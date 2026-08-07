@@ -263,6 +263,6 @@ categories in the table above, which together with `roundtrip_mismatch` account 
 
 Full findings: `docs/handoffs/2026-08-03-backbuild-property-test-review.md`.
 
-- [ ] **Rerun-safety leg** — apply composed scripts twice in `generated_options_match_full_rebuild_oracle` when all chosen options are `rerun_safe: true`; add E2/F1 siblings of `e4_idempotent_with_identity`. (M4b: dropping E2/F1 anti-join guards survives the entire suite today.)
-- [ ] **Generator additions** — tighten variant `o.status = 'open'` (E1 3VL), WHERE conjuncts on `Shape::Grouped` (B5 WHERE-carry), guaranteed `LoosenFilter`-removing-`StatusOpen` slot (E2/E4 3VL at N=24).
-- [ ] **Optional** — a drop+reader composite case for H drop-ordering, or document conformance-only coverage.
+- [x] **Rerun-safety leg** (2026-08-07) — composed scripts now apply twice in `generated_options_match_full_rebuild_oracle` when all chosen options are `rerun_safe: true`; `e2_idempotent_with_identity` + `f1_idempotent_with_identity` added as E2/F1 siblings of `e4_idempotent_with_identity`. M4b re-injected and caught by both the property leg (at default N=24) and the new conformance tests.
+- [x] **Generator additions** (2026-08-07) — `EditRecipe::TightenFilterStatusOpen` (`o.status = 'open'`, E1 3VL; guaranteed slot), WHERE conjuncts on `Shape::Grouped` + `AmountPositive` on the `AddAggregate` guaranteed slot (B5 WHERE-carry), and the guaranteed `LoosenFilter` slot swapped to `StatusOpen` (E2/E4 3VL). M2, M7, M3 all re-injected and caught at default N=24.
+- [x] **Optional** (2026-08-07) — documented conformance-only coverage of H drop-ordering in the property harness module doc (generatively unobservable: drop+reader combos are correctly refused at admission).

@@ -145,6 +145,9 @@ fn apply_order_edits(edits: &[EditRecipe], before: &BeforeRecipe) -> OrderMutati
                 m.rewritten.insert("qty", "o.customer_id".to_string());
             }
             EditRecipe::TightenFilter => m.extra_where.push("o.status IS NOT NULL".to_string()),
+            EditRecipe::TightenFilterStatusOpen => {
+                m.extra_where.push("o.status = 'open'".to_string())
+            }
             EditRecipe::LoosenFilter => {
                 if before.where_conjuncts.len() == 1 {
                     m.removed_where = Some(before.where_conjuncts[0]);

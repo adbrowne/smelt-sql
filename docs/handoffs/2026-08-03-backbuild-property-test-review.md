@@ -87,3 +87,26 @@ good — every equivalence mutation except M4b was caught by something behaviora
    nullable `LoosenFilter` slot (findings 2–3).
 3. Optional: a drop+reader composite case if one can be made admissible, else document
    that H drop-ordering is conformance-covered only.
+
+## Addendum — remediation landed (2026-08-07)
+
+All three suggested next steps are implemented (same branch/worktree):
+
+- **Finding 1 (M4b hole)**: `generated_options_match_full_rebuild_oracle` now applies a
+  composed script **twice** before the oracle check whenever every chosen option is
+  `rerun_safe: true`; `e2_idempotent_with_identity` and `f1_idempotent_with_identity`
+  added to `backbuild_conformance.rs`. M4b (guard drop at E2+F1 only, `rerun_safe`
+  left `true`) re-injected: caught by the property leg at default N=24 (`EXCEPT ALL
+  forward: left=6, right=0`) **and** by both new conformance tests. The hole that
+  previously survived the entire repo suite is closed on three fronts.
+- **Findings 2–3 (generator blind spots)**: `EditRecipe::TightenFilterStatusOpen`
+  (`o.status = 'open'`, guaranteed slot, mutually exclusive with the `IS NOT NULL`
+  tighten per shape), `Shape::Grouped` now draws WHERE conjuncts (+ `AmountPositive`
+  on the `AddAggregate` guaranteed slot), and the guaranteed `LoosenFilter` slot uses
+  `StatusOpen` (NULL-evaluating) instead of `AmountPositive`. M2, M7, and M3 all
+  re-injected and caught at default N=24 (M3 verified at N=24/30/40).
+- **M5 (drop ordering)**: documented as a structural generative blind spot in the
+  property-harness module doc; conformance-only coverage
+  (`c1_dropped_column_drops_last`) is the accepted posture.
+
+Post-remediation the harness was held green from N=24 through N=800.

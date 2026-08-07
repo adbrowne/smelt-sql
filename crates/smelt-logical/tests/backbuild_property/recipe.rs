@@ -253,8 +253,15 @@ pub enum EditRecipe {
     /// column not currently stored under that name) — routes through the
     /// same `UpstreamPullthrough` technique B3 uses.
     RewriteFromUpstream,
-    /// E1: add a `qty > 0` conjunct.
+    /// E1: add a `status IS NOT NULL` conjunct.
     TightenFilter,
+    /// E1: add a `status = 'open'` conjunct — unlike [`Self::TightenFilter`]'s
+    /// `IS NOT NULL` (which never itself evaluates NULL for a NULL `status`
+    /// row), an equality conjunct evaluates NULL, not just FALSE, for such a
+    /// row, so `emit_predicate_delete`'s `IS NOT TRUE` three-valued-logic
+    /// wrapping is actually exercised (mutation-audit finding 2a,
+    /// `docs/handoffs/2026-08-03-backbuild-property-test-review.md`).
+    TightenFilterStatusOpen,
     /// E2: remove the (sole) existing conjunct.
     LoosenFilter,
     /// E4: widen the existing `ts` horizon conjunct.
@@ -325,8 +332,30 @@ pub fn compatible_edits(before: &BeforeRecipe) -> Vec<EditRecipe> {
             // the same column's "unchanged representative" status in the
             // same diff (E1's requalification needs its conjunct's
             // dependency to still resolve as *unchanged*).
+            // Exactly one E1 tighten-on-`status` variant per `before` (never
+            // both): `TightenFilter`/`TightenFilterStatusOpen` both target
+            // `status`, so offering both in the same compatible list risks
+            // `arb_case` drawing them *together* — two added conjuncts on
+            // the same column in one diff, a genuinely different (and
+            // untested-by-design) scenario than this generator's disjoint-
+            // target invariant assumes (see `RewriteFromUpstream`'s doc
+            // comment above). Split by shape so both variants still get
+            // generative coverage across the sample without ever colliding
+            // in a single case. `TightenFilterStatusOpen`'s own added
+            // conjunct text (`status = 'open'`) is additionally withheld
+            // whenever `before` already carries a `StatusOpen` conjunct —
+            // otherwise it would duplicate (or, combined with
+            // `LoosenFilter` removing that same solitary conjunct,
+            // exactly cancel) an existing predicate and render a no-op
+            // diff.
             if has(cols, Col::Status) {
-                out.push(EditRecipe::TightenFilter);
+                if before.shape == Shape::Joined {
+                    if !before.where_conjuncts.contains(&WhereKind::StatusOpen) {
+                        out.push(EditRecipe::TightenFilterStatusOpen);
+                    }
+                } else {
+                    out.push(EditRecipe::TightenFilter);
+                }
             }
             if before.where_conjuncts.len() == 1
                 && before.where_conjuncts[0] != WhereKind::TsHorizon
@@ -481,11 +510,19 @@ fn arb_plain_or_joined(joined: bool) -> impl Strategy<Value = BeforeRecipe> {
     })
 }
 
+/// `Grouped`'s fixed projection ignores `columns`, but its `FROM src_orders
+/// o` still exposes every [`Col`] to a `WHERE` conjunct — so `where_conjuncts`
+/// is drawn over [`all_cols`] rather than the (unused, empty) `columns` field.
+/// Previously always empty (mutation-audit finding 2b: B5's re-aggregation
+/// subquery carrying the model's `WHERE` clause,
+/// `docs/handoffs/2026-08-03-backbuild-property-test-review.md`) — a
+/// hardcoded empty `WHERE` here meant the generator could never render a
+/// `Grouped` case whose `AddAggregate` script had a `WHERE` clause to drop.
 fn arb_grouped() -> impl Strategy<Value = BeforeRecipe> {
-    Just(BeforeRecipe {
+    arb_where_for(all_cols()).prop_map(|wh| BeforeRecipe {
         shape: Shape::Grouped,
         columns: Vec::new(),
-        where_conjuncts: Vec::new(),
+        where_conjuncts: wh,
     })
 }
 
@@ -582,6 +619,7 @@ pub const GUARANTEED_EDITS: &[EditRecipe] = &[
     EditRecipe::AddPullthrough,
     EditRecipe::AddJoin { general: false },
     EditRecipe::TightenFilter,
+    EditRecipe::TightenFilterStatusOpen,
     EditRecipe::WidenHorizon,
     EditRecipe::LoosenFilter,
     EditRecipe::AddBranch,
@@ -599,10 +637,14 @@ pub const GUARANTEED_EDITS: &[EditRecipe] = &[
 fn guaranteed_before(edit: EditRecipe) -> BeforeRecipe {
     let all = all_cols();
     match edit {
+        // A non-empty `WHERE` here (rather than `Vec::new()`) makes the B5
+        // WHERE-carry property (mutation-audit finding 2b) a guaranteed,
+        // every-run assertion rather than one only the generative arm might
+        // draw.
         EditRecipe::AddAggregate => BeforeRecipe {
             shape: Shape::Grouped,
             columns: Vec::new(),
-            where_conjuncts: Vec::new(),
+            where_conjuncts: vec![WhereKind::AmountPositive],
         },
         EditRecipe::AddBranch => BeforeRecipe {
             shape: Shape::SingleBranch,
@@ -614,15 +656,29 @@ fn guaranteed_before(edit: EditRecipe) -> BeforeRecipe {
             columns: Vec::new(),
             where_conjuncts: Vec::new(),
         },
+        // `StatusOpen` (not `AmountPositive`) — `AmountPositive`'s `amount >
+        // 0` is NOT NULL and 3VL-blind; `status = 'open'` evaluates NULL for
+        // a NULL-status row (boundary row 92), so removing it exercises the
+        // E2 complement-form `IS NOT TRUE` wrapping's NULL-semantics case
+        // deterministically, at the default case count (mutation-audit
+        // finding 3, `docs/handoffs/2026-08-03-backbuild-property-test-review.md`).
         EditRecipe::LoosenFilter => BeforeRecipe {
             shape: Shape::Plain,
             columns: all,
-            where_conjuncts: vec![WhereKind::AmountPositive],
+            where_conjuncts: vec![WhereKind::StatusOpen],
         },
         EditRecipe::WidenHorizon => BeforeRecipe {
             shape: Shape::Plain,
             columns: all,
             where_conjuncts: vec![WhereKind::TsHorizon],
+        },
+        // Must be `Joined` — `compatible_edits` only offers
+        // `TightenFilterStatusOpen` (never alongside its `TightenFilter`
+        // sibling) for a `Joined` before.
+        EditRecipe::TightenFilterStatusOpen => BeforeRecipe {
+            shape: Shape::Joined,
+            columns: all,
+            where_conjuncts: Vec::new(),
         },
         EditRecipe::AddPullthrough => BeforeRecipe {
             shape: Shape::Plain,

@@ -2025,6 +2025,62 @@ fn e2_loosen_inserts_difference() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+#[test]
+fn e2_idempotent_with_identity() {
+    // Sibling of `e4_idempotent_with_identity`: a declared, NOT-NULL-proven
+    // row identity must make E2's difference `INSERT` rerun-safe too — the
+    // anti-join guard is authored at the same site
+    // (`emit_difference_insert`) for both techniques. Applying the script
+    // twice must leave the table matching a single-application full-rebuild
+    // oracle, not a duplicate-row table.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, status TEXT);
+         INSERT INTO orders VALUES (1, 'active'), (2, 'cancelled'), (3, 'active');",
+    );
+
+    let before_sql = "SELECT id, status FROM orders WHERE status = 'active'";
+    let after_sql = "SELECT id, status FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", after_sql);
+    backbuild_inputs.row_identity = Some(vec!["id".to_string()]);
+    backbuild_inputs.not_null_columns = BTreeSet::from(["id".to_string()]);
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::FilterLoosenInsert);
+    assert!(
+        option.rerun_safe,
+        "a declared, NOT-NULL-proven row identity must make E2's INSERT rerun-safe"
+    );
+    assert!(
+        option.statements[0].to_uppercase().contains("NOT EXISTS"),
+        "expected the identity anti-join guard, got: {:?}",
+        option.statements
+    );
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply E2 insert `{stmt}`: {e}"));
+    }
+    // Re-run: the anti-join guard must make this a no-op, not a duplicate
+    // insert.
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("re-apply E2 insert `{stmt}`: {e}"));
+    }
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
 /// Regression: gating E2's *pure-loosen* admission (no composition —
 /// `added` empty) on `analysis::model_diff::collect_dependencies` (the
 /// pre-fix shape of the disjointness check below) wrongly refused a removed
@@ -2196,6 +2252,65 @@ fn f1_union_branch_insert() {
     assert!(option.statements[0].contains("events_b"));
 
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn f1_idempotent_with_identity() {
+    // Sibling of `e4_idempotent_with_identity`/`e2_idempotent_with_identity`:
+    // a declared, NOT-NULL-proven row identity must make F1's added-branch
+    // `INSERT` rerun-safe too — the anti-join guard is authored at
+    // `emit_branch_insert`, the F1 counterpart of `emit_difference_insert`.
+    // Applying the script twice must leave the table matching a
+    // single-application full-rebuild oracle, not a duplicate-row table.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events_a (id INTEGER);
+         CREATE TABLE events_b (id INTEGER);
+         INSERT INTO events_a VALUES (1), (2);
+         INSERT INTO events_b VALUES (3);",
+    );
+
+    let before_sql = "SELECT id, 'a' AS kind FROM events_a";
+    let after_sql =
+        "SELECT id, 'a' AS kind FROM events_a UNION ALL SELECT id, 'b' AS kind FROM events_b";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", after_sql);
+    backbuild_inputs.row_identity = Some(vec!["id".to_string()]);
+    backbuild_inputs.not_null_columns = BTreeSet::from(["id".to_string()]);
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::UnionBranchInsert);
+    assert!(
+        option.rerun_safe,
+        "a declared, NOT-NULL-proven row identity must make F1's INSERT rerun-safe"
+    );
+    assert!(
+        option.statements[0].to_uppercase().contains("NOT EXISTS"),
+        "expected the identity anti-join guard, got: {:?}",
+        option.statements
+    );
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply F1 insert `{stmt}`: {e}"));
+    }
+    // Re-run: the anti-join guard must make this a no-op, not a duplicate
+    // insert.
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("re-apply F1 insert `{stmt}`: {e}"));
+    }
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
 }
 
 // ===== F2 (task-11-brief.md) =====

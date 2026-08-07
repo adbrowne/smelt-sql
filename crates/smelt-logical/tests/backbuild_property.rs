@@ -16,6 +16,15 @@
 //! turns a recipe into actual SQL text plus `BackbuildInputs`; `data.rs`
 //! generates the fact-table rows staged alongside a small fixed dimension
 //! fixture. `proptest` shrinks the recipe, never the rendered SQL.
+//!
+//! Known generative blind spot (2026-08-03 mutation audit, M5): ALTER
+//! `DROP COLUMN` *ordering* (drops must run last, after every statement
+//! that reads the dropped column) is unobservable here at any case count —
+//! no composed script the generator can express both drops a column and
+//! reads it, because edit combinations that would are correctly refused at
+//! admission. Drop ordering is covered behaviorally by the conformance
+//! suite only (`backbuild_conformance.rs::c1_dropped_column_drops_last`);
+//! a regression there will not reproduce in this harness.
 
 #[path = "backbuild_property/data.rs"]
 mod data;
@@ -266,13 +275,40 @@ fn generated_options_match_full_rebuild_oracle() {
                     "case {i}: combo {combo:?} over atoms {:?} composed to an empty script",
                     options.atoms
                 );
-                harness::verify_script(
-                    &conn,
-                    "t",
-                    &rendered.before_sql,
-                    &rendered.after_sql,
-                    &script,
-                );
+
+                // Rerun-safety leg (mutation-audit finding 1,
+                // `docs/handoffs/2026-08-03-backbuild-property-test-review.md`):
+                // when every atom's chosen option in this combo claims
+                // `rerun_safe: true`, apply the composed script *twice*
+                // against a fresh before-table before the oracle check —
+                // makes `rerun_safe` a tested claim rather than a
+                // self-reported, never-exercised field. Otherwise, the
+                // single-application leg the harness always ran.
+                let combo_rerun_safe = combo.iter().enumerate().all(|(atom_idx, &opt_idx)| {
+                    options.atoms[atom_idx].options[opt_idx].rerun_safe
+                });
+                if combo_rerun_safe {
+                    harness::build_before(&conn, "t", &rendered.before_sql);
+                    for stmt in &script {
+                        conn.execute_batch(stmt).unwrap_or_else(|e| {
+                            panic!("case {i}: apply backbuild script statement (1st pass) `{stmt}`: {e}")
+                        });
+                    }
+                    for stmt in &script {
+                        conn.execute_batch(stmt).unwrap_or_else(|e| {
+                            panic!("case {i}: apply backbuild script statement (2nd rerun-safety pass) `{stmt}`: {e}")
+                        });
+                    }
+                    harness::assert_matches_full_rebuild(&conn, "t", &rendered.after_sql);
+                } else {
+                    harness::verify_script(
+                        &conn,
+                        "t",
+                        &rendered.before_sql,
+                        &rendered.after_sql,
+                        &script,
+                    );
+                }
                 verified_scripts += 1;
             }
         }
