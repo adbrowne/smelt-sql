@@ -339,13 +339,13 @@ fn admission_rate_stays_above_floor() {
 
     let mut tally = TechniqueTally::default();
     // Generative-only counters (see the floor rationale below): the first
-    // `recipe::GUARANTEED_EDITS.len()` slots are deterministic
+    // `recipe::guaranteed_slot_count()` slots are deterministic
     // always-admitting cases (`recipe::guaranteed_case`), not proptest draws.
     // Folding them into the admission rate makes the floor decorative at the
-    // default case count (13 of 24 slots trivially admit regardless of
+    // default case count (most of the 24 slots trivially admit regardless of
     // generator health) — count them separately from the generative slots
     // that `arb_case` actually draws.
-    let guaranteed_slots = recipe::GUARANTEED_EDITS.len();
+    let guaranteed_slots = recipe::guaranteed_slot_count();
     let mut generative_total = 0usize;
     let mut generative_admitted = 0usize;
 
@@ -383,13 +383,14 @@ fn admission_rate_stays_above_floor() {
     }
 
     // The floor is measured over the *generative* slots only (`i >=
-    // guaranteed_slots`), never the whole sample: `recipe::GUARANTEED_EDITS`
-    // reserves the first `guaranteed_slots` slots (13 at the current list
-    // length) for deterministic always-admitting cases, so a floor computed
+    // guaranteed_slots`), never the whole sample: `recipe::guaranteed_case`
+    // reserves the first `guaranteed_slots` slots (the single-edit
+    // `GUARANTEED_EDITS` list plus the combined both-tighten-variants slot)
+    // for deterministic always-admitting cases, so a floor computed
     // over all `n` slots stays comfortably passed even if `arb_case`'s
     // generative arm admits nothing at all — decorative, not a real
     // generator-health gate. Measured directly against this harness:
-    // generative-arm admission rate is 11/11 = 1.00 at N=24 and
+    // generative-arm admission rate is 1.00 at N=24 and
     // 277/287 = 0.965 at N=300 — `arb_case`'s weighted shape/edit mix almost
     // always lands on a `BeforeRecipe`/`EditRecipe` pair with at least one
     // admissible option, so the floor has plenty of room. 0.80 is chosen

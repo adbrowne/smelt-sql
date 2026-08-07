@@ -332,29 +332,26 @@ pub fn compatible_edits(before: &BeforeRecipe) -> Vec<EditRecipe> {
             // the same column's "unchanged representative" status in the
             // same diff (E1's requalification needs its conjunct's
             // dependency to still resolve as *unchanged*).
-            // Exactly one E1 tighten-on-`status` variant per `before` (never
-            // both): `TightenFilter`/`TightenFilterStatusOpen` both target
-            // `status`, so offering both in the same compatible list risks
-            // `arb_case` drawing them *together* — two added conjuncts on
-            // the same column in one diff, a genuinely different (and
-            // untested-by-design) scenario than this generator's disjoint-
-            // target invariant assumes (see `RewriteFromUpstream`'s doc
-            // comment above). Split by shape so both variants still get
-            // generative coverage across the sample without ever colliding
-            // in a single case. `TightenFilterStatusOpen`'s own added
-            // conjunct text (`status = 'open'`) is additionally withheld
-            // whenever `before` already carries a `StatusOpen` conjunct —
-            // otherwise it would duplicate (or, combined with
-            // `LoosenFilter` removing that same solitary conjunct,
-            // exactly cancel) an existing predicate and render a no-op
-            // diff.
+            // Both E1 tighten-on-`status` variants are offered together:
+            // `arb_case` drawing them in the same diff yields two added
+            // conjuncts on the same (unchanged) column — two independent E1
+            // atoms, each requalified on its own. This combination is what
+            // originally exposed the `Expr::as_binary` child-first-cast
+            // parser bug (three-conjunct AND chains mis-split; fixed
+            // 2026-08-07, pinned by `backbuild_options.rs::
+            // e1_three_conjunct_and_chain_with_duplicate_splits_and_requalifies_fully`),
+            // so drawing it generatively is regression coverage, not a
+            // hazard. `TightenFilterStatusOpen`'s own added conjunct text
+            // (`status = 'open'`) is still withheld whenever `before`
+            // already carries a `StatusOpen` conjunct: combined with
+            // `LoosenFilter` removing that same solitary conjunct it
+            // exactly cancels an existing predicate and renders a no-op
+            // diff, and `compatible_edits` cannot see which other edits a
+            // `subsequence` draw will pair it with.
             if has(cols, Col::Status) {
-                if before.shape == Shape::Joined {
-                    if !before.where_conjuncts.contains(&WhereKind::StatusOpen) {
-                        out.push(EditRecipe::TightenFilterStatusOpen);
-                    }
-                } else {
-                    out.push(EditRecipe::TightenFilter);
+                out.push(EditRecipe::TightenFilter);
+                if !before.where_conjuncts.contains(&WhereKind::StatusOpen) {
+                    out.push(EditRecipe::TightenFilterStatusOpen);
                 }
             }
             if before.where_conjuncts.len() == 1
@@ -672,9 +669,10 @@ fn guaranteed_before(edit: EditRecipe) -> BeforeRecipe {
             columns: all,
             where_conjuncts: vec![WhereKind::TsHorizon],
         },
-        // Must be `Joined` — `compatible_edits` only offers
-        // `TightenFilterStatusOpen` (never alongside its `TightenFilter`
-        // sibling) for a `Joined` before.
+        // `Joined` (though `compatible_edits` now offers this variant for
+        // `Plain` too) — keeps the guaranteed single-edit slot exercising
+        // the joined rendering path, complementing the combined
+        // both-tighten-variants slot's `Plain` before.
         EditRecipe::TightenFilterStatusOpen => BeforeRecipe {
             shape: Shape::Joined,
             columns: all,
@@ -696,7 +694,50 @@ fn guaranteed_before(edit: EditRecipe) -> BeforeRecipe {
 /// The deterministic case for [`GUARANTEED_EDITS`] slot `i` (see
 /// [`GUARANTEED_EDITS`]'s doc comment) — `None` once `i` runs past the
 /// reserved slots, so callers fall back to [`arb_case`].
+/// Total reserved deterministic slots: one per [`GUARANTEED_EDITS`] entry
+/// plus the combined both-tighten-variants slot [`guaranteed_case`] serves
+/// at the index just past the list.
+pub fn guaranteed_slot_count() -> usize {
+    GUARANTEED_EDITS.len() + 1
+}
+
 pub fn guaranteed_case(i: usize) -> Option<(BeforeRecipe, Vec<EditRecipe>)> {
+    // One multi-edit slot beyond the single-edit list: both E1 tighten
+    // variants in one diff over a `before` that ALREADY carries the
+    // `StatusOpen` conjunct — rendering the after-WHERE as a
+    // three-conjunct AND chain whose trailing conjunct duplicates the
+    // pre-existing one. This is byte-for-byte the composition that exposed
+    // the `Expr::as_binary` child-first-cast parser bug (2026-08-07): the
+    // duplicate lets the conjunct diff pair the before-conjunct against
+    // the *trailing* duplicate, so a mis-split `(a AND b)` subtree
+    // surfaces as a single added conjunct and E1 emits half-requalified
+    // invalid SQL. A shorter chain or a duplicate-free one degrades to a
+    // refusal instead and detects nothing (verified by mutation
+    // re-injection). Deterministic so the case runs every time, not only
+    // when `arb_case` draws the pair.
+    //
+    // `TightenFilterStatusOpen` is deliberately drawn OUTSIDE
+    // `compatible_edits` here: the generative arm withholds it for a
+    // `StatusOpen`-bearing before only because a co-drawn `LoosenFilter`
+    // could cancel the predicate into a no-op diff — a fixed slot with no
+    // `LoosenFilter` cannot hit that, and the duplicate-conjunct rendering
+    // is exactly the point.
+    if i == GUARANTEED_EDITS.len() {
+        let before = BeforeRecipe {
+            shape: Shape::Plain,
+            columns: all_cols(),
+            where_conjuncts: vec![WhereKind::StatusOpen],
+        };
+        let edits = vec![
+            EditRecipe::TightenFilter,
+            EditRecipe::TightenFilterStatusOpen,
+        ];
+        debug_assert!(
+            compatible_edits(&before).contains(&EditRecipe::TightenFilter),
+            "combined tighten slot's before must offer TightenFilter: {before:?}"
+        );
+        return Some((before, edits));
+    }
     let edit = *GUARANTEED_EDITS.get(i)?;
     let before = guaranteed_before(edit);
     debug_assert!(
