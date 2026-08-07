@@ -61,12 +61,14 @@ fn grain_without_incremental_errors() {
     );
 }
 
-/// Each of the removed `refresh:` mode names (`batched`, `keyed`,
-/// `cumulative`, `versioned`) hard-errors with a fix-it naming the
-/// `refresh: incremental` + `grain:` replacement.
+/// Each of the removed `refresh:` mode names hard-errors with a fix-it:
+/// `batched`/`keyed`/`cumulative` steer to the `refresh: incremental` +
+/// `grain:` replacement; `versioned` steers to the plain-SQL SCD2 posture
+/// (`refresh: full` / `materialized_view` — there is no versioned mode,
+/// `docs/specs/incremental_models.md` §Limitations).
 #[test]
 fn removed_names_error_with_fixit() {
-    for value in ["batched", "keyed", "cumulative", "versioned"] {
+    for value in ["batched", "keyed", "cumulative"] {
         let source = format!("---\nmaterialization: table\nrefresh: {value}\n---\nSELECT 1 AS n");
         let result = extract_file_metadata(&source);
         let err = match result {
@@ -83,4 +85,12 @@ fn removed_names_error_with_fixit() {
             "error for '{value}' must contain the fix-it `grain:`; got: {message}"
         );
     }
+
+    let source = "---\nmaterialization: table\nrefresh: versioned\n---\nSELECT 1 AS n";
+    let err = extract_file_metadata(source).expect_err("`refresh: versioned` must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("no versioned mode") && message.contains("refresh: full"),
+        "error for 'versioned' must steer to the plain-SQL SCD2 posture; got: {message}"
+    );
 }
