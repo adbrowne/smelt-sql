@@ -4269,6 +4269,8 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     );
     // arg_max(value, key) → value: return the value from the row with the maximum key.
     // Accepts any value type T and any key type K (must be orderable at runtime).
+    // `MAX_BY` is DuckDB/Postgres's alias for the same order-monotone-overwrite
+    // combiner (`incremental_models.md` §"The column-family catalogue").
     insert(
         Signature::new(
             "ARG_MAX",
@@ -4276,7 +4278,20 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T"), var("K")],
             TypeExpr::Var("T".into()),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_aliases(&["MAX_BY"]),
+    );
+    // arg_min(value, key) → value: the order-monotone-overwrite family's
+    // minimum-ordering counterpart to `ARG_MAX`, aliased `MIN_BY`.
+    insert(
+        Signature::new(
+            "ARG_MIN",
+            vec![tp("T", TypeConstraint::Any), tp("K", TypeConstraint::Any)],
+            vec![var("T"), var("K")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_kind(ExprKind::Agg)
+        .with_aliases(&["MIN_BY"]),
     );
     insert(
         Signature::new(

@@ -1408,6 +1408,72 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
     );
 }
 
+/// Phase 1 (`docs/plans/20260809-keyed-frontier.md`): the order-monotone
+/// overwrite family's (`MAX_BY`/`MIN_BY`) rendered `MERGE` compares ordering
+/// values with strict `>` — incumbent wins on a tie
+/// (`docs/specs/incremental_models.md` §"Ordering ties") — and carries the
+/// ordering column (the companion running-`MAX` tracking column, Phase 1's
+/// storage decision) in the same statement.
+#[test]
+fn max_by_merge_renders_incumbent_comparison() {
+    use smelt_core::config::{Granularity, TimeseriesConfig};
+    use smelt_logical::{
+        AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
+    };
+    use smelt_runtime::cumulative::build_cumulative_merge_sql;
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["device_id".to_string()],
+        aggregator_columns: vec![
+            AggregatorColumn {
+                output_name: "status".to_string(),
+                per_partition_agg: "MAX_BY".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone {
+                    ordering_column: "updated_at".to_string(),
+                },
+            },
+            AggregatorColumn {
+                output_name: "updated_at".to_string(),
+                per_partition_agg: "MAX".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Max,
+            },
+        ],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.events".to_string(),
+            timeseries: TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            },
+        },
+    };
+    let delta_sql = "SELECT device_id, MAX_BY(status, updated_at) AS status, \
+                      MAX(updated_at) AS updated_at FROM events GROUP BY device_id";
+
+    let sql = build_cumulative_merge_sql(
+        "main",
+        "device_latest",
+        delta_sql,
+        &classification,
+        None,
+        &unconditional(),
+    );
+
+    assert!(
+        sql.contains(
+            "status = CASE WHEN delta.updated_at > target.updated_at THEN delta.status \
+             ELSE target.status END"
+        ),
+        "expected the incumbent-wins CASE comparison over the ordering column, got: {sql}"
+    );
+    assert!(
+        sql.contains("updated_at = GREATEST(target.updated_at, delta.updated_at)"),
+        "expected the companion tracking column's own running-MAX update, got: {sql}"
+    );
+}
+
 /// MP11's real end-to-end proof: drive `examples/timeseries/models/
 /// daily_events_enriched.sql` through `execute_project` itself — never a
 /// direct call to `resolve_cell_technique`/`execute_column_scoped_merge` —

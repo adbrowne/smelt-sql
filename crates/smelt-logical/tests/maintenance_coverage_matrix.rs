@@ -390,20 +390,22 @@ fn ex27_row_number_dedup_refuses_today() {
 // ---------------------------------------------------------------------------
 // EX-35 — correlated MIN_BY first-value pick (`07-example-catalogue.md`
 // EX-35; candidate probe cell, the EX-01/EX-11 three-way ledger-grade
-// contrast). Catalogue hypothesis: "UNSUPPORTED-TODAY; recompute arm HOLDS
-// (EX-01 analogue, order-sensitive combiner)".
+// contrast). Original catalogue hypothesis (pre-`docs/plans/
+// 20260809-keyed-frontier.md` Phase 1): "UNSUPPORTED-TODAY; recompute arm
+// HOLDS (EX-01 analogue, order-sensitive combiner)".
 //
-// `ArgMax`/`ArgMin` (the `MIN_BY`/`MAX_BY`/first-value family) is classified
-// `is_monoid: false, monotone: Monotone::Order`
-// (`analysis/discriminants.rs`) — an order-sensitive combiner the v0
-// tracer's obligation 3 refuses regardless of source posture (the source
-// here IS append-only, so obligation 2 passes cleanly — this isolates the
-// combiner-algebra refusal specifically, the EX-01/EX-11 three-way
-// contrast the catalogue calls out). Only the recompute family remains.
+// Phase 1 lands the order-monotone overwrite family (`MAX_BY`/`MIN_BY` —
+// `ArgMax`/`ArgMin`, `Monotone::Order`, `analysis/discriminants.rs`):
+// `faithful_fold`'s obligation-3 combiner-algebra condition now admits it
+// alongside `is_monoid` monoids — a semilattice fold is well-defined under
+// the same sequential-application discipline the window-forward driver
+// already enforces (`incremental_models.md` §"The two run shapes"). The
+// catalogue verdict updates: EX-35 now HOLDS (fold cell admitted), not
+// recompute-only.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ex35_correlated_first_value_recompute_only() {
+fn ex35_correlated_first_value_fold_admitted() {
     let sql = "SELECT user_id, ARG_MAX(event_ts, event_ts) AS first_seen \
                FROM smelt.sources.events GROUP BY user_id";
     let inputs = ModelInputs {
@@ -439,13 +441,12 @@ fn ex35_correlated_first_value_recompute_only() {
             source: "events".to_string(),
         }],
     );
-    assert!(fold_plan.cells.is_empty());
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
-        Refusal::NoAdmissibleTechnique { why, .. }
-            if why.contains("holistic or unrecognised (not a monoid)")
-    ));
+    assert!(
+        fold_plan.refusals.is_empty(),
+        "expected the order-monotone combiner to admit: {:?}",
+        fold_plan.refusals
+    );
+    assert_eq!(fold_plan.cells[0].technique, Technique::KeyedFold);
 
     let backfill_plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     assert!(backfill_plan.refusals.is_empty());

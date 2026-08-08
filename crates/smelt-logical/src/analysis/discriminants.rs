@@ -120,8 +120,10 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
         },
 
         // Order-monotone: the presented value may switch, but only in step
-        // with a monotone ordering key (a semilattice fold).
-        ArgMax => Discriminants {
+        // with a monotone ordering key (a semilattice fold) — the
+        // order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
+        // `incremental_models.md` §"The column-family catalogue").
+        ArgMax | ArgMin => Discriminants {
             is_monoid: false,
             needs_inverse: false,
             decomposable: false,
@@ -184,6 +186,14 @@ mod tests {
     fn arg_max_is_order_monotone() {
         assert_eq!(
             combiner_discriminants(SqlFunction::ArgMax, false).monotone,
+            Monotone::Order
+        );
+    }
+
+    #[test]
+    fn arg_min_is_order_monotone() {
+        assert_eq!(
+            combiner_discriminants(SqlFunction::ArgMin, false).monotone,
             Monotone::Order
         );
     }

@@ -17,8 +17,17 @@
 //!    partition equals the fold over the whole partition. This is a fact of
 //!    the algebraic discriminants ([`combiner_discriminants`]): a
 //!    commutative monoid satisfies it; a holistic or unrecognised aggregate
-//!    never does. The admitted set is exactly `is_monoid` — a decomposable
-//!    non-monoid (`AVG`) is not admitted here.
+//!    never does. The admitted set is `is_monoid`, widened by the
+//!    order-monotone overwrite family (`MAX_BY`/`MIN_BY`, `ArgMax`/`ArgMin`
+//!    — a semilattice fold, not a commutative monoid) when the plan layer's
+//!    `FoldSpec` already carries the column: `smelt_db::queries::maintenance
+//!    ::derive_fold_spec` only ever puts an `ArgMax`/`ArgMin` column into a
+//!    `FoldSpec` after proving the same companion-projection condition the
+//!    runtime classifier (`smelt_logical::rules::cumulative::
+//!    classify_order_monotone_column`) enforces, via the single shared
+//!    helper `smelt_logical::rules::cumulative::order_monotone_companion`
+//!    — so this stage never re-derives that proof itself. A decomposable
+//!    non-monoid outside that family (`AVG`) is still not admitted here.
 //!
 //! Both conditions must hold for a fold technique to be admissible; either
 //! failing alone refuses, and each is reported independently — the spec's
@@ -33,7 +42,7 @@
 use serde::Serialize;
 use smelt_types::SqlFunction;
 
-use super::discriminants::combiner_discriminants;
+use super::discriminants::{combiner_discriminants, Monotone};
 use super::input_delta::{InputDeltaKind, MutationProfile};
 
 /// One faithful-fold condition, independently reported: holds, or fails with
@@ -121,10 +130,19 @@ pub fn faithful_fold(
         ConditionVerdict::Fails { reason }
     };
 
-    // Condition (2): combiner algebra. The admitted set is exactly
-    // `is_monoid` — a decomposable non-monoid (`AVG`) is not admitted by
-    // this proof.
-    let submultiset_fold = if combiner_discriminants(combiner, distinct).is_monoid {
+    // Condition (2): combiner algebra. The admitted set is `is_monoid`,
+    // widened to also admit the order-monotone overwrite family
+    // (`Monotone::Order` — `MAX_BY`/`MIN_BY`, `incremental_models.md`
+    // §"The column-family catalogue"): it is a semilattice fold, not a
+    // commutative monoid (`is_monoid` stays `false` for it,
+    // `discriminants.rs`), but its sub-multiset fold IS well-defined under
+    // the same sequential-application discipline this cell's caller
+    // already enforces (window-forward keyed steps apply in temporal
+    // order — §"The two run shapes"; overwrite columns additionally force
+    // that ordering themselves, §"Order-independence") — a decomposable
+    // non-monoid (`AVG`) is still not admitted by this proof.
+    let discriminants = combiner_discriminants(combiner, distinct);
+    let submultiset_fold = if discriminants.is_monoid || discriminants.monotone == Monotone::Order {
         ConditionVerdict::Holds
     } else {
         ConditionVerdict::Fails {

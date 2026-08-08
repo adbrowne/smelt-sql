@@ -1,9 +1,10 @@
 //! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
-//! the mode's built seed: the direct-monoid families (additive fold,
-//! extremal/lattice fold) — the overwrite, once-write, and plain-overwrite
-//! families are not yet classified here.
+//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module
+//! classifies the direct-monoid families (additive fold, extremal/lattice
+//! fold) and the order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
+//! `docs/plans/20260809-keyed-frontier.md` Phase 1) — the once-write and
+//! plain-overwrite families are not yet classified here.
 //!
 //! The classifier is a pure function that reads an inlined SELECT
 //! (post function expansion) plus a small source-timeseries lookup
@@ -64,6 +65,19 @@ pub enum CrossPartitionCombiner {
     /// `xor(target.c, delta.c)` — function form is DuckDB-compatible and works
     /// in Postgres as well; the `#` infix operator is Postgres-only.
     BitXor,
+    /// The order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
+    /// `incremental_models.md` §"The column-family catalogue"): the delta's
+    /// value wins iff its ordering value strictly beats the target's stored
+    /// ordering value — incumbent wins on a tie (§"Ordering ties"). Storage
+    /// decision (Phase 1, `docs/plans/20260809-keyed-frontier.md`): the
+    /// ordering value is never a hidden shadow column — `ordering_column` is
+    /// the output name of another column in the *same* projection that
+    /// tracks the running `MAX`/`MIN` of the ordering expression (a plain
+    /// extremal-fold `AggregatorColumn`), so target/delta values for the
+    /// comparison always come from that column's own `target.<name>` /
+    /// `delta.<name>` refs — no decomposed/hidden state
+    /// (`docs/specs/incremental_models.md` §Known Divergences).
+    OrderMonotone { ordering_column: String },
 }
 
 impl CrossPartitionCombiner {
@@ -78,6 +92,23 @@ impl CrossPartitionCombiner {
             CrossPartitionCombiner::BitAnd => format!("{} & {}", target_col, delta_col),
             CrossPartitionCombiner::BitOr => format!("{} | {}", target_col, delta_col),
             CrossPartitionCombiner::BitXor => format!("xor({}, {})", target_col, delta_col),
+            CrossPartitionCombiner::OrderMonotone { ordering_column } => {
+                // `target_col`/`delta_col` are already qualified
+                // (`target.<name>`/`delta.<name>`, the caller's own
+                // convention, `smelt-runtime::cumulative::build_cumulative_
+                // merge_sql`) — the ordering column lives in the same
+                // target/delta scope, so the same qualifiers apply.
+                let target_qualifier = target_col.rsplit_once('.').map_or("target", |(q, _)| q);
+                let delta_qualifier = delta_col.rsplit_once('.').map_or("delta", |(q, _)| q);
+                let target_ord = format!("{target_qualifier}.{ordering_column}");
+                let delta_ord = format!("{delta_qualifier}.{ordering_column}");
+                // Strict `>` — incumbent wins on a tie (§"Ordering ties":
+                // "the delta wins iff `delta.ordering > target.ordering`
+                // (strict); on equality the incumbent wins").
+                format!(
+                    "CASE WHEN {delta_ord} > {target_ord} THEN {delta_col} ELSE {target_col} END"
+                )
+            }
         }
     }
 }
@@ -372,6 +403,34 @@ pub fn classify_cumulative(
                     .and_then(|f| f.name())
                     .map(|n| n.to_ascii_uppercase())
                     .filter(|n| SqlFunction::from_name(n).is_some_and(|f| f.is_aggregate()));
+
+                // The order-monotone overwrite family (`MAX_BY`/`MIN_BY` —
+                // `ArgMax`/`ArgMin`, `Monotone::Order`) is not gated through
+                // `combiner_for`'s `is_monoid` allowlist (it is a semilattice
+                // fold, not a commutative monoid) — handle it up front and
+                // move to the next projection.
+                let order_monotone = agg_name.as_deref().and_then(|n| {
+                    let sql_fn = SqlFunction::from_name(n)?;
+                    let is_order =
+                        crate::analysis::discriminants::combiner_discriminants(sql_fn, false)
+                            .monotone
+                            == crate::analysis::discriminants::Monotone::Order;
+                    is_order.then_some((n.to_string(), sql_fn))
+                });
+                if let Some((agg_upper, sql_fn)) = order_monotone {
+                    classify_order_monotone_column(
+                        &analysis,
+                        text,
+                        alias,
+                        expr,
+                        sql_fn,
+                        &agg_upper,
+                        &mut aggregator_columns,
+                        &mut diagnostics,
+                    );
+                    continue;
+                }
+
                 let combiner = agg_name.as_deref().and_then(combiner_for);
                 match (agg_name, combiner) {
                     (Some(agg_upper), Some(combiner)) => {
@@ -513,6 +572,158 @@ pub fn classify_cumulative(
         aggregator_columns,
         driving_source: driving_source.expect("driving_source must be set when diagnostics empty"),
     })
+}
+
+/// Classify one `MAX_BY(value, ordering)`/`MIN_BY(value, ordering)`
+/// projection (`ArgMax`/`ArgMin`, `Monotone::Order`) — the order-monotone
+/// overwrite family (`incremental_models.md` §"The column-family
+/// catalogue").
+///
+/// **Storage decision (Phase 1).** The cross-window combiner needs the
+/// *stored* ordering value to compare a new delta's ordering against — but
+/// this classifier has no decomposed/hidden-state mechanism (that is
+/// rung-2 ladder territory, out of scope here). The only honest option
+/// without one is to require the ordering value to already be a genuine
+/// output column: this function requires the SELECT list to *also* project
+/// `MAX(<ordering>)` (for `MAX_BY`) or `MIN(<ordering>)` (for `MIN_BY`) —
+/// the running extremal fold of the exact same ordering expression, which
+/// is provably equal to the ordering of MAX_BY/MIN_BY's own winning row by
+/// construction. Absent that companion column, the model is refused
+/// (`KeyedUnknownCombiner`, naming the missing companion projection) rather
+/// than silently deriving a hidden state column.
+#[allow(clippy::too_many_arguments)]
+fn classify_order_monotone_column(
+    analysis: &crate::analysis::SelectAnalysis,
+    text: &str,
+    alias: &str,
+    expr: &smelt_parser::Expr,
+    sql_fn: SqlFunction,
+    agg_upper: &str,
+    aggregator_columns: &mut Vec<AggregatorColumn>,
+    diagnostics: &mut Vec<KeyedDiagnostic>,
+) {
+    if !is_direct_function_call(text, agg_upper) {
+        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+            projection: alias.to_string(),
+            offending: format!("composite expression `{}`", text.trim()),
+        });
+        return;
+    }
+
+    let Some(fc) = expr.as_function_call() else {
+        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+            projection: alias.to_string(),
+            offending: text.trim().to_string(),
+        });
+        return;
+    };
+    let args = fc.arguments();
+    if args.len() != 2 {
+        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+            projection: alias.to_string(),
+            offending: format!(
+                "{agg_upper} requires exactly 2 arguments (value, ordering), got {}",
+                args.len()
+            ),
+        });
+        return;
+    }
+    let value_text = args[0].text().trim().to_string();
+    let ordering_text = args[1].text().trim().to_string();
+    let tracking_fn = if sql_fn == SqlFunction::ArgMax {
+        "MAX"
+    } else {
+        "MIN"
+    };
+
+    match order_monotone_companion(
+        &analysis.items,
+        alias,
+        &value_text,
+        &ordering_text,
+        tracking_fn,
+    ) {
+        Some(ordering_column) => {
+            aggregator_columns.push(AggregatorColumn {
+                output_name: alias.to_string(),
+                per_partition_agg: agg_upper.to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone { ordering_column },
+            });
+        }
+        None => {
+            diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+                projection: alias.to_string(),
+                offending: format!(
+                    "{agg_upper}'s ordering expression `{ordering_text}` must also be \
+                     projected as `{tracking_fn}({ordering_text})` — the classifier stores no \
+                     hidden ordering state, only what the SELECT already projects"
+                ),
+            });
+        }
+    }
+}
+
+/// Whether an order-monotone (`MAX_BY`/`MIN_BY`, `ArgMax`/`ArgMin`)
+/// projection's ordering value is provably trustworthy under the storage
+/// decision documented on [`CrossPartitionCombiner::OrderMonotone`] — the
+/// cross-window combiner has no decomposed/hidden state, so it can only
+/// compare the *stored output* of some column in the same projection
+/// against the delta's. Two shapes prove that:
+///
+/// 1. **Self-companion**: the value expression is textually identical to
+///    the ordering expression (`MAX_BY(x, x)` ≡ `MAX(x)`) — the projected
+///    value already *is* the running extremal of the ordering expression,
+///    by construction, so the column is trivially its own companion.
+/// 2. **Explicit companion**: another projection in the same SELECT list
+///    is a direct `<tracking_fn>(<ordering_text>)` call — the running
+///    extremal fold of the exact same ordering expression.
+///
+/// Returns the alias of the column whose `target.<alias>`/`delta.<alias>`
+/// the cross-partition merge should compare (the projection's own `alias`
+/// in the self-companion case, the companion projection's alias
+/// otherwise). `None` means neither shape is provable from the SELECT's
+/// own projections — the projection must be refused, not admitted with a
+/// hidden ordering column.
+///
+/// **Single ownership** (`CLAUDE.md` §"Fail-loud discipline"): both the
+/// runtime classifier ([`classify_order_monotone_column`], which
+/// admits/refuses at execution time with `KeyedUnknownCombiner`) and the
+/// plan-derivation layer (`smelt_db::queries::maintenance::derive_fold_spec`,
+/// which decides whether an `ArgMax`/`ArgMin` column enters a `FoldSpec` at
+/// all) call this one helper, so `smelt explain`/LSP diagnostics never
+/// report a fold admission the runtime then refuses.
+pub fn order_monotone_companion(
+    items: &[SelectItemKind],
+    alias: &str,
+    value_text: &str,
+    ordering_text: &str,
+    tracking_fn: &str,
+) -> Option<String> {
+    if value_text.trim() == ordering_text.trim() {
+        return Some(alias.to_string());
+    }
+    for item in items {
+        let SelectItemKind::OtherAggregate {
+            text, alias, expr, ..
+        } = item
+        else {
+            continue;
+        };
+        if !is_direct_function_call(text, tracking_fn) {
+            continue;
+        }
+        let Some(fc) = expr.as_function_call() else {
+            continue;
+        };
+        let args = fc.arguments();
+        if args.len() != 1 {
+            continue;
+        }
+        if args[0].text().trim() == ordering_text {
+            return Some(alias.clone());
+        }
+    }
+    None
 }
 
 /// Verify the projection is a direct call to `expected_fn` and nothing else —

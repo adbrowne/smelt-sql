@@ -302,9 +302,11 @@ fn registry_lub(a: &DataType, b: &DataType) -> DataType {
 ///   * `DATE_TRUNC` — return tz-axis mirrors the second argument.
 ///   * `COALESCE`/`IFNULL`/`NULLIF`/`GREATEST`/`LEAST` — first-concrete-of-N
 ///     with argument-derived nullability.
-///   * `MODE`/`ANY_VALUE`/`ARG_MAX`/`FIRST`/`LAST` and the window-navigation
+///   * `MODE`/`ANY_VALUE`/`FIRST`/`LAST` and the window-navigation
 ///     family (`LAG`/`LEAD`/`FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`) — first-
 ///     argument identity with optional trailing arguments (variable arity).
+///     `ARG_MAX`/`ARG_MIN` (aliases `MAX_BY`/`MIN_BY`) migrated below — fixed
+///     2-arity, first-argument-identity return type, no trailing arguments.
 ///   * `BIT_AND`/`BIT_OR`/`BIT_XOR` — first-argument identity else BigInt.
 ///   * `EXTRACT` — routed as `ExtractExpr` syntax, not a plain call.
 ///
@@ -334,6 +336,8 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "LISTAGG",
     "GROUP_CONCAT",
     "APPROX_COUNT_DISTINCT", // (Any) → BigInt (nullable=false)
+    "ARG_MAX",               // <T: Any>(T, K) → T (first-arg identity, nullable=true)
+    "ARG_MIN",               // <T: Any>(T, K) → T (first-arg identity, nullable=true)
     // ── Window (fixed return) ───────────────────────────────────────────────
     "ROW_NUMBER",
     "RANK",
@@ -1169,9 +1173,11 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: false,
         }),
 
-        SqlFunction::AnyValue | SqlFunction::ArgMax | SqlFunction::First | SqlFunction::Last => {
-            first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true)
-        }
+        SqlFunction::AnyValue
+        | SqlFunction::ArgMax
+        | SqlFunction::ArgMin
+        | SqlFunction::First
+        | SqlFunction::Last => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 
         SqlFunction::GroupConcat => Some(TypedColumn {
             data_type: DataType::Text,

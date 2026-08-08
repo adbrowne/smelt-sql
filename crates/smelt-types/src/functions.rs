@@ -47,6 +47,7 @@ pub enum SqlFunction {
     ApproxCountDistinct,
     AnyValue,
     ArgMax,
+    ArgMin,
     First,
     Last,
     BoolAnd,
@@ -215,6 +216,7 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::ApproxCountDistinct,
     SqlFunction::AnyValue,
     SqlFunction::ArgMax,
+    SqlFunction::ArgMin,
     SqlFunction::First,
     SqlFunction::Last,
     SqlFunction::BoolAnd,
@@ -371,6 +373,7 @@ impl SqlFunction {
             Self::ApproxCountDistinct => "APPROX_COUNT_DISTINCT",
             Self::AnyValue => "ANY_VALUE",
             Self::ArgMax => "ARG_MAX",
+            Self::ArgMin => "ARG_MIN",
             Self::First => "FIRST",
             Self::Last => "LAST",
             Self::BoolAnd => "BOOL_AND",
@@ -509,6 +512,7 @@ impl SqlFunction {
             | Self::ApproxCountDistinct
             | Self::AnyValue
             | Self::ArgMax
+            | Self::ArgMin
             | Self::First
             | Self::Last
             | Self::BoolAnd

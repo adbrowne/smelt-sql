@@ -47,11 +47,23 @@ use tracing::info;
 impl WindowedKeyedRule for CumulativeClassification {
     fn refuse(&self) -> Option<String> {
         for col in &self.aggregator_columns {
-            if combiner_for(&col.per_partition_agg).is_none() {
-                return Some(format!(
-                    "aggregator `{}` on column `{}` is not a monoid combiner",
-                    col.per_partition_agg, col.output_name
-                ));
+            match &col.cross_partition_combiner {
+                // The order-monotone overwrite family (`MAX_BY`/`MIN_BY`) is
+                // not a monoid — `combiner_for`'s allowlist deliberately
+                // doesn't cover it (`analysis::discriminants::Monotone::Order`
+                // is a semilattice fold, not a commutative monoid). It is
+                // already verified at classify time
+                // (`rules::cumulative::classify_order_monotone_column`), so
+                // this defense-in-depth pass has nothing further to check.
+                CrossPartitionCombiner::OrderMonotone { .. } => {}
+                _ => {
+                    if combiner_for(&col.per_partition_agg).is_none() {
+                        return Some(format!(
+                            "aggregator `{}` on column `{}` is not a monoid combiner",
+                            col.per_partition_agg, col.output_name
+                        ));
+                    }
+                }
             }
         }
         None
@@ -72,11 +84,15 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// combiner is `Sum` — an additive fold double-counts on a repeat merge
     /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). The remaining catalogued combiners
-    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`) are the
-    /// extremal/lattice family and grade `Idempotent`. Mixing an additive
-    /// column with idempotent ones in the same cell still grades the whole
-    /// cell `Additive` — conservative (never unsafe), per
-    /// `WindowedKeyedRule::ledger_grade`'s doc comment.
+    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`, and the
+    /// order-monotone overwrite family `OrderMonotone`) grade `Idempotent`:
+    /// re-merging the SAME already-reflected delta twice leaves the
+    /// incumbent-wins comparison unchanged (`delta.ord > target.ord` is
+    /// false the second time, since after the first merge
+    /// `target.ord == delta.ord`) — a re-run converges, it does not
+    /// double-count. Mixing an additive column with idempotent ones in the
+    /// same cell still grades the whole cell `Additive` — conservative
+    /// (never unsafe), per `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
         let any_additive = self
             .aggregator_columns

@@ -518,8 +518,9 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
     let src = format!("smelt.sources.{}", recipe.source.name);
     let key = &recipe.source.key_column;
     let val = &recipe.source.payload_column;
-    let (agg, alias) = recipe.combiner.agg_and_alias();
-    format!("SELECT {key}, {agg}({val}) AS {alias} FROM {src} GROUP BY {key}")
+    let clock = &recipe.source.clock_column;
+    let proj = recipe.combiner.projection_sql(val, clock);
+    format!("SELECT {key}, {proj} FROM {src} GROUP BY {key}")
 }
 
 /// The full `grain: key` model file: `refresh: incremental` + `grain: key`

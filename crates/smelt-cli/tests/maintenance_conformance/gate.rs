@@ -974,6 +974,68 @@ fn retained_departed_keys_adjusts_the_oracle() {
     );
 }
 
+/// Phase 1 (`docs/plans/20260809-keyed-frontier.md`): the order-monotone
+/// overwrite family (`MAX_BY`) grades `Grade::Idempotent`
+/// (`crates/smelt-runtime/src/cumulative.rs`'s `WindowedKeyedRule::
+/// ledger_grade` doc comment — incumbent-wins re-merge of an
+/// already-reflected delta converges) — unlike the additive family
+/// (`redelivered_window_refuses_for_additive_keyed`,
+/// `crates/smelt-cli/tests/maintenance_conformance/probes.rs`), re-running
+/// the SAME window must NOT be refused: no ledger exists for an
+/// idempotent-graded cell, and re-merging is harmless by construction.
+#[tokio::test]
+async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
+    let recipe = KeyedRecipe::new_window_forward(KeyedCombiner::OrderMonotone);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage order-monotone keyed recipe");
+
+    let plan = classify_keyed(&project, &recipe).expect("classify order-monotone keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the order-monotone keyed recipe to admit at least one cell: {plan:#?}"
+    );
+
+    let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 5 }).expect("insert row");
+
+    let mut request = base_request("dev");
+    request.start = Some("2024-01-01".to_string());
+    request.end = Some("2024-01-02".to_string());
+    project
+        .run_quiet("keyed-order-monotone-1", request.clone())
+        .await
+        .expect("first fold of the window must succeed");
+
+    let maintained_after_first = {
+        let backend = project.backend().await.expect("backend");
+        snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+            .await
+            .expect("snapshot after first fold")
+    };
+
+    // Re-deliver the SAME window: an idempotent-graded cell has no ledger
+    // and must succeed, converging to the same stored state.
+    project
+        .run_quiet("keyed-order-monotone-2", request)
+        .await
+        .expect(
+            "re-running an already-folded order-monotone keyed window must succeed — \
+             idempotent-graded cells carry no reprocessing ledger",
+        );
+
+    let maintained_after_redelivery = {
+        let backend = project.backend().await.expect("backend");
+        snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+            .await
+            .expect("snapshot after redelivery")
+    };
+    assert_eq!(
+        maintained_after_first, maintained_after_redelivery,
+        "redelivering an already-folded window must converge to byte-identical state, never \
+         double-apply the overwrite"
+    );
+}
+
 // ---------------------------------------------------------------------
 // W10 Phase 5 (`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`):
 // the change-suppressed column-scoped `MERGE`'s generative conformance leg.

@@ -934,12 +934,13 @@ impl SourceRecipe {
 }
 
 /// The `grain: key` pool's combiner family
-/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
-/// `incremental_models.md` §"The algebraic maintenance ladder"): both are
-/// direct-monoid, admitted by the built classifier seed
-/// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
-/// `incremental_models.md` §Known Divergences "The key grain": "the classifier covers only the
-/// direct-monoid families").
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5,
+/// extended by `docs/plans/20260809-keyed-frontier.md` Phase 1;
+/// `incremental_models.md` §"The algebraic maintenance ladder"): `Additive`/
+/// `Idempotent` are direct-monoid; `OrderMonotone` is the order-monotone
+/// overwrite family (a semilattice fold, not a monoid) — all three are
+/// admitted by the built classifier
+/// (`crates/smelt-logical/src/rules/cumulative.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyedCombiner {
     /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
@@ -951,6 +952,18 @@ pub enum KeyedCombiner {
     /// not a group). The `Grade::Idempotent` family: entries record only a
     /// frontier watermark, so re-folding a window is harmless.
     Idempotent,
+    /// `MAX_BY(val, d)` — the order-monotone overwrite family
+    /// (`incremental_models.md` §"The column-family catalogue",
+    /// `crates/smelt-logical/src/rules/cumulative.rs`
+    /// `classify_order_monotone_column`). Also `Grade::Idempotent`
+    /// (incumbent-wins re-merge of an already-reflected delta converges).
+    /// The classifier's storage decision requires the ordering expression
+    /// (the driving source's own clock column `d` — strictly monotone
+    /// across this pool's generated windows, §"Ordering ties": ties are
+    /// avoided by construction, not by luck) to also be projected as its
+    /// own running `MAX(d)` column — [`Self::projection_sql`] projects
+    /// both.
+    OrderMonotone,
 }
 
 impl KeyedCombiner {
@@ -958,23 +971,64 @@ impl KeyedCombiner {
         match self {
             KeyedCombiner::Additive => "additive",
             KeyedCombiner::Idempotent => "idempotent",
+            KeyedCombiner::OrderMonotone => "order_monotone",
         }
     }
 
     /// `(aggregate function, output column alias)` this combiner projects.
+    /// For [`KeyedCombiner::OrderMonotone`] this names only the *value*
+    /// column — see [`Self::ordering_alias`] for the companion tracking
+    /// column and [`Self::projection_sql`] for the full select-list
+    /// fragment.
     pub fn agg_and_alias(self) -> (&'static str, &'static str) {
         match self {
             KeyedCombiner::Additive => ("SUM", "total"),
             KeyedCombiner::Idempotent => ("MAX", "max_val"),
+            KeyedCombiner::OrderMonotone => ("MAX_BY", "max_by_val"),
+        }
+    }
+
+    /// The companion ordering-tracking column's output alias — only
+    /// [`KeyedCombiner::OrderMonotone`] needs one (the classifier's storage
+    /// decision: the ordering value must itself be a projected running
+    /// `MAX`/`MIN` column, not hidden state).
+    pub fn ordering_alias(self) -> Option<&'static str> {
+        match self {
+            KeyedCombiner::OrderMonotone => Some("max_by_ord"),
+            KeyedCombiner::Additive | KeyedCombiner::Idempotent => None,
+        }
+    }
+
+    /// The full select-list fragment (beyond the key) this combiner
+    /// projects, given the source's payload column (`val`) and clock column
+    /// (`clock`, used as the order-monotone family's ordering expression).
+    pub fn projection_sql(self, val: &str, clock: &str) -> String {
+        let (agg, alias) = self.agg_and_alias();
+        match self {
+            // `ordering_alias()` is `Some` for every `OrderMonotone` value —
+            // matched directly here rather than via `.expect(...)` so a
+            // future variant added to `ordering_alias()`'s match without a
+            // corresponding `projection_sql` arm fails to compile instead of
+            // panicking at runtime.
+            KeyedCombiner::OrderMonotone => match self.ordering_alias() {
+                Some(ord_alias) => {
+                    format!("{agg}({val}, {clock}) AS {alias}, MAX({clock}) AS {ord_alias}")
+                }
+                None => unreachable!("OrderMonotone always carries an ordering alias"),
+            },
+            KeyedCombiner::Additive | KeyedCombiner::Idempotent => {
+                format!("{agg}({val}) AS {alias}")
+            }
         }
     }
 }
 
-/// A `Strategy` drawing uniformly from the two [`KeyedCombiner`] families.
+/// A `Strategy` drawing uniformly from the three [`KeyedCombiner`] families.
 pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
     prop_oneof![
         Just(KeyedCombiner::Additive),
         Just(KeyedCombiner::Idempotent),
+        Just(KeyedCombiner::OrderMonotone),
     ]
 }
 
@@ -1082,14 +1136,14 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction (design §5 "Key-recurrence control": "where ordering-
 /// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
 /// made unique by construction so the documented ties carve-out cannot fire
-/// spuriously" — `incremental_models.md` §"Ordering ties"). The order-monotone
-/// overwrite combiner family this discipline targets is not yet an admitted
-/// technique (`incremental_models.md` §Known Divergences "The key grain": "the classifier union
-/// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
-/// so this generator is not wired into [`KeyedCombiner`] today — but the
-/// discipline it must uphold once that family lands is independently
-/// testable now: a strictly increasing sequence can never collide, by
-/// construction rather than by (unprovable) statistical luck.
+/// spuriously" — `incremental_models.md` §"Ordering ties"). [`KeyedCombiner::
+/// OrderMonotone`] itself uses the driving source's own clock column as its
+/// ordering expression (already strictly monotone across a generated
+/// [`KeyedSchedule`] by construction, without needing this generator) — this
+/// strategy remains available for any future recipe that needs an
+/// independent, non-clock ordering key with the same tie-free guarantee: a
+/// strictly increasing sequence can never collide, by construction rather
+/// than by (unprovable) statistical luck.
 pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
     (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
 }
