@@ -17,10 +17,10 @@ use super::{
     OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
     SourceFacts, Technique, Trigger,
 };
-use crate::analysis::discriminants::combiner_discriminants;
+use crate::analysis::faithful_fold::{faithful_fold, ConditionVerdict, FaithfulFold};
 use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::input_delta::{
-    input_delta_discovery, InputDeltaKind, MutationProfile as DeltaMutationProfile, SourceShape,
+    input_delta_discovery, MutationProfile as DeltaMutationProfile, SourceShape,
 };
 use crate::analysis::join_shape::JoinContext;
 use crate::analysis::model_diff::ModelDiff;
@@ -867,102 +867,90 @@ fn derive_new_data(
             // already-processed partition, so it can never by itself widen a
             // source to "retraction-free". The declared `MutationProfile`
             // remains the sole source of that fact (never derived from
-            // discovery kind alone) — this is the explicit
-            // `MutationProfile::Mutable` guard the (now-deleted) dead-code
-            // tripwire required of its first production caller.
+            // discovery kind alone) — inside the proof, `discovery` refines
+            // only the failure *reason*, never the verdict.
             let discovery = input_delta_discovery(source_shape(facts));
-            let carries_retractions = facts.mutation != MutationProfile::AppendOnly;
-            if carries_retractions {
-                // Narrowing (`incremental_models.md` §"The key grain
-                // (`grain: key`)"): the append-only obligation binds a
-                // FOLD-CONTRIBUTING source, not every source the model
-                // references. This `NewData` trigger's obligation is waived
-                // iff (i) `source` is covered by an `UpstreamMutation` cell
-                // for this model — its post-creation mutations are
-                // maintained by that cell, not silently dropped — AND (ii)
-                // `source_contributes_to_fold` proves `source` is never an
-                // argument to the fold's own aggregates. Both conditions are
-                // required: coverage alone would let an un-retractable
-                // folded contribution through (the classifier's
-                // conservatism is the safety net there); non-contribution
-                // alone would still fold an un-retractable delta with
-                // nothing else maintaining it. A source that is both
-                // fold-contributing and mutable stays refused below — the
-                // folded contribution genuinely is un-retractable. When
-                // waived, this `NewData{source}` trigger needs no technique
-                // at all (no cell, no refusal): `source`'s deltas do not
-                // feed the fold, and its post-creation mutations are already
-                // this model's `UpstreamMutation{source}` cell's job, not
-                // this one's.
-                if covered_by_mutation.contains(source)
-                    && !source_contributes_to_fold(inputs.sql, source)
-                {
-                    return;
-                }
-                if discovery == InputDeltaKind::WindowForward {
-                    // The blind spot the (now-deleted) dead-code tripwire
-                    // required a human sign-off before wiring: a clocked
-                    // Mutable source's discovery kind is WindowForward, but
-                    // that kind only proves how *new* rows are found — it has
-                    // no branch for an in-place update to an already-scanned
-                    // partition. A window-forward incremental read would
-                    // never re-visit that partition at all, so the retracted
-                    // contribution is not merely un-undoable, it is silently
-                    // invisible to the next run. Name this specific blind
-                    // spot distinctly from the unclocked case below, where a
-                    // full re-scan at least *sees* the change (SC-2,
-                    // `docs/research/property-discovery/ledger.md`).
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: format!(
-                            "fold over '{source}' fails the faithful-fold source-posture \
-                             condition: the source is not append-only, and input-delta \
-                             discovery classifies it as window-forward (clocked) — a \
-                             window-forward incremental read only visits new partitions, \
-                             so an in-place update to an already-processed partition would \
-                             go entirely unseen by the next run, not merely un-undoable; no \
-                             un-fold mechanism exists to undo an already-folded contribution \
-                             either, so this refuses the fold family whether or not any of the \
-                             fold's combiners ({:?}) are themselves monoids — the two \
-                             faithful-fold conditions are independent and either alone refuses",
-                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
-                        ),
-                    });
-                } else {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: format!(
-                            "fold over '{source}' fails the faithful-fold source-posture \
-                             condition: the source is not append-only and may carry \
-                             retractions (input-delta discovery = {discovery:?}); no un-fold \
-                             mechanism exists to undo an already-folded contribution, so this \
-                             refuses the fold family whether or not any of the fold's combiners \
-                             ({:?}) are themselves monoids — the two faithful-fold conditions \
-                             are independent and either alone refuses",
-                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
-                        ),
-                    });
-                }
+
+            // Narrowing (`incremental_models.md` §"The key grain
+            // (`grain: key`)"), applied BEFORE the faithful-fold proof is
+            // consulted — this is derive-layer waiver POLICY, not part of
+            // the proof: the append-only obligation binds a
+            // FOLD-CONTRIBUTING source, not every source the model
+            // references. This `NewData` trigger's obligation is waived
+            // iff (i) `source` is covered by an `UpstreamMutation` cell
+            // for this model — its post-creation mutations are
+            // maintained by that cell, not silently dropped — AND (ii)
+            // `source_contributes_to_fold` proves `source` is never an
+            // argument to the fold's own aggregates. Both conditions are
+            // required: coverage alone would let an un-retractable
+            // folded contribution through (the classifier's
+            // conservatism is the safety net there); non-contribution
+            // alone would still fold an un-retractable delta with
+            // nothing else maintaining it. A source that is both
+            // fold-contributing and mutable stays refused below — the
+            // folded contribution genuinely is un-retractable. When
+            // waived, this `NewData{source}` trigger needs no technique
+            // at all (no cell, no refusal): `source`'s deltas do not
+            // feed the fold, and its post-creation mutations are already
+            // this model's `UpstreamMutation{source}` cell's job, not
+            // this one's.
+            if facts.mutation != MutationProfile::AppendOnly
+                && covered_by_mutation.contains(source)
+                && !source_contributes_to_fold(inputs.sql, source)
+            {
                 return;
             }
 
-            // Obligation 3: combiner algebra class, checked independently of
-            // the (already-passed) source-posture condition above, per
-            // column — a mixed-combiner fold refuses as a whole (fail-closed,
-            // not a partial fold) the moment any one column's combiner is
-            // not a monoid.
-            if let Some((column, combiner)) = fold.add_columns.iter().find_map(|(name, c)| {
-                (!combiner_discriminants(*c, false).is_monoid).then_some((name.clone(), *c))
-            }) {
+            // Obligations 2 and 3 are the two faithful-fold conditions
+            // (`model_properties.md` §"Faithful-fold conditions"), derived
+            // by the pure `faithful_fold` proof; this function only maps a
+            // failing verdict onto the existing refusal text. Condition (1)
+            // is combiner-independent, so one representative verdict decides
+            // it for the whole fold (`Count` stands in when the fold has no
+            // add columns — the posture obligation still binds).
+            let posture = match facts.mutation {
+                MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
+                MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+            };
+            let representative = fold
+                .add_columns
+                .first()
+                .map(|(_, c)| *c)
+                .unwrap_or(SqlFunction::Count);
+            if let FaithfulFold::Fails {
+                partitioned_input: ConditionVerdict::Fails { reason },
+                ..
+            } = faithful_fold(representative, false, &posture, discovery)
+            {
                 plan.refusals.push(Refusal::NoAdmissibleTechnique {
                     trigger: format!("{trigger:?}"),
                     why: format!(
-                        "combiner {combiner:?} for column '{column}' is holistic or \
-                         unrecognised (not a monoid) — no delta+state read exists; only the \
-                         recompute family (a full rebuild) can serve this cell",
+                        "fold over '{source}' fails the faithful-fold source-posture \
+                         condition: {reason} (whether or not any of the fold's combiners \
+                         ({:?}) are themselves monoids)",
+                        fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                     ),
                 });
                 return;
+            }
+
+            // Condition (2): combiner algebra class, checked independently
+            // of the (already-passed) source-posture condition above, per
+            // column — a mixed-combiner fold refuses as a whole (fail-closed,
+            // not a partial fold) the moment any one column's combiner is
+            // not a monoid.
+            for (column, combiner) in &fold.add_columns {
+                if let FaithfulFold::Fails {
+                    submultiset_fold: ConditionVerdict::Fails { reason },
+                    ..
+                } = faithful_fold(*combiner, false, &posture, discovery)
+                {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: format!("combiner {combiner:?} for column '{column}' {reason}"),
+                    });
+                    return;
+                }
             }
             plan.cells.push(PlanCell {
                 group: format!(

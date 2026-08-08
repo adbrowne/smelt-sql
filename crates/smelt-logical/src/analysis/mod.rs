@@ -2,6 +2,7 @@ pub mod bounded_domain;
 pub mod decomposed_state;
 pub mod discriminants;
 pub(crate) mod expr_util;
+pub mod faithful_fold;
 pub mod fingerprint;
 pub mod functional_dependency;
 pub mod horizon_ceiling;
