@@ -67,7 +67,7 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 | 3     | done     | 42fbfa71 | 2026-08-08 |
 | 4     | done     | dec07e11 | 2026-08-08 |
 | 5     | done     | 8747be07 | 2026-08-09 |
-| 6     | pending  |        |      |
+| 6     | done     | (this commit) | 2026-08-09 |
 
 ---
 
@@ -284,6 +284,47 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+### Phase 6 survivors ledger
+
+`cargo-mutants` over the four new proof modules (`analysis/faithful_fold.rs`,
+`analysis/footprint.rs`, `analysis/locality_projection.rs`,
+`analysis/definition_change.rs`) plus the rewired `maintenance/derive.rs`
+region: 123 mutants generated, 105 caught, 17 unviable (non-compiling), 1
+missed and ledgered below. Nine kill tests were added
+(`crates/smelt-logical/tests/footprint_reflection.rs`,
+`locality_projection.rs`, `maintenance_fold_contribution.rs`,
+`maintenance_referential_integrity.rs` (new file),
+`maintenance_column_added_group_agreement.rs` (new file)) closing every
+other survivor across three campaign passes; no production code changed
+(no mutant exposed a real bug).
+
+- `crates/smelt-logical/src/maintenance/derive.rs:247:25` — mutation
+  `replace match guard aliases.len() == 1 with false` in
+  `source_contributes_to_fold`. Verdict: **equivalent**. Reachability
+  analysis: line 247's guard is only evaluated for an unqualified column
+  reference inside an aggregate argument, and the function only reaches that
+  loop body at all when line 225's earlier check
+  (`aliases.values().any(|v| v.eq_ignore_ascii_case(&source_lower))`) has
+  already passed — i.e. `source` is provably present among `aliases`'
+  values. When `aliases.len() == 1`, that "present" fact and "there is
+  exactly one value in the map" together force the sole alias to equal
+  `source` (a one-element set containing an element that satisfies `any(..)`
+  has no other member it could be). So whenever code reaches line 247 with
+  `aliases.len() == 1`, `aliases.values().next()` is provably `Some(source)`
+  regardless of whether the guard evaluates true or false: the `true` arm
+  resolves it explicitly and matches `source_lower` (`Some(name) if
+  name.eq_ignore_ascii_case(&source_lower) => return true`); the `false`
+  arm falls through to `None => None`, which the caller's fail-closed
+  default (`None => return true`, per the module's "false negatives are
+  forbidden" invariant) resolves to the identical `true`. No SQL shape can
+  observe a difference between the guard's two outcomes through this
+  function's public behavior, so no test can kill this mutant without
+  asserting an implementation-internal fact (which condition branch ran)
+  rather than a spec-level one. Confirmed by three successive full-suite
+  `cargo-mutants` runs (progressively narrowed via added kill tests for
+  every other survivor in the same function) leaving only this one
+  candidate.
 
 ## Verification
 

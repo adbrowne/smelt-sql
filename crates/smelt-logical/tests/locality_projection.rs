@@ -13,10 +13,11 @@ use smelt_logical::analysis::locality_projection::{locality_verdict, LocalityVer
 use smelt_logical::analysis::source_bounds::{
     derive_cross_axis_links, derive_model_bounds, BoundContext, BoundResult, CrossAxisLink, Seconds,
 };
-use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
+use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, PartitionLocal, SourceFacts, Trigger,
 };
+use smelt_types::SqlFunction;
 
 fn bounded(col: &str, before: Seconds, after: Seconds) -> BoundResult {
     BoundResult::Bounded {
@@ -169,6 +170,30 @@ fn cross_axis_source_without_predicate_is_not_local() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. A source whose partition column is literally the same name as the
+//     output axis is linked by that identity alone — the SameAxis link
+//     evidence is a corroborating derivation, not the sole admissible proof
+//     of a shared axis.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_named_axis_is_local_even_without_same_axis_link_evidence() {
+    let verdict = locality_verdict(
+        &bounded("event_date", Seconds::ZERO, Seconds::ZERO),
+        &bounded_footprint("event_date", Seconds::ZERO, Seconds::ZERO),
+        Some("event_date"),
+        Some("event_date"),
+        CrossAxisLink::Absent,
+    );
+    assert_eq!(
+        verdict,
+        LocalityVerdict::Local,
+        "a source and output partition column sharing a name are linked by identity alone, \
+         independent of the separately-derived CrossAxisLink evidence"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // 4. An Unbounded reflected footprint defeats locality regardless of the
 //    read bound — the composition the spec requires.
 // ---------------------------------------------------------------------------
@@ -254,4 +279,126 @@ fn verdicts_are_per_cell_per_source() {
         "expected snapshots to decide the folded verdict, got {:?}",
         cell.partition_local
     );
+}
+
+// ---------------------------------------------------------------------------
+// 6. The keyed-grain vacuous-locality residue (`project_source_link`'s
+//    documented pre-proof policy for `output_partition_col: None`, kept
+//    verbatim rather than routed through the partition-locality proof): a
+//    clocked source's nonzero read margin alone links it — no cross-axis
+//    predicate is consulted because there is no output partition axis to
+//    pose the question against.
+// ---------------------------------------------------------------------------
+
+fn keyed_fold_plan(sql: &str) -> smelt_logical::maintenance::MaintenancePlan {
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "t".to_string(),
+            grain: Grain::Key {
+                unique_key: vec!["user_id".to_string()],
+            },
+            skeleton_columns: BTreeSet::new(),
+        },
+        sources: vec![SourceFacts {
+            name: "payments".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: Some("pay_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: true,
+        }],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["total".to_string()],
+            mutation_sensitivity: BTreeSet::from(["payments".to_string()]),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        fold: Some(FoldSpec {
+            add_columns: vec![("total".to_string(), SqlFunction::Sum)],
+        }),
+        old_columns: Vec::new(),
+    };
+    derive_maintenance_plan(
+        &inputs,
+        &[Trigger::UpstreamMutation {
+            source: "payments".to_string(),
+        }],
+    )
+}
+
+/// A keyed-grain source with a genuine nonzero read margin (a rolling window
+/// over its own clock) links: the cell carries the derived clamp, mirroring
+/// the read reach exactly (`ScanClamp::before` = the derived margin,
+/// `after: ZERO` since the frame is one-sided).
+#[test]
+fn keyed_grain_source_with_nonzero_margin_links() {
+    let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY pay_date \
+               RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS total \
+               FROM smelt.sources.payments";
+    let plan = keyed_fold_plan(sql);
+    let cell = &plan.cells[0];
+    assert_eq!(
+        cell.scans,
+        vec![smelt_logical::maintenance::ScanClamp {
+            source: "payments".to_string(),
+            column: "pay_date".to_string(),
+            before: Seconds::days(1),
+            after: Seconds::ZERO,
+        }],
+        "a nonzero read margin on a keyed-grain source must produce the mirrored clamp, \
+         got {:?}",
+        cell.scans
+    );
+    assert_eq!(cell.partition_local, PartitionLocal::Yes);
+}
+
+/// A keyed-grain source whose margin is entirely on the `after` side
+/// (`before: ZERO`) still links — the `before > ZERO || after > ZERO`
+/// disjunction must check EACH side independently; a fixture with a nonzero
+/// `before` alone (the previous test) short-circuits past the `after` half
+/// of that check, which is what this pins.
+#[test]
+fn keyed_grain_source_with_after_only_margin_links() {
+    let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY pay_date \
+               RANGE BETWEEN CURRENT ROW AND INTERVAL '1 day' FOLLOWING) AS total \
+               FROM smelt.sources.payments";
+    let plan = keyed_fold_plan(sql);
+    let cell = &plan.cells[0];
+    assert_eq!(
+        cell.scans,
+        vec![smelt_logical::maintenance::ScanClamp {
+            source: "payments".to_string(),
+            column: "pay_date".to_string(),
+            before: Seconds::ZERO,
+            after: Seconds::days(1),
+        }],
+        "an after-only margin must still produce the mirrored clamp, got {:?}",
+        cell.scans
+    );
+    assert_eq!(cell.partition_local, PartitionLocal::Yes);
+}
+
+/// A keyed-grain source with NO read margin at all (a plain grouped
+/// aggregate, no window, no WHERE band) does not link — the vacuous-locality
+/// residue policy requires a genuine nonzero margin, not merely a `Bounded`
+/// verdict at zero.
+#[test]
+fn keyed_grain_source_with_zero_margin_does_not_link() {
+    let sql = "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
+    let plan = keyed_fold_plan(sql);
+    let cell = &plan.cells[0];
+    assert!(
+        cell.scans.is_empty(),
+        "a zero read margin must not produce a clamp, got {:?}",
+        cell.scans
+    );
+    match &cell.partition_local {
+        PartitionLocal::No { source, why } => {
+            assert_eq!(source, "payments");
+            assert!(
+                why.contains("no predicate links"),
+                "expected the missing-link reason, got: {why}"
+            );
+        }
+        other => panic!("expected a zero-margin source to fail to link, got {other:?}"),
+    }
 }

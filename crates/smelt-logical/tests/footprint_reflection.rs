@@ -154,3 +154,94 @@ fn bounded_verdict_names_the_output_partition_column() {
         other => panic!("expected Bounded naming the output axis, got {other:?}"),
     }
 }
+
+/// A scalar subquery embedded in `WHERE` (not a FROM item, so the
+/// walk-normalized tree stays "supported") may itself contain a windowed
+/// aggregate ordered by the output axis — but it is not one of the model's
+/// own output columns, so it must never be treated as a trajectory column.
+/// The walk-backed derivation composes only the outer SELECT's own
+/// select-list items; a whole-syntax-tree scan (the `has_unsupported`
+/// fallback, wrongly taken for a supported tree) would wrongly pick up the
+/// subquery's window and misclassify this as `Unbounded`. This pins the
+/// walk/fallback dispatch — not just the trajectory leaf classifier.
+#[test]
+fn window_inside_a_where_subquery_is_not_a_trajectory_of_the_outer_select() {
+    let sql = "SELECT event_date, COUNT(*) AS cnt FROM smelt.silver.events \
+               WHERE event_ts BETWEEN event_date - INTERVAL '2 hours' \
+                                  AND event_date + INTERVAL '1 hours' \
+                 AND 1 > (SELECT SUM(x) OVER (ORDER BY event_date) FROM smelt.silver.other) \
+               GROUP BY event_date";
+    let ctx = BoundContext::new().with_source("silver.events", "event_ts");
+    let fps = reflect_footprint(sql, &ctx, Some("event_date"));
+    assert_eq!(
+        fps.get("silver.events"),
+        Some(&FootprintResult::Bounded {
+            output_partition_col: "event_date".to_string(),
+            before: Seconds::hours(1),
+            after: Seconds::hours(2),
+        }),
+        "a window inside an unrelated WHERE subquery must not be mistaken for the outer \
+         select's own trajectory column"
+    );
+}
+
+/// A `RECURSIVE` CTE's body is opaque to the walk by construction
+/// (`analysis::walk::normalize_ctes`: a recursive CTE's self-reference would
+/// be misread as a base table, so its body normalizes to a bare
+/// `QueryNode::Unsupported` carrying no captured substructure at all — even
+/// though the CTE's body verdict is unconditionally folded into every
+/// consuming scope's children, `walk_node` on an `Unsupported` node never
+/// recurses into it, so a trajectory column inside that body is invisible to
+/// the walk regardless of whether the CTE is referenced). This makes the
+/// whole tree `has_unsupported() == true`, so real (un-mutated) code takes
+/// the coverage-preserving CST-fallback path — a flat syntactic scan that,
+/// unaware of `normalize`'s judgment, still finds the recursive CTE's own
+/// raw `SELECT_STMT` text and its trajectory column, correctly reporting
+/// `Unbounded`. This pins the walk/fallback dispatch itself
+/// (`footprint.rs:116`'s guard): forcing the walk path unconditionally
+/// would instead see only the opaque `Unsupported` placeholder — never the
+/// hidden trajectory — and wrongly report `Bounded`.
+#[test]
+fn trajectory_hidden_inside_a_recursive_cte_body_forces_the_fallback() {
+    let sql = "WITH RECURSIVE rec AS ( \
+                 SELECT event_date, SUM(x) OVER (ORDER BY event_date) AS running_total \
+                 FROM smelt.silver.other \
+               ) \
+               SELECT event_date, COUNT(*) AS cnt FROM smelt.silver.events \
+               WHERE event_ts BETWEEN event_date - INTERVAL '1 day' AND event_date + INTERVAL '1 day' \
+               GROUP BY event_date";
+    let ctx = BoundContext::new().with_source("silver.events", "event_ts");
+    let fps = reflect_footprint(sql, &ctx, Some("event_date"));
+    assert_eq!(
+        fps.get("silver.events"),
+        Some(&FootprintResult::Unbounded),
+        "a tree the walk cannot normalize must take the CST-fallback trajectory scan, not \
+         the walk composition — the two disagree exactly when a trajectory column is hidden \
+         inside a construct (here a RECURSIVE CTE body) the walk treats as fully opaque"
+    );
+}
+
+/// A running fold whose `ORDER BY` leads with a column other than the
+/// output's own partition axis is not a trajectory of that axis — only a
+/// fold ordered along the axis itself has the "late input at t rewrites
+/// every later output row" shape. This pins `expr_is_column`'s role in
+/// distinguishing the axis column from any other `ORDER BY` column.
+#[test]
+fn window_ordered_by_non_axis_column_is_not_a_trajectory() {
+    let sql = "SELECT event_date, event_ts, \
+               SUM(amount) OVER (PARTITION BY event_date ORDER BY event_ts) AS running \
+               FROM smelt.silver.events \
+               WHERE event_ts BETWEEN event_date - INTERVAL '1 day' AND event_date + INTERVAL '1 day'";
+    let ctx = BoundContext::new().with_source("silver.events", "event_ts");
+    let fps = reflect_footprint(sql, &ctx, Some("event_date"));
+    assert_eq!(
+        fps.get("silver.events"),
+        Some(&FootprintResult::Bounded {
+            output_partition_col: "event_date".to_string(),
+            before: Seconds::days(1),
+            after: Seconds::days(1),
+        }),
+        "a running fold ordered by a non-axis column must not be classified as a trajectory \
+         column of the output axis"
+    );
+}
