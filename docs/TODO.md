@@ -132,7 +132,16 @@ Found during `docs/plans/20260711-clock-vs-root-anchored-sessions.md`; both pred
 
 - [ ] **`extract_interval_days_from_combined` mis-parses sub-day intervals as days.** `crates/smelt-logical/src/analysis/temporal.rs` has no MINUTE/SECOND branch, so `INTERVAL '5 minutes'` parses as 5 days. Impact is limited to the advisory `analyze_batch_safety` JSON label (e.g. `context=5d`); actual runtime chunk sizing uses `batch_safety_from_bounds` and is unaffected. Fix: add sub-day unit branches (round up to 1 day, or carry finer granularity) plus a regression test pinning `INTERVAL '5 minutes'`.
 
-- [ ] **Rare parallel-execution flake in DuckDB-backed integration suites.** Observed twice during the plan run: `smelt-datagen/tests/example_web_analytics.rs::test_identity_backward_fill_materializes` and one `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` test failed under a full parallel `cargo test`, then passed in isolation and on re-run of the full suite — same failure family both times (parallel load), reproduced on an unmodified tree. Worth capturing the exact failure output next time it fires and checking for a shared-resource collision (e.g. temp DB paths, memory pressure) before it erodes trust in the gates.
+- [ ] **Rare parallel-execution flake in DuckDB-backed integration suites.** Third sighting
+  2026-08-08 (captured output, as this item requested): `smelt-runtime/tests/fingerprint_sidecar.rs`
+  `a_hand_corrupted_stamp_is_detected_treated_as_absent_and_logged_loudly` failed under a full
+  parallel `cargo test -p smelt-logical -p smelt-runtime` with
+  `a corrupted/mismatched stamp must be logged loudly (tracing::warn!) ...; captured WARN messages: []`
+  (`fingerprint_sidecar.rs:1008`), then passed 4/4 in isolation. This one is a **tracing-capture
+  race**, not DuckDB load: the assertion depends on capturing `tracing::warn!` while other test
+  binaries/threads contend for the global subscriber. Fix direction: use a scoped
+  `tracing::subscriber::with_default` (or `set_default` guard) around the assertion instead of a
+  global subscriber. Earlier sightings observed twice during the plan run: `smelt-datagen/tests/example_web_analytics.rs::test_identity_backward_fill_materializes` and one `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` test failed under a full parallel `cargo test`, then passed in isolation and on re-run of the full suite — same failure family both times (parallel load), reproduced on an unmodified tree. Worth capturing the exact failure output next time it fires and checking for a shared-resource collision (e.g. temp DB paths, memory pressure) before it erodes trust in the gates.
 
 ## Refresh-as-maintenance-plan: ratification queue (2026-07-06) — CLOSED 2026-07-07
 
