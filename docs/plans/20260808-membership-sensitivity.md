@@ -58,7 +58,7 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     | pending-review | 2026-08-08 |
+| 1     | done     | 3d83305f | 2026-08-08 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
