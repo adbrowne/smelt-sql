@@ -82,6 +82,31 @@ impl DayInterval {
     }
 }
 
+#[cfg(test)]
+mod day_interval_tests {
+    use super::*;
+
+    /// `is_whole` requires BOTH bounds to have widened past the `WHOLE`
+    /// sentinel — an interval that widened only one side (start clamped to
+    /// `WHOLE.start` but `end` still finite, or vice versa) is not the whole
+    /// table. Pins the `&&` (not `||`) in `is_whole`'s definition.
+    #[test]
+    fn is_whole_requires_both_bounds_to_have_widened() {
+        assert!(
+            !DayInterval::new(DayInterval::WHOLE.start, 0).is_whole(),
+            "a widened start with a finite end must not read as whole"
+        );
+        assert!(
+            !DayInterval::new(0, DayInterval::WHOLE.end).is_whole(),
+            "a widened end with a finite start must not read as whole"
+        );
+        assert!(
+            DayInterval::WHOLE.is_whole(),
+            "an interval widened on both sides must read as whole"
+        );
+    }
+}
+
 /// Sort and merge overlapping/adjacent intervals into a normal form.
 pub fn normalize(mut intervals: Vec<DayInterval>) -> Vec<DayInterval> {
     intervals.retain(|i| !i.is_empty());
@@ -821,6 +846,29 @@ mod project_observed_delta_tests {
             vec![DayInterval::new(day - 5, day + 1)],
             "route 3's declared r (already folded into margin_before) must widen the observed \
              partition backward, not just project it exactly"
+        );
+    }
+
+    /// Route 3's forward half: a `RecurrenceBounded` slice with a nonzero
+    /// `margin_after` must widen the projected interval forward too, not
+    /// just backward — pins the `day + 1 + after` half of the projection
+    /// formula (only the backward `day - before` half was previously
+    /// exercised by a nonzero fixture).
+    #[test]
+    fn route_3_recurrence_bounded_widens_forward_by_margin_after() {
+        let slice = locality::LocalitySlice::RecurrenceBounded {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(5),
+            margin_after: Seconds::days(2),
+            r: Seconds::days(4),
+        };
+        let partitions = vec!["2026-01-10".to_string()];
+        let projected = project_observed_delta(&slice, &partitions);
+        let day = day_ordinal(2026, 1, 10);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(day - 5, day + 3)],
+            "a nonzero margin_after must widen the projected interval forward beyond day + 1"
         );
     }
 

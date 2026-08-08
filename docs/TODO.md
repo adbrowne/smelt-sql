@@ -1,5 +1,32 @@
 # TODO
 
+## Mutation-campaign residue (2026-08-08)
+
+From `docs/research/20260808-mutation-testing-maintenance-gates.md` (472-mutant campaign over
+`smelt-logical/src/maintenance/`; 13 final survivors, all classified). The genuine untested-logic
+residue:
+
+- [ ] **`choice.rs:235` liveness arm** — nothing drives `resolve_cell_choice` with
+  `backend_supports_column_scoped_merge=false` on a ColumnScopedMerge-admitted cell; deleting the
+  liveness-filter arm survives every gate. Add a pure test asserting the fallback when the backend
+  lacks MERGE.
+- [ ] **`derive.rs:182`** — `||`→`&&` in `source_contributes_to_fold` survives; find the input
+  class that distinguishes the disjunction and pin it.
+- [ ] **`derive.rs:1279` `group_columns`** — returning an empty/garbage set survives; no test
+  observes the grouped-column set directly.
+- [ ] **`granularity.rs:68`** — the `alias == partition_column` match guard forced to `true`
+  survives `check_declared_granularity`'s tests.
+- [ ] **`derive.rs:240`** — provably equivalent match guard (`aliases.len() == 1`); delete the
+  guard (cleanup, needs no test) so it stops registering as a survivor.
+- [ ] **Label/refusal text** — `trigger_label`, `resolvable_set_label`, `LocalityRefusal::fmt`
+  are unpinned. Decide: golden-pin refusal text (fail-loud culture) or accept as advisory.
+- [ ] **Re-run after F3** — `model_fingerprint_projections` mutants become killable once
+  fingerprint sidecars consume the projection; re-run the campaign then
+  (`cargo mutants --iterate` makes this incremental).
+- [ ] **Conformance-generator extensions** suggested by the campaign's blind spots: recipes with
+  `cells[].write` pins, ColumnAdded triggers with `allow_full_scan: true`, December/era-boundary
+  date pools, backends without column-scoped MERGE.
+
 ## Cross-Model Type Inference
 
 - [x] **Salsa cycle recovery for circular refs** — `salsa::cycle` recovery attributes added to `resolved_model_schema`, `typed_model_schema`, and `type_context` queries. Recovery functions return empty/default schemas and produce diagnostics. Tests cover A→B→C→A cycles and mutual dependencies.

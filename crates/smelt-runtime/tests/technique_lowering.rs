@@ -2452,6 +2452,62 @@ mod write_pattern_registry_pin {
                 .expect_err("a pin selecting a technique this resolver can't lower must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
     }
+
+    /// Pins the resolvable set member `write: keyed` (selects
+    /// `Technique::KeyedFold`, this cell's own admitted technique) directly
+    /// through `lookup_write_pattern` + `resolve_cell_choice`: proves
+    /// `admits_write_selection`'s equality check on the exact-technique arm
+    /// (`selection == Technique(t)`, `t != ColumnScopedMerge`) admits when
+    /// the pinned technique equals the plan's admitted technique. Kills the
+    /// `admits_write_selection` `==` → `!=` mutant on that arm together with
+    /// `pinning_update_on_a_keyed_fold_cell_refuses` below.
+    #[test]
+    fn pinning_keyed_on_a_keyed_fold_cell_admits() {
+        let source = "sources.raw_events";
+        let plan = composed_keyed_fold_plan(source);
+        let trigger = Trigger::UpstreamMutation {
+            source: source.to_string(),
+        };
+
+        let keyed_pattern = lookup_write_pattern("keyed").expect("registered pattern");
+        let chosen = resolve_cell_choice(
+            &plan,
+            &trigger,
+            &effective_override(None, &[], "unused", &[]),
+            Some(keyed_pattern),
+            true,
+        )
+        .expect("a keyed pin matching the cell's own admitted KeyedFold technique must resolve");
+        assert_eq!(chosen, ChosenTechnique::Admitted(Technique::KeyedFold));
+    }
+
+    /// Pins `write: update` (selects `Technique::InPlaceUpdate`) against the
+    /// same `KeyedFold`-admitted plan: the pinned technique does NOT equal
+    /// the plan's admitted technique, so `admits_write_selection` must
+    /// refuse. With the `==` → `!=` mutant this would wrongly admit,
+    /// substituting a technique the plan never derived.
+    #[test]
+    fn pinning_update_on_a_keyed_fold_cell_refuses() {
+        let source = "sources.raw_events";
+        let plan = composed_keyed_fold_plan(source);
+        let trigger = Trigger::UpstreamMutation {
+            source: source.to_string(),
+        };
+
+        let update_pattern = lookup_write_pattern("update").expect("registered pattern");
+        let err = resolve_cell_choice(
+            &plan,
+            &trigger,
+            &effective_override(None, &[], "unused", &[]),
+            Some(update_pattern),
+            true,
+        )
+        .expect_err(
+            "an update pin selecting a technique the plan never admitted must refuse, not \
+             substitute the admitted technique",
+        );
+        assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+    }
 }
 
 /// T3 over external sources — the point-lookup enrichment recompute

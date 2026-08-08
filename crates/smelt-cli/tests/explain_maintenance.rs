@@ -148,6 +148,12 @@ fn explain_prints_cells_clamps_locality() {
         !report.contains("could not distinguish"),
         "daily_events has no ambiguous provenance; the collapse callout must not fire: {report}"
     );
+    assert!(
+        report.contains("admissible write patterns: region"),
+        "expected the admissible write-pattern registry listing, leading with `region` (the \
+         only structural fact this cell's declared facts satisfy first in registry order): \
+         {report}"
+    );
 }
 
 /// A model whose SQL has an unqualified column ambiguous between two joined

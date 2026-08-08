@@ -805,6 +805,49 @@ mod tests {
         assert!(matches!(err, AnchorAmbiguity::Multiple(_)));
     }
 
+    fn unclocked_source(name: &str) -> SourceFacts {
+        SourceFacts {
+            name: name.to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: false,
+        }
+    }
+
+    /// A clocked source joined with an unclocked one must resolve to the
+    /// clocked source alone — the candidate test requires BOTH the name
+    /// match AND `partition_col.is_some()`; an `||` mutant would let the
+    /// unclocked source's name-only match through too, which either
+    /// resolves to the wrong source or wrongly reports ambiguity. Pins the
+    /// `&&` (not `||`) in the candidate closure.
+    #[test]
+    fn resolve_driving_source_picks_the_clocked_side_of_a_clocked_unclocked_join() {
+        let sql = "SELECT e.device_id, e.event_date, d.region \
+                   FROM smelt.sources.events e \
+                   JOIN smelt.sources.dim d ON e.device_id = d.device_id";
+        let sources = vec![clocked_source("events"), unclocked_source("dim")];
+        let resolved = resolve_driving_source(sql, &sources)
+            .expect("only one alias-scoped source is clocked — no ambiguity")
+            .expect("`sources.events` must resolve as the sole clocked driving source");
+        assert_eq!(resolved.name, "events");
+    }
+
+    /// A single unclocked source resolves to `Ok(None)` (snapshot-reconcile
+    /// — no clocked candidate at all), never an error and never a wrong
+    /// match.
+    #[test]
+    fn resolve_driving_source_returns_none_for_a_single_unclocked_source() {
+        let sql = "SELECT device_id, region FROM smelt.sources.dim";
+        let sources = vec![unclocked_source("dim")];
+        let resolved =
+            resolve_driving_source(sql, &sources).expect("a single candidate is never ambiguous");
+        assert!(
+            resolved.is_none(),
+            "an unclocked-only source set must resolve to no driving source"
+        );
+    }
+
     /// A minimal route-1-shaped input: `event_date` is both the partition
     /// column and part of the unique key, the driving source is clocked at
     /// the same (day) granularity, and the model SQL has no lookback
@@ -1280,6 +1323,42 @@ mod tests {
             } => {
                 assert_eq!(r, Seconds::days(3));
                 assert_eq!(margin_before, Seconds::days(3));
+            }
+            other => {
+                panic!("a declared route-3 bound must render as RecurrenceBounded, got {other:?}")
+            }
+        }
+    }
+
+    /// A declared `key_recurrence` route-3 admission also folds in a
+    /// forward-only static bound derived from the model's own SQL (a Form-B
+    /// `BETWEEN ... AND ... + INTERVAL` relation with `before == 0`, so it
+    /// doesn't itself satisfy the static sub-route's `before > 0` gate) into
+    /// the resulting slice's `margin_after` — pins the `BoundResult::Bounded
+    /// { after, .. } => Some(*after)` arm that reads the driving source's
+    /// own derived forward bound, rather than always falling back to zero.
+    #[test]
+    fn route3_declared_key_recurrence_folds_in_a_forward_only_static_bound() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date BETWEEN conversion_date AND conversion_date + INTERVAL '2 days' \
+                   GROUP BY event_id";
+        let mut inputs = route3_inputs(sql);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice =
+            establish_locality(&inputs).expect("declared key_recurrence must admit route 3");
+        match slice {
+            LocalitySlice::RecurrenceBounded { margin_after, .. } => {
+                assert_eq!(
+                    margin_after,
+                    Seconds::days(2),
+                    "the driving source's own derived forward bound must fold into margin_after, \
+                     not be silently dropped to zero"
+                );
             }
             other => {
                 panic!("a declared route-3 bound must render as RecurrenceBounded, got {other:?}")
