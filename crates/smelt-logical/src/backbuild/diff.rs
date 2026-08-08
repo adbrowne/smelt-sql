@@ -12,7 +12,7 @@ use super::{
     ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, EditedBranch, SelectColumn,
     SelectListDiff, SetOpDiff, SkeletonDiff,
 };
-use smelt_parser::syntax_kind::SyntaxNode;
+use crate::analysis::expr_util::same_modulo_trivia;
 use smelt_parser::{Expr, File, JoinClause, JoinType, SelectEntry, SelectList, SelectStmt};
 
 /// Factor `before` and `after` into a [`DefinitionDiff`].
@@ -55,30 +55,6 @@ pub fn definition_diff(before: &File, after: &File) -> DefinitionDiff {
         skeleton,
         set_ops,
     }))
-}
-
-/// Trivia-insensitive structural equality: two syntax subtrees are equal
-/// when their non-trivia token kind+text sequences match. Whitespace and
-/// comments are skipped; token text is compared exactly (case-preserving —
-/// a case *change* is not a no-op). Used by every clause comparator below.
-fn same_modulo_trivia(a: &SyntaxNode, b: &SyntaxNode) -> bool {
-    let mut ta = a
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()));
-    let mut tb = b
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()));
-    loop {
-        match (ta.next(), tb.next()) {
-            (None, None) => return true,
-            (Some(x), Some(y)) if x == y => continue,
-            _ => return false,
-        }
-    }
 }
 
 // ===== SELECT list =====

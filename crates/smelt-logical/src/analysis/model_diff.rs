@@ -16,6 +16,7 @@
 //! change over the walk's prior posture, which silently treated an unknown
 //! zero-arg function call as having no dependencies at all.
 
+use crate::analysis::expr_util::same_modulo_trivia;
 use crate::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
 use smelt_parser::{Expr, SyntaxKind};
 use smelt_types::signatures::BuiltinRegistry;
@@ -77,7 +78,7 @@ pub fn additive_only_diff(
                 };
             }
             Some(new_col) => {
-                if old.expr.text().trim() != new_col.expr.text().trim() {
+                if !same_modulo_trivia(old.expr.syntax(), new_col.expr.syntax()) {
                     return ModelDiff::NotAdditive {
                         reason: format!(
                             "existing column '{}' changed its expression — a rebuild or declared \

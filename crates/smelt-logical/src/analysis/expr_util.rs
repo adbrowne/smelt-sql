@@ -1,7 +1,8 @@
 //! Shared expression-tree primitives used across `analysis/`,
 //! `maintenance/`, and `backbuild/`: collecting the column references
-//! embedded in an already-parsed expression, and splitting a `WHERE`/`ON`
-//! predicate into its top-level `AND`-joined conjuncts.
+//! embedded in an already-parsed expression, splitting a `WHERE`/`ON`
+//! predicate into its top-level `AND`-joined conjuncts, and comparing two
+//! syntax subtrees for trivia-insensitive structural equality.
 //!
 //! Before this module existed, both primitives were copied independently at
 //! each call site (`analysis::fingerprint`, `analysis::skeleton_closure`,
@@ -110,6 +111,39 @@ pub(crate) fn collect_referenced_qualifiers(expr: &Expr) -> BTreeSet<String> {
         .into_iter()
         .filter_map(|cref| cref.qualifier().map(|q| q.to_string()))
         .collect()
+}
+
+/// Trivia-insensitive structural equality: two syntax subtrees are equal
+/// when their non-trivia token kind+text sequences match. Whitespace and
+/// comments are skipped; token text is compared exactly (case-preserving —
+/// a case *change* is not a no-op).
+///
+/// The single token-stream equality primitive for definition diffs
+/// (`docs/plans/20260808-substrate-unification.md` Phase 4): both
+/// `backbuild::diff`'s clause-by-clause `DefinitionDiff` comparators and
+/// `analysis::model_diff`'s `additive_only_diff` column-expression
+/// comparison consume this rather than each carrying their own notion of
+/// "unchanged" (previously `backbuild::diff` had a private token-stream
+/// copy and `model_diff` used raw `.text().trim()`, which disagreed on a
+/// pure whitespace/comment reformat).
+pub(crate) fn same_modulo_trivia(a: &SyntaxNode, b: &SyntaxNode) -> bool {
+    let mut ta = a
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .map(|t| (t.kind(), t.text().to_string()));
+    let mut tb = b
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .map(|t| (t.kind(), t.text().to_string()));
+    loop {
+        match (ta.next(), tb.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => continue,
+            _ => return false,
+        }
+    }
 }
 
 /// Recursively split `expr` into its top-level `AND`-joined conjuncts.

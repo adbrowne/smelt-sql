@@ -63,7 +63,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | 1     | done     | bfd0453b | 2026-08-08 |
 | 2     | done     | 6827ea9e | 2026-08-08 |
 | 3     | done     | 9073e141 | 2026-08-08 |
-| 4     | pending  |        |      |
+| 4     | done     | pending-review | 2026-08-08 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
