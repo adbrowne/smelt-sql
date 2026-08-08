@@ -61,7 +61,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | bfd0453b | 2026-08-08 |
-| 2     | done     | pending-review | 2026-08-08 |
+| 2     | done     | 6827ea9e | 2026-08-08 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
