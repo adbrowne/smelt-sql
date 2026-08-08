@@ -30,6 +30,7 @@ use smelt_parser::{Expr, JoinClause, JoinType, SelectEntry, SelectStmt, SyntaxKi
 use smelt_types::SqlFunction;
 
 use crate::analysis::model_diff;
+use crate::analysis::walk;
 
 use super::{
     resolve_representative, AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption,
@@ -1031,7 +1032,7 @@ fn as_range_conjunct(expr: &Expr) -> Option<RangeConjunctShape> {
     let left = bin.left()?;
     let right = bin.right()?;
 
-    if let (Some(col), Some(lit)) = (left.as_column_ref(), bare_literal(&right)) {
+    if let (Some(col), Some(lit)) = (left.as_column_ref(), as_bare_range_literal(&right)) {
         return Some(RangeConjunctShape {
             name: col.name().to_string(),
             operator: op,
@@ -1039,7 +1040,7 @@ fn as_range_conjunct(expr: &Expr) -> Option<RangeConjunctShape> {
             literal_text: lit.1,
         });
     }
-    if let (Some(lit), Some(col)) = (bare_literal(&left), right.as_column_ref()) {
+    if let (Some(lit), Some(col)) = (as_bare_range_literal(&left), right.as_column_ref()) {
         return Some(RangeConjunctShape {
             name: col.name().to_string(),
             operator: flip_comparison_operator(&op),
@@ -1060,12 +1061,19 @@ fn flip_comparison_operator(op: &str) -> String {
     }
 }
 
-/// `expr` is a bare literal (exactly one non-trivia token, a `NUMBER` or
-/// `STRING`) — a comparison against anything else (a function call, another
-/// column, a parenthesised expression) is not a shape E4's literal-widening
-/// proof recognises. String literal text has its surrounding quotes
-/// stripped for comparison.
-fn bare_literal(expr: &Expr) -> Option<(RangeLiteralKind, String)> {
+/// `expr` is a *bare* literal (exactly one non-trivia token, a `NUMBER` or
+/// `STRING` — no typed-literal prefix like `DATE '…'`) — E4's
+/// range-widening proof needs this narrower shape than the crate's shared
+/// constant-literal recognizer ([`walk::is_constant_literal`]) admits: a
+/// comparison against a typed literal, a function call, another column, or
+/// a parenthesised expression is not a shape E4 recognises (research §4 E4
+/// only reasons about plain numeric/text bound arithmetic). A thin wrapper
+/// over the shared recognizer, restricted to the single-token shape.
+/// String literal text has its surrounding quotes stripped for comparison.
+fn as_bare_range_literal(expr: &Expr) -> Option<(RangeLiteralKind, String)> {
+    if !walk::is_constant_literal(expr) {
+        return None;
+    }
     let mut tokens = expr
         .syntax()
         .descendants_with_tokens()
@@ -1240,8 +1248,9 @@ fn iso8601_fixed_width_shape(s: &str) -> Option<Iso8601Shape> {
 /// Whether `a` is strictly less than `b`, for a lower-bound (`>`/`>=`)
 /// widening check: `a < b` means moving the bound from `b` to `a` admits
 /// more rows. Numeric literals compare as parsed `f64`s (fail-closed on an
-/// unparseable literal — this should be unreachable given `bare_literal`
-/// only ever tags `NUMBER`-kind tokens this way, but a lexer accepting a
+/// unparseable literal — this should be unreachable given
+/// `as_bare_range_literal` only ever tags `NUMBER`-kind tokens this way,
+/// but a lexer accepting a
 /// shape `f64::from_str` rejects is reported, not panicked, per fail-loud
 /// discipline). Text literals compare lexicographically *only* when both
 /// match the same [`iso8601_fixed_width_shape`] — refused otherwise
@@ -1501,9 +1510,8 @@ fn build_f2_option(
     unchanged: &[SelectStmt],
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
-    let (column, kind, text) = find_branch_discriminator(removed_branch, unchanged)
+    let (column, literal_sql) = find_branch_discriminator(removed_branch, unchanged)
         .map_err(|reason| format!("F2 (removed UNION ALL branch) refused: {reason}"))?;
-    let literal_sql = render_bare_literal_sql(kind, &text);
     let statement = emit::emit_discriminated_branch_delete(&inputs.table, &column, &literal_sql);
 
     Ok(BackbuildOption {
@@ -1522,25 +1530,29 @@ fn build_f2_option(
 /// The F2 discriminator proof (research §4 F2): find a SELECT-list output
 /// column that is present, under the same output name, in `removed_branch`
 /// and every one of `other_branches` (the before-definition's surviving
-/// branches), whose expression is a bare literal ([`bare_literal`]) in every
-/// one of those branches, and whose literal value is distinct across all of
+/// branches), whose expression is [`walk::is_constant_literal`] in every one
+/// of those branches, and whose literal value is distinct across all of
 /// them. Candidates are tried in `removed_branch`'s own declared column
 /// order; the first fully-qualifying one wins. Returns the column name plus
-/// `removed_branch`'s own literal kind/text — the predicate's right-hand
-/// side.
+/// `removed_branch`'s own literal's raw SQL text — the predicate's
+/// right-hand side, spliced verbatim (a typed literal like `DATE
+/// '2026-01-01'` already carries its own quoting/type prefix; a bare
+/// `NUMBER`/`STRING` needs none added).
 ///
 /// Deliberately does **not** consult `analysis::discriminants.rs`: that
 /// module classifies an *aggregate combiner's* algebraic facts (is-monoid,
 /// decomposable, monotonicity — `docs/specs/model_properties.md` §"Algebraic
 /// discriminants") for maintenance-ladder purposes, and has no concept of a
 /// per-branch literal-constant provenance column at all — the two "discriminant"
-/// names are unrelated ideas that happen to share a word. This proof instead
-/// reuses [`bare_literal`], the same leaf classifier E4's range-widening
-/// proof already uses to recognise a bare `NUMBER`/`STRING` token, over each
-/// branch's own already-bounded SELECT-list expression — consistent with the
-/// property-composition-walk rule's "leaf classifier over one bounded node"
-/// carve-out (`docs/specs/architecture.md` §"Property composition walk
-/// rule").
+/// names are unrelated ideas that happen to share a word. The true sibling
+/// is `analysis::walk`'s discriminated-union machinery
+/// ([`walk::is_constant_literal`], [`walk::constant_literal_tag`], and
+/// `walk::union_discriminated_grain`'s whole-`PropertyVector` counterpart):
+/// this proof is the per-branch-`SelectStmt` shape of the same recognizer,
+/// reused rather than re-derived, over each branch's own already-bounded
+/// SELECT-list expression — consistent with the property-composition-walk
+/// rule's "leaf classifier over one bounded node" carve-out
+/// (`docs/specs/architecture.md` §"Property composition walk rule").
 ///
 /// Fail-closed with a specific, actionable reason:
 /// - no candidate column is ever a literal anywhere: "no provenance
@@ -1553,17 +1565,19 @@ fn build_f2_option(
 ///   same value: refused by name, since the resulting equality predicate
 ///   would also delete a surviving branch's rows.
 /// - a candidate is a literal in every branch but not the *same* literal
-///   kind (e.g. `1` in one branch, `'1'` in another): refused by name — a
-///   `UNION ALL` coerces the column to a common supertype (e.g. VARCHAR),
-///   so the emitted equality predicate implicit-casts at execution and can
-///   match a surviving branch's differently-typed-but-textually-equal rows
-///   even though the two literals compare as distinct `(kind, text)` pairs
-///   here; only a discriminator that is the *same* literal kind in every
-///   branch is kind-safe to compare by value at all.
+///   kind (e.g. `1` in one branch, `'1'` in another, or `DATE '2026-01-01'`
+///   in one branch and a plain string in another): refused by name — a
+///   `UNION ALL` coerces the column to a common supertype, so the emitted
+///   equality predicate implicit-casts at execution and can match a
+///   surviving branch's differently-typed-but-textually-equal rows even
+///   though the two literals compare as distinct `(kind, text)` pairs here;
+///   only a discriminator that is the *same* literal kind
+///   ([`walk::constant_literal_tag`]'s `kind`) in every branch is kind-safe
+///   to compare by value at all.
 fn find_branch_discriminator(
     removed_branch: &SelectStmt,
     other_branches: &[SelectStmt],
-) -> Result<(String, RangeLiteralKind, String), String> {
+) -> Result<(String, String), String> {
     let removed_items = branch_named_items(removed_branch)?;
     let mut other_items = Vec::with_capacity(other_branches.len());
     for branch in other_branches {
@@ -1592,8 +1606,10 @@ fn find_branch_discriminator(
             continue;
         }
 
-        let literals: Vec<Option<(RangeLiteralKind, String)>> =
-            branch_exprs.iter().map(|e| bare_literal(e)).collect();
+        let literals: Vec<Option<(String, String)>> = branch_exprs
+            .iter()
+            .map(|e| walk::constant_literal_tag(e))
+            .collect();
         let literal_count = literals.iter().filter(|l| l.is_some()).count();
 
         if literal_count == 0 {
@@ -1609,10 +1625,10 @@ fn find_branch_discriminator(
             continue;
         }
 
-        // Every branch declares this column as a bare literal (the
+        // Every branch declares this column as a constant literal (the
         // `literal_count` check above proved every entry is `Some`, so
         // `flatten` drops nothing) — check the values are pairwise distinct.
-        let values: Vec<(RangeLiteralKind, String)> = literals.into_iter().flatten().collect();
+        let values: Vec<(String, String)> = literals.into_iter().flatten().collect();
 
         // The column must be the *same* literal kind in every branch: a
         // `UNION ALL` coerces the column to one common supertype, so an
@@ -1624,8 +1640,8 @@ fn find_branch_discriminator(
         // distinct" refusals below, but kept looking for a genuinely
         // qualifying candidate before reporting it (same posture as the
         // other two fail-closed buckets).
-        let first_kind = values[0].0;
-        if values.iter().any(|(kind, _)| *kind != first_kind) {
+        let first_kind = &values[0].0;
+        if values.iter().any(|(kind, _)| kind != first_kind) {
             mixed_kind_candidate.get_or_insert_with(|| name.clone());
             continue;
         }
@@ -1643,8 +1659,9 @@ fn find_branch_discriminator(
             None => {
                 // A qualifying discriminator — removed_branch's own value is
                 // always `values[0]` (branch_exprs was built with
-                // removed_expr first).
-                return Ok((name.clone(), values[0].0, values[0].1.clone()));
+                // removed_expr first). Its raw text is already valid SQL to
+                // splice verbatim into the equality predicate.
+                return Ok((name.clone(), values[0].1.clone()));
             }
             Some(value) => {
                 shared_candidate.get_or_insert((name.clone(), value));
@@ -1684,7 +1701,7 @@ fn find_branch_discriminator(
 /// the F2 discriminator proof's per-branch view. Mirrors
 /// [`branch_output_column_names`] (same wildcard/spread fail-closed
 /// posture) but also keeps each item's expression, which the discriminator
-/// proof needs to test with [`bare_literal`].
+/// proof needs to test with [`walk::constant_literal_tag`].
 fn branch_named_items(branch: &SelectStmt) -> Result<Vec<(String, Expr)>, String> {
     let list = branch
         .select_list()
@@ -1720,17 +1737,6 @@ fn branch_named_items(branch: &SelectStmt) -> Result<Vec<(String, Expr)>, String
         }
     }
     Ok(items)
-}
-
-/// Render a [`bare_literal`] result back into SQL text for splicing into an
-/// equality predicate: a text literal is re-quoted, a numeric literal is
-/// bare. Test-grade DuckDB dialect (research §3) — no escaping beyond the
-/// bare re-quote, matching this module's other emitted-literal sites.
-fn render_bare_literal_sql(kind: RangeLiteralKind, text: &str) -> String {
-    match kind {
-        RangeLiteralKind::Number => text.to_string(),
-        RangeLiteralKind::Text => format!("'{text}'"),
-    }
 }
 
 fn build_f1_atom(

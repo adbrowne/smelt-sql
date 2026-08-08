@@ -603,3 +603,81 @@ fn stale_upstream_documents_precondition_generatively() {
          the §2 precondition, not a correctness bug in the script"
     );
 }
+
+fn inputs(table: &str, after_sql: &str) -> BackbuildInputs {
+    BackbuildInputs {
+        table: table.to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: std::collections::BTreeSet::new(),
+        added_column_types: std::collections::BTreeMap::new(),
+        sources: std::collections::BTreeMap::new(),
+    }
+}
+
+/// Substrate-unification Phase 3 (`docs/plans/20260808-substrate-unification.md`):
+/// the F2 branch-removal discriminator proof must recognise a *typed*
+/// literal (`DATE '…'`) branch tag, not just a bare `NUMBER`/`STRING`
+/// token — the walk's `is_constant_literal` already does (walk_hardening.rs
+/// `constant_literal_rejects_function_call`); backbuild's own
+/// `bare_literal` did not. This is the phase's single named
+/// behaviour change, in the accepting direction: today this refuses (no
+/// `DiscriminatedBranchDelete` option), fixed it admits one whose
+/// statement equality-predicate literal is the removed branch's own typed
+/// tag.
+#[test]
+fn typed_literal_branch_discriminator() {
+    let before_sql = "SELECT id, DATE '2026-01-01' AS src FROM events_a UNION ALL SELECT id, \
+                       DATE '2026-02-01' AS src FROM events_b";
+    let after_sql = "SELECT id, DATE '2026-01-01' AS src FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        matches!(
+            &atom.change,
+            smelt_logical::backbuild::AtomicChange::RemovedSetOpBranch { index: 0 }
+        ),
+        "expected a RemovedSetOpBranch atom, got {:?}",
+        atom.change
+    );
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "expected the typed-literal branch tag to be recognised as a discriminator: {atom:?}"
+    );
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::DiscriminatedBranchDelete);
+    assert_eq!(option.statements.len(), 1, "{:?}", option.statements);
+    assert_eq!(
+        option.statements[0],
+        "DELETE FROM t WHERE src = DATE '2026-02-01'"
+    );
+}
+
+/// Guard against the unification widening too far: a branch tag that is a
+/// function call (`CURRENT_DATE`, not a constant literal) must never be
+/// recognised as a discriminator by either layer — this should already pass
+/// today and stays passing after the delegation.
+#[test]
+fn function_call_never_discriminates() {
+    let before_sql = "SELECT id, CURRENT_DATE AS src FROM events_a UNION ALL SELECT id, \
+                       CURRENT_DATE AS src FROM events_b";
+    let after_sql = "SELECT id, CURRENT_DATE AS src FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "a CURRENT_DATE branch tag is not a constant literal and must never be admitted as a \
+         discriminator: {atom:?}"
+    );
+}

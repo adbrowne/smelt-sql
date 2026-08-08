@@ -24,6 +24,9 @@ pub use walk::{
     RelationSource, Scope, ScopeEnum, ScopeEnumeration, ScopeKind, SelectNode, SetOpKind,
     SetOpNode, Transfer, UnsupportedConstruct,
 };
+// `is_constant_literal`/`constant_literal_tag` are `pub(crate)` (crate-internal
+// leaf classifiers, not part of this crate's public surface) — accessed via
+// `crate::analysis::walk::{..}` directly rather than re-exported here.
 
 use serde::Serialize;
 use smelt_types::SqlFunction;

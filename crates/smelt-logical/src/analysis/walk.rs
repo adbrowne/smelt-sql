@@ -2175,9 +2175,14 @@ fn expr_comparability(expr: &smelt_parser::Expr) -> Comparability {
     result
 }
 
-/// Whether `expr` is a constant literal — a string/number literal with no
-/// column reference or function call (a discriminator/tag candidate).
-fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
+/// Whether `expr` is a constant literal — a string/number literal (bare, or
+/// a typed literal such as `DATE '2026-01-01'`/`INTERVAL '1' DAY`) with no
+/// column reference or function call. The shared constant-literal
+/// recognizer (`docs/specs/architecture.md` §"Property composition walk
+/// rule") — a discriminator/tag candidate for [`union_discriminated_grain`]
+/// and, via [`constant_literal_tag`], for backbuild's F2 branch-removal
+/// discriminator proof.
+pub(crate) fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
     if smelt_parser::ColumnRef::from_expr(expr).is_some() {
         return false;
     }
@@ -2204,6 +2209,37 @@ fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
         }
     }
     saw_literal
+}
+
+/// `expr`'s discriminator identity — `(kind, raw source text)` — if it is
+/// [`is_constant_literal`], else `None`. `kind` is the literal's coercion
+/// family: `"NUMBER"`/`"STRING"` for a bare literal, or the uppercase type
+/// keyword (`"DATE"`, `"TIME"`, `"TIMESTAMP"`, `"INTERVAL"`) for a typed
+/// one. Two literals of different kinds are not safely comparable by value
+/// after a `UNION ALL`'s column-type coercion, even when their raw text
+/// differs — callers building a coercion-safe discriminator (backbuild's F2
+/// branch-removal proof) compare `kind` before comparing `text`. The
+/// per-branch counterpart of [`union_discriminated_grain`]: that function
+/// works over already-walked `PropertyVector`s; this one works directly
+/// over one branch's own already-bounded SELECT-item expression, the shape
+/// backbuild's per-`SelectStmt` diffing needs without building a full
+/// [`QueryTree`].
+pub(crate) fn constant_literal_tag(expr: &smelt_parser::Expr) -> Option<(String, String)> {
+    if !is_constant_literal(expr) {
+        return None;
+    }
+    let kind = expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| !t.kind().is_trivia())
+        .map(|t| match t.kind() {
+            smelt_parser::SyntaxKind::NUMBER => "NUMBER".to_string(),
+            smelt_parser::SyntaxKind::STRING => "STRING".to_string(),
+            _ => t.text().to_ascii_uppercase(),
+        })
+        .unwrap_or_default();
+    Some((kind, expr.text().trim().to_string()))
 }
 
 /// The whole-model property vector — the single walk-derived derivation of

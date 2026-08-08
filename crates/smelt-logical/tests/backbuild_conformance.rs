@@ -2356,6 +2356,56 @@ fn f2_discriminated_branch_delete() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+/// Substrate-unification Phase 3
+/// (`docs/plans/20260808-substrate-unification.md`): F2's discriminator
+/// proof now delegates to the walk's shared constant-literal recognizer
+/// (`analysis::walk::is_constant_literal`/`constant_literal_tag`), which
+/// admits *typed* literal branch tags (`DATE '…'`) that backbuild's old
+/// `bare_literal` (a single `NUMBER`/`STRING` token only) refused — the
+/// phase's single named behaviour change, in the accepting direction.
+/// Oracle-verified: DuckDB equivalence must hold for the newly-admitted
+/// case, mirroring [`f2_discriminated_branch_delete`]'s harness usage.
+#[test]
+fn f2_discriminated_branch_delete_typed_literal() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events_a (id INTEGER);
+         CREATE TABLE events_b (id INTEGER);
+         INSERT INTO events_a VALUES (1), (2);
+         INSERT INTO events_b VALUES (3);",
+    );
+
+    let before_sql = "SELECT id, DATE '2026-01-01' AS src FROM events_a UNION ALL SELECT id, \
+                       DATE '2026-02-01' AS src FROM events_b";
+    let after_sql = "SELECT id, DATE '2026-01-01' AS src FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        matches!(
+            &atom.change,
+            smelt_logical::backbuild::AtomicChange::RemovedSetOpBranch { index: 0 }
+        ),
+        "expected a RemovedSetOpBranch atom, got {:?}",
+        atom.change
+    );
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::DiscriminatedBranchDelete);
+    assert_eq!(option.statements.len(), 1, "{:?}", option.statements);
+    assert_eq!(
+        option.statements[0],
+        "DELETE FROM t WHERE src = DATE '2026-02-01'"
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
 #[test]
 fn f2_duplicate_payload_rows_survive_correctly() {
     // events_a and events_b carry the *same* ids — a content-matching
