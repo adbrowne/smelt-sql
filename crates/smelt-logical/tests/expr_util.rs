@@ -96,8 +96,13 @@ fn function_wrapped_membership_predicate_on_enrichment_column_stays_open() {
 /// resolves the FROM-alias qualifier for `d.tier` inside the call's
 /// arguments, so the derivation produces a soundly narrower per-column
 /// group instead of collapsing. `d` is also read in the `LEFT JOIN`'s `ON`
-/// predicate, so it additionally carries membership sensitivity — deriving
-/// fail-closed for outer joins, per this plan's Phase 1 scope.
+/// predicate — but this shape's closure (`model_properties.md`
+/// §"Skeleton-source closure") proves `Closed` via the join's own shape
+/// (a `LEFT JOIN`, one-to-one on `customers`' declared `id` key, no
+/// membership predicate), so `docs/plans/20260809-sensitivity-precision.md`
+/// Phase 4's closure-pruning rule now exempts that `ON` read from
+/// membership sensitivity entirely — its deltas are pure value changes,
+/// value sensitivity alone carries them.
 #[test]
 fn function_wrapped_source_column_no_longer_collapses() {
     let sources = vec![
@@ -123,10 +128,11 @@ fn function_wrapped_source_column_no_longer_collapses() {
         set(&["customers"]),
         "UPPER(d.tier) must contribute d.tier's value sensitivity"
     );
-    assert_eq!(
-        tier_group.membership_sensitivity,
-        set(&["customers"]),
-        "d is also read in the LEFT JOIN's ON predicate — membership \
-         sensitivity, deriving fail-closed for outer joins"
+    assert!(
+        tier_group.membership_sensitivity.is_empty(),
+        "this shape's skeleton-source closure proves Closed via the LEFT \
+         JOIN's own shape (one-to-one, no membership predicate) — the \
+         closure-pruning rule exempts its ON read from membership \
+         sensitivity: {tier_group:?}"
     );
 }

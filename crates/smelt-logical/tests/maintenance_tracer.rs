@@ -813,3 +813,85 @@ fn keyed_enriched_dim_mutation_is_membership_sensitive_recompute_never_column_me
         plan.cells
     );
 }
+
+/// The closure-pruning rule (`docs/plans/20260809-sensitivity-precision.md`
+/// Phase 4; `model_properties.md` §"Semantics"): the SAME fact+mutable-dim
+/// shape as the test above, but the enrichment join is a `LEFT JOIN` in a
+/// non-aggregating scope with no membership predicate on `dim` — every
+/// skeleton-source-closure conjunct proves `Closed` with row preservation
+/// established by the join shape itself, so `dim`'s own `ON` read
+/// contributes no membership sensitivity. The `UpstreamMutation(dim)` cell
+/// for the (purely value-sensitive) `attr` group must now derive
+/// `Corner::ColumnMerge`/`Technique::ColumnScopedMerge` instead of the
+/// recompute-region `DeleteInsert` the un-pruned (aggregating, inner-join)
+/// shape gets.
+#[test]
+fn closed_outer_enrichment_join_upstream_mutation_derives_column_scoped_merge() {
+    let sql = "SELECT f.id, f.amount, d.attr AS attr \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+    let sources = vec![
+        SourceFacts {
+            name: "fact".to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: Some("event_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        },
+        SourceFacts {
+            name: "dim".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: strings(&["id"]),
+            allow_full_scan: true,
+        },
+    ];
+    let skeleton = set(&["id"]);
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    let attr_group = grouping
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"attr".to_string()))
+        .expect("attr group");
+    assert!(
+        attr_group.membership_sensitivity.is_empty(),
+        "the closed LEFT JOIN's own ON read must contribute no membership \
+         sensitivity: {attr_group:?}"
+    );
+    assert_eq!(attr_group.mutation_sensitivity, set(&["dim"]));
+
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "fact_dim".to_string(),
+            grain: Grain::Key {
+                unique_key: strings(&["id"]),
+            },
+            skeleton_columns: skeleton,
+        },
+        sources,
+        column_groups: grouping.groups,
+        fold: None,
+        old_columns: Vec::new(),
+    };
+
+    let plan = derive_maintenance_plan(
+        &inputs,
+        &[Trigger::UpstreamMutation {
+            source: "dim".to_string(),
+        }],
+    );
+    assert!(plan.refusals.is_empty(), "refusals: {:?}", plan.refusals);
+    let cell = plan
+        .cells
+        .iter()
+        .find(|c| c.group == "{attr}")
+        .unwrap_or_else(|| panic!("no {{attr}} cell: {:?}", plan.cells));
+    assert_eq!(cell.corner, Corner::ColumnMerge);
+    assert_eq!(cell.technique, Technique::ColumnScopedMerge);
+}

@@ -2092,12 +2092,17 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   parse but are not consumed (every refusal is an Error); the cost model between two admissible
   techniques is unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **`ColumnScopedMerge` is currently unreachable from any shipped SQL shape.** Membership
-  sensitivity (§"The plan matrix", sensitivity kinds) routes every mutable join partner to the
-  recompute family, and no shipped fixture derives a pure value-sensitive mutation cell — the
-  column-scoped merge emitter and its dispatch remain covered by synthetic statement-parity
-  legs only. A model whose mutable source is read solely in select-item position (never in row
-  admission) would reach it; none ships today. The change-suppressed recompute's departed-key
+- **`ColumnScopedMerge` derivation is now reachable; end-to-end execution proof is pending.**
+  Membership sensitivity (§"The plan matrix", sensitivity kinds) routes every mutable join
+  partner to the recompute family EXCEPT one closure-pruned case: an enrichment join whose
+  skeleton-source closure (`model_properties.md` §"Skeleton-source closure") proves `Closed`
+  with row preservation established by the join's own shape (a provably outer join, never the
+  declared `referential_integrity` world-fact) contributes no membership sensitivity through
+  its own `ON` read, so a mutation cell over that source derives `ColumnScopedMerge` from real
+  SQL (`model_properties.md` §"Semantics"). No shipped fixture has yet driven this derivation
+  through the real pipeline against a real backend — the equivalence proof (staged recipe,
+  dimension value mutation, dimension row deletion, re-run schedules) is tracked by
+  `docs/plans/20260809-sensitivity-precision.md`. The change-suppressed recompute's departed-key
   `DELETE` also uses plain key equality, so a NULL-keyed row is rewritten every run —
   end-state equivalence holds, but write suppression silently does not apply to such rows.
   Tracked: `docs/TODO.md`.

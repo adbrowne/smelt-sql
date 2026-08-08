@@ -582,3 +582,194 @@ fn subquery_conjunct_still_fails_closed() {
         result.groups[0]
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 (`docs/plans/20260809-sensitivity-precision.md`): closure-pruned
+// membership sensitivity — an enrichment join whose skeleton-source closure
+// (`model_properties.md` §"Skeleton-source closure") is proven `Closed` with
+// row preservation established by the join SHAPE itself (a provably outer
+// join, never a declared `referential_integrity` world-fact) contributes no
+// membership sensitivity through its own `ON` read.
+// ---------------------------------------------------------------------------
+
+/// The load-bearing pruning case: a `LEFT JOIN` against a one-to-one,
+/// payload-only, no-membership-predicate `dim` closes all five conjuncts —
+/// its `ON` read must no longer attach membership sensitivity. Value
+/// sensitivity is untouched: `attr` still reads `dim`'s mutable value.
+#[test]
+fn closed_outer_enrichment_join_prunes_membership() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, f.amount, d.attr AS attr \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    for group in &result.groups {
+        assert!(
+            group.membership_sensitivity.is_empty(),
+            "a closure-Closed LEFT JOIN's own ON read must contribute no \
+             membership sensitivity: {:?}",
+            group.membership_sensitivity
+        );
+    }
+    let attr_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"attr".to_string()))
+        .expect("attr group");
+    assert_eq!(
+        attr_group.mutation_sensitivity,
+        set(&["dim"]),
+        "value sensitivity is untouched by the pruning rule: {attr_group:?}"
+    );
+}
+
+/// The declared-`referential_integrity` route is excluded from the pruning
+/// rule (`model_properties.md` §"Semantics"): `derive_column_groups` has no
+/// access to a source's declared `referential_integrity` world-fact at all
+/// (only `maintenance::derive`'s `SourceReferentialIntegrity` map, consulted
+/// separately for the `UpstreamMutation` cell's own closure verdict, ever
+/// sees it) — so a bare inner `JOIN` that a declared `referential_integrity`
+/// world-fact would close at the full-plan level must still attach
+/// membership sensitivity here: this module can only ever prune via the
+/// join-shape (LEFT JOIN) route.
+#[test]
+fn declared_ri_inner_join_does_not_prune() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, f.amount, d.attr AS attr \
+               FROM smelt.sources.fact f \
+               JOIN smelt.sources.dim d ON f.id = d.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "an inner JOIN's closure cannot be proven via join shape alone — \
+         membership sensitivity must stay attached even though a declared \
+         referential_integrity world-fact (invisible to this module) could \
+         close it at the full-plan level: {:?}",
+        result.groups
+    );
+}
+
+/// An `Open` closure — here, a `WHERE` conjunct testing the enrichment-side
+/// column (conjunct 5, no-membership-predicate, fails) — never prunes:
+/// membership stays attached exactly as it did before Phase 4.
+#[test]
+fn open_closure_does_not_prune_membership_predicate() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, f.amount, d.attr AS attr \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.id = d.id \
+               WHERE d.attr = 'gold'";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "a WHERE predicate on the enrichment-side column breaks the closure \
+         (conjunct 5) — membership sensitivity must stay attached: {:?}",
+        result.groups
+    );
+}
+
+/// An `Open` closure via the one-to-one conjunct (3): `dim`'s declared
+/// `unique_key` (`id`) does not cover the join's equality column
+/// (`category`), so fan-out cannot prove `OneToOne` — the join may be
+/// `OneToMany`, and membership sensitivity must stay attached.
+#[test]
+fn open_closure_fan_out_does_not_prune_membership() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, f.amount, d.attr AS attr \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.id = d.category";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "an unproven one-to-one join contribution (fan-out/cardinality) \
+         must not prune membership sensitivity: {:?}",
+        result.groups
+    );
+}
+
+/// The v1 scope restriction (`skeleton_closure`'s own aggregation
+/// restriction, folded into conjunct evaluation): a top-level scope with a
+/// `GROUP BY` above the enrichment join is `Open` regardless of the other
+/// four conjuncts, even though the join itself is a `LEFT JOIN` against a
+/// one-to-one, no-membership-predicate `dim` — an aggregating scope changes
+/// the skeleton question (which rows survive the fold, not which rows
+/// survive the join), so membership sensitivity must stay attached.
+#[test]
+fn aggregating_scope_does_not_prune_membership() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT d.category, COUNT(*) AS n \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.dim_id = d.id \
+               GROUP BY d.category";
+    let skeleton = set(&["category"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "an aggregating top-level scope (GROUP BY) must not prune \
+         membership sensitivity through the v1 scope restriction, even \
+         though the enrichment join is otherwise a closeable LEFT JOIN: \
+         {:?}",
+        result.groups
+    );
+}
