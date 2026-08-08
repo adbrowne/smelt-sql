@@ -40,8 +40,9 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
 use smelt_logical::backbuild::{
-    assemble, definition_diff, derive_backbuild_options, BackbuildInputs, Selection, SourceRef,
-    Technique,
+    assemble, definition_diff, derive_backbuild_options, BackbuildInputs, ComparableDiff,
+    ConjunctDiff, DefinitionDiff, SelectListDiff, Selection, SetOpDiff, SkeletonCause,
+    SkeletonDiff, SourceRef, Technique,
 };
 
 /// Default deterministic case count — small enough to keep the gate on par
@@ -604,6 +605,197 @@ fn stale_upstream_documents_precondition_generatively() {
     );
 }
 
+/// Substrate-unification Phase 5 (`docs/plans/20260808-substrate-unification.md`):
+/// the left-join enrichment admission (`classify.rs`'s
+/// `admit_added_left_join`, now delegating its at-most-one-match proof to
+/// `analysis::join_shape::fan_out` + `analysis::functional_dependency::
+/// functional_dependency_verdict`) and that same shared FD verdict function,
+/// called independently over the equivalent `Cardinality`, agree on one
+/// join shape — for both an exact key match (admitted) and a key mismatch
+/// (refused). One verdict, two consumers, proven to coincide rather than
+/// asserted by inspection.
+#[test]
+fn fd_verdict_shared() {
+    use smelt_logical::analysis::functional_dependency::functional_dependency_verdict;
+    use smelt_logical::analysis::join_shape::{fan_out, JoinContext};
+
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id";
+    let after_file = parse(after_sql);
+    let after_stmt = after_file.select_stmt().expect("select");
+    let join = after_stmt
+        .from_clause()
+        .expect("from clause")
+        .joins()
+        .next()
+        .expect("one join");
+
+    for (unique_key, expect_admitted) in [(vec!["order_id"], true), (vec!["customer_id"], false)] {
+        let diff = definition_diff(&parse(before_sql), &after_file);
+        assert!(!diff.is_noop());
+
+        let mut sources = std::collections::BTreeMap::new();
+        sources.insert(
+            "d".to_string(),
+            SourceRef {
+                physical_name: "dims".to_string(),
+                unique_key: Some(unique_key.iter().map(|s| s.to_string()).collect()),
+                not_null_columns: unique_key.iter().map(|s| s.to_string()).collect(),
+            },
+        );
+        let backbuild_inputs = BackbuildInputs {
+            table: "t".to_string(),
+            after_sql: after_sql.to_string(),
+            row_identity: None,
+            not_null_columns: std::collections::BTreeSet::new(),
+            added_column_types: [("dim_name".to_string(), "TEXT".to_string())]
+                .into_iter()
+                .collect(),
+            sources,
+        };
+        let options = derive_backbuild_options(&diff, &backbuild_inputs);
+        let atom = &options.atoms[0];
+        let admission_admits = atom.options.iter().any(|o| {
+            matches!(
+                o.technique,
+                Technique::JoinEnrichmentUpdateFrom | Technique::JoinEnrichmentScalarSubquery
+            )
+        });
+        assert_eq!(
+            admission_admits, expect_admitted,
+            "unique_key {unique_key:?}: admission verdict {atom:?}"
+        );
+
+        // The independent verdict, computed the same way
+        // `admit_added_left_join` now does: declared `unique_key` feeds a
+        // `JoinContext`, `fan_out` proves the join's cardinality against it,
+        // and `functional_dependency_verdict` turns that into a
+        // constant/not-constant verdict.
+        let mut ctx = JoinContext::new();
+        for k in &unique_key {
+            ctx = ctx.with_unique_key("d", k);
+        }
+        let cardinality = fan_out(&join, &ctx);
+        let fd_verdict = functional_dependency_verdict(Some(cardinality), false);
+        assert_eq!(
+            fd_verdict.is_constant(),
+            expect_admitted,
+            "unique_key {unique_key:?}: FD verdict {fd_verdict:?} disagrees with the admission \
+             outcome"
+        );
+    }
+}
+
+/// Phase 5 reviewer finding 1: a *composite* declared `unique_key` must be
+/// registered with `join_shape::JoinContext` as one composite key-set
+/// (`with_composite_unique_key`), never one `with_unique_key` call per
+/// column — the latter registers each column as an *independently*
+/// sufficient single-column key, so a join keyed on only *part* of a
+/// 2-column composite key would be falsely proven `OneToOne` (at-most-one-
+/// match unsound). `dims` declares a composite `unique_key`
+/// `["region_id", "dept_id"]`; equating only `region_id` in the ON clause
+/// must refuse, equating both must admit.
+#[test]
+fn fd_verdict_shared_composite_key() {
+    let before_sql = "SELECT o.region_id AS region_id, o.dept_id AS dept_id FROM orders o";
+
+    let partial_after_sql = "SELECT o.region_id AS region_id, o.dept_id AS dept_id, d.name AS \
+                              dim_name FROM orders o LEFT JOIN dims d ON o.region_id = \
+                              d.region_id";
+    let full_after_sql = "SELECT o.region_id AS region_id, o.dept_id AS dept_id, d.name AS \
+                           dim_name FROM orders o LEFT JOIN dims d ON o.region_id = d.region_id \
+                           AND o.dept_id = d.dept_id";
+
+    for (after_sql, expect_admitted) in [(partial_after_sql, false), (full_after_sql, true)] {
+        let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+        assert!(!diff.is_noop());
+
+        let mut sources = std::collections::BTreeMap::new();
+        sources.insert(
+            "d".to_string(),
+            SourceRef {
+                physical_name: "dims".to_string(),
+                unique_key: Some(vec!["region_id".to_string(), "dept_id".to_string()]),
+                not_null_columns: ["region_id", "dept_id"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            },
+        );
+        let backbuild_inputs = BackbuildInputs {
+            table: "t".to_string(),
+            after_sql: after_sql.to_string(),
+            row_identity: None,
+            not_null_columns: std::collections::BTreeSet::new(),
+            added_column_types: [("dim_name".to_string(), "TEXT".to_string())]
+                .into_iter()
+                .collect(),
+            sources,
+        };
+        let options = derive_backbuild_options(&diff, &backbuild_inputs);
+        let atom = &options.atoms[0];
+        let admission_admits = atom.options.iter().any(|o| {
+            matches!(
+                o.technique,
+                Technique::JoinEnrichmentUpdateFrom | Technique::JoinEnrichmentScalarSubquery
+            )
+        });
+        assert_eq!(
+            admission_admits, expect_admitted,
+            "ON clause equating only part of a composite unique_key must never be proven \
+             at-most-one-match: after_sql={after_sql:?}, atom={atom:?}"
+        );
+    }
+}
+
+/// Substrate-unification Phase 5 (`docs/plans/20260808-substrate-unification.md`):
+/// the G1-vs-G2 catalogue label is driven by `diff.rs`'s own structured
+/// `SkeletonCause`, not by `classify.rs` lowercased-`.contains`-scanning the
+/// free-English `reason` string. Hand-construct a `DefinitionDiff` whose
+/// skeleton change is structurally a grain change (`cause:
+/// SkeletonCause::GrainChanged`) but whose `reason` prose happens to mention
+/// "join" (a plausible real message: a `GROUP BY` over a column literally
+/// named `join_key`) — the pre-Phase-5 string scan would misclassify this as
+/// G2 (join-multiplicity change) because it checked `.contains("join")`
+/// after failing to find the *fixed* substring `"group by"` in a
+/// hand-written reason that omits it; the structured classifier is immune
+/// to the reason text's own wording by construction.
+#[test]
+fn skeleton_reason_structured() {
+    let diff = DefinitionDiff::Comparable(Box::new(ComparableDiff {
+        select_list: SelectListDiff::Diffed {
+            added: Vec::new(),
+            dropped: Vec::new(),
+            changed: Vec::new(),
+            unchanged: Vec::new(),
+            before_order: Vec::new(),
+            after_order: Vec::new(),
+        },
+        where_clause: ConjunctDiff::Diffed {
+            added: Vec::new(),
+            removed: Vec::new(),
+            unchanged: Vec::new(),
+        },
+        skeleton: SkeletonDiff::Changed {
+            reason: "the grouping over join_key changed".to_string(),
+            cause: SkeletonCause::GrainChanged,
+        },
+        set_ops: SetOpDiff::NotApplicable,
+    }));
+
+    let options = derive_backbuild_options(&diff, &inputs("t", "SELECT 1"));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.inadmissible.len(), 1, "{:?}", atom.inadmissible);
+    assert!(
+        atom.inadmissible[0].reason.starts_with("G1"),
+        "expected the structural GrainChanged cause to win a G1 label regardless of 'join' \
+         appearing in the reason prose, got: {:?}",
+        atom.inadmissible[0].reason
+    );
+}
+
 fn inputs(table: &str, after_sql: &str) -> BackbuildInputs {
     BackbuildInputs {
         table: table.to_string(),
@@ -679,5 +871,193 @@ fn function_call_never_discriminates() {
         atom.options.is_empty(),
         "a CURRENT_DATE branch tag is not a constant literal and must never be admitted as a \
          discriminator: {atom:?}"
+    );
+}
+
+/// Substrate-unification Phase 5 (`docs/plans/20260808-substrate-unification.md`):
+/// B1 must admit an added column that is derivable from a stored column
+/// *through a CTE rename* — not just from a stored column referenced by the
+/// exact same qualifier/raw-name text the outer SELECT list itself uses.
+/// The CTE renames `order_id` to `id`; the outer SELECT then re-renames `id`
+/// to `order_identifier`, so the representative's own (bare) raw name `id`
+/// and its stored output name `order_identifier` differ. A bare dependency
+/// on `id` (inside the added `doubled` column) is only provably the same
+/// stored data once both the representative and the dependency are chased
+/// to their shared base-relation leaf (`orders.order_id`) — the flat
+/// `(qualifier, raw_name)` triple match `resolve_representative` used before
+/// this phase cannot see that, because it requires a *bare* dependency's raw
+/// name to equal the representative's own output name, which only ever
+/// holds when the outer SELECT does not itself re-rename. The WITH prefix is
+/// byte-identical on both sides (`diff.rs` refuses to chase a *changed* CTE
+/// section outright) — only the outer SELECT list changes.
+#[test]
+fn provenance_chases_renames() {
+    let with_prefix = "WITH cte AS (SELECT order_id AS id, amount FROM orders)";
+    let before_sql = format!("{with_prefix} SELECT id AS order_identifier, amount FROM cte");
+    let after_sql =
+        format!("{with_prefix} SELECT id AS order_identifier, amount, id * 2 AS doubled FROM cte");
+
+    let diff = definition_diff(&parse(&before_sql), &parse(&after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", &after_sql);
+    backbuild_inputs
+        .added_column_types
+        .insert("doubled".to_string(), "INTEGER".to_string());
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        matches!(
+            &atom.change,
+            smelt_logical::backbuild::AtomicChange::AddedColumn { name } if name == "doubled"
+        ),
+        "expected an AddedColumn atom for 'doubled', got {:?}",
+        atom.change
+    );
+    let b1 = atom
+        .options
+        .iter()
+        .find(|o| o.technique == Technique::SelfDerivedColumnAdd)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected B1 to admit 'doubled' via the CTE-rename-chased representative for \
+                 'id': {atom:?}"
+            )
+        });
+    assert_eq!(
+        b1.statements,
+        vec![
+            "ALTER TABLE t ADD COLUMN doubled INTEGER",
+            "UPDATE t SET doubled = order_identifier * 2",
+        ],
+        "{:?}",
+        b1.statements
+    );
+}
+
+/// Phase 5 reviewer finding 2: the lineage fallback must refuse rather than
+/// falsely unify two different join legs of a *self-join*. `orders` is
+/// joined to itself as `o1`/`o2`; the stored representative `id1` comes
+/// from `o1.id`, and the added column `id2` reads `o2.id` — a *different*
+/// row's column, even though both chase to the identical
+/// `LeafColumn{relation: "orders", column: "id"}` (same base table, same
+/// column name). Matching them as "the same stored data" purely off that
+/// shared leaf would be the exact C2 self-read hazard the flat
+/// qualifier-match rule was written to prevent — B1 must refuse `id2`
+/// (no representative resolves it), not admit a self-read `UPDATE` that
+/// silently substitutes `o1`'s stored value for `o2`'s.
+#[test]
+fn self_join_leaves_are_not_unified() {
+    let before_sql =
+        "SELECT o1.id AS id1, o2.amount AS amt2 FROM orders o1 JOIN orders o2 ON o1.id = o2.id";
+    let after_sql = "SELECT o1.id AS id1, o2.amount AS amt2, o2.id AS id2 FROM orders o1 JOIN \
+                      orders o2 ON o1.id = o2.id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", after_sql);
+    backbuild_inputs
+        .added_column_types
+        .insert("id2".to_string(), "INTEGER".to_string());
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "a self-join must never let 'id2' (o2.id) be admitted via a representative sourced \
+         from a *different* join leg (o1.id) just because they share a base-relation leaf: \
+         {atom:?}"
+    );
+}
+
+/// Phase 5 reviewer round 2, finding: the self-join guard must fire when
+/// the self-join is *hidden inside a CTE body* the outer scope only sees as
+/// one `Cte` alias — a scope-local "count Table aliases in the current
+/// scope's own FROM tree" check never sees this, because the outer scope's
+/// own `aliases` map has exactly one entry (`cte`), not two. `cte`'s own
+/// body self-joins `orders` as `o1`/`o2`; the outer scope only ever
+/// references `cte`'s already-projected columns. `added2` reads `cte`'s
+/// `hidden_id2` (itself `o2.id`) while the representative for `id1` is
+/// `cte`'s `id1` (`o1.id`) — the identical hazard as
+/// `self_join_leaves_are_not_unified`, one CTE hop removed. Ambiguity must
+/// be a property of `cte`'s own lineage entries (set when `cte`'s body is
+/// walked) and survive being read back out through the outer scope's
+/// `Cte` resolution, not something a scope-local recount could ever catch.
+#[test]
+fn self_join_ambiguity_survives_a_cte_hop() {
+    let with_prefix = "WITH cte AS (SELECT o1.id AS id1, o2.amount AS amt2, o2.id AS hidden_id2 \
+                        FROM orders o1 JOIN orders o2 ON o1.id = o2.parent_id)";
+    let before_sql = format!("{with_prefix} SELECT id1, amt2 FROM cte");
+    let after_sql = format!("{with_prefix} SELECT id1, amt2, hidden_id2 AS added2 FROM cte");
+
+    let diff = definition_diff(&parse(&before_sql), &parse(&after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", &after_sql);
+    backbuild_inputs
+        .added_column_types
+        .insert("added2".to_string(), "INTEGER".to_string());
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "a self-join hidden inside a CTE body must still refuse 'added2' (cte.hidden_id2, \
+         itself o2.id) rather than admit it via a representative sourced from cte.id1 \
+         (o1.id) — a self-read UPDATE that would substitute o1's value for o2's: {atom:?}"
+    );
+}
+
+/// Phase 5 reviewer round 2, guard-of-the-guard: an *unrelated* CTE that
+/// itself self-joins `orders` must never poison a *different*, clean CTE's
+/// own lineage — ambiguity is scoped per lineage entry (built once, per
+/// CTE body's own FROM tree), not global to the model. `dirty` self-joins
+/// `orders` and is declared alongside `clean` (which references `orders`
+/// only once) but the outer scope only ever reads from `clean` — `doubled`
+/// must still be admitted via the ordinary CTE-rename-chased representative
+/// path (`provenance_chases_renames`'s shape), proving `dirty`'s own
+/// ambiguity never leaks into `clean`'s lineage entries.
+#[test]
+fn self_join_ambiguity_does_not_poison_an_unrelated_cte() {
+    let with_prefix = "WITH clean AS (SELECT o.amount AS amt FROM orders o), dirty AS (SELECT \
+                        x1.id AS xid1, x2.id AS xid2 FROM orders x1 JOIN orders x2 ON x1.id = \
+                        x2.parent_id)";
+    let before_sql = format!("{with_prefix} SELECT amt AS amount FROM clean");
+    let after_sql = format!("{with_prefix} SELECT amt AS amount, amt * 2 AS doubled FROM clean");
+
+    let diff = definition_diff(&parse(&before_sql), &parse(&after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", &after_sql);
+    backbuild_inputs
+        .added_column_types
+        .insert("doubled".to_string(), "INTEGER".to_string());
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    let b1 = atom
+        .options
+        .iter()
+        .find(|o| o.technique == Technique::SelfDerivedColumnAdd)
+        .unwrap_or_else(|| {
+            panic!(
+                "an unrelated self-joined CTE ('dirty') must not stop B1 admitting 'doubled' \
+                 via 'clean's own (unambiguous) rename-chased representative: {atom:?}"
+            )
+        });
+    assert_eq!(
+        b1.statements,
+        vec![
+            "ALTER TABLE t ADD COLUMN doubled INTEGER",
+            "UPDATE t SET doubled = amount * 2",
+        ],
+        "{:?}",
+        b1.statements
     );
 }

@@ -64,7 +64,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | 2     | done     | 6827ea9e | 2026-08-08 |
 | 3     | done     | 9073e141 | 2026-08-08 |
 | 4     | done     | 34529973 | 2026-08-08 |
-| 5     | pending  |        |      |
+| 5     | done     | pending-review | 2026-08-08 |
 | 6     | pending  |        |      |
 
 ---
@@ -256,6 +256,48 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
   `Vec<Expr>`-returning splitters (`backbuild::diff`'s `split_conjuncts`,
   `backbuild::classify`'s `split_top_level_and`, which were byte-identical and are now one
   function).
+- **Phase 5 — `analysis::skeleton_closure` had no applicable consumption site for `try_b1`/
+  `try_d1`.** It was listed among Phase 5's allowed-touch files (visibility/adapter factoring)
+  because the Goal line's shorthand ("`try_b1`/`try_d1` 'derivable from stored data' →
+  skeleton-closure verdicts") suggested a possible delegation target, but `SkeletonSourceClosure`
+  answers a different question — whether an *enrichment join's* output rows are entirely
+  accounted for by the driving side (five conjuncts: skeleton-role extraction, per-column
+  provenance, one-to-one join contribution, row preservation, no membership predicate) — not
+  "is this dependency derivable from a stored column," which is `try_b1`/`try_d1`'s actual
+  question and is what `resolve_representative`'s new `ColumnLineage` adapter answers. The one
+  join-admission proof Phase 5 *does* touch (`admit_added_left_join`'s B4 at-most-one-match
+  check) already delegates to the correct shared primitive for its own question
+  (`analysis::join_shape::fan_out` + `analysis::functional_dependency::functional_dependency_verdict`,
+  per the Implementation Shape paragraph and `fd_verdict_shared`) — `skeleton_closure` is not
+  that primitive either (it composes fan-out with four *other* conjuncts B4 doesn't need, since
+  B4 already proves "nothing else references the alias" and NOT-NULL-key addressability its own,
+  narrower way). No code change was needed in `skeleton_closure.rs`; it remains untouched.
+- **Phase 5 — `ModelDiff` (`analysis::model_diff`) should *not* become a view over
+  `DefinitionDiff`.** Reviewer verdict, per the Phase 5 review checklist's "record verdict in
+  Deferred if not": the two types answer genuinely different questions at different granularity,
+  the same conclusion Phase 4 already reached for the equality *primitive* underneath them
+  ("this phase unifies only the equality primitive... representation-level convergence is
+  re-examined in Phase 5's review" — this is that re-examination). `ModelDiff` is a coarse
+  whole-model boolean ("is this edit a pure column addition licensing an in-place backfill,
+  given a set of monotone dimensions") consumed by maintenance-plan derivation over a flat
+  `Vec<ColumnDef>` (name + expression pairs) the caller has already extracted from *both*
+  versions uniformly — it does not distinguish WHERE-clause, skeleton, or set-operation changes
+  at all, and refuses (`NotAdditive`) the instant any existing column's expression differs.
+  `DefinitionDiff` is deliberately clause-factored (`SelectListDiff`/`ConjunctDiff`/
+  `SkeletonDiff`/`SetOpDiff`) for backbuild's much finer atom-level catalogue (added/renamed/
+  dropped/changed columns, per-conjunct WHERE deltas, per-branch set-operation deltas), fails
+  closed to `Opaque` per clause rather than for the whole diff, and carries a CTE posture
+  (refuse outright on any WITH-prefix change) that `ModelDiff`'s callers have no occasion to
+  need — `ModelDiff` operates on a plain `Vec<ColumnDef>` a caller already sliced out of
+  whichever definition, CTE or not. Rebasing `ModelDiff` onto `DefinitionDiff` would force
+  maintenance-plan derivation's simple pure-addition proof to pay for (and inherit the fail-
+  closed posture of) machinery it does not need — clause factoring, branch pairing, CTE-prefix
+  opacity — for a question `DefinitionDiff` does not directly expose (`ModelDiff` needs
+  "did column X's expression change", not "how did the WHERE/skeleton/set-ops change"). The two
+  representations stay independent; Phase 4 already collapsed the one genuine duplication
+  between them (the trivia-equality primitive, `analysis::expr_util::same_modulo_trivia`), and
+  Phase 5 additionally collapsed `classify.rs`'s own second copy
+  (`expr_equal_modulo_trivia`) onto the same primitive.
 
 ## Verification
 

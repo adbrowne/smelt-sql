@@ -48,15 +48,20 @@ pub fn requalify(
     expr: &Expr,
     representative_sources: &[RepresentativeSource],
 ) -> Result<String, String> {
-    collect_and_splice(expr, &|col| {
-        resolve_representative(col.qualifier(), col.name(), representative_sources)
-            .map(|r| r.output_name.clone())
-            .ok_or_else(|| {
-                format!(
-                    "column '{}' has no stored representative to requalify against",
-                    col.name()
-                )
-            })
+    collect_and_splice(expr, &|col, node| {
+        resolve_representative(
+            col.qualifier(),
+            col.name(),
+            representative_sources,
+            Some(node),
+        )
+        .map(|r| r.output_name.clone())
+        .ok_or_else(|| {
+            format!(
+                "column '{}' has no stored representative to requalify against",
+                col.name()
+            )
+        })
     })
 }
 
@@ -80,7 +85,7 @@ pub fn requalify_upstream(
     source_alias: &str,
     upstream_alias: &str,
 ) -> Result<String, String> {
-    collect_and_splice(expr, &|col| match col.qualifier() {
+    collect_and_splice(expr, &|col, _node| match col.qualifier() {
         Some(q) if q == source_alias => Ok(format!("{upstream_alias}.{}", col.name())),
         _ => Err(format!(
             "column '{}' is not qualified with the upstream alias '{source_alias}' the \
@@ -115,7 +120,7 @@ pub fn requalify_scalar_subquery(
     source_alias: &str,
     substitute: &impl Fn(&str) -> String,
 ) -> Result<String, String> {
-    collect_and_splice(expr, &|col| match col.qualifier() {
+    collect_and_splice(expr, &|col, _node| match col.qualifier() {
         Some(q) if q == source_alias => Ok(substitute(col.name())),
         _ => Err(format!(
             "column '{}' is not qualified with the dimension alias '{source_alias}' the join \
@@ -127,7 +132,7 @@ pub fn requalify_scalar_subquery(
 
 fn collect_and_splice(
     expr: &Expr,
-    resolve: &impl Fn(&ColumnRef) -> Result<String, String>,
+    resolve: &impl Fn(&ColumnRef, &SyntaxNode) -> Result<String, String>,
 ) -> Result<String, String> {
     let mut spans: Vec<(TextRange, String)> = Vec::new();
     collect_replacements(expr, resolve, &mut spans)?;
@@ -144,11 +149,11 @@ fn collect_and_splice(
 /// resolution differs, the traversal is identical.
 fn collect_replacements(
     expr: &Expr,
-    resolve: &impl Fn(&ColumnRef) -> Result<String, String>,
+    resolve: &impl Fn(&ColumnRef, &SyntaxNode) -> Result<String, String>,
     out: &mut Vec<(TextRange, String)>,
 ) -> Result<(), String> {
     if let Some(col) = expr.as_column_ref() {
-        let replacement = resolve(&col)?;
+        let replacement = resolve(&col, expr.syntax())?;
         out.push((trimmed_range(expr.syntax()), replacement));
         return Ok(());
     }
@@ -297,6 +302,7 @@ mod tests {
                 output_name: n.to_string(),
                 qualifier: Some("o".to_string()),
                 raw_name: n.to_string(),
+                leaf: None,
             })
             .collect()
     }

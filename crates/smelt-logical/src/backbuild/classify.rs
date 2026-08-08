@@ -33,10 +33,10 @@ use crate::analysis::model_diff;
 use crate::analysis::walk;
 
 use super::{
-    resolve_representative, AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption,
-    BackbuildOptions, BackbuildRefusal, ChangedColumn, ComparableDiff, ConjunctDiff,
-    DefinitionDiff, HSlot, RepresentativeSource, SelectColumn, SelectListDiff, SetOpDiff,
-    SkeletonDiff, Technique, WriteScope,
+    chase_leaf, resolve_representative, AtomAnalysis, AtomicChange, BackbuildInputs,
+    BackbuildOption, BackbuildOptions, BackbuildRefusal, ChangedColumn, ComparableDiff,
+    ConjunctDiff, DefinitionDiff, HSlot, RepresentativeSource, SelectColumn, SelectListDiff,
+    SetOpDiff, SkeletonCause, SkeletonDiff, Technique, WriteScope,
 };
 
 use super::emit;
@@ -69,7 +69,9 @@ pub fn derive_backbuild_options(
                 vec![refusal]
             } else {
                 match &comparable.skeleton {
-                    SkeletonDiff::Changed { reason } => vec![skeleton_refusal(reason)],
+                    SkeletonDiff::Changed { reason, cause } => {
+                        vec![skeleton_refusal(reason, *cause)]
+                    }
                     SkeletonDiff::Unchanged => classify_comparable(comparable, inputs),
                     // B4 (a single added LEFT JOIN feeding only added
                     // columns, research §4 B4) for exactly one added join;
@@ -225,7 +227,7 @@ fn whole_definition_refusal(reason: &str) -> AtomAnalysis {
     }
 }
 
-fn skeleton_refusal(reason: &str) -> AtomAnalysis {
+fn skeleton_refusal(reason: &str, cause: SkeletonCause) -> AtomAnalysis {
     AtomAnalysis {
         change: AtomicChange::Skeleton {
             reason: reason.to_string(),
@@ -233,26 +235,28 @@ fn skeleton_refusal(reason: &str) -> AtomAnalysis {
         options: Vec::new(),
         inadmissible: vec![BackbuildRefusal {
             atom: "skeleton".to_string(),
-            reason: classify_skeleton_reason(reason),
+            reason: skeleton_cause_label(reason, cause),
         }],
     }
 }
 
 /// Label a `SkeletonDiff::Changed` reason with its research §4 catalogue
-/// case where the diff module's reason text identifies one: G1 (grain
-/// change — `GROUP BY`/`DISTINCT`) or G2 (join-multiplicity change). Any
-/// other skeleton change (FROM target, `HAVING`/`QUALIFY`/`WINDOW`/`ORDER
-/// BY`/`LIMIT`) is still refused, just without a G1/G2 label — the
-/// catalogue's G-class explicitly refuses those too ("Opaque expressions
-/// ... LIMIT/ORDER BY changes: refuse with named reasons").
-fn classify_skeleton_reason(reason: &str) -> String {
-    let lower = reason.to_lowercase();
-    if lower.contains("group by") || lower.contains("distinct") {
-        format!("G1 (grain change) — {reason}")
-    } else if lower.contains("join") {
-        format!("G2 (join-multiplicity change) — {reason}")
-    } else {
-        format!("skeleton changed, not yet admissible — {reason}")
+/// case, read directly off `diff.rs`'s own structural [`SkeletonCause`]
+/// classification (substrate-unification Phase 5) — G1 (grain change) or G2
+/// (join-multiplicity change) — rather than re-deriving the same
+/// classification by lowercased-`.contains` scanning `reason`'s free English
+/// text, which could misfire on a `reason` string that happens to *mention*
+/// the other class's vocabulary without describing it (e.g. a grain change
+/// over a column literally named `join_key`). Any other skeleton change
+/// (FROM target, `HAVING`/`QUALIFY`/`WINDOW`/`ORDER BY`/`LIMIT`) is still
+/// refused, just without a G1/G2 label — the catalogue's G-class explicitly
+/// refuses those too ("Opaque expressions ... LIMIT/ORDER BY changes:
+/// refuse with named reasons").
+fn skeleton_cause_label(reason: &str, cause: SkeletonCause) -> String {
+    match cause {
+        SkeletonCause::GrainChanged => format!("G1 (grain change) — {reason}"),
+        SkeletonCause::JoinShapeChanged => format!("G2 (join-multiplicity change) — {reason}"),
+        SkeletonCause::Other => format!("skeleton changed, not yet admissible — {reason}"),
     }
 }
 
@@ -2030,10 +2034,14 @@ fn representative_sources(unchanged: &[SelectColumn]) -> Vec<RepresentativeSourc
         .iter()
         .filter_map(|c| {
             let col_ref = c.expr.as_column_ref()?;
+            let qualifier = col_ref.qualifier().map(|q| q.to_string());
+            let raw_name = col_ref.name().to_string();
+            let leaf = chase_leaf(c.expr.syntax(), qualifier.as_deref(), &raw_name);
             Some(RepresentativeSource {
                 output_name: c.name.clone(),
-                qualifier: col_ref.qualifier().map(|q| q.to_string()),
-                raw_name: col_ref.name().to_string(),
+                qualifier,
+                raw_name,
+                leaf,
             })
         })
         .collect()
@@ -2204,7 +2212,15 @@ fn try_b1(
 
     let mut missing: Vec<String> = deps
         .iter()
-        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .filter(|(q, n)| {
+            resolve_representative(
+                q.as_deref(),
+                n,
+                representative_sources,
+                Some(col.expr.syntax()),
+            )
+            .is_none()
+        })
         .map(|(q, n)| format_dependency(q, n))
         .collect();
     missing.sort();
@@ -2591,14 +2607,19 @@ fn resolve_group_key(
     let qualifier = col_ref.qualifier().map(|q| q.to_string());
     let raw_name = col_ref.name().to_string();
 
-    let rep = resolve_representative(qualifier.as_deref(), &raw_name, representative_sources)
-        .ok_or_else(|| {
-            format!(
-                "GROUP BY key '{}' has no 1:1 stored bare pull-through (unchanged between both \
+    let rep = resolve_representative(
+        qualifier.as_deref(),
+        &raw_name,
+        representative_sources,
+        Some(key_expr.syntax()),
+    )
+    .ok_or_else(|| {
+        format!(
+            "GROUP BY key '{}' has no 1:1 stored bare pull-through (unchanged between both \
                  definitions) in the model's own output — no addressable identity",
-                format_dependency(&qualifier, &raw_name)
-            )
-        })?;
+            format_dependency(&qualifier, &raw_name)
+        )
+    })?;
 
     if !inputs.not_null_columns.contains(rep.output_name.as_str()) {
         return Err(format!(
@@ -2850,13 +2871,18 @@ fn collect_window_replacements(
     out: &mut Vec<(TextRange, String)>,
 ) -> Result<(), String> {
     if let Some(col) = expr.as_column_ref() {
-        let rep = resolve_representative(col.qualifier(), col.name(), representative_sources)
-            .ok_or_else(|| {
-                format!(
-                    "column '{}' has no stored representative to requalify against",
-                    col.name()
-                )
-            })?;
+        let rep = resolve_representative(
+            col.qualifier(),
+            col.name(),
+            representative_sources,
+            Some(expr.syntax()),
+        )
+        .ok_or_else(|| {
+            format!(
+                "column '{}' has no stored representative to requalify against",
+                col.name()
+            )
+        })?;
         out.push((window_trimmed_range(expr.syntax()), rep.output_name.clone()));
         return Ok(());
     }
@@ -3005,7 +3031,15 @@ fn try_b6(
     })?;
     let mut missing: Vec<String> = deps
         .iter()
-        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .filter(|(q, n)| {
+            resolve_representative(
+                q.as_deref(),
+                n,
+                representative_sources,
+                Some(col.expr.syntax()),
+            )
+            .is_none()
+        })
         .map(|(q, n)| format_dependency(q, n))
         .collect();
     missing.sort();
@@ -3278,32 +3312,33 @@ fn admit_added_left_join(
         key_pairs_raw.push((fact_qualifier, fact_col, dim_col));
     }
 
-    // Declared `unique_key` only — no `analysis::functional_dependency` route, unlike the
-    // brief's implementation shape sketch. Checked both entry points' actual signatures
-    // before deciding this (`docs/plans/20260802-backbuild-synthesis.md` §"Deferred during
-    // implementation", 2026-08-02 entry, corrected 2026-08-02): they are not equally
-    // inapplicable.
-    //   - `functional_dependency_verdict_over_vector` genuinely needs a `PropertyVector`
-    //     derived by parsing and walking *the model's own SQL*
-    //     (`analysis::walk::model_property_vector`) — inapplicable, since the dimension
-    //     here is an *external* source declared only via `BackbuildInputs::SourceRef`, with
-    //     no SQL of its own anywhere in this standalone, unwired module to walk.
-    //   - `functional_dependency_verdict(determines_fan_out: Option<Cardinality>, declared:
-    //     bool)` IS callable today: its `Cardinality` comes from
-    //     `analysis::join_shape::fan_out(join, ctx)`, which only needs `join` — already
-    //     held right here — and a `JoinContext.unique_keys` populated purely from
-    //     hand-declared facts, structurally the same data as `source.unique_key` below. It
-    //     is not used because it would be pure indirection: with no declared key, `fan_out`
-    //     returns `OneToMany` and the verdict refuses unconditionally — exactly the manual
-    //     check below, just re-routed through a differently-shaped input
-    //     (`JoinContext`'s `HashMap<String, Vec<HashSet<String>>>`) for no added admission
-    //     power. (`fan_out` proves `OneToOne` off a *superset* match on the ON's equality
-    //     columns, while the "bare key equality" leg above already forbids any ON conjunct
-    //     beyond the key — so by this point `dim_cols` is already exactly the ON's key
-    //     columns, and the two checks would coincide in practice.)
-    // Revisit `functional_dependency_verdict_over_vector` specifically once wiring supplies
-    // the dimension's own definition (e.g. it is itself a smelt model with a derivable
-    // grain/FD verdict).
+    // substrate-unification Phase 5: the at-most-one-match proof is F6's own
+    // fan-out/cardinality proof (`analysis::join_shape::fan_out` +
+    // `analysis::functional_dependency::functional_dependency_verdict`), not
+    // a parallel `dim_cols != unique_key_set` re-implementation — the
+    // declared `unique_key` below is a plain-data fact fed into that shared
+    // verdict, the same posture `BackbuildInputs::sources[...].unique_key`
+    // already has elsewhere (a schema fact `smelt-logical` has no catalog
+    // access to derive itself). Consulting the SQL-walked
+    // `functional_dependency_verdict_over_vector` route instead is not
+    // available here: the dimension is an *external* source declared only
+    // via `SourceRef`, with no SQL of its own in this module to walk.
+    //
+    // The whole declared `unique_key` must be registered as *one* composite
+    // key-set (`with_composite_unique_key`, the same pattern
+    // `maintenance/derive.rs`'s `join_context_for_edges`/
+    // `join_context_for_sources` already use) — never one
+    // `with_unique_key` call per column, which would register each column
+    // as an *independently* sufficient single-column key and let `fan_out`
+    // prove `OneToOne` off a join keyed on only *part* of a composite key
+    // (`fd_verdict_shared_composite_key` is the killing test for this).
+    // Once registered as one composite key-set, `fan_out`'s superset match
+    // on the ON's equality columns against that key-set is equivalent to
+    // the original `dim_cols != unique_key_set` exact-set check under the
+    // bare-key-equality restriction above (which already forbids any ON
+    // conjunct beyond the key, so by this point `dim_cols` is exactly the
+    // ON's key columns) — see `fd_verdict_shared` for the equivalence this
+    // delegation is proven not to change.
     let unique_key = source
         .unique_key
         .as_ref()
@@ -3314,12 +3349,19 @@ fn admit_added_left_join(
                  proof needs an addressable identity"
             )
         })?;
-    let unique_key_set: BTreeSet<String> = unique_key.iter().cloned().collect();
-    if dim_cols != unique_key_set {
+    let unique_key_refs: Vec<&str> = unique_key.iter().map(String::as_str).collect();
+    let join_ctx = crate::analysis::join_shape::JoinContext::new()
+        .with_composite_unique_key(&alias, &unique_key_refs);
+    let cardinality = crate::analysis::join_shape::fan_out(join, &join_ctx);
+    if !crate::analysis::functional_dependency::functional_dependency_verdict(
+        Some(cardinality),
+        false,
+    )
+    .is_constant()
+    {
         return Err(format!(
             "the added join's ON key columns ({dim_cols:?}) do not exactly match upstream \
-             '{alias}''s declared unique_key ({unique_key_set:?}) — at-most-one-match is not \
-             proven"
+             '{alias}''s declared unique_key ({unique_key:?}) — at-most-one-match is not proven"
         ));
     }
 
@@ -3439,7 +3481,10 @@ fn references_alias_or_unproven_bare_node(
                 {
                     false
                 }
-                None => resolve_representative(None, col.name(), representative_sources).is_none(),
+                None => {
+                    resolve_representative(None, col.name(), representative_sources, Some(node))
+                        .is_none()
+                }
             };
         }
     }
@@ -3898,6 +3943,12 @@ fn classify_b7_diff(
                         output_name: col.name.clone(),
                         qualifier: Some(alias.clone()),
                         raw_name: bare.name().to_string(),
+                        // No SELECT scope of its own to chase a leaf
+                        // through — synthesized from a B4/B7-added column
+                        // reading the newly-added join's alias, not from an
+                        // `unchanged` item in either definition's own
+                        // parsed CST.
+                        leaf: None,
                     });
                 }
             }
@@ -4079,7 +4130,15 @@ fn d1_failure_licenses_d2_attempt(
     };
     let mut missing: Vec<(Option<String>, String)> = deps
         .into_iter()
-        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .filter(|(q, n)| {
+            resolve_representative(
+                q.as_deref(),
+                n,
+                representative_sources,
+                Some(changed.after.syntax()),
+            )
+            .is_none()
+        })
         .collect();
     missing.sort();
     match missing.first() {
@@ -4137,7 +4196,15 @@ fn try_d1(
 
     let mut missing: Vec<(Option<String>, String)> = deps
         .into_iter()
-        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .filter(|(q, n)| {
+            resolve_representative(
+                q.as_deref(),
+                n,
+                representative_sources,
+                Some(changed.after.syntax()),
+            )
+            .is_none()
+        })
         .collect();
     missing.sort();
     if let Some((qualifier, name)) = missing.first() {
@@ -4245,7 +4312,12 @@ fn pair_renames(
     for cluster in cluster_by_expr(dropped) {
         let candidates: Vec<&SelectColumn> = added
             .iter()
-            .filter(|a| expr_equal_modulo_trivia(&a.expr, &cluster[0].expr))
+            .filter(|a| {
+                crate::analysis::expr_util::same_modulo_trivia(
+                    a.expr.syntax(),
+                    cluster[0].expr.syntax(),
+                )
+            })
             .collect();
 
         if cluster.len() == 1 {
@@ -4293,12 +4365,15 @@ fn pair_renames(
 }
 
 /// Group `dropped` into expression-equivalence clusters (pairwise
-/// `expr_equal_modulo_trivia`).
+/// `analysis::expr_util::same_modulo_trivia`).
 fn cluster_by_expr(dropped: &[SelectColumn]) -> Vec<Vec<&SelectColumn>> {
     let mut clusters: Vec<Vec<&SelectColumn>> = Vec::new();
     'outer: for d in dropped {
         for cluster in clusters.iter_mut() {
-            if expr_equal_modulo_trivia(&cluster[0].expr, &d.expr) {
+            if crate::analysis::expr_util::same_modulo_trivia(
+                cluster[0].expr.syntax(),
+                d.expr.syntax(),
+            ) {
                 cluster.push(d);
                 continue 'outer;
             }
@@ -4381,33 +4456,6 @@ fn classify_rename_loser(
                 reason,
             }],
         },
-    }
-}
-
-/// Trivia-insensitive structural equality of two expressions. Duplicates
-/// `diff.rs`'s private `same_modulo_trivia` (over `Expr` rather than
-/// `SyntaxNode`) rather than exposing it: `diff.rs` is out of this phase's
-/// touch-scope, and this is a small, self-contained comparator, not the
-/// dependency walk the "don't fork" rule is about.
-fn expr_equal_modulo_trivia(a: &Expr, b: &Expr) -> bool {
-    let mut ta = a
-        .syntax()
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()));
-    let mut tb = b
-        .syntax()
-        .descendants_with_tokens()
-        .filter_map(|e| e.into_token())
-        .filter(|t| !t.kind().is_trivia())
-        .map(|t| (t.kind(), t.text().to_string()));
-    loop {
-        match (ta.next(), tb.next()) {
-            (None, None) => return true,
-            (Some(x), Some(y)) if x == y => continue,
-            _ => return false,
-        }
     }
 }
 

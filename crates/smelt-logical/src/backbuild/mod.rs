@@ -19,7 +19,10 @@ pub use diff::definition_diff;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{Expr, JoinClause, SelectStmt};
+
+use crate::analysis::walk::{self, LeafColumn};
 
 /// The CST-level factoring of a (before, after) pair of model definitions.
 ///
@@ -189,10 +192,38 @@ pub enum SkeletonDiff {
     /// Any other skeleton difference: the FROM target changed, GROUP BY /
     /// DISTINCT changed, HAVING/QUALIFY/WINDOW/ORDER BY/LIMIT changed, an
     /// existing join's condition or type changed, a join was removed, or an
-    /// added join is not a `LEFT JOIN`.
+    /// added join is not a `LEFT JOIN`. `cause` is `diff.rs`'s own
+    /// structural classification of which comparison produced this —
+    /// substrate-unification Phase 5's replacement for `classify.rs`
+    /// deriving the same classification by lowercased-`.contains` scanning
+    /// `reason`'s English prose after the fact.
     Changed {
         reason: String,
+        cause: SkeletonCause,
     },
+}
+
+/// `diff.rs`'s own structural classification of a [`SkeletonDiff::Changed`]
+/// difference — set at the exact comparison that produced it, so
+/// `classify.rs`'s research §4 G1/G2 catalogue labelling reads this
+/// directly instead of re-deriving it by scanning `reason`'s free English
+/// text for substrings like `"group by"` or `"join"` (substrate-unification
+/// Phase 5: that scan could misfire on a `reason` string that happens to
+/// *mention* the other class's vocabulary — e.g. a grain change over a
+/// column literally named `join_key` — without describing it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkeletonCause {
+    /// Research §4 G1: `GROUP BY` keys added/removed/changed, or `DISTINCT`
+    /// toggled.
+    GrainChanged,
+    /// Research §4 G2: an existing join's condition or type changed, a join
+    /// was removed or reordered incompatibly, or an added join is not a
+    /// `LEFT JOIN`.
+    JoinShapeChanged,
+    /// Any other skeleton difference this module refuses without a G1/G2
+    /// label: the FROM target changed, or a post-processing clause
+    /// (`HAVING`/`QUALIFY`/`WINDOW`/`ORDER BY`/`LIMIT`) changed.
+    Other,
 }
 
 impl SkeletonDiff {
@@ -302,6 +333,16 @@ pub struct RepresentativeSource {
     pub output_name: String,
     pub qualifier: Option<String>,
     pub raw_name: String,
+    /// This representative's own base-relation leaf, chased through CTE /
+    /// derived-table renames from the definition that produced it
+    /// (`analysis::walk::resolve_reference_leaf`, substrate-unification
+    /// Phase 5) — `None` when no anchor syntax tree was available to chase
+    /// from (e.g. a B7 representative synthesized for a newly-added join
+    /// alias, which has no defining SELECT scope of its own to walk) or the
+    /// walk could not resolve it. [`resolve_representative`]'s lineage
+    /// fallback matches against this when the flat qualifier/raw-name
+    /// comparison misses.
+    pub leaf: Option<LeafColumn>,
 }
 
 /// Resolve one column-reference dependency — `(qualifier, raw_name)`, read
@@ -327,19 +368,62 @@ pub struct RepresentativeSource {
 /// also happened to be named `region` (`o.rc AS region`) — emitting a
 /// self-read `UPDATE` that read the wrong stored column instead of refusing
 /// (or routing to an upstream-read technique).
+///
+/// substrate-unification Phase 5 widening: when the flat comparison above
+/// finds nothing, `dependency_node` — the syntax node the `(qualifier,
+/// raw_name)` pair was itself read off, when the caller has one at hand —
+/// licenses a lineage fallback. The flat rule only ever matches a dependency
+/// written with the exact same qualifier and raw column name as the
+/// representative's own recorded text; it cannot see that two differently
+/// -named references (e.g. a bare reference to a CTE's already-renamed
+/// column, versus that same column re-renamed *again* at this scope's own
+/// SELECT list) name the very same stored data. The fallback chases both
+/// sides to their base-relation leaf (`analysis::walk`'s `ColumnLineage`,
+/// through CTE/derived-table projections — [`chase_leaf`]) and matches by
+/// leaf identity instead — sound because a shared leaf *proves* the same
+/// physical column, never a same-named-but-differently-sourced collision
+/// (the C2 hazard the flat rule above was written to avoid: this is an
+/// independent, structural proof of identity, not a relaxation of it).
 pub(crate) fn resolve_representative<'a>(
     qualifier: Option<&str>,
     raw_name: &str,
     representative_sources: &'a [RepresentativeSource],
+    dependency_node: Option<&SyntaxNode>,
 ) -> Option<&'a RepresentativeSource> {
-    match qualifier {
+    let flat = match qualifier {
         Some(q) => representative_sources
             .iter()
             .find(|r| r.qualifier.as_deref() == Some(q) && r.raw_name == raw_name),
         None => representative_sources
             .iter()
             .find(|r| r.raw_name == raw_name && r.output_name == raw_name),
+    };
+    if flat.is_some() {
+        return flat;
     }
+
+    let dep_leaf = chase_leaf(dependency_node?, qualifier, raw_name)?;
+    representative_sources
+        .iter()
+        .find(|r| r.leaf.as_ref() == Some(&dep_leaf))
+}
+
+/// Chase `(qualifier, raw_name)` — a column reference read straight off
+/// `node`'s own enclosing `SELECT` statement — to its base-relation leaf, via
+/// [`walk::QueryTree::from_select`] + [`walk::resolve_reference_leaf`]. Used
+/// both by [`resolve_representative`]'s lineage fallback and by
+/// `classify.rs`'s `representative_sources` (to record each representative's
+/// own leaf up front). `None` when `node` has no enclosing `SELECT`
+/// (unreachable for any node backbuild constructs from a parsed definition)
+/// or the walk cannot resolve the reference.
+pub(crate) fn chase_leaf(
+    node: &SyntaxNode,
+    qualifier: Option<&str>,
+    raw_name: &str,
+) -> Option<LeafColumn> {
+    let stmt = node.ancestors().find_map(SelectStmt::cast)?;
+    let tree = walk::QueryTree::from_select(&stmt);
+    walk::resolve_reference_leaf(&tree, qualifier, raw_name)
 }
 
 /// Physical facts about the deployed model and its inputs, supplied

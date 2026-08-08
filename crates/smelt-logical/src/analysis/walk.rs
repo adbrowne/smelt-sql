@@ -156,6 +156,24 @@ pub struct ColumnLineage {
     /// rename-chain of simple column references; `None` for computed
     /// expressions, wildcards, and unresolvable references.
     pub leaf: Option<LeafColumn>,
+    /// Whether this column's resolution passes through a self-join — a
+    /// scope whose FROM tree reaches the same base relation under more than
+    /// one alias, at this scope or *any* scope the reference was chased
+    /// through (a CTE body, a derived table) — substrate-unification Phase
+    /// 5 review finding 2. `orders o1 JOIN orders o2 ON …` makes `o1.id` and
+    /// `o2.id` chase to the identical [`LeafColumn`] even though they are
+    /// different rows on different join legs; `leaf` may still be populated
+    /// here (it is the best-effort chase result, kept for diagnostics) but
+    /// a consumer matching on stored-column *identity*
+    /// (`backbuild::resolve_representative`'s lineage fallback, via
+    /// [`resolve_reference_leaf`]) must never trust it when this is `true`.
+    /// This is a property of the lineage entry itself, decided once where
+    /// the entry is built ([`select_lineage`]) and propagated unchanged
+    /// through every further CTE/derived-table hop — never re-derived
+    /// per call site by counting aliases in whichever scope happens to be
+    /// current there (that was the bypassable, scope-local version of this
+    /// guard).
+    pub ambiguous: bool,
 }
 
 /// Per-node context handed to every transfer function.
@@ -542,20 +560,32 @@ fn walk_ctes<T: Transfer>(
     verdicts
 }
 
-fn walk_select<T: Transfer>(
-    sn: &SelectNode,
+/// Build one scope's FROM-tree alias table and derived-table lineages — the
+/// `InputItem` → `RelationSource` mapping [`walk_select`] and
+/// [`resolve_reference_leaf`] both need (substrate-unification Phase 5
+/// review: factored out so this mapping exists once rather than forked
+/// between a full property walk and the standalone lineage-only resolver).
+/// Each input's own transfer verdict (a leaf verdict, a cloned CTE-body
+/// verdict, a derived-table subtree's verdict, or an `Unsupported` verdict)
+/// is pushed onto `children` in source order, exactly as
+/// [`walk_select`] needs them interleaved after the CTE verdicts already
+/// there; [`resolve_reference_leaf`]'s `Discard` transfer populates
+/// `children` too but never reads it back.
+fn build_scope_aliases<T: Transfer>(
+    inputs: &[InputItem],
     transfer: &T,
     path: &[PathSeg],
     env: &WalkEnv<T::Verdict>,
-) -> (T::Verdict, Vec<ColumnLineage>) {
-    let mut env = env.clone();
-    let mut children = walk_ctes(&sn.ctes, transfer, path, &mut env);
-
+    children: &mut Vec<T::Verdict>,
+) -> (
+    BTreeMap<String, RelationSource>,
+    BTreeMap<String, Vec<ColumnLineage>>,
+) {
     let mut aliases = BTreeMap::new();
     // Derived-table lineages, keyed like `aliases`, for column resolution.
     let mut derived_lineage: BTreeMap<String, Vec<ColumnLineage>> = BTreeMap::new();
 
-    for input in &sn.inputs {
+    for input in inputs {
         match input {
             InputItem::Table { name, alias } => {
                 let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
@@ -597,7 +627,7 @@ fn walk_select<T: Transfer>(
                 let alias_text = alias.clone().unwrap_or_default();
                 let mut child_path = path.to_vec();
                 child_path.push(PathSeg::DerivedTable(alias_text.clone()));
-                let (verdict, lineage) = walk_node(body, transfer, &child_path, &env);
+                let (verdict, lineage) = walk_node(body, transfer, &child_path, env);
                 if let Some(alias) = alias {
                     let key = alias.to_ascii_lowercase();
                     aliases.insert(key.clone(), RelationSource::DerivedTable(alias.clone()));
@@ -615,6 +645,21 @@ fn walk_select<T: Transfer>(
             }
         }
     }
+
+    (aliases, derived_lineage)
+}
+
+fn walk_select<T: Transfer>(
+    sn: &SelectNode,
+    transfer: &T,
+    path: &[PathSeg],
+    env: &WalkEnv<T::Verdict>,
+) -> (T::Verdict, Vec<ColumnLineage>) {
+    let mut env = env.clone();
+    let mut children = walk_ctes(&sn.ctes, transfer, path, &mut env);
+
+    let (aliases, derived_lineage) =
+        build_scope_aliases(&sn.inputs, transfer, path, &env, &mut children);
 
     let columns = select_lineage(&sn.select, &aliases, &env, &derived_lineage);
     let cx = NodeCx {
@@ -657,10 +702,36 @@ fn walk_setop<T: Transfer>(
     (verdict, cx.columns)
 }
 
+/// Whether `source` is a base-relation reference (`RelationSource::Table`)
+/// whose own table is reachable through more than one alias in `aliases` —
+/// a self-join at this scope (substrate-unification Phase 5 review finding
+/// 2). `false` for a `Cte`/`DerivedTable` source: their own ambiguity, if
+/// any, is already carried on the resolved [`ColumnLineage::ambiguous`]
+/// flag from whichever inner scope built it — this only ever decides the
+/// *local*, direct-Table leg of the ambiguity, at the exact point a lineage
+/// entry is built ([`select_lineage`]) or a standalone reference is resolved
+/// ([`resolve_reference_leaf`]) — the two call sites that ever need it, so
+/// the duplicate-alias count is computed in exactly one place.
+fn table_is_self_joined(
+    source: &RelationSource,
+    aliases: &BTreeMap<String, RelationSource>,
+) -> bool {
+    let RelationSource::Table(name) = source else {
+        return false;
+    };
+    aliases
+        .values()
+        .filter(|r| matches!(r, RelationSource::Table(n) if n == name))
+        .count()
+        > 1
+}
+
 /// Projected-column lineage of one SELECT scope: each output column, and —
 /// when its expression is a simple (possibly qualified) column reference —
 /// the base-relation column it resolves to, chased through CTE and
-/// derived-table projections.
+/// derived-table projections. Each entry's [`ColumnLineage::ambiguous`] flag
+/// is decided right here, the lineage's single build site, and never
+/// recomputed downstream.
 fn select_lineage<V: Clone>(
     select: &SelectStmt,
     aliases: &BTreeMap<String, RelationSource>,
@@ -676,6 +747,7 @@ fn select_lineage<V: Clone>(
             columns.push(ColumnLineage {
                 output: "*".to_string(),
                 leaf: None,
+                ambiguous: false,
             });
             continue;
         }
@@ -685,48 +757,140 @@ fn select_lineage<V: Clone>(
         let output = item
             .column_name()
             .unwrap_or_else(|| expr.text().trim().to_string());
-        let leaf = ColumnRef::from_expr(&expr).and_then(|col_ref| {
+        let resolved = ColumnRef::from_expr(&expr).and_then(|col_ref| {
             let source = match col_ref.qualifier() {
                 Some(q) => aliases.get(&q.to_ascii_lowercase()),
                 // Unqualified: unambiguous only with a single input.
                 None if aliases.len() == 1 => aliases.values().next().map(Some).unwrap_or(None),
                 None => None,
             }?;
-            resolve_leaf(source, col_ref.name(), env, derived_lineage)
+            let mut lineage = resolve_leaf(source, col_ref.name(), env, derived_lineage)?;
+            // Monotonic: only ever set `ambiguous` to `true` here, never
+            // clear it — a `Cte`/`DerivedTable` source may already have
+            // propagated `true` from a self-join several hops down.
+            if table_is_self_joined(source, aliases) {
+                lineage.ambiguous = true;
+            }
+            Some(lineage)
         });
-        columns.push(ColumnLineage { output, leaf });
+        let (leaf, ambiguous) = match resolved {
+            Some(lineage) => (lineage.leaf, lineage.ambiguous),
+            None => (None, false),
+        };
+        columns.push(ColumnLineage {
+            output,
+            leaf,
+            ambiguous,
+        });
     }
     columns
 }
 
+/// Resolve `column` against `source`, returning the matched lineage entry
+/// (leaf + its own `ambiguous` flag, propagated unchanged from whichever
+/// scope originally built it for a `Cte`/`DerivedTable` source — never
+/// recomputed here). Callers combine this with their own scope's
+/// [`table_is_self_joined`] check for the direct-`Table` leg.
 fn resolve_leaf<V: Clone>(
     source: &RelationSource,
     column: &str,
     env: &WalkEnv<V>,
     derived_lineage: &BTreeMap<String, Vec<ColumnLineage>>,
-) -> Option<LeafColumn> {
+) -> Option<ColumnLineage> {
     match source {
-        RelationSource::Table(table) => Some(LeafColumn {
-            relation: table.clone(),
-            column: column.to_string(),
+        RelationSource::Table(table) => Some(ColumnLineage {
+            output: column.to_string(),
+            leaf: Some(LeafColumn {
+                relation: table.clone(),
+                column: column.to_string(),
+            }),
+            ambiguous: false,
         }),
         RelationSource::Cte(name) => {
             let (_, lineage) = env.ctes.get(&name.to_ascii_lowercase())?;
             lineage
                 .iter()
-                .find(|c| c.output.eq_ignore_ascii_case(column))?
-                .leaf
-                .clone()
+                .find(|c| c.output.eq_ignore_ascii_case(column))
+                .cloned()
         }
         RelationSource::DerivedTable(alias) => {
             let lineage = derived_lineage.get(&alias.to_ascii_lowercase())?;
             lineage
                 .iter()
-                .find(|c| c.output.eq_ignore_ascii_case(column))?
-                .leaf
-                .clone()
+                .find(|c| c.output.eq_ignore_ascii_case(column))
+                .cloned()
         }
     }
+}
+
+/// Resolve a single column reference — `(qualifier, raw_name)`, read
+/// straight off some expression in `tree`'s own top-level scope — against
+/// that scope's own lineage, chasing CTE / derived-table renames to the
+/// reference's base-relation leaf. This generalizes [`select_lineage`]'s
+/// per-projected-column resolution to an arbitrary reference (e.g. a
+/// dependency inside an expression that is not itself a SELECT-list item —
+/// `backbuild::resolve_representative`'s consumer, substrate-unification
+/// Phase 5) — the same alias/CTE-lineage machinery [`walk_select`] builds,
+/// run with a [`Transfer`] whose verdict is discarded, since only the
+/// lineage side-channel is wanted here.
+///
+/// `None` when the top-level node is not a single `SELECT` scope (a set
+/// operation or an unrecognised construct — fail-closed, no lineage to
+/// chase), the qualifier does not resolve to a FROM-tree alias in this
+/// scope, an unqualified reference is ambiguous (more than one FROM input),
+/// the resolved source has no lineage entry for `raw_name` at all, or the
+/// resolved [`ColumnLineage::ambiguous`] flag is set — a self-join
+/// anywhere along the chase, at this scope or nested arbitrarily deep
+/// through CTE bodies (substrate-unification Phase 5 review finding 2: a
+/// self-join — `FROM orders o1 JOIN orders o2` — chases `o1.id` and `o2.id`
+/// to the identical `LeafColumn{relation: "orders", column: "id"}`, which
+/// would otherwise let a caller conflate two different join legs' columns
+/// as "the same stored data" purely because they share a base table name —
+/// the exact C2 self-read hazard `backbuild::resolve_representative`'s flat
+/// qualifier-match rule was written to prevent). The ambiguity check itself
+/// lives once, in [`select_lineage`]/[`table_is_self_joined`] — this
+/// function only ever *reads* the flag [`resolve_leaf`] returns, it never
+/// recomputes an alias count of its own (a prior version did, scoped to
+/// only the top-level call site, which a self-join hidden inside a
+/// referenced CTE body bypassed entirely).
+pub fn resolve_reference_leaf(
+    tree: &QueryTree,
+    qualifier: Option<&str>,
+    raw_name: &str,
+) -> Option<LeafColumn> {
+    let QueryNode::Select(sn) = &tree.root else {
+        return None;
+    };
+
+    struct Discard;
+    impl Transfer for Discard {
+        type Verdict = ();
+        fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) {}
+        fn operator(&self, _op: &OpNode<'_>, _children: &[()], _cx: &NodeCx) {}
+    }
+
+    let mut env = WalkEnv::<()>::default();
+    walk_ctes(&sn.ctes, &Discard, &[], &mut env);
+
+    let mut discarded_children = Vec::new();
+    let (aliases, derived_lineage) =
+        build_scope_aliases(&sn.inputs, &Discard, &[], &env, &mut discarded_children);
+
+    let source = match qualifier {
+        Some(q) => aliases.get(&q.to_ascii_lowercase())?,
+        None if aliases.len() == 1 => aliases.values().next()?,
+        None => return None,
+    };
+
+    let mut lineage = resolve_leaf(source, raw_name, &env, &derived_lineage)?;
+    if table_is_self_joined(source, &aliases) {
+        lineage.ambiguous = true;
+    }
+
+    if lineage.ambiguous {
+        return None;
+    }
+    lineage.leaf
 }
 
 // ===== Scope enumeration: the first Transfer =====

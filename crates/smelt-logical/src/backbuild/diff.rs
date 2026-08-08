@@ -10,7 +10,7 @@
 
 use super::{
     ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, EditedBranch, SelectColumn,
-    SelectListDiff, SetOpDiff, SkeletonDiff,
+    SelectListDiff, SetOpDiff, SkeletonCause, SkeletonDiff,
 };
 use crate::analysis::expr_util::same_modulo_trivia;
 use smelt_parser::{Expr, File, JoinClause, JoinType, SelectEntry, SelectList, SelectStmt};
@@ -304,6 +304,7 @@ fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
     if !base_equal {
         return SkeletonDiff::Changed {
             reason: "the FROM target changed".to_string(),
+            cause: SkeletonCause::Other,
         };
     }
 
@@ -315,17 +316,22 @@ fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
     if !group_by_equal {
         return SkeletonDiff::Changed {
             reason: "GROUP BY changed".to_string(),
+            cause: SkeletonCause::GrainChanged,
         };
     }
 
     if before.is_distinct() != after.is_distinct() {
         return SkeletonDiff::Changed {
             reason: "DISTINCT toggled".to_string(),
+            cause: SkeletonCause::GrainChanged,
         };
     }
 
     if let Some(reason) = post_processing_clause_changed(before, after) {
-        return SkeletonDiff::Changed { reason };
+        return SkeletonDiff::Changed {
+            reason,
+            cause: SkeletonCause::Other,
+        };
     }
 
     let before_joins: Vec<JoinClause> = before_from.iter().flat_map(|f| f.joins()).collect();
@@ -334,7 +340,10 @@ fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
     match diff_joins(&before_joins, &after_joins) {
         JoinDiffResult::Same => SkeletonDiff::Unchanged,
         JoinDiffResult::AddedLeft(added) => SkeletonDiff::AddedLeftJoins(added),
-        JoinDiffResult::Changed(reason) => SkeletonDiff::Changed { reason },
+        JoinDiffResult::Changed(reason) => SkeletonDiff::Changed {
+            reason,
+            cause: SkeletonCause::JoinShapeChanged,
+        },
     }
 }
 

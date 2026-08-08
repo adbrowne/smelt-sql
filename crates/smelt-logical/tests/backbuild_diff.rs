@@ -350,7 +350,7 @@ fn having_only_change_is_not_noop() {
     assert!(!diff.is_noop(), "a HAVING-only change must not be a no-op");
     let c = comparable(&diff);
     match &c.skeleton {
-        SkeletonDiff::Changed { reason } => {
+        SkeletonDiff::Changed { reason, .. } => {
             assert!(reason.contains("HAVING"), "unexpected reason: {reason}");
         }
         other => panic!("expected Changed skeleton diff for a HAVING edit, got {other:?}"),
@@ -368,7 +368,7 @@ fn qualify_only_change_is_not_noop() {
     assert!(!diff.is_noop(), "a QUALIFY-only change must not be a no-op");
     let c = comparable(&diff);
     match &c.skeleton {
-        SkeletonDiff::Changed { reason } => {
+        SkeletonDiff::Changed { reason, .. } => {
             assert!(reason.contains("QUALIFY"), "unexpected reason: {reason}");
         }
         other => panic!("expected Changed skeleton diff for a QUALIFY edit, got {other:?}"),
@@ -384,7 +384,7 @@ fn window_only_change_is_not_noop() {
     assert!(!diff.is_noop(), "a WINDOW-only change must not be a no-op");
     let c = comparable(&diff);
     match &c.skeleton {
-        SkeletonDiff::Changed { reason } => {
+        SkeletonDiff::Changed { reason, .. } => {
             assert!(reason.contains("WINDOW"), "unexpected reason: {reason}");
         }
         other => panic!("expected Changed skeleton diff for a WINDOW edit, got {other:?}"),
@@ -403,7 +403,7 @@ fn order_by_only_change_is_not_noop() {
     );
     let c = comparable(&diff);
     match &c.skeleton {
-        SkeletonDiff::Changed { reason } => {
+        SkeletonDiff::Changed { reason, .. } => {
             assert!(reason.contains("ORDER BY"), "unexpected reason: {reason}");
         }
         other => panic!("expected Changed skeleton diff for an ORDER BY edit, got {other:?}"),
@@ -419,7 +419,7 @@ fn limit_only_change_is_not_noop() {
     assert!(!diff.is_noop(), "a LIMIT-only change must not be a no-op");
     let c = comparable(&diff);
     match &c.skeleton {
-        SkeletonDiff::Changed { reason } => {
+        SkeletonDiff::Changed { reason, .. } => {
             assert!(reason.contains("LIMIT"), "unexpected reason: {reason}");
         }
         other => panic!("expected Changed skeleton diff for a LIMIT edit, got {other:?}"),

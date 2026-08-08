@@ -319,6 +319,53 @@ fn b1_arithmetic_over_stored_columns() {
     harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
 }
 
+/// Substrate-unification Phase 5's named accepting-direction migration
+/// (`docs/plans/20260808-substrate-unification.md`): B1 admits an added
+/// column derivable from a stored column *through a CTE rename* — mirrors
+/// `b1_arithmetic_over_stored_columns` above, except the dependency
+/// (`id`) and its representative's stored output name (`order_identifier`)
+/// differ, because the CTE already renamed `order_id` to `id` before the
+/// outer SELECT renames it again to `order_identifier`.
+#[test]
+fn b1_derivable_through_cte_rename() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, amount INTEGER);
+         INSERT INTO orders VALUES (1, 10), (2, 20), (3, -5);",
+    );
+
+    let with_prefix = "WITH cte AS (SELECT order_id AS id, amount FROM orders)";
+    let before_sql = format!("{with_prefix} SELECT id AS order_identifier, amount FROM cte");
+    let after_sql =
+        format!("{with_prefix} SELECT id AS order_identifier, amount, id * 2 AS doubled FROM cte");
+
+    let diff = definition_diff(&parse(&before_sql), &parse(&after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("doubled".to_string(), "INTEGER".to_string());
+    let inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.clone(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types,
+        sources: BTreeMap::new(),
+    };
+
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    let option = atom
+        .options
+        .iter()
+        .find(|o| o.technique == Technique::SelfDerivedColumnAdd)
+        .unwrap_or_else(|| panic!("expected B1 to admit the rename-chased column: {atom:?}"));
+
+    harness::verify_option(&conn, "t", &before_sql, &after_sql, option);
+}
+
 #[test]
 fn b2_rename_touches_no_rows() {
     let conn = Connection::open_in_memory().expect("duckdb");
