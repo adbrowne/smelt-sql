@@ -15,7 +15,7 @@ You are executing this plan from the start of a new session, phase by phase with
 1. Read this entire plan, then the two spec sections named above — they are the correctness oracle.
 2. Confirm branch `spec-redraft-incremental-models`.
 3. Execute the next `pending` phase: implementer subagent (red-green TDD on the listed tests) → reviewer subagent (material findings only, spec as oracle) → fix → commit with the phase's `Commit.` line → push → record in Progress tracking.
-4. Verification gate per phase: `bash .claude/scripts/verify-phase.sh` plus `cargo test -p smelt-cli --test maintenance_conformance` and `cargo test -p smelt-logical --test walk_coverage`.
+4. Verification gate per phase: `bash .claude/scripts/verify-phase.sh` plus `cargo test -p smelt-cli --test maintenance_conformance`, `cargo test -p smelt-cli --test e2e`, and `cargo test -p smelt-logical --test walk_coverage`. The e2e suite is mandatory — a locality regression once slipped through fast-mode gates.
 5. Pause for the user if: a reviewer repeats the same material finding twice; a test cannot go green without violating a spec rule; a pre-existing unrelated failure appears.
 6. Timeless-oracle rule: phase vocabulary only in this file; spec/docs edits describe behavior as always-existing; residues go to Known Divergences gap-first.
 

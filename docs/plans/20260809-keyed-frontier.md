@@ -14,7 +14,7 @@ Execute phase by phase with implementer + reviewer subagents; spec sections abov
 
 1. Read this plan, then the named spec sections. Confirm branch `spec-redraft-incremental-models`.
 2. Next `pending` phase → implementer (red-green) → reviewer (material findings, spec-anchored) → fix → commit with the phase's `Commit.` line → push → record.
-3. Per-phase gate: `bash .claude/scripts/verify-phase.sh` + `cargo test -p smelt-cli --test maintenance_conformance` + `cargo test -p smelt-runtime --test statement_parity`.
+3. Per-phase gate: `bash .claude/scripts/verify-phase.sh` + `cargo test -p smelt-cli --test maintenance_conformance` + `cargo test -p smelt-cli --test e2e` + `cargo test -p smelt-runtime --test statement_parity`.
 4. Pause for the user on: repeated material finding, spec conflict, pre-existing unrelated failure.
 5. Timeless-oracle rule applies to all spec/docs edits.
 
