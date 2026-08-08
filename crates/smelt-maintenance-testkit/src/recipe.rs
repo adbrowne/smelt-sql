@@ -750,6 +750,152 @@ impl MutableEnrichedRecipe {
     }
 }
 
+/// The closure-pruned column-scoped-`MERGE` recipe
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 5): the same
+/// `grain: partition` fact+dimension shape as [`MutableEnrichedRecipe`]
+/// (the `examples/timeseries/models/daily_events_enriched.sql` MP11
+/// column-scoped-`MERGE` mechanism) EXCEPT the fact/dimension join is a
+/// `LEFT JOIN` and the dimension declares its own `unique_key`. Those two
+/// facts are exactly the two conjuncts
+/// `crates/smelt-logical/src/analysis/skeleton_closure.rs`'s
+/// `skeleton_source_closure` needs to return `Closed` without any
+/// `referential_integrity` world-fact (which the closure-pruned membership
+/// pass never consults, `grouping.rs`'s own doc comment: conjunct 3
+/// one-to-one via the dimension's declared `unique_key`, conjunct 4
+/// row-preservation via the `LEFT JOIN` shape itself, unconditionally).
+/// Unlike [`MutableEnrichedRecipe`] (bare INNER `JOIN`, no declared
+/// dimension `unique_key`, membership-sensitive, `Technique::DeleteInsert`)
+/// and `KeyedEnrichedRecipe` in `gate.rs` (INNER JOIN, dimension read only
+/// in `ON`, never selected), this recipe SELECTS the dimension's own
+/// `attr` column directly through a closed `LEFT JOIN` — the one shape the
+/// closure proof can actually prune, so the `{attr}` column group's
+/// `UpstreamMutation(dim)` cell derives `Technique::ColumnScopedMerge`
+/// instead of falling back to the recompute family (mirrors
+/// `smelt-logical/tests/maintenance_tracer.rs::closed_outer_enrichment_join_upstream_mutation_derives_column_scoped_merge`'s
+/// hand-built `ModelInputs`, staged here through the real
+/// disk-backed/Salsa-backed derivation and the real `execute_project`
+/// pipeline).
+#[derive(Debug, Clone)]
+pub struct ValueEnrichedRecipe {
+    pub model_name: String,
+    pub fact: SourceRecipe,
+    pub dimension: SourceRecipe,
+}
+
+impl Default for ValueEnrichedRecipe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ValueEnrichedRecipe {
+    /// The pool's one fixed shape (mirrors [`MutableEnrichedRecipe::new`]'s
+    /// own doc comment: exactly one closure-pruned enrichment shape needs
+    /// to be reachable, not a generated construct family).
+    pub fn new() -> Self {
+        Self {
+            model_name: "recipe_value_enriched".to_string(),
+            fact: SourceRecipe::events(KeyShape::Single),
+            dimension: SourceRecipe::mutable_dimension("value_enrich_dim"),
+        }
+    }
+
+    /// The declared `batched.unique_key`: the fact's own row key — still
+    /// uniquely identifies each output row since the join is 1:1
+    /// ([`SourceRecipe::mutable_dimension`]'s doc comment).
+    pub fn unique_key(&self) -> Vec<String> {
+        vec![self.fact.key_column.clone()]
+    }
+
+    /// The model's `SELECT` body: the fact source passed through, enriched
+    /// by the dimension's `attr` column via a `LEFT JOIN` on the fact's own
+    /// row key — the dimension's `attr` is a SELECTED payload column, not
+    /// merely read in the join's `ON` predicate (unlike `KeyedEnrichedRecipe`
+    /// in `gate.rs`, whose whole point is the opposite shape). Otherwise
+    /// identical to [`MutableEnrichedRecipe::model_body`] with `JOIN`
+    /// swapped for `LEFT JOIN`.
+    pub fn model_body(&self) -> String {
+        let fact_src = format!("smelt.sources.{}", self.fact.name);
+        let dim_src = format!("smelt.sources.{}", self.dimension.name);
+        let d = &self.fact.clock_column;
+        let id = &self.fact.key_column;
+        let val = &self.fact.payload_column;
+        let dim_id = &self.dimension.key_column;
+        let attr = &self.dimension.payload_column;
+        format!(
+            "SELECT f.{d} AS {d}, f.{id} AS {id}, f.{val} AS {val}, dim.{attr} AS {attr} \
+             FROM {fact_src} f LEFT JOIN {dim_src} dim ON f.{id} = dim.{dim_id}"
+        )
+    }
+
+    /// The full model file: `timeseries:` + `refresh: incremental` +
+    /// `grain: partition` frontmatter (mirroring
+    /// [`MutableEnrichedRecipe::model_file`]) plus the dimension declared
+    /// `allow_full_scan` (its `ColumnScopedMerge` cell's admission
+    /// precondition). The column-scoped `MERGE`'s own `ON`-predicate key
+    /// (`decide_column_merge_dispatch`'s `model_declares_unique_key`
+    /// precondition, `smelt_core::PartitionGrainConfig::unique_key`) is NOT
+    /// declarable in SQL frontmatter — the `batched:` sub-block there was
+    /// retired in favour of the top-level `unique_key:` identity fact, which
+    /// instead flips the DERIVED grain to `Key`/`KeyPerPartition`
+    /// (`smelt_core::config::derive_grain`), conflicting with this recipe's
+    /// asserted `grain: partition`. The only remaining surface for a
+    /// partition-grain `PartitionGrainConfig.unique_key` is smelt.yml's
+    /// `models.<name>.batched.unique_key` (`ModelConfig::batched`,
+    /// `Config::get_incremental_with_metadata`'s smelt.yml-only fallback
+    /// arm) — the staging harness (`gate.rs::stage_value_enriched_recipe`)
+    /// writes that block into the generated `smelt.yml` rather than here.
+    pub fn model_file(&self) -> String {
+        let d = &self.fact.clock_column;
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            dim_name = self.dimension.name,
+            body = self.model_body(),
+        )
+    }
+
+    /// The fact source YAML sidecar — the same append-only `events(d, id,
+    /// val)` shape [`MutableEnrichedRecipe::fact_source_yaml`] renders.
+    pub fn fact_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance closure-pruned-enrichment fact source.\n\
+             mutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  \
+             partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: \
+             DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.fact.clock_column,
+            id = self.fact.key_column,
+            val = self.fact.payload_column,
+        )
+    }
+
+    /// The dimension source YAML sidecar: unclocked,
+    /// `mutation_profile: mutable_snapshot`, WITH a declared `unique_key:`
+    /// (`sources.md` §"Row identity") — unlike
+    /// [`MutableEnrichedRecipe::dimension_source_yaml`], this is the one
+    /// fact the closure proof's one-to-one conjunct actually needs to prune
+    /// the LEFT JOIN's own `ON` read.
+    pub fn dimension_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance closure-pruned-enrichment mutable dimension.\nmutation_profile: mutable_snapshot\nunique_key: [{id}]\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {attr}\n    type: INTEGER\n",
+            id = self.dimension.key_column,
+            attr = self.dimension.payload_column,
+        )
+    }
+
+    /// The oracle query for this recipe: [`Self::model_body`] with the fact
+    /// source reference swapped for `fact_table_ref` (a full-refresh oracle
+    /// or an `STracker`-materialized `S_k` temp table) and the dimension's
+    /// reference swapped for its CURRENT physical table.
+    pub fn oracle_body_over(&self, fact_table_ref: &str) -> String {
+        self.model_body()
+            .replace(&format!("smelt.sources.{}", self.fact.name), fact_table_ref)
+            .replace(
+                &format!("smelt.sources.{}", self.dimension.name),
+                &format!("main.sources_{}", self.dimension.name),
+            )
+    }
+}
+
 /// A source's declared `batched.unique_key`/source-YAML rendering, factored
 /// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
 /// keyed output declares no `timeseries:`/`unique_key`, `incremental_models.md`

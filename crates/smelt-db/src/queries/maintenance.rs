@@ -75,11 +75,26 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
         // assume append-only.
         _ => PlanMutationProfile::MutableSnapshot,
     };
+    // The source's own declared `unique_key:` (`sources.md` §"Row
+    // identity"). This is what `derive_column_groups`'
+    // `top_level_join_context` (`smelt-logical/src/maintenance/grouping.rs`)
+    // needs to prove a `JOIN ... ON`'s equality conjunct is 1:1 against this
+    // source — without it every join against this source fails closed to
+    // `Open` (never pruned), so an otherwise-closeable LEFT JOIN enrichment
+    // stays membership-sensitive forever, regardless of what the source YAML
+    // declares. Previously hardcoded to `vec![]` — this left
+    // `Technique::ColumnScopedMerge` structurally unreachable from any real
+    // source declaration (`docs/plans/20260809-sensitivity-precision.md`
+    // Phase 5).
+    let unique_key = info
+        .and_then(|s| s.unique_key.as_ref())
+        .cloned()
+        .unwrap_or_default();
     SourceFacts {
         name: name.to_string(),
         mutation,
         partition_col,
-        unique_key: vec![],
+        unique_key,
         allow_full_scan,
     }
 }
