@@ -60,8 +60,8 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 |-------|----------|--------|------|
 | 1     | done     | 3d83305f | 2026-08-08 |
 | 2     | done     | 1c208806 | 2026-08-08 |
-| 3     | done     | pending-review | 2026-08-08 |
-| 4     | pending  |        |      |
+| 3     | done     | 8e3c0877 + b5f42fef | 2026-08-08 |
+| 4     | done     | (this commit) | 2026-08-08 |
 
 ---
 

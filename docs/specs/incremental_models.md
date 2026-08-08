@@ -2088,15 +2088,15 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   parse but are not consumed (every refusal is an Error); the cost model between two admissible
   techniques is unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Membership sensitivity is not yet derived; the keyed-enriched dimension cell is admitted
-  by a collector misparse.** The column-group derivation still uses a reader that misreads an
-  aggregate's function-name token as an ambiguous column once two-plus FROM sources are
-  joined; the resulting fail-closed whole-model collapse is what admits the dimension's
-  mutation cell, and the column-scoped merge it assigns is a suppressed no-op by construction —
-  it could not repair a genuine membership change (§"The plan matrix", sensitivity kinds).
-  Fixing the reader alone would leave the dimension's mutations silently unmaintained (no
-  cell, no refusal), so the reader fix and the membership-sensitivity derivation land
-  together. Tracked: `docs/plans/20260808-membership-sensitivity.md`.
+- **`ColumnScopedMerge` is currently unreachable from any shipped SQL shape.** Membership
+  sensitivity (§"The plan matrix", sensitivity kinds) routes every mutable join partner to the
+  recompute family, and no shipped fixture derives a pure value-sensitive mutation cell — the
+  column-scoped merge emitter and its dispatch remain covered by synthetic statement-parity
+  legs only. A model whose mutable source is read solely in select-item position (never in row
+  admission) would reach it; none ships today. The change-suppressed recompute's departed-key
+  `DELETE` also uses plain key equality, so a NULL-keyed row is rewritten every run —
+  end-state equivalence holds, but write suppression silently does not apply to such rows.
+  Tracked: `docs/TODO.md`.
 - **Emission remainders.** `emit_in_place_update` has no production consumer; the additive
   fold's MERGE-inside-ledger-transaction interior is not observable at the statement-group
   seam, so its parity leg uses an idempotent fixture; `Backend::delete_partitions` /

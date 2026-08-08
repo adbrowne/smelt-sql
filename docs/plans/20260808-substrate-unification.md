@@ -249,6 +249,10 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
   behaviour-preservation contract. `grouping` therefore calls the deliberately-kept
   `expr_util::collect_column_refs_ungated`. Tracked as a follow-up in `docs/TODO.md`
   ("`maintenance::grouping`'s column-ref collector keeps a known under-collection bug").
+  *Resolution (2026-08-08): landed by `docs/plans/20260808-membership-sensitivity.md` — gated
+  collector adopted, `collect_column_refs_ungated` deleted, and the admission change made sound
+  via first-class membership-sensitivity derivation with oracle-verified dimension-mutation
+  conformance.*
 - **Phase 2 — `analysis::walk`'s `collect_self_conjunct_ranges` stays a distinct function**, now
   implemented as a thin consumer of `expr_util::split_top_level_conjuncts` rather than folded into
   its signature: its own output is text ranges for region carving (blanking excluded ranges out of
