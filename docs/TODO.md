@@ -1,6 +1,34 @@
 # TODO
 
-## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells (2026-08-08, corrected same day)
+## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells — RESOLVED (2026-08-09)
+
+Resolved by `docs/plans/20260809-sensitivity-precision.md` (Phases 2–5): membership sensitivity is
+now walk-composed across every scope (Phase 3) and pruned by the skeleton-source closure proof
+over a provably outer join (Phase 4) — a `LEFT JOIN` enrichment against a dimension that declares
+its own `unique_key` derives `Closed` and stops contributing membership sensitivity through its
+own `ON`-equality read, leaving only value sensitivity for the columns it actually feeds.
+`ValueEnrichedRecipe` (`crates/smelt-maintenance-testkit/src/recipe.rs`) stages exactly that shape
+and `crates/smelt-cli/tests/maintenance_conformance/gate.rs::value_enriched_recipe_executes_column_scoped_merge`
+proves it end to end: the derived cell carries `Technique::ColumnScopedMerge`, the executed
+statement is the column-scoped MERGE family (statement-parity seam), and end state matches the
+full-refresh oracle across dimension value mutation, dimension row deletion, and re-run schedules
+— including through `smelt bakeoff`'s measured/`--pin` code path, which item #1 below found had
+zero reachable coverage while `ColumnScopedMerge` was unreachable.
+
+One coverage gap this closure did **not** resolve survives, already tracked under "Mutation-campaign
+residue" below: the `choice.rs:235` liveness arm (`backend_supports_column_scoped_merge=false` on a
+`ColumnScopedMerge`-admitted cell) still has no test driving it, so the backend-capability fallback
+itself remains unpinned even though the technique's normal admission path is now proven.
+
+The bare inner-join fixture `examples/timeseries/models/daily_events_enriched.sql` (this item's
+original repro) is unaffected by the fix — it derives `Technique::DeleteInsert` for its
+`{user_name}` cell today, same as before, because its join is an inner `JOIN` with no dimension
+`unique_key` proving closure; that fixture was never the shape the fix targets. Its own doc
+comment (predating this resolution) still claims a live column-scoped `MERGE` for that cell — a
+pre-existing inaccuracy in the fixture's comments, not touched by this docs-only pass since
+`examples/` is out of scope for a docs sweep; worth a follow-up correction.
+
+### Original entry (2026-08-08, corrected same day)
 
 `docs/plans/20260808-membership-sensitivity.md` Phase 3 surfaced (confirmed empirically while
 rewriting `crates/smelt-cli/tests/{bakeoff,bakeoff_seam,maintenance_pins,explain_model,
@@ -424,3 +452,9 @@ planner surface:
   is never executed by `smelt-runtime` (only `smelt explain` and tests read
   it). The new gate proves the rewrite correct when it does fire; decide
   whether to wire it into execution or retire it.
+- [ ] **docs-site RI claim overstates delta restriction** — the incremental-models
+  guide says declaring a source's `referential_integrity` "narrows the
+  enrichment MERGE's recompute", but `resolve_recompute_restriction` is
+  model-edge-only; source-level enrichment joins get no delta restriction.
+  Fix the guide or wire the source-level route (flagged 2026-08-09 during the
+  sensitivity-precision docs sweep).
