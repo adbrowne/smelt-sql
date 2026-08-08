@@ -215,7 +215,7 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -315,7 +315,7 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -416,7 +416,7 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -527,7 +527,7 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // Introduction: catch up the added column per partition with the derived

@@ -91,7 +91,7 @@ fn admits_enrich_only_covered_mutable_source() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let triggers = vec![
@@ -172,7 +172,7 @@ fn both_fold_and_enrich_stays_refused() {
                 ("bonus".to_string(), SqlFunction::Sum),
             ],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let triggers = vec![
@@ -238,7 +238,7 @@ fn uncovered_mutable_source_stays_refused() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // No `Trigger::UpstreamMutation` for dim: it is not in the covered set.

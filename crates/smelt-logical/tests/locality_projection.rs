@@ -155,7 +155,7 @@ fn cross_axis_source_without_predicate_is_not_local() {
         }],
         column_groups: vec![],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -235,7 +235,7 @@ fn verdicts_are_per_cell_per_source() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];

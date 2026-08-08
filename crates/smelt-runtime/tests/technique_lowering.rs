@@ -1322,7 +1322,7 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
         sources: sources.clone(),
         column_groups: grouping.groups.clone(),
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let plan = smelt_logical::maintenance::derive::derive_maintenance_plan(
@@ -3001,7 +3001,7 @@ mod external_source_point_lookup_recompute {
             sources,
             column_groups: grouping.groups,
             fold: None,
-            column_add_proof: None,
+            old_columns: Vec::new(),
         };
 
         let mut source_ri = BTreeMap::new();
@@ -3070,7 +3070,7 @@ mod external_source_point_lookup_recompute {
             sources,
             column_groups: grouping.groups,
             fold: None,
-            column_add_proof: None,
+            old_columns: Vec::new(),
         };
         let trigger = Trigger::UpstreamMutation {
             source: "raw.users".to_string(),

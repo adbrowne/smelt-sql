@@ -139,7 +139,7 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 
@@ -166,7 +166,7 @@ fn rollup_inputs() -> ModelInputs<'static> {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 
@@ -507,7 +507,7 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 

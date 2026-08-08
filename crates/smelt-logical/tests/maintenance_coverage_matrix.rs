@@ -118,7 +118,7 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // Both triggering sources land on the SAME merged group with the SAME
@@ -193,7 +193,7 @@ fn ex14_change_feed_sum_recompute_only() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -306,7 +306,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         fold: Some(FoldSpec {
             add_columns: vec![("status".to_string(), SqlFunction::Max)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -370,7 +370,7 @@ fn ex27_row_number_dedup_refuses_today() {
         // No windowed-merge/locality-pruned dedup fold exists — nothing
         // honest to supply.
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let plan = derive_maintenance_plan(
@@ -430,7 +430,7 @@ fn ex35_correlated_first_value_recompute_only() {
         fold: Some(FoldSpec {
             add_columns: vec![("first_seen".to_string(), SqlFunction::ArgMax)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(

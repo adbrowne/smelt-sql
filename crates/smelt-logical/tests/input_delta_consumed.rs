@@ -84,7 +84,7 @@ fn inputs_with(source: SourceFacts) -> (ModelInputs<'static>, Trigger) {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),

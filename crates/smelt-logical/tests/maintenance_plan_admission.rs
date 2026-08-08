@@ -52,7 +52,7 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -179,7 +179,7 @@ fn multi_column_inputs(
                 .map(|(c, combiner)| (c.to_string(), combiner))
                 .collect(),
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),

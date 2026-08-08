@@ -124,7 +124,7 @@ fn described_technique_matches_execution_partition_recompute() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -198,7 +198,7 @@ fn described_technique_matches_execution_keyed_fold() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -301,7 +301,7 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,

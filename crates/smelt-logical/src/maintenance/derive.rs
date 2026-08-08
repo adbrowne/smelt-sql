@@ -17,6 +17,9 @@ use super::{
     OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
     SourceFacts, Technique, Trigger,
 };
+use crate::analysis::definition_change::{
+    classify_definition_change, DefinitionChangeClass, DefinitionChangeCtx,
+};
 use crate::analysis::faithful_fold::{faithful_fold, ConditionVerdict, FaithfulFold};
 use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::footprint::{reflect_footprint, FootprintResult};
@@ -25,13 +28,14 @@ use crate::analysis::input_delta::{
 };
 use crate::analysis::join_shape::JoinContext;
 use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
-use crate::analysis::model_diff::ModelDiff;
+use crate::analysis::model_diff::ColumnDef;
 use crate::analysis::source_bounds::{
     derive_cross_axis_links, derive_model_bounds, resolve_table_ref_source_name, BoundContext,
     BoundResult, CrossAxisLink, Seconds,
 };
 use crate::analysis::walk::model_property_vector;
-use crate::analysis::{item_expr, select_stmt_items, SelectItemKind};
+use crate::analysis::{item_alias, item_expr, select_stmt_items, SelectItemKind};
+use crate::maintenance::skeleton::skeleton_roles;
 
 /// Derive the region row identity (P2, `model_properties.md` §"Region row
 /// identity") for a model: the declared `unique_key` off the output's own
@@ -595,10 +599,13 @@ pub struct ModelInputs<'a> {
     pub column_groups: Vec<ColumnGroup>,
     /// Present for keyed-grain models whose new-data cell should fold.
     pub fold: Option<FoldSpec>,
-    /// The additive-only proof for a `ColumnAdded` trigger, computed by the
-    /// caller via [`crate::analysis::model_diff::additive_only_diff`] over
-    /// the old/new column lists. Required to admit an in-place update.
-    pub column_add_proof: Option<&'a ModelDiff>,
+    /// The model's existing (pre-`ColumnAdded`) output columns — the
+    /// [`crate::analysis::definition_change::classify_definition_change`]
+    /// proof's `old_columns` for a `ColumnAdded` trigger. Empty means "no
+    /// old schema known", which fails closed exactly as the retired
+    /// `column_add_proof: None` did (`docs/plans/
+    /// 20260808-derived-maintenance-proofs.md` Phase 4).
+    pub old_columns: Vec<ColumnDef>,
 }
 
 impl ModelInputs<'_> {
@@ -1190,6 +1197,29 @@ fn derive_mutation(
     }
 }
 
+/// Extract one named column's [`ColumnDef`] (name + defining expression)
+/// from `sql`'s own outermost `SELECT` scope — a `ColumnAdded` trigger fires
+/// because `name` already exists in the model's current `sql`, so this
+/// resolves the [`crate::analysis::definition_change::classify_definition_
+/// change`] proof's `added_column` argument straight from the same source
+/// the rest of this derivation already reads. `None` when `sql` has no
+/// classifiable top-level `SELECT`, or `name` isn't one of its projected
+/// aliases — the caller fails closed rather than guessing an expression.
+fn column_def_from_sql(sql: &str, name: &str) -> Option<ColumnDef> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let items = select_stmt_items(&select)?;
+    items
+        .iter()
+        .find(|item| item_alias(item) == name)
+        .map(|item| ColumnDef {
+            name: name.to_string(),
+            expr: item_expr(item).clone(),
+        })
+}
+
 /// Definition change: the model gained fields. Skeleton adds are grain
 /// changes and refuse (EX-39); payload adds land in the 2×2's left column by
 /// what they read (EX-36/37/40), instantiating their ledger entries at
@@ -1205,12 +1235,43 @@ fn derive_column_added(
         columns: columns.to_vec(),
     };
     // Boundary first: a skeleton-position add changes which rows exist.
+    // Two independent proofs must both clear every added column before
+    // *either* branch below (empty-sensitivity in-place update, or the
+    // mutation-sensitive column-scoped merge) is allowed to dispatch it:
+    // the hand-declared `output.skeleton_columns` set, and — when the
+    // model's current SQL is classifiable — the derived skeleton-role
+    // extraction (`maintenance::skeleton::skeleton_roles`). Only the
+    // declared-set check used to run here; the derived check ran solely
+    // inside `classify_definition_change`, which the non-empty-sensitivity
+    // branch never calls, so a `GROUP BY` key absent from the declared set
+    // could reach `ColumnScopedMerge` in that branch undetected. Computing
+    // `skeleton_roles` once here, ahead of both branches, closes that gap.
+    // An unclassifiable shape (`skeleton_roles` returns `None`) does not
+    // newly refuse a model that relied on the declared set alone —
+    // fail-closed without over-refusing.
+    let derived_roles = skeleton_roles(
+        inputs.sql,
+        inputs.declared_unique_key(),
+        inputs.output_partition_col(),
+    );
     for col in columns {
         if inputs.output.skeleton_columns.contains(col) {
             plan.refusals.push(Refusal::SkeletonColumnAdded {
                 column: col.clone(),
             });
             return;
+        }
+        if let Some(role) = derived_roles
+            .as_ref()
+            .and_then(|roles| roles.iter().find(|(name, _)| name == col))
+            .map(|(_, role)| *role)
+        {
+            if role.is_skeleton() {
+                plan.refusals.push(Refusal::SkeletonColumnAdded {
+                    column: col.clone(),
+                });
+                return;
+            }
         }
     }
 
@@ -1222,32 +1283,102 @@ fn derive_column_added(
         .filter(|g| g.columns.iter().any(|c| columns.contains(c)))
     {
         if group.mutation_sensitivity.is_empty() {
-            // Pure function of stored columns — admissible in place only if
-            // the additive-only proof holds (fail closed without it).
-            match inputs.column_add_proof {
-                Some(ModelDiff::AdditiveOnly) => plan.cells.push(PlanCell {
-                    group: group.name(),
-                    trigger: trigger.clone(),
-                    corner: Corner::FoldDelta,
-                    technique: Technique::InPlaceUpdate,
-                    partition_local: PartitionLocal::Yes,
-                    scans: vec![],
-                    ledger_catch_up: true,
-                    row_identity: identity.clone(),
-                    skeleton_source_closure: None,
-                    fingerprint_projections: BTreeMap::new(),
-                }),
-                Some(ModelDiff::NotAdditive { reason }) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: format!("in-place update not proven additive-only: {reason}"),
+            // Empty mutation-sensitivity is *eligible* for the cheap
+            // in-place update, but is not on its own proof of purity — it
+            // can also mean "an append-only source read that is never
+            // re-mutated after creation, yet was never stored before" (the
+            // misclassification `classify_definition_change` exists to
+            // correct, `model_properties.md` §"Definition-change column
+            // classification"). Every added column in this group is run
+            // through the composed proof; a `PureBackfill` verdict admits
+            // the in-place `UPDATE`, a `SkeletonAdd` verdict this group's
+            // hand-declared `output.skeleton_columns` didn't already catch
+            // still refuses as a grain change, and an `UpstreamRederive`
+            // verdict — or any refusal — fails closed here: this group
+            // carries no source name to scan (that is exactly what "empty
+            // mutation-sensitivity" means), so a column-scoped merge cannot
+            // be constructed from the inputs this v0 derivation has
+            // (production `ColumnAdded` trigger derivation, which could
+            // supply one, stays out of this phase's scope).
+            let added_in_group: Vec<&String> = group
+                .columns
+                .iter()
+                .filter(|c| columns.contains(c))
+                .collect();
+            let mut verdict: Option<DefinitionChangeClass> = None;
+            let mut refused: Option<String> = None;
+            'columns: for c in &added_in_group {
+                let Some(def) = column_def_from_sql(inputs.sql, c) else {
+                    refused = Some(format!(
+                        "could not resolve '{c}''s expression in the model's own SQL"
+                    ));
+                    break 'columns;
+                };
+                let ctx = DefinitionChangeCtx {
+                    old_columns: &inputs.old_columns,
+                    declared_unique_key: inputs.declared_unique_key(),
+                    partition_col: inputs.output_partition_col(),
+                    declared_skeleton_columns: &inputs.output.skeleton_columns,
+                    monotone_dims: &[],
+                };
+                match classify_definition_change(&def, inputs.sql, &ctx) {
+                    Ok(DefinitionChangeClass::SkeletonAdd { .. }) => {
+                        plan.refusals.push(Refusal::SkeletonColumnAdded {
+                            column: (*c).clone(),
+                        });
+                        return;
+                    }
+                    Ok(v) => match &verdict {
+                        None => verdict = Some(v),
+                        Some(prev) if *prev == v => {}
+                        Some(_) => {
+                            refused = Some(
+                                "group columns disagree on definition-change classification"
+                                    .to_string(),
+                            );
+                            break 'columns;
+                        }
+                    },
+                    Err(e) => {
+                        refused = Some(format!("{e:?}"));
+                        break 'columns;
+                    }
+                }
+            }
+            match (verdict, refused) {
+                (Some(DefinitionChangeClass::PureBackfill), None) => {
+                    plan.cells.push(PlanCell {
+                        group: group.name(),
+                        trigger: trigger.clone(),
+                        corner: Corner::FoldDelta,
+                        technique: Technique::InPlaceUpdate,
+                        partition_local: PartitionLocal::Yes,
+                        scans: vec![],
+                        ledger_catch_up: true,
+                        row_identity: identity.clone(),
+                        skeleton_source_closure: None,
+                        fingerprint_projections: BTreeMap::new(),
                     });
                 }
-                None => {
+                (Some(DefinitionChangeClass::UpstreamRederive), None) => {
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
                         trigger: format!("{trigger:?}"),
-                        why: "in-place update requires the additive-only model-diff proof"
+                        why: "re-derives from upstream, but this group's mutation-sensitivity \
+                              names no source to scan — a column-scoped merge cannot be \
+                              constructed"
                             .to_string(),
+                    });
+                }
+                (_, Some(why)) => {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why,
+                    });
+                }
+                (_, None) => {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: "in-place update not proven additive-only".to_string(),
                     });
                 }
             }

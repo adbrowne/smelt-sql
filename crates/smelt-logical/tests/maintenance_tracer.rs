@@ -99,7 +99,7 @@ fn ex02_inputs() -> ModelInputs<'static> {
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 
@@ -233,7 +233,7 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 
@@ -347,7 +347,7 @@ fn ex13_new_day_is_partition_local_recompute_region() {
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -389,7 +389,7 @@ fn ex24_inputs(
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -473,13 +473,23 @@ fn ex36_pure_function_field_add_is_in_place_update_with_ledger_catch_up() {
     let proof = additive_only_diff(&old, &new, &[]);
     assert!(proof.is_additive_only());
 
+    // `classify_definition_change` resolves the added column's own
+    // expression from the model's *current* SQL (a `ColumnAdded` trigger
+    // fires because `referrer_domain` already exists there) and the
+    // additive-only diff's `old_columns` from `ModelInputs::old_columns` —
+    // the retired `column_add_proof`'s replacement
+    // (`docs/plans/20260808-derived-maintenance-proofs.md` Phase 4).
+    let sql = "SELECT event_id, user_id, event_date, event_ts, page, referrer, \
+               SUBSTRING(referrer, 1, 10) AS referrer_domain \
+               FROM smelt.sources.events";
     let mut inputs = ex02_inputs();
+    inputs.sql = sql;
     inputs.column_groups.push(ColumnGroup {
         columns: strings(&["referrer_domain"]),
         mutation_sensitivity: BTreeSet::new(),
         membership_sensitivity: BTreeSet::new(),
     });
-    inputs.column_add_proof = Some(&proof);
+    inputs.old_columns = old;
     let plan = derive_maintenance_plan(
         &inputs,
         &[Trigger::ColumnAdded {
@@ -583,7 +593,7 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -643,6 +653,78 @@ fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
     // No explicit column-list SET — `revenue` flows through the source
     // projection itself, not through emitter-side sibling exclusion.
     assert!(!sql.contains("order_count = s.order_count"));
+}
+
+/// A `GROUP BY` key absent from the declared `output.skeleton_columns` set,
+/// added in a group whose `mutation_sensitivity` is non-empty, must still
+/// refuse as `SkeletonColumnAdded` — a grain change, never a column
+/// backfill (`model_properties.md` §"Definition-change column
+/// classification": "SkeletonAdd — refused, a grain change, never a column
+/// backfill"). Before this test's fix, `derive_column_added`'s only
+/// skeleton guard was the declared-set check in the early refusal loop;
+/// `classify_definition_change` (whose leg 1 derives skeleton roles from
+/// the SQL itself) only ran inside the *empty*-sensitivity branch, so a
+/// non-empty-sensitivity group dispatched straight to `ColumnScopedMerge`
+/// without ever deriving the added column's skeleton role.
+#[test]
+fn ex39b_underived_skeleton_add_in_sensitive_group_still_refuses() {
+    let inputs = ModelInputs {
+        sql: "SELECT pay_date, region, SUM(amount) AS revenue \
+              FROM smelt.sources.payments GROUP BY pay_date, region",
+        output: OutputSpec {
+            table: "daily_revenue".to_string(),
+            grain: Grain::Partition {
+                partition_col: "pay_date".to_string(),
+            },
+            // `region` is a `GROUP BY` key but was never hand-declared —
+            // only the derived check catches it.
+            skeleton_columns: set(&["pay_date"]),
+        },
+        sources: vec![source(
+            "payments",
+            MutationProfile::MutableSnapshot,
+            Some("pay_date"),
+        )],
+        column_groups: vec![
+            ColumnGroup {
+                columns: strings(&["revenue"]),
+                mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
+            },
+            // The added column's own group — non-empty sensitivity, so
+            // this exercises the `ColumnScopedMerge` branch, not the
+            // in-place-update branch `classify_definition_change` already
+            // guarded.
+            ColumnGroup {
+                columns: strings(&["region"]),
+                mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
+            },
+        ],
+        fold: None,
+        old_columns: vec![
+            column_def("pay_date", "pay_date"),
+            column_def("revenue", "SUM(amount)"),
+        ],
+    };
+    let plan = derive_maintenance_plan(
+        &inputs,
+        &[Trigger::ColumnAdded {
+            columns: strings(&["region"]),
+        }],
+    );
+    assert!(
+        matches!(&plan.refusals[..], [Refusal::SkeletonColumnAdded { column }] if column == "region"),
+        "refusals: {:?}",
+        plan.refusals
+    );
+    assert!(
+        plan.cells
+            .iter()
+            .all(|c| c.technique != Technique::ColumnScopedMerge),
+        "no ColumnScopedMerge cell should be emitted for a skeleton-position add: {:?}",
+        plan.cells
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -707,7 +789,7 @@ fn keyed_enriched_dim_mutation_is_membership_sensitive_recompute_never_column_me
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let plan = derive_maintenance_plan(

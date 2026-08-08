@@ -85,7 +85,7 @@ fn derived_conversions_clamp_drives_the_propagation() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,

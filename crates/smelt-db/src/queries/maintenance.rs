@@ -358,7 +358,7 @@ pub fn derive_model_maintenance_plan(
         sources: sources.to_vec(),
         column_groups: grouping.groups.clone(),
         fold,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let mut triggers = Vec::new();

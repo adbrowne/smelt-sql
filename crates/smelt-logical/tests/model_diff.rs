@@ -125,7 +125,7 @@ fn reformatted_unrelated_column_does_not_block_a_real_column_add() {
             membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: Some(&proof),
+        old_columns: old,
     };
 
     let plan = derive_maintenance_plan(
