@@ -1,11 +1,9 @@
-//! Black-box coverage for the Phase 2 substrate unification
-//! (`docs/plans/20260808-substrate-unification.md`): `analysis::
-//! expr_util::{collect_column_refs, collect_column_refs_ungated,
+//! Black-box coverage for `analysis::expr_util::{collect_column_refs,
 //! collect_column_names, collect_referenced_qualifiers,
-//! split_top_level_conjuncts}` replaced eight independently-copied helpers
-//! (five column-ref collectors, three conjunct splitters) with one home
-//! each. Those functions are deliberately `pub(crate)` — not part of this
-//! crate's external API — so the direct, table-driven characterization
+//! split_top_level_conjuncts}`, which replaced eight independently-copied
+//! helpers (five column-ref collectors, three conjunct splitters) with one
+//! home each. Those functions are deliberately `pub(crate)` — not part of
+//! this crate's external API — so the direct, table-driven characterization
 //! (the battery of qualified refs / aliases / function args / `CASE` /
 //! window `OVER` clauses for column-ref collection, and nested parens /
 //! `OR` guards / `BETWEEN` for conjunct splitting) lives as unit tests
@@ -26,34 +24,26 @@
 //! the match short-circuits the recursion — every real column reference
 //! among that call's arguments was silently dropped.
 //!
-//! | Input | Gated (fingerprint/classify shape) | Ungated (old skeleton_closure/grouping shape) |
-//! |---|---|---|
-//! | `a.b` | `[a.b]` | `[a.b]` (agree) |
-//! | `CASE WHEN a.x > 1 THEN a.y ELSE b.z END` | `[a.x, a.y, b.z]` | `[a.x, a.y, b.z]` (agree) |
-//! | `foo(a.x, b.y)` | `[a.x, b.y]` | `[foo]` — **disagreement**: false column `foo`, real refs dropped |
-//! | `SUM(a.x) OVER (PARTITION BY a.y ORDER BY a.z)` | `[a.x, a.y, a.z]` | `[SUM, a.y, a.z]` — **disagreement**: `a.x` silently dropped |
-//! | `CAST(a.x AS INTEGER)` | `[a.x]` | `[a.x]` (agree) |
-//! | `a.x BETWEEN b.y AND b.z` | `[a.x, b.y, b.z]` | `[a.x, b.y, b.z]` (agree) |
+//! | Input | Result |
+//! |---|---|
+//! | `a.b` | `[a.b]` |
+//! | `CASE WHEN a.x > 1 THEN a.y ELSE b.z END` | `[a.x, a.y, b.z]` |
+//! | `foo(a.x, b.y)` | `[a.x, b.y]` (not the false column `foo`) |
+//! | `SUM(a.x) OVER (PARTITION BY a.y ORDER BY a.z)` | `[a.x, a.y, a.z]` (not `[SUM, a.y, a.z]`) |
+//! | `CAST(a.x AS INTEGER)` | `[a.x]` |
+//! | `a.x BETWEEN b.y AND b.z` | `[a.x, b.y, b.z]` |
 //!
-//! Default resolution: the gated (correct) shape, `collect_column_refs`,
-//! became the crate-wide implementation. `analysis::skeleton_closure` was
-//! repointed to it with zero conformance-suite regression (its
-//! `expr_references_alias` WHERE/ON-conjunct membership check simply
-//! becomes more precise). `maintenance::grouping` could **not** be: fixing
-//! it flips `maintenance_conformance::
-//! keyed_enriched_pool_upholds_equivalence_with_zero_write_redelivery` and
-//! `keyed_enriched_recipe_admits_suppressed_column_scoped_merge` to a
-//! different maintenance technique — an admission-verdict change Phase 2's
-//! contract forbids. `maintenance::grouping` therefore keeps calling
-//! `collect_column_refs_ungated` (the historical, bug-preserving shape),
-//! tracked as a follow-up in `docs/TODO.md`. The two conjunct-splitter
-//! copies unified here (`backbuild::diff`'s `split_conjuncts`,
-//! `backbuild::classify`'s `split_top_level_and`) were byte-identical in
-//! logic — no disagreement to reconcile; `analysis::walk`'s range-based
-//! `collect_self_conjunct_ranges` now consumes the shared splitter
-//! internally (see its doc comment) rather than folding into the same
-//! signature, since its own output (text ranges for region carving) is a
-//! genuinely different shape.
+//! `collect_column_refs`, the guarded (correct) shape, is the crate-wide
+//! implementation — every call site, including `maintenance::grouping`'s
+//! per-column provenance derivation, uses it
+//! (`docs/plans/20260808-membership-sensitivity.md` Phase 1). The two
+//! conjunct-splitter copies unified here (`backbuild::diff`'s
+//! `split_conjuncts`, `backbuild::classify`'s `split_top_level_and`) were
+//! byte-identical in logic — no disagreement to reconcile;
+//! `analysis::walk`'s range-based `collect_self_conjunct_ranges` now
+//! consumes the shared splitter internally (see its doc comment) rather
+//! than folding into the same signature, since its own output (text ranges
+//! for region carving) is a genuinely different shape.
 
 use std::collections::BTreeSet;
 
@@ -98,20 +88,18 @@ fn function_wrapped_membership_predicate_on_enrichment_column_stays_open() {
     }
 }
 
-/// `maintenance::grouping` deliberately still uses `collect_column_refs_
-/// ungated` (see this file's module doc and `docs/TODO.md`): a column that
-/// is a pure function call over a mutation-sensitive source's own column
-/// (`UPPER(d.tier)`) is *not* attributed to that source's sensitivity here
-/// — the ungated collector reads `UPPER` as a bare (unresolvable) column
-/// name and drops `d.tier` entirely, so the derivation cannot resolve any
-/// FROM-alias qualifier for the column and — per the fail-closed collapse
-/// rule — the whole model's non-skeleton columns degenerate into one group
-/// sensitive to every declared source, rather than a soundly narrower
-/// per-column group. This pins today's behaviour, not the target: fixing
-/// `maintenance::grouping` to use the gated collector is the tracked
-/// follow-up.
+/// `maintenance::grouping` now uses the gated `collect_column_refs`
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 1 — the
+/// collector-swap that closed out this file's originally-documented
+/// divergence): a column that is a pure function call over a
+/// mutation-sensitive source's own column (`UPPER(d.tier)`) correctly
+/// resolves the FROM-alias qualifier for `d.tier` inside the call's
+/// arguments, so the derivation produces a soundly narrower per-column
+/// group instead of collapsing. `d` is also read in the `LEFT JOIN`'s `ON`
+/// predicate, so it additionally carries membership sensitivity — deriving
+/// fail-closed for outer joins, per this plan's Phase 1 scope.
 #[test]
-fn function_wrapped_source_column_still_collapses_under_the_preserved_bug() {
+fn function_wrapped_source_column_no_longer_collapses() {
     let sources = vec![
         source("customers", MutationProfile::MutableSnapshot, &["id"]),
         source("orders", MutationProfile::AppendOnly, &[]),
@@ -122,7 +110,23 @@ fn function_wrapped_source_column_still_collapses_under_the_preserved_bug() {
     let skeleton = set(&["order_id"]);
     let result = derive_column_groups(sql, &sources, &skeleton);
     assert!(
-        !result.degenerate.is_empty(),
-        "expected the unresolvable bare `UPPER` reference to force a degenerate collapse, got {result:?}"
+        result.degenerate.is_empty(),
+        "UPPER(d.tier) must resolve via the gated collector, not collapse: {result:?}"
+    );
+    let tier_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"tier_u".to_string()))
+        .expect("tier_u is grouped");
+    assert_eq!(
+        tier_group.mutation_sensitivity,
+        set(&["customers"]),
+        "UPPER(d.tier) must contribute d.tier's value sensitivity"
+    );
+    assert_eq!(
+        tier_group.membership_sensitivity,
+        set(&["customers"]),
+        "d is also read in the LEFT JOIN's ON predicate — membership \
+         sensitivity, deriving fail-closed for outer joins"
     );
 }

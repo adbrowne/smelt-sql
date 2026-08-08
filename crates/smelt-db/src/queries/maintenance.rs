@@ -961,6 +961,8 @@ pub fn maintenance_plan_diagnostics(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use smelt_core::config::{MaintenanceCellConfig, PerSourceScanBounds};
 
@@ -968,6 +970,7 @@ mod tests {
         ColumnGroup {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             mutation_sensitivity: sensitivity.iter().map(|s| s.to_string()).collect(),
+            membership_sensitivity: BTreeSet::new(),
         }
     }
 

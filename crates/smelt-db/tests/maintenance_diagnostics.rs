@@ -107,14 +107,21 @@ JOIN smelt.sources.enrichment e ON o.customer_id = e.customer_id
         "revenue",
     );
 
+    // `enrichment` is read only in the JOIN's ON predicate — never in a
+    // select item for `o.order_id` — so BOTH payload groups
+    // (`{order_id}` and `{enrichment_category}`) are membership-sensitive to
+    // it (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity
+    // / column provenance", membership paragraph) and each refuses its own
+    // `MaintenanceScanUnbounded` independently.
     let scan_unbounded: Vec<_> = diags
         .iter()
         .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
         .collect();
     assert_eq!(
         scan_unbounded.len(),
-        1,
-        "expected exactly one MaintenanceScanUnbounded, got {diags:?}"
+        2,
+        "expected one MaintenanceScanUnbounded per membership-sensitive payload \
+         group, got {diags:?}"
     );
 
     // `allow_full_scan: true` for the enrichment source clears the refusal.

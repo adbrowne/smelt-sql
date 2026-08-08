@@ -47,6 +47,7 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
@@ -170,6 +171,7 @@ fn multi_column_inputs(
         column_groups: vec![ColumnGroup {
             columns: add_columns.iter().map(|(c, _)| c.to_string()).collect(),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: add_columns

@@ -56,6 +56,7 @@ fn dim_column_group() -> ColumnGroup {
     ColumnGroup {
         columns: strings(&["status"]),
         mutation_sensitivity: set(&["dim"]),
+        membership_sensitivity: BTreeSet::new(),
     }
 }
 

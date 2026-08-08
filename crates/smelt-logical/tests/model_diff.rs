@@ -122,6 +122,7 @@ fn reformatted_unrelated_column_does_not_block_a_real_column_add() {
         column_groups: vec![ColumnGroup {
             columns: vec!["referrer_domain".to_string()],
             mutation_sensitivity: BTreeSet::new(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: Some(&proof),

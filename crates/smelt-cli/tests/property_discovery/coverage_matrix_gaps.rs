@@ -80,6 +80,7 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
         column_groups: vec![ColumnGroup {
             columns: vec!["tier".to_string()],
             mutation_sensitivity: set(&["customers_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: None,

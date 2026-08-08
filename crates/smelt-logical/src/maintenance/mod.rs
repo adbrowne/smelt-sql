@@ -73,13 +73,33 @@ pub struct SourceFacts {
 
 /// A named group of output columns sharing mutation-sensitivity
 /// (`01-framework.md` §5), derived by [`grouping::derive_column_groups`].
+///
+/// Sensitivity has two independent kinds (`docs/specs/model_properties.md`
+/// §"Per-column mutation-sensitivity / column provenance", membership
+/// paragraph). **Value sensitivity** (`mutation_sensitivity`) is per-column:
+/// which sources' deltas can change a column's *stored value*. **Membership
+/// sensitivity** (`membership_sensitivity`) is row-scoped: a mutable source
+/// read in row-admission position (a JOIN's `ON` predicate) can retroactively
+/// add or remove rows the model already materialized, even when no
+/// select-item expression ever reads that source — so it attaches to
+/// *every* payload group the admission read governs, not only the groups
+/// that happen to read the source's columns. A source can be in one set, the
+/// other, both, or neither. A membership-sensitive group must be repaired by
+/// a technique that can create and delete rows — the recompute family,
+/// never a column-scoped merge (`docs/specs/incremental_models.md`
+/// §"The plan matrix").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnGroup {
     pub columns: Vec<String>,
-    /// Sources whose *post-creation* deltas can change these columns'
-    /// values. Empty = never mutated after creation (pass-through columns,
-    /// or a pure function of stored columns).
+    /// Value sensitivity: sources whose *post-creation* deltas can change
+    /// these columns' stored values. Empty = never mutated after creation
+    /// (pass-through columns, or a pure function of stored columns).
     pub mutation_sensitivity: BTreeSet<String>,
+    /// Membership sensitivity: mutable sources read in row-admission
+    /// position (a JOIN's `ON` predicate) whose deltas can add or remove
+    /// rows this group covers. Empty = no admission read of a mutable
+    /// source governs this group's rows.
+    pub membership_sensitivity: BTreeSet<String>,
 }
 
 impl ColumnGroup {

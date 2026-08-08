@@ -200,3 +200,242 @@ fn degenerate_collapse_is_surfaced() {
     );
     assert!(result.groups[0].columns.contains(&"amount".to_string()));
 }
+
+/// The keyed-enriched shape (`docs/plans/20260808-membership-sensitivity.md`
+/// Phase 1): a mutable dimension read only in the JOIN's `ON` predicate —
+/// never in any select item — must still drive a plan cell. Value
+/// sensitivity alone would leave it invisible (no select-item expression
+/// reads `dim` at all); membership sensitivity is its own derived kind that
+/// attaches to every payload column group the admission read governs
+/// (`model_properties.md` §"Per-column mutation-sensitivity / column
+/// provenance", membership paragraph).
+#[test]
+fn join_only_mutable_dim_is_membership_sensitive() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, COUNT(f.val) AS val_count \
+               FROM smelt.sources.fact f \
+               JOIN smelt.sources.dim d ON f.id = d.id \
+               GROUP BY f.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert_eq!(result.groups.len(), 1);
+    let group = &result.groups[0];
+    assert!(group.columns.contains(&"val_count".to_string()));
+    assert_eq!(
+        group.mutation_sensitivity,
+        set(&["fact"]),
+        "value sensitivity: only fact is read in a select item"
+    );
+    assert_eq!(
+        group.membership_sensitivity,
+        set(&["dim"]),
+        "membership sensitivity: dim is read only in the JOIN ON predicate, \
+         in row-admission position"
+    );
+}
+
+/// The complement of the previous test: an `AppendOnly` join partner's
+/// retroactive-admission hazard (a later-arriving append could match a row
+/// already materialized) is a *different*, out-of-scope question
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 1 "Explicitly
+/// deferred"). Membership sensitivity derives only from `MutableSnapshot`
+/// sources read in row-admission position — an `AppendOnly` partner
+/// contributes nothing to it, even though it too is read only in the `ON`
+/// predicate.
+#[test]
+fn append_only_join_partner_contributes_no_membership() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::AppendOnly, None, &["id"]),
+    ];
+    let sql = "SELECT f.id, COUNT(f.val) AS val_count \
+               FROM smelt.sources.fact f \
+               JOIN smelt.sources.dim d ON f.id = d.id \
+               GROUP BY f.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    for group in &result.groups {
+        assert!(
+            group.membership_sensitivity.is_empty(),
+            "an AppendOnly join partner must contribute no membership \
+             sensitivity: {:?}",
+            group.membership_sensitivity
+        );
+    }
+}
+
+/// The collector-swap red test (`docs/plans/20260808-membership-
+/// sensitivity.md` Phase 1): `SUM(a.x)` must contribute `a.x`'s value
+/// sensitivity, never a bogus `SUM` "column", and never force a degenerate
+/// collapse — the gated `expr_util::collect_column_refs` shape, not the
+/// ungated one that misreads a function call's own name as a bare column.
+#[test]
+fn function_wrapped_ref_collects_arguments() {
+    let sources = vec![source(
+        "orders",
+        MutationProfile::MutableSnapshot,
+        None,
+        &["id"],
+    )];
+    let sql = "SELECT a.id, SUM(a.x) AS total FROM smelt.sources.orders a";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "SUM(a.x) must not force a degenerate collapse: {:?}",
+        result.degenerate
+    );
+    let total_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"total".to_string()))
+        .expect("total is grouped");
+    assert_eq!(
+        total_group.mutation_sensitivity,
+        set(&["orders"]),
+        "SUM(a.x) must contribute a.x's sensitivity, not a bogus 'SUM' column"
+    );
+}
+
+/// Reviewer finding (`docs/plans/20260808-membership-sensitivity.md` Phase
+/// 1 follow-up): `WHERE x IN (SELECT ... FROM smelt.sources.<mutable>)` is
+/// a semi-join admission read the spec explicitly names alongside `ON`
+/// predicates (`docs/specs/model_properties.md` §"Per-column
+/// mutation-sensitivity / column provenance", membership paragraph). This
+/// leaf classifier never resolves into the subquery's own FROM/aliases, so
+/// it must fail closed to the whole-model collapse rather than silently
+/// deriving zero sensitivity of either kind — the exact silent-hole shape
+/// the spec paragraph forbids, relocated from `ON` to `WHERE`.
+#[test]
+fn where_in_subquery_over_mutable_source_collapses_fail_closed() {
+    let sources = vec![
+        source(
+            "orders",
+            MutationProfile::AppendOnly,
+            Some("order_date"),
+            &[],
+        ),
+        source(
+            "customers",
+            MutationProfile::MutableSnapshot,
+            None,
+            &["user_id"],
+        ),
+    ];
+    let sql = "SELECT o.order_id, o.amount \
+               FROM smelt.sources.orders o \
+               WHERE o.user_id IN (SELECT user_id FROM smelt.sources.customers)";
+    let skeleton = set(&["order_id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        !result.degenerate.is_empty(),
+        "a WHERE-clause subquery over a mutable source must collapse, never \
+         silently derive zero sensitivity: {result:?}"
+    );
+    assert_eq!(result.groups.len(), 1);
+    assert_eq!(
+        result.groups[0].membership_sensitivity,
+        set(&["orders", "customers"]),
+        "the collapse must widen membership sensitivity too, not just value \
+         sensitivity: {:?}",
+        result.groups[0]
+    );
+}
+
+/// A mutable dimension read directly in a top-level `WHERE` conjunct (no
+/// subquery) is a row-admission read exactly like a `JOIN`'s `ON`
+/// predicate — isolated here from the `ON`-predicate path by joining `dim`
+/// on a constant (`ON 1 = 1`, no column reference to `dim` at all), so the
+/// only source of `dim`'s membership sensitivity is the `WHERE` conjunct.
+#[test]
+fn direct_where_read_of_mutable_dim_is_membership_sensitive() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "SELECT f.order_id, f.amount \
+               FROM smelt.sources.fact f \
+               JOIN smelt.sources.dim d ON 1 = 1 \
+               WHERE d.tier = 'gold'";
+    let skeleton = BTreeSet::new();
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "a direct WHERE read of a mutable dim column must mark every payload \
+         group membership-sensitive to it: {:?}",
+        result.groups
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.mutation_sensitivity.is_empty()),
+        "value sensitivity must stay empty — dim is never read in a select item: {:?}",
+        result.groups
+    );
+}
+
+/// Guard: the ubiquitous `WHERE <clocked column> > <literal>` time-window
+/// filter on an append-only fact — the ordinary shape of nearly every
+/// incremental model — must stay clean. An `AppendOnly` source read in
+/// `WHERE` contributes no membership sensitivity, exactly as it contributes
+/// none read in an `ON` predicate.
+#[test]
+fn where_filter_on_append_only_fact_contributes_no_membership() {
+    let sources = vec![source(
+        "fact",
+        MutationProfile::AppendOnly,
+        Some("event_date"),
+        &[],
+    )];
+    let sql = "SELECT f.order_id, f.amount \
+               FROM smelt.sources.fact f \
+               WHERE f.event_time > '2024-01-01'";
+    let skeleton = BTreeSet::new();
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    for group in &result.groups {
+        assert!(
+            group.membership_sensitivity.is_empty(),
+            "an AppendOnly source read in WHERE must contribute no membership \
+             sensitivity: {:?}",
+            group.membership_sensitivity
+        );
+        assert!(
+            group.mutation_sensitivity.is_empty(),
+            "value sensitivity verdicts must stay unchanged: {:?}",
+            group.mutation_sensitivity
+        );
+    }
+}

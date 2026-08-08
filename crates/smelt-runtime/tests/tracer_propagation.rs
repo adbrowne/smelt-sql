@@ -21,7 +21,7 @@
 
 mod oracle;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use duckdb::Connection;
 
@@ -130,10 +130,12 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["user_id", "event_ts"]),
                 mutation_sensitivity: Default::default(),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["conversion_score"]),
                 mutation_sensitivity: set(&["conversions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
@@ -161,6 +163,7 @@ fn rollup_inputs() -> ModelInputs<'static> {
         column_groups: vec![ColumnGroup {
             columns: strings(&["events", "converted"]),
             mutation_sensitivity: set(&["silver_events"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: None,
@@ -490,14 +493,17 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["user_id", "event_ts"]),
                 mutation_sensitivity: Default::default(),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["conversion_score"]),
                 mutation_sensitivity: set(&["conversions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,

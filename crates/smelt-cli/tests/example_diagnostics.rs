@@ -1135,9 +1135,15 @@ fn broken_workspace_diagnostics_still_fire() {
 /// `grain: partition` model whose `enrichment_category` group is mutation-
 /// sensitive to an unclocked `maintenance_enrichment` source with no
 /// `allow_full_scan` acceptance — produces exactly one
-/// `MaintenanceScanUnbounded` diagnostic, anchored at that file, and no
-/// `MaintenanceScanUnbounded`/`MaintenanceNoAdmissibleTechnique` diagnostic
-/// fires from any other file in the shared `examples/broken/` workspace.
+/// `MaintenanceScanUnbounded` diagnostic per membership-sensitive payload
+/// group, anchored at that file, and no `MaintenanceScanUnbounded`/
+/// `MaintenanceNoAdmissibleTechnique` diagnostic fires from any other file
+/// in the shared `examples/broken/` workspace. `maintenance_enrichment` is
+/// read only in the JOIN's ON predicate — never in a select item for
+/// `o.order_id` — so BOTH payload groups (`{order_id}` and
+/// `{enrichment_category}`) are membership-sensitive to it
+/// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+/// column provenance", membership paragraph) and each refuses independently.
 ///
 /// Spec: `docs/specs/incremental_models.md` §Semantics "Partition-local
 /// maintenance (the K8 guardrail)".
@@ -1230,8 +1236,9 @@ fn broken_workspace_maintenance_scan_unbounded() {
 
     assert_eq!(
         target.len(),
-        1,
-        "expected exactly 1 maintenance diagnostic from '{expected_file}', got {}:\n  {}",
+        2,
+        "expected exactly 2 maintenance diagnostics (one per membership-sensitive \
+         payload group) from '{expected_file}', got {}:\n  {}",
         target.len(),
         target
             .iter()
@@ -1239,9 +1246,12 @@ fn broken_workspace_maintenance_scan_unbounded() {
             .collect::<Vec<_>>()
             .join("\n  ")
     );
-    assert_eq!(
-        target[0].code,
-        Some(DiagnosticCode::MaintenanceScanUnbounded)
+    assert!(
+        target
+            .iter()
+            .all(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded)),
+        "target: {:?}",
+        target
     );
 }
 

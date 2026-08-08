@@ -79,6 +79,7 @@ fn inputs_with(source: SourceFacts) -> (ModelInputs<'static>, Trigger) {
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],

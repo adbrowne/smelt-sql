@@ -160,9 +160,15 @@ fn ex02_delete_insert_carries_the_partition_predicate_on_the_delete_and_the_clam
 }
 
 // ---------------------------------------------------------------------------
-// EX-07 — orders × unclocked mutable customer dim. Dimension churn drives a
-// column-scoped merge of {tier}; without a declared full-scan acceptance the
-// K8 guardrail refuses (partition-locality fails on `customers`).
+// EX-07 — orders × unclocked mutable customer dim, inner-joined. `customers`
+// is read both in a select item (`c.tier`, value sensitivity) and in the
+// JOIN's ON predicate (row-admission position, membership sensitivity) — so
+// EVERY payload group (`{tier}` and `{amount, user_id}`, which reads no
+// customers column at all) is membership-sensitive to `customers` and gets
+// a whole-row DeleteInsert recompute, never a column-scoped merge
+// (`docs/specs/incremental_models.md` §"The plan matrix"). Without a
+// declared full-scan acceptance the K8 guardrail refuses each group
+// (partition-locality fails on `customers`).
 // ---------------------------------------------------------------------------
 
 fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
@@ -183,9 +189,12 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
     ];
     // Derived, not hand-supplied (MP4): `amount` (and `user_id`) read only
     // the append-only `orders` join input without aggregating over it, so
-    // they land in the empty-sensitivity group; `tier` reads the mutable
-    // `customers` dimension and lands in its own group sensitive to
-    // `customers` — dimension churn drives its column-scoped merge below.
+    // they land in the value-empty-sensitivity group; `tier` reads the
+    // mutable `customers` dimension and lands in its own group value-
+    // sensitive to `customers`. `customers` is also read in the JOIN's ON
+    // predicate, so BOTH groups carry membership sensitivity to it — an
+    // inner join's dimension churn can retroactively un-admit an order row
+    // no select item ever needed to read `customers` to produce.
     let skeleton = skeleton_columns(sql, &["order_id".to_string()], Some("order_date"));
     assert_eq!(skeleton, set(&["order_id", "order_date"]));
     let grouping = derive_column_groups(sql, &sources, &skeleton);
@@ -201,6 +210,14 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
             .any(|g| g.columns.contains(&"tier".to_string())
                 && g.mutation_sensitivity == set(&["customers"])),
         "groups: {:?}",
+        grouping.groups
+    );
+    assert!(
+        grouping
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["customers"])),
+        "every payload group must be membership-sensitive to customers: {:?}",
         grouping.groups
     );
 
@@ -230,15 +247,22 @@ fn ex07_dimension_churn_without_full_scan_acceptance_refuses_scan_unbounded() {
         }],
     );
     assert!(plan.cells.is_empty(), "cells: {:?}", plan.cells);
+    // Every payload group (`{tier}` and `{amount, user_id}`) is now
+    // membership-sensitive to `customers`, so each is its own admission
+    // attempt and each refuses under the K8 guardrail — two refusals, not
+    // one.
+    assert_eq!(plan.refusals.len(), 2, "refusals: {:?}", plan.refusals);
     assert!(
-        matches!(&plan.refusals[..], [Refusal::ScanUnbounded { source, .. }] if source == "customers"),
+        plan.refusals
+            .iter()
+            .all(|r| matches!(r, Refusal::ScanUnbounded { source, .. } if source == "customers")),
         "refusals: {:?}",
         plan.refusals
     );
 }
 
 #[test]
-fn ex07_declared_full_scan_admits_the_column_merge_as_non_partition_local() {
+fn ex07_declared_full_scan_admits_the_membership_recompute_as_non_partition_local() {
     let inputs = ex07_inputs(true);
     let plan = derive_maintenance_plan(
         &inputs,
@@ -247,13 +271,20 @@ fn ex07_declared_full_scan_admits_the_column_merge_as_non_partition_local() {
         }],
     );
     assert!(plan.refusals.is_empty(), "refusals: {:?}", plan.refusals);
-    let cell = &plan.cells[0];
-    assert_eq!(cell.corner, Corner::ColumnMerge);
-    assert_eq!(cell.technique, Technique::ColumnScopedMerge);
-    assert_eq!(cell.group, "{tier}");
-    assert!(
-        matches!(&cell.partition_local, PartitionLocal::No { source, .. } if source == "customers")
-    );
+    // Both payload groups are membership-sensitive to `customers` (it is
+    // read in the JOIN's ON predicate), so both get a whole-row recompute
+    // cell — never a column-scoped merge, even for `{tier}`, which is ALSO
+    // value-sensitive to `customers`: membership sensitivity dominates.
+    assert_eq!(plan.cells.len(), 2, "cells: {:?}", plan.cells);
+    for cell in &plan.cells {
+        assert_eq!(cell.corner, Corner::RecomputeRegion);
+        assert_eq!(cell.technique, Technique::DeleteInsert);
+        assert!(
+            matches!(&cell.partition_local, PartitionLocal::No { source, .. } if source == "customers")
+        );
+    }
+    let groups: BTreeSet<String> = plan.cells.iter().map(|c| c.group.clone()).collect();
+    assert_eq!(groups, set(&["{tier}", "{amount, user_id}"]));
 }
 
 #[test]
@@ -300,6 +331,7 @@ fn ex13_new_day_is_partition_local_recompute_region() {
         vec![ColumnGroup {
             columns: strings(&["revenue"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }]
     );
 
@@ -352,6 +384,7 @@ fn ex24_inputs(
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
@@ -444,6 +477,7 @@ fn ex36_pure_function_field_add_is_in_place_update_with_ledger_catch_up() {
     inputs.column_groups.push(ColumnGroup {
         columns: strings(&["referrer_domain"]),
         mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
     });
     inputs.column_add_proof = Some(&proof);
     let plan = derive_maintenance_plan(
@@ -466,6 +500,7 @@ fn ex36_without_the_additive_only_proof_fails_closed() {
     inputs.column_groups.push(ColumnGroup {
         columns: strings(&["referrer_domain"]),
         mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
     });
     let plan = derive_maintenance_plan(
         &inputs,
@@ -537,12 +572,14 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
             ColumnGroup {
                 columns: strings(&["revenue"]),
                 mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             // The added field is co-sensitive with {revenue} but starts at
             // S = ∅ — its own catch-up group until convergence (EX-40).
             ColumnGroup {
                 columns: strings(&["order_count"]),
                 mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
@@ -606,4 +643,91 @@ fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
     // No explicit column-list SET — `revenue` flows through the source
     // projection itself, not through emitter-side sibling exclusion.
     assert!(!sql.contains("order_count = s.order_count"));
+}
+
+// ---------------------------------------------------------------------------
+// Keyed-enriched shape (`docs/plans/20260808-membership-sensitivity.md`
+// Phase 1): a keyed model over an append-only fact joined to an unclocked
+// mutable dimension whose columns appear ONLY in the JOIN's ON predicate —
+// never in any select item. Membership sensitivity is what makes `dim`'s
+// mutations maintainable at all (`docs/specs/model_properties.md`
+// §"Per-column mutation-sensitivity / column provenance", membership
+// paragraph): value sensitivity alone would leave `dim` invisible to the
+// derivation entirely (no cell, no refusal — a quiet equivalence hole).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyed_enriched_dim_mutation_is_membership_sensitive_recompute_never_column_merge() {
+    let sql = "SELECT f.id, COUNT(f.val) AS val_count \
+               FROM smelt.sources.fact f \
+               JOIN smelt.sources.dim d ON f.id = d.id \
+               GROUP BY f.id";
+    let sources = vec![
+        SourceFacts {
+            name: "fact".to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: Some("event_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        },
+        SourceFacts {
+            name: "dim".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: strings(&["id"]),
+            allow_full_scan: true,
+        },
+    ];
+    let skeleton = set(&["id"]);
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    assert!(
+        grouping
+            .groups
+            .iter()
+            .any(|g| g.columns.contains(&"val_count".to_string())
+                && g.membership_sensitivity == set(&["dim"])),
+        "groups: {:?}",
+        grouping.groups
+    );
+
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "fact_dim".to_string(),
+            grain: Grain::Key {
+                unique_key: strings(&["id"]),
+            },
+            skeleton_columns: skeleton,
+        },
+        sources,
+        column_groups: grouping.groups,
+        fold: None,
+        column_add_proof: None,
+    };
+
+    let plan = derive_maintenance_plan(
+        &inputs,
+        &[Trigger::UpstreamMutation {
+            source: "dim".to_string(),
+        }],
+    );
+    assert!(plan.refusals.is_empty(), "refusals: {:?}", plan.refusals);
+    assert_eq!(plan.cells.len(), 1, "cells: {:?}", plan.cells);
+    let cell = &plan.cells[0];
+    assert_eq!(cell.group, "{val_count}");
+    assert_eq!(cell.corner, Corner::RecomputeRegion);
+    assert_eq!(cell.technique, Technique::DeleteInsert);
+    assert!(
+        !plan
+            .cells
+            .iter()
+            .any(|c| c.technique == Technique::ColumnScopedMerge),
+        "a membership-sensitive dim cell must never resolve to ColumnScopedMerge: {:?}",
+        plan.cells
+    );
 }

@@ -145,6 +145,7 @@ fn base_group() -> ColumnGroup {
     ColumnGroup {
         columns: strings(&["user_id", "event_ts", "arrival_ts", "page"]),
         mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
     }
 }
 
@@ -268,6 +269,7 @@ fn v4_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
@@ -339,6 +341,7 @@ fn v4_without_the_explicit_partition_predicate_but_declared_full_scan_admits() {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
@@ -387,10 +390,12 @@ fn v5_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["conversion_score"]),
                 mutation_sensitivity: set(&["conversions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,

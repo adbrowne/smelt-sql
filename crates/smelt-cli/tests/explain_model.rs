@@ -1079,6 +1079,8 @@ fn explain_shows_no_projection_row_for_a_bare_keyed_model() {
 // ---------------------------------------------------------------------------
 
 mod write_variant_explain_surface {
+    use std::collections::BTreeSet;
+
     use smelt_cli::build_maintenance_plan_report;
     use smelt_cli::explain::RelationContractView;
     use smelt_db::queries::maintenance::MaintenancePlanResult;
@@ -1132,6 +1134,7 @@ mod write_variant_explain_surface {
             column_groups: vec![ColumnGroup {
                 columns: vec!["tier".to_string()],
                 mutation_sensitivity: Default::default(),
+                membership_sensitivity: BTreeSet::new(),
             }],
             degenerate: vec![],
         };

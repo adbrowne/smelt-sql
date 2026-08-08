@@ -121,6 +121,7 @@ fn described_technique_matches_execution_partition_recompute() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["user_id", "page"]),
             mutation_sensitivity: BTreeSet::new(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: None,
@@ -192,6 +193,7 @@ fn described_technique_matches_execution_keyed_fold() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
@@ -296,6 +298,7 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["total"]),
             mutation_sensitivity: set(&["orders"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: None,

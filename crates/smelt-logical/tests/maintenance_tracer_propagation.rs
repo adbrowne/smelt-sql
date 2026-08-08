@@ -8,7 +8,7 @@
 //! arithmetic running backwards through the same clamps. Day/Month grains
 //! align intervals outward per hop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::propagate::{
@@ -82,6 +82,7 @@ fn derived_conversions_clamp_drives_the_propagation() {
         column_groups: vec![ColumnGroup {
             columns: vec!["conversion_score".to_string()],
             mutation_sensitivity: ["conversions"].iter().map(|s| s.to_string()).collect(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
         column_add_proof: None,

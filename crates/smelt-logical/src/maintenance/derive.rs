@@ -1035,11 +1035,17 @@ fn derive_mutation(
         source_referential_integrity,
     );
 
-    for group in inputs
-        .column_groups
-        .iter()
-        .filter(|g| g.mutation_sensitivity.contains(source))
-    {
+    for group in inputs.column_groups.iter().filter(|g| {
+        g.mutation_sensitivity.contains(source) || g.membership_sensitivity.contains(source)
+    }) {
+        // Membership sensitivity (`docs/specs/incremental_models.md` §"The
+        // plan matrix"): a group governed by a row-admission read of
+        // `source` must be repaired by a technique that can create and
+        // delete rows — the recompute family — even when `source` also
+        // happens to be pure value-sensitive for this same group. Only a
+        // group whose sensitivity to `source` is *purely* value (never
+        // membership) is eligible for the cheaper column-scoped merge.
+        let membership_sensitive = group.membership_sensitivity.contains(source);
         let (locality, scans) = match link_source(inputs.output_partition_col(), bounds, facts) {
             SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
             SourceLink::Unclocked => (
@@ -1070,11 +1076,16 @@ fn derive_mutation(
             });
             continue;
         }
+        let (corner, technique) = if membership_sensitive {
+            (Corner::RecomputeRegion, Technique::DeleteInsert)
+        } else {
+            (Corner::ColumnMerge, Technique::ColumnScopedMerge)
+        };
         plan.cells.push(PlanCell {
             group: group.name(),
             trigger: trigger.clone(),
-            corner: Corner::ColumnMerge,
-            technique: Technique::ColumnScopedMerge,
+            corner,
+            technique,
             partition_local: locality,
             scans,
             ledger_catch_up: false,

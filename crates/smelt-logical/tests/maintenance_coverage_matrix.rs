@@ -29,7 +29,8 @@ use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, Mode
 use smelt_logical::maintenance::granularity::check_declared_granularity;
 use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::{
-    ColumnGroup, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Technique, Trigger,
+    ColumnGroup, Corner, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Technique,
+    Trigger,
 };
 use smelt_types::SqlFunction;
 
@@ -48,20 +49,17 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 // Catalogue framing: "merged column group → recompute-region only
 // (factoring degenerates)" — a *definitional* fact about column-group
 // provenance, not a runtime behaviour to falsify (probe-status:
-// not-probe-worthy). What IS falsifiable, and what this test pins, is the
-// concrete divergence recorded in `incremental_models.md` §Known Divergences
-// ("A group merged across two mutable inputs has no group-merge-provenance
-// policy"): today's shipped code does NOT force a whole-row `DeleteInsert`
-// recompute for this merged group — it treats it exactly like a
-// single-input mutable enrichment, admitting `ColumnScopedMerge`
-// independently per triggering source. "Degenerates" here names the
-// *grouping* fact (both `orders` and `fx_rates` collapse onto the SAME
-// undifferentiated column group, `grouping.rs`'s own vocabulary for a
-// merged/shared provenance set) — not literally "technique = recompute".
-// A stricter policy that forces `DeleteInsert` whenever a group's
-// provenance spans more than one mutation-sensitive input is undecided and
-// unbuilt (tracked in the same Known Divergences entry); this test is what
-// would need to change if that policy ever lands.
+// not-probe-worthy). What IS falsifiable, and what this test pins is that
+// the merged group's cell is a whole-row `DeleteInsert` recompute, never a
+// `ColumnScopedMerge` — both `orders` and `fx_rates` are `MutableSnapshot`
+// and both are read in the `JOIN`'s `ON` predicate, so both are
+// membership-sensitive (`docs/specs/model_properties.md` §"Per-column
+// mutation-sensitivity / column provenance", membership paragraph): either
+// source's churn can retroactively add or remove a matched row, which only
+// the recompute family can repair (`docs/specs/incremental_models.md`
+// §"The plan matrix"). "Degenerates" here names the *grouping* fact (both
+// sources collapse onto the SAME undifferentiated column group, `grouping.
+// rs`'s own vocabulary for a merged/shared provenance set).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -102,6 +100,11 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         set(&["orders", "fx_rates"]),
         "the group's provenance is the UNION of both mutable inputs — no per-input isolation"
     );
+    assert_eq!(
+        merged.membership_sensitivity,
+        set(&["orders", "fx_rates"]),
+        "both sources are read in the JOIN's ON predicate — both are membership-sensitive"
+    );
 
     let inputs = ModelInputs {
         sql,
@@ -120,7 +123,9 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
 
     // Both triggering sources land on the SAME merged group with the SAME
     // technique — no per-source targeted isolation exists for a merged
-    // group today.
+    // group today. Membership sensitivity forces the recompute family for
+    // both: a `ColumnScopedMerge` could rewrite `amount_usd` in place but
+    // cannot create or delete the row a churned join match would.
     for source in ["orders", "fx_rates"] {
         let plan = derive_maintenance_plan(
             &inputs,
@@ -135,7 +140,8 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         );
         assert_eq!(plan.cells.len(), 1);
         assert_eq!(plan.cells[0].group, "{amount_usd}");
-        assert_eq!(plan.cells[0].technique, Technique::ColumnScopedMerge);
+        assert_eq!(plan.cells[0].corner, Corner::RecomputeRegion);
+        assert_eq!(plan.cells[0].technique, Technique::DeleteInsert);
     }
 }
 
@@ -182,6 +188,7 @@ fn ex14_change_feed_sum_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["ledger_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
@@ -290,6 +297,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["status"]),
             mutation_sensitivity: set(&["status_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         // MAX is order-monotone in principle, but the source-posture
         // condition is checked FIRST and independently (obligation 2) —
@@ -357,6 +365,7 @@ fn ex27_row_number_dedup_refuses_today() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["event_id", "event_ts"]),
             mutation_sensitivity: set(&["events_redelivered"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         // No windowed-merge/locality-pruned dedup fold exists — nothing
         // honest to supply.
@@ -416,6 +425,7 @@ fn ex35_correlated_first_value_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["first_seen"]),
             mutation_sensitivity: set(&["events"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("first_seen".to_string(), SqlFunction::ArgMax)],

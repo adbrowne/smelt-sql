@@ -58,7 +58,7 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | pending-review | 2026-08-08 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -172,6 +172,68 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 ## Deferred during implementation
 
 (Append-only.)
+
+- **Phase 1 (2026-08-08):** the derivation swap flips the `daily_events_enriched`
+  fixture (and `MutableEnrichedRecipe`, `examples/timeseries/models/
+  daily_events_status.sql`) from `ColumnScopedMerge` to `DeleteInsert` for its
+  dimension-mutation cell — the intended effect, since `raw.users` is read in
+  the enrichment JOIN's `ON` predicate and is now correctly membership-
+  sensitive. This leaves the following tests red, all in the SAME shape
+  family, all expected, all left for Phase 2 (runtime dispatch) / Phase 3
+  (conformance rewrite) to resolve — none is a regression outside this
+  family:
+  - `smelt-runtime --test statement_parity::column_scoped_merge_statements_come_from_the_emitter`
+  - `smelt-runtime --test technique_lowering` (`keyed_column_scoped_merge_e2e::*`,
+    `column_scoped_merge_e2e::column_scoped_merge_dispatches_through_execute_project`,
+    `real_fixture_examples_timeseries_admits_column_scoped_merge_cell`,
+    `real_fixture_daily_events_status_would_admit_partition_local_yes_cell`)
+  - `smelt-cli --test maintenance_conformance` (`gate::keyed_enriched_recipe_admits_suppressed_column_scoped_merge`,
+    `gate::keyed_enriched_pool_upholds_equivalence_with_zero_write_redelivery`,
+    `probes::dimension_mutation_touches_only_sensitive_groups`)
+  - `smelt-cli --test bakeoff` (`pin_mutates_no_files`, `pin_emits_parseable_cells_entry`,
+    `bakeoff_reports_measured_cost_per_admissible_technique`, `bakeoff_drops_scratch_unless_keep`)
+    — the cell now has only one admissible technique, so there is nothing to
+    measure/pin among alternatives
+  - `smelt-cli --test bakeoff_seam` (`request_override_subject_to_admission`,
+    `empty_overrides_change_nothing`, `request_override_forces_each_admissible_technique`)
+  - `smelt-cli --test explain_model` (`explain_prints_no_recording_for_a_whole_row_identity_conditional_cell`,
+    `explain_prints_observed_delta_recording_status_for_a_conditional_cell`)
+  - `smelt-cli --test explain_show_sql::show_sql_statements_unaffected_by_observed_delta_report_rows`
+  - `smelt-cli --test maintenance_pins` (`inadmissible_pin_fails_loud`, `prefer_is_soft_and_never_refuses`)
+
+  Two test-only fixes were made in Phase 1 itself where the fallout was a
+  pure diagnostic-count assertion, not a technique-choice assertion:
+  `smelt-db/tests/maintenance_diagnostics.rs::unbounded_scan_refuses_by_default`
+  and `smelt-cli/tests/example_diagnostics.rs::broken_workspace_maintenance_scan_unbounded`
+  now expect 2 `MaintenanceScanUnbounded` diagnostics (one per membership-
+  sensitive payload group) instead of 1 — both fixtures join a mutable,
+  unclocked source only in the `ON` predicate, so both of the model's
+  payload groups are now correctly membership-sensitive and each refuses
+  independently.
+
+- **Phase 1 reviewer follow-up (2026-08-08):** the first pass only scanned
+  `JOIN` `ON` predicates; a reviewer pass found the same silent-hole shape
+  relocated to `WHERE`/`HAVING` — `WHERE o.user_id IN (SELECT user_id FROM
+  smelt.sources.<mutable>)` (a semi-join admission read, named explicitly
+  in `model_properties.md`'s membership paragraph) derived zero sensitivity
+  of either kind and zero collapse. Fixed in the same
+  `membership_sensitivity_sources` (`crates/smelt-logical/src/maintenance/
+  grouping.rs`): top-level `WHERE`/`HAVING` conjuncts are now scanned the
+  same way `ON` conjuncts are (shared `resolve_conjunct` closure); a direct
+  column read of a `MutableSnapshot` source contributes membership
+  sensitivity, an `AppendOnly` read contributes nothing, and ANY subquery
+  inside a `WHERE`/`HAVING` conjunct (`IN`/`EXISTS`/scalar — detected via a
+  `SELECT_STMT` descendant scan) fails closed to the whole-model collapse
+  rather than being resolved into. Three new tests added to
+  `maintenance_grouping.rs`: `where_in_subquery_over_mutable_source_
+  collapses_fail_closed`, `direct_where_read_of_mutable_dim_is_membership_
+  sensitive`, `where_filter_on_append_only_fact_contributes_no_membership`.
+  Full failure survey re-run after the fix: identical failure set to the
+  entry above, no new flips — the WHERE/HAVING scan only ever *adds*
+  sensitivity (or collapses) on top of the existing ON-predicate scan, and
+  none of the already-catalogued fixtures has a WHERE/HAVING conjunct
+  reading a mutable source that the ON-predicate scan hadn't already
+  caught.
 
 ## Verification
 
