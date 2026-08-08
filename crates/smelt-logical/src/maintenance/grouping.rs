@@ -29,10 +29,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{ColumnRef, Expr};
-
 use super::{ColumnGroup, MutationProfile, SourceFacts};
+use crate::analysis::expr_util::collect_column_refs_ungated as collect_column_refs;
 use crate::analysis::source_bounds::resolve_table_ref_source_name;
 use crate::analysis::{item_alias, item_expr, select_stmt_items, SelectItemKind};
 
@@ -256,26 +254,5 @@ fn degenerate_whole_model(
     GroupingResult {
         groups: vec![group],
         degenerate,
-    }
-}
-
-/// Recursively collect every simple (possibly qualified) column reference
-/// inside `expr` — a leaf classifier over one already-parsed select-item
-/// expression's own syntax tree (never the whole model text).
-fn collect_column_refs(expr: &Expr) -> Vec<ColumnRef> {
-    let mut out = Vec::new();
-    collect_column_refs_rec(expr.syntax(), &mut out);
-    out
-}
-
-fn collect_column_refs_rec(node: &SyntaxNode, out: &mut Vec<ColumnRef>) {
-    if let Some(e) = Expr::cast(node.clone()) {
-        if let Some(cref) = ColumnRef::from_expr(&e) {
-            out.push(cref);
-            return;
-        }
-    }
-    for child in node.children() {
-        collect_column_refs_rec(&child, out);
     }
 }

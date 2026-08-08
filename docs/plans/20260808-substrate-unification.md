@@ -61,7 +61,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | bfd0453b | 2026-08-08 |
-| 2     | pending  |        |      |
+| 2     | done     | pending-review | 2026-08-08 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -238,6 +238,24 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 2 — `maintenance::grouping` keeps the pre-unification, un-gated column-ref collector.**
+  Characterization found `analysis::skeleton_closure` and `maintenance::grouping`'s copies had
+  silently diverged from the other three (missing an `EXPRESSION`-kind guard, causing a bare
+  function call to be misread as a column reference while silently dropping every real reference
+  among its arguments). `skeleton_closure` was repointed to the fixed collector with zero
+  conformance regression. `grouping` could not be: the fix flips two `maintenance_conformance`
+  cases to a different maintenance technique, an admission-verdict change outside Phase 2's
+  behaviour-preservation contract. `grouping` therefore calls the deliberately-kept
+  `expr_util::collect_column_refs_ungated`. Tracked as a follow-up in `docs/TODO.md`
+  ("`maintenance::grouping`'s column-ref collector keeps a known under-collection bug").
+- **Phase 2 — `analysis::walk`'s `collect_self_conjunct_ranges` stays a distinct function**, now
+  implemented as a thin consumer of `expr_util::split_top_level_conjuncts` rather than folded into
+  its signature: its own output is text ranges for region carving (blanking excluded ranges out of
+  a scope's own SQL text), not `Vec<Expr>` — a genuinely different shape from the two unified
+  `Vec<Expr>`-returning splitters (`backbuild::diff`'s `split_conjuncts`,
+  `backbuild::classify`'s `split_top_level_and`, which were byte-identical and are now one
+  function).
 
 ## Verification
 

@@ -1,5 +1,31 @@
 # TODO
 
+## `maintenance::grouping`'s column-ref collector keeps a known under-collection bug (2026-08-08)
+
+Phase 2 of `docs/plans/20260808-substrate-unification.md` unified five crate-wide copies of
+column-ref collection into `analysis/expr_util.rs::collect_column_refs`. Characterization
+(`crates/smelt-logical/tests/expr_util.rs`) found `maintenance::grouping` and
+`analysis::skeleton_closure`'s copies had silently diverged from the other three: they omitted
+the `EXPRESSION`-kind guard, so a function call anywhere in an expression (e.g. `SUM(a.x) OVER
+(...)`) was misread as itself a bare column reference *and* — because the match short-circuits —
+every real column reference among that call's arguments was silently dropped (`SUM(a.x) OVER
+(PARTITION BY a.y ORDER BY a.z)` collected `[SUM, a.y, a.z]`, losing `a.x` entirely).
+
+`analysis::skeleton_closure` was repointed to the fixed (gated) collector — no conformance
+regression. `maintenance::grouping` could not be: fixing it flips
+`maintenance_conformance::keyed_enriched_pool_upholds_equivalence_with_zero_write_redelivery` and
+`keyed_enriched_recipe_admits_suppressed_column_scoped_merge` to a different (and, on inspection,
+more correct — the pool's expression involves a function call over what the fix now recognises as
+enrichment-side provenance) maintenance technique. Phase 2's contract is behaviour preservation
+only, so `grouping.rs` still calls the deliberately-kept `expr_util::collect_column_refs_ungated`.
+
+- [ ] Fix `maintenance::grouping::derive_column_groups` to use the gated `collect_column_refs`,
+      oracle-verify the technique-selection change on the two flipped conformance fixtures (and
+      any other model recipe with a function call wrapping a provenance-relevant column
+      reference), and delete `collect_column_refs_ungated`. This is an accepting-direction
+      admission-widening change in the same family as Phases 3/5's named changes — needs the same
+      DuckDB-oracle discipline, not a silent flip.
+
 ## Mutation-campaign residue (2026-08-08)
 
 From `docs/research/20260808-mutation-testing-maintenance-gates.md` (472-mutant campaign over

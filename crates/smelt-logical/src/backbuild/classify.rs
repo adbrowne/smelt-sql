@@ -3237,7 +3237,7 @@ fn admit_added_left_join(
         .ok_or_else(|| "the added join's ON condition has no expression".to_string())?;
 
     let mut conjuncts = Vec::new();
-    split_top_level_and(&on_expr, &mut conjuncts);
+    crate::analysis::expr_util::split_top_level_conjuncts(&on_expr, &mut conjuncts);
 
     let mut dim_cols = BTreeSet::new();
     let mut key_pairs_raw: Vec<(Option<String>, String, String)> = Vec::new();
@@ -3355,23 +3355,6 @@ fn bare_key_equality_refusal() -> String {
         .to_string()
 }
 
-/// Recursively split `expr` into its top-level `AND`-joined conjuncts.
-/// Mirrors `diff.rs`'s private `split_conjuncts` (out of this phase's
-/// touch-scope) — a small, self-contained comparator duplicated here rather
-/// than exposed, same posture as [`expr_equal_modulo_trivia`] below.
-fn split_top_level_and(expr: &Expr, out: &mut Vec<Expr>) {
-    if let Some(bin) = expr.as_binary() {
-        if bin.operator().as_deref() == Some("AND") {
-            if let (Some(l), Some(r)) = (bin.left(), bin.right()) {
-                split_top_level_and(&l, out);
-                split_top_level_and(&r, out);
-                return;
-            }
-        }
-    }
-    out.push(expr.clone());
-}
-
 /// Whether `expr`'s subtree contains any column reference that could
 /// plausibly resolve to the newly-added join's alias `alias` — either
 /// directly qualified with it, or unqualified and not provably resolvable to
@@ -3426,21 +3409,7 @@ fn references_alias_or_unproven_bare(
 /// conservative (a spurious shared name blocks composition, fail-closed),
 /// never less sound.
 fn conjunct_column_names(expr: &Expr) -> HashSet<String> {
-    let mut out = HashSet::new();
-    collect_column_names(expr.syntax(), &mut out);
-    out
-}
-
-fn collect_column_names(node: &SyntaxNode, out: &mut HashSet<String>) {
-    if node.kind() == SyntaxKind::EXPRESSION {
-        if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
-            out.insert(col.name().to_string());
-            return;
-        }
-    }
-    for child in node.children() {
-        collect_column_names(&child, out);
-    }
+    crate::analysis::expr_util::collect_column_names(expr)
 }
 
 fn references_alias_or_unproven_bare_node(
@@ -3728,28 +3697,6 @@ fn classify_single_added_left_join(
     atoms
 }
 
-/// Every FROM-tree alias/qualifier referenced anywhere in `expr`'s subtree
-/// — a permissive existence probe, same posture as
-/// [`references_alias_node`] (which only tests membership; this collects
-/// the whole set), used solely to build [`derive_join_order`]'s reference-
-/// dependency graph. Shape validation of the ON condition itself stays
-/// [`admit_added_left_join`]'s job — this is graph-building only, never a
-/// derivability proof, so an unrecognised sub-shape is simply walked
-/// through rather than refused.
-fn collect_referenced_qualifiers(node: &SyntaxNode, out: &mut BTreeSet<String>) {
-    if node.kind() == SyntaxKind::EXPRESSION {
-        if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
-            if let Some(q) = col.qualifier() {
-                out.insert(q.to_string());
-            }
-            return;
-        }
-    }
-    for child in node.children() {
-        collect_referenced_qualifiers(&child, out);
-    }
-}
-
 /// Derive B7's reference-dependency order over `joins` (research §4 B7; "H.
 /// Composites"' one data-dependent within-slot ordering): join `i` must run
 /// after join `j` whenever `i`'s `ON` condition references `j`'s own alias
@@ -3788,8 +3735,15 @@ fn derive_join_order(joins: &[JoinClause], aliases: &[String]) -> Result<Vec<usi
             // ON key equality") once processing reaches it.
             continue;
         };
-        let mut referenced = BTreeSet::new();
-        collect_referenced_qualifiers(on_expr.syntax(), &mut referenced);
+        // Every FROM-tree alias/qualifier referenced anywhere in the ON
+        // condition's subtree — a permissive existence probe, same posture
+        // as [`references_alias_node`] (which only tests membership; this
+        // collects the whole set), used solely to build this reference-
+        // dependency graph. Shape validation of the ON condition itself
+        // stays `admit_added_left_join`'s job — this is graph-building
+        // only, never a derivability proof, so an unrecognised sub-shape is
+        // simply walked through rather than refused.
+        let referenced = crate::analysis::expr_util::collect_referenced_qualifiers(&on_expr);
         for q in referenced {
             if q == aliases[i] {
                 continue;

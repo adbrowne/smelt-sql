@@ -1332,13 +1332,13 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
     let mut excluded: Vec<TextRange> = Vec::new();
     if let Some(where_clause) = select.where_clause() {
         if let Some(expr) = where_clause.expression() {
-            collect_self_conjunct_ranges(expr.syntax(), self_quals, &mut excluded);
+            collect_self_conjunct_ranges(&expr, self_quals, &mut excluded);
         }
     }
     if let Some(from_clause) = select.from_clause() {
         for join in from_clause.joins() {
             if let Some(on_expr) = join.condition().and_then(|c| c.on_expression()) {
-                collect_self_conjunct_ranges(on_expr.syntax(), self_quals, &mut excluded);
+                collect_self_conjunct_ranges(&on_expr, self_quals, &mut excluded);
             }
         }
     }
@@ -1371,11 +1371,17 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
     out
 }
 
-/// Split `node` (a `WHERE`/`ON` expression) into its top-level
-/// `AND`-separated conditions — structurally, by descending `BINARY_EXPR`
-/// nodes whose own operator token is `AND` (a `BETWEEN`'s `AND` lives inside
-/// its own `BETWEEN_EXPR` node and is never split) — and record the range of
-/// each condition that references one of `self_quals`.
+/// Split `expr` (a `WHERE`/`ON` expression) into its top-level `AND`-joined
+/// conjuncts via the shared [`super::expr_util::split_top_level_conjuncts`]
+/// splitter, then record the range of each conjunct that references one of
+/// `self_quals`.
+///
+/// This function's own output is text *ranges* for region carving
+/// (`own_region_text_excluding_self_relations` blanks the excluded ranges
+/// out of the scope's own SQL text), not split expressions — genuinely a
+/// different shape from the two `Vec<Expr>`-returning splitters unified in
+/// `expr_util`, so it consumes the shared splitter internally rather than
+/// being folded into its signature.
 ///
 /// A condition containing an `OR` anywhere in its subtree is **never**
 /// recorded, even when it references a self qualifier: an `OR` may
@@ -1383,34 +1389,17 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
 /// the whole disjunction would silently under-widen the derived output
 /// window. Keeping it can only over-widen — the fail-safe direction.
 fn collect_self_conjunct_ranges(
-    node: &smelt_parser::syntax_kind::SyntaxNode,
+    expr: &smelt_parser::Expr,
     self_quals: &[String],
     out: &mut Vec<smelt_parser::TextRange>,
 ) {
-    use smelt_parser::SyntaxKind::{AND_KW, BINARY_EXPR, EXPRESSION};
-
-    // Unwrap EXPRESSION wrappers.
-    if node.kind() == EXPRESSION {
-        let children: Vec<_> = node.children().collect();
-        if children.len() == 1 {
-            return collect_self_conjunct_ranges(&children[0], self_quals, out);
+    let mut conjuncts = Vec::new();
+    super::expr_util::split_top_level_conjuncts(expr, &mut conjuncts);
+    for conjunct in &conjuncts {
+        let node = conjunct.syntax();
+        if !conjunct_contains_or(node) && conjunct_references_qualifier(node, self_quals) {
+            out.push(node.text_range());
         }
-    }
-
-    let is_and = node.kind() == BINARY_EXPR
-        && node
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .any(|t| t.kind() == AND_KW);
-    if is_and {
-        for child in node.children() {
-            collect_self_conjunct_ranges(&child, self_quals, out);
-        }
-        return;
-    }
-
-    if !conjunct_contains_or(node) && conjunct_references_qualifier(node, self_quals) {
-        out.push(node.text_range());
     }
 }
 

@@ -34,9 +34,9 @@
 
 use std::collections::BTreeSet;
 
-use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{ColumnRef, Expr, FromClause, JoinClause, JoinType};
+use smelt_parser::{Expr, FromClause, JoinClause, JoinType};
 
+use crate::analysis::expr_util::collect_column_refs;
 use crate::analysis::join_shape::{fan_out, Cardinality, JoinContext};
 use crate::analysis::source_bounds::resolve_table_ref_source_name;
 use crate::analysis::{item_expr, select_stmt_items};
@@ -284,27 +284,6 @@ fn expr_references_alias(expr: &Expr, alias: &str) -> bool {
         cref.qualifier()
             .is_some_and(|q| q.eq_ignore_ascii_case(alias))
     })
-}
-
-/// Recursively collect every simple (possibly qualified) column reference
-/// inside `expr` — mirrors `maintenance::grouping`'s private helper of the
-/// same shape; kept local since that one is not `pub`.
-fn collect_column_refs(expr: &Expr) -> Vec<ColumnRef> {
-    let mut out = Vec::new();
-    collect_column_refs_rec(expr.syntax(), &mut out);
-    out
-}
-
-fn collect_column_refs_rec(node: &SyntaxNode, out: &mut Vec<ColumnRef>) {
-    if let Some(e) = Expr::cast(node.clone()) {
-        if let Some(cref) = ColumnRef::from_expr(&e) {
-            out.push(cref);
-            return;
-        }
-    }
-    for child in node.children() {
-        collect_column_refs_rec(&child, out);
-    }
 }
 
 #[cfg(test)]

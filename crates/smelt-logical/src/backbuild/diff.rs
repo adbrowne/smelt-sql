@@ -265,11 +265,11 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
 
     let mut before_conjuncts = Vec::new();
     if let Some(e) = &before_expr {
-        split_conjuncts(e, &mut before_conjuncts);
+        crate::analysis::expr_util::split_top_level_conjuncts(e, &mut before_conjuncts);
     }
     let mut after_conjuncts = Vec::new();
     if let Some(e) = &after_expr {
-        split_conjuncts(e, &mut after_conjuncts);
+        crate::analysis::expr_util::split_top_level_conjuncts(e, &mut after_conjuncts);
     }
 
     let mut matched_after = vec![false; after_conjuncts.len()];
@@ -307,24 +307,6 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
 fn is_top_level_or(expr: &Expr) -> bool {
     expr.as_binary()
         .is_some_and(|b| b.operator().as_deref() == Some("OR"))
-}
-
-/// Recursively split `expr` into its top-level `AND`-joined conjuncts.
-/// `AND` is left-associative in the grammar (`a AND b AND c` parses as
-/// `(a AND b) AND c`), so this recurses into both operands whenever the
-/// operator is `AND`; anything else (including a nested `OR`) is a single
-/// atomic conjunct, compared as a whole unit.
-fn split_conjuncts(expr: &Expr, out: &mut Vec<Expr>) {
-    if let Some(bin) = expr.as_binary() {
-        if bin.operator().as_deref() == Some("AND") {
-            if let (Some(l), Some(r)) = (bin.left(), bin.right()) {
-                split_conjuncts(&l, out);
-                split_conjuncts(&r, out);
-                return;
-            }
-        }
-    }
-    out.push(expr.clone());
 }
 
 // ===== Skeleton (FROM/JOIN tree, GROUP BY, dedup, and the post-processing

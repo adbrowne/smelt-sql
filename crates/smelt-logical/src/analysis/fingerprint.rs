@@ -40,7 +40,6 @@
 
 use std::collections::BTreeSet;
 
-use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr};
 
 use super::walk::{LeafInput, NodeCx, OpNode, QueryNode, QueryTree, RelationSource, Transfer};
@@ -215,36 +214,7 @@ fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
     }
 }
 
-/// Recursively collect every simple (possibly qualified) column reference
-/// inside `expr` — mirrors `skeleton_closure`'s private helper of the same
-/// shape (kept local; that one is not `pub`).
-fn collect_column_refs(expr: &Expr) -> Vec<ColumnRef> {
-    let mut out = Vec::new();
-    collect_column_refs_rec(expr.syntax(), &mut out);
-    out
-}
-
-fn collect_column_refs_rec(node: &SyntaxNode, out: &mut Vec<ColumnRef>) {
-    // Only a genuine `EXPRESSION` wrapper node is a candidate bare/qualified
-    // column reference — `Expr::cast` also accepts a `FUNCTION_CALL` node
-    // directly (so its callable body can be inspected as an expression),
-    // and `ColumnRef::from_expr` would then misread the function's own
-    // single-IDENT name token as a bare column reference. Restricting the
-    // cast attempt to `EXPRESSION` nodes avoids that false match while
-    // still finding every legitimate reference, which is always wrapped in
-    // one at the point it appears as a select-item or argument expression.
-    if node.kind() == smelt_parser::SyntaxKind::EXPRESSION {
-        if let Some(e) = Expr::cast(node.clone()) {
-            if let Some(cref) = ColumnRef::from_expr(&e) {
-                out.push(cref);
-                return;
-            }
-        }
-    }
-    for child in node.children() {
-        collect_column_refs_rec(&child, out);
-    }
-}
+use crate::analysis::expr_util::collect_column_refs;
 
 /// The result of scanning one non-simple-rename projected expression for
 /// provenance touching `source_ref`.
