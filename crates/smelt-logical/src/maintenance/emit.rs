@@ -304,21 +304,45 @@ pub fn emit_column_scoped_merge_suppressed(
 
 /// In-place field backfill (top-left with an empty input delta): `UPDATE`
 /// the stored region from its own columns; no upstream read at all.
+///
+/// `region` is `Some((partition_col, region))` for a maintenance run's
+/// region-scoped backfill, or `None` for an unregioned, unconditional
+/// `UPDATE` — the shape backbuild's B1/D1 self-read backfill needs (every
+/// row touched, no maintenance `Region` in scope yet). Backbuild's
+/// `backbuild::emit::emit_in_place_update` is a thin `None`-region wrapper
+/// over this function, not a second, forked emitter
+/// (`docs/plans/20260808-substrate-unification.md`, "emitter unification"
+/// — the two shapes are one statement family with an optional predicate,
+/// not two).
 pub fn emit_in_place_update(
     table: &str,
     assignments: &[(String, String)],
-    partition_col: &str,
-    region: &Region,
+    region: Option<(&str, &Region)>,
 ) -> Vec<String> {
+    vec![render_in_place_update(table, assignments, region)]
+}
+
+/// Shared string assembly behind [`emit_in_place_update`], exposed
+/// `pub(crate)` so `backbuild::emit::emit_in_place_update` can render the
+/// unregioned form directly without allocating (and immediately
+/// discarding) a one-element `Vec`.
+pub(crate) fn render_in_place_update(
+    table: &str,
+    assignments: &[(String, String)],
+    region: Option<(&str, &Region)>,
+) -> String {
     let sets = assignments
         .iter()
         .map(|(c, expr)| format!("{c} = {expr}"))
         .collect::<Vec<_>>()
         .join(", ");
-    vec![format!(
-        "UPDATE {table} SET {sets} WHERE {}",
-        region.predicate(None, partition_col)
-    )]
+    match region {
+        Some((partition_col, region)) => format!(
+            "UPDATE {table} SET {sets} WHERE {}",
+            region.predicate(None, partition_col)
+        ),
+        None => format!("UPDATE {table} SET {sets}"),
+    }
 }
 
 /// A target-scan slice predicate for a locality-admitted keyed fold

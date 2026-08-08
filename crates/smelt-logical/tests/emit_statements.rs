@@ -6,8 +6,8 @@
 //! in `crates/smelt-runtime/tests/statement_parity.rs`).
 
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    emit_recurrence_bound_probe, MaintenanceDialect, Region,
+    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
+    emit_keyed_fold, emit_recurrence_bound_probe, MaintenanceDialect, Region,
 };
 
 #[test]
@@ -462,4 +462,43 @@ fn recurrence_bound_probe_spark_dialect_uses_string_and_concat_ws() {
         "Spark dialect must never emit STRING_AGG (not a Spark SQL builtin): {}",
         stmt.sql
     );
+}
+
+/// Substrate unification (`docs/plans/20260808-substrate-unification.md`
+/// Phase 6): backbuild's unregioned in-place `UPDATE` is not a second,
+/// forked emitter — it is this module's [`emit_in_place_update`] called
+/// with an absent region. Byte-identical by construction, asserted here
+/// rather than assumed.
+#[test]
+fn backbuild_unregioned_update_is_the_maintenance_emitter() {
+    let assignments = vec![(
+        "referrer_domain".to_string(),
+        "regexp_extract(referrer, '://([^/]+)', 1)".to_string(),
+    )];
+
+    let backbuild_sql =
+        smelt_logical::backbuild::emit::emit_in_place_update("clickstream", &assignments);
+    let maintenance_sql = emit_in_place_update("clickstream", &assignments, None);
+
+    assert_eq!(
+        maintenance_sql.len(),
+        1,
+        "an unregioned in-place update is still exactly one statement"
+    );
+    assert_eq!(backbuild_sql, maintenance_sql[0]);
+}
+
+/// The regioned form still carries the `WHERE` clause — the `Option<Region>`
+/// generalization must not silently drop it.
+#[test]
+fn maintenance_regioned_update_still_carries_the_where_clause() {
+    let region = Region {
+        start: "DATE '2026-01-01'".to_string(),
+        end: "DATE '2026-02-01'".to_string(),
+    };
+    let assignments = vec![("total".to_string(), "price * qty".to_string())];
+    let stmts = emit_in_place_update("t", &assignments, Some(("event_date", &region)));
+    assert_eq!(stmts.len(), 1);
+    assert!(stmts[0].starts_with("UPDATE t SET total = price * qty WHERE"));
+    assert!(stmts[0].contains("event_date >= DATE '2026-01-01'"));
 }

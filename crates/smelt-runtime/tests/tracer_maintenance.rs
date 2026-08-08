@@ -347,11 +347,13 @@ fn ex36_in_place_field_backfill_equals_full_refresh_of_the_new_definition() {
                 "referrer_domain".to_string(),
                 "regexp_extract(referrer, '://([^/]+)', 1)".to_string(),
             )],
-            "event_date",
-            &Region {
-                start: day("2026-01-01"),
-                end: day("2026-01-03"),
-            },
+            Some((
+                "event_date",
+                &Region {
+                    start: day("2026-01-01"),
+                    end: day("2026-01-03"),
+                },
+            )),
         ),
     );
     let v2_body = "SELECT event_id, event_date, referrer, \

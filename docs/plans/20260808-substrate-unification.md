@@ -65,7 +65,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | 3     | done     | 9073e141 | 2026-08-08 |
 | 4     | done     | 34529973 | 2026-08-08 |
 | 5     | done     | af964350 | 2026-08-08 |
-| 6     | pending  |        |      |
+| 6     | done     | pending-review | 2026-08-08 |
 
 ---
 
@@ -298,6 +298,23 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
   between them (the trivia-equality primitive, `analysis::expr_util::same_modulo_trivia`), and
   Phase 5 additionally collapsed `classify.rs`'s own second copy
   (`expr_equal_modulo_trivia`) onto the same primitive.
+- **Phase 6 — the widened `walk_coverage` and `statement_parity` no-authoring gates found zero
+  new sites, contrary to the Goal line's estimate.** The Context audit's "~50 `maintenance/`
+  sites" count (and the Phase 6 Goal line's `backbuild/classify.rs:247`, already deleted in
+  Phase 5) turns out to have counted `.contains("` occurrences across whole files, not
+  production code: every occurrence actually present in `maintenance/{locality,choice,mod}.rs`
+  and `maintenance/emit.rs` after Phases 1–5 landed is inside a `#[cfg(test)]` block (test
+  assertions like `message.contains("Nearest missing fact")`), which
+  `crates/smelt-logical/tests/walk_coverage.rs`'s own production-source truncation already
+  excludes by design (mirroring `hardening_budget.rs`). Widening `SCANNED_DIRS` to
+  `{maintenance, backbuild}` therefore required no per-file tagging, no gate-pattern
+  tightening, and surfaced no free-text scan feeding admission to report. Symmetrically,
+  widening `statement_parity`'s `no_maintenance_statement_authoring_outside_the_emitter` scan to
+  `smelt-logical/src` (excluding the two emitter modules) found no forbidden statement shape
+  authored anywhere else in the crate — every `DELETE FROM `/`MERGE INTO `/`CREATE TEMP TABLE `
+  occurrence outside the emitters is itself inside `maintenance/emit.rs` or
+  `backbuild/emit.rs`. Both gates are genuinely green at the widened scope, not green because a
+  pattern was loosened to stop matching.
 
 ## Verification
 

@@ -37,6 +37,8 @@ fn repo_root() -> PathBuf {
 const SCANNED_DIRS: &[&str] = &[
     "crates/smelt-logical/src/analysis",
     "crates/smelt-logical/src/rules",
+    "crates/smelt-logical/src/maintenance",
+    "crates/smelt-logical/src/backbuild",
 ];
 
 /// Files under `SCANNED_DIRS` excluded from the gate, each with a reason.
@@ -105,22 +107,96 @@ fn is_fn_signature(line: &str) -> bool {
     t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn ")
 }
 
-/// Production lines (everything strictly before the file's `#[cfg(test)]`
-/// line, or the whole file if absent) plus whether the module-level `//!`
-/// doc block carries a classification tag.
+/// Production lines — every line in the file *except* those inside a
+/// `#[cfg(test)]`-annotated item's own span — plus whether the
+/// module-level `//!` doc block carries a classification tag.
+///
+/// Deliberately **not** "everything strictly before the first
+/// `#[cfg(test)]` line": that truncation assumption is false for at least
+/// one file in this crate (`maintenance/propagate.rs` has a
+/// `#[cfg(test)] mod day_interval_tests { .. }` block at line 85, followed
+/// by ~450 lines of production code — `normalize` and friends — followed
+/// by two more test modules). A file may interleave test modules and
+/// production code any number of times; each `#[cfg(test)]` span is
+/// excluded individually via [`cfg_test_spans`], and everything else is
+/// scanned, regardless of how many test blocks precede it.
 struct ProductionSource {
     lines: Vec<String>,
     module_doc_is_classified: bool,
 }
 
+/// Line-index `(start, end)` spans (inclusive, 0-based) of every
+/// `#[cfg(test)]`-annotated item in `lines`: the attribute line itself
+/// through the closing brace of the item it annotates, tracked by brace
+/// depth from that item's own first `{`. Mirrors [`function_spans`]'s
+/// brace-counting idiom, applied to attribute-marked items instead of `fn`
+/// signatures. A same-line-terminated item with no braces at all (e.g. a
+/// bare `#[cfg(test)] mod tests;` declaration) closes at its own
+/// semicolon — not used by this crate's style today, but handled so an
+/// unbalanced file fails loud (an unterminated span) rather than silently
+/// swallowing the rest of the file.
+fn cfg_test_spans(lines: &[String]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if !lines[i].trim_start().starts_with("#[cfg(test)]") {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut depth = 0i32;
+        let mut opened = false;
+        let mut end = start;
+        let mut j = start;
+        while j < lines.len() {
+            let line = &lines[j];
+            for ch in line.chars() {
+                match ch {
+                    '{' => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            end = j;
+            if opened && depth <= 0 {
+                break;
+            }
+            if !opened && line.trim_end().ends_with(';') {
+                // A brace-less item (e.g. `mod tests;`) — ends here.
+                break;
+            }
+            j += 1;
+        }
+        spans.push((start, end));
+        i = end + 1;
+    }
+    spans
+}
+
+fn is_within_any_span(spans: &[(usize, usize)], i: usize) -> bool {
+    spans.iter().any(|(start, end)| i >= *start && i <= *end)
+}
+
+/// Blanks every line inside a `#[cfg(test)]` span to an empty string
+/// rather than dropping it, so `lines[i]` still corresponds to the
+/// original file's 1-based line `i + 1` — `unclassified_raw_scans` reports
+/// that number directly, and a shifted index would point a violation at
+/// the wrong line the moment a file has more than one test span.
 fn load_production_source(path: &Path) -> ProductionSource {
     let content = fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
-    let mut lines = Vec::new();
+    let all_lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let test_spans = cfg_test_spans(&all_lines);
+
+    let mut lines = Vec::with_capacity(all_lines.len());
     let mut module_doc_is_classified = false;
-    for line in content.lines() {
-        if line.trim_start().starts_with("#[cfg(test)]") {
-            break;
+    for (i, line) in all_lines.iter().enumerate() {
+        if is_within_any_span(&test_spans, i) {
+            lines.push(String::new());
+            continue;
         }
         if line.trim_start().starts_with("//!") {
             let lower = line.to_lowercase();
@@ -128,7 +204,7 @@ fn load_production_source(path: &Path) -> ProductionSource {
                 module_doc_is_classified = true;
             }
         }
-        lines.push(line.to_string());
+        lines.push(line.clone());
     }
     ProductionSource {
         lines,
@@ -295,6 +371,135 @@ fn detects_an_unclassified_injected_raw_scan() {
         2,
         "expected both unclassified scans (`//` is not `///`) to be flagged, got: {violations:?}"
     );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// Regression lock for the "first-`#[cfg(test)]`-truncates-the-rest" blind
+/// spot (review finding on `docs/plans/20260808-substrate-unification.md`
+/// Phase 6): `maintenance/propagate.rs`'s real shape is a
+/// `#[cfg(test)] mod day_interval_tests { .. }` block, then ~450 lines of
+/// production code (`normalize` and friends), then two more test modules.
+/// `load_production_source` must scan the production span that sits
+/// *between* two test spans, not just "everything before the first
+/// `#[cfg(test)]` line".
+#[test]
+fn load_production_source_scans_production_code_interleaved_between_cfg_test_blocks() {
+    let dir = std::env::temp_dir().join(format!(
+        "smelt-walk-coverage-probe-interleaved-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create temp probe dir");
+    let probe = dir.join("propagate_shape.rs");
+    fs::write(
+        &probe,
+        "#[cfg(test)]\n\
+         mod day_interval_tests {\n\
+         \x20   #[test]\n\
+         \x20   fn probe() {\n\
+         \x20       assert!(true);\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         fn normalize(x: &str) -> bool {\n\
+         \x20   x.to_lowercase().contains(\"group by\")\n\
+         }\n\
+         \n\
+         #[cfg(test)]\n\
+         mod later_tests {\n\
+         \x20   #[test]\n\
+         \x20   fn probe2() {\n\
+         \x20       assert!(true);\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write probe fixture");
+
+    let source = load_production_source(&probe);
+    let joined = source.lines.join("\n");
+
+    assert!(
+        joined.contains("fn normalize"),
+        "expected the production fn sandwiched between two cfg(test) blocks to be \
+         scanned, got:\n{joined}"
+    );
+    assert!(
+        joined.contains("x.to_lowercase().contains(\"group by\")"),
+        "expected the production scan site itself to survive exclusion, got:\n{joined}"
+    );
+    assert!(
+        !joined.contains("day_interval_tests"),
+        "expected the first cfg(test) block's own content to be excluded, got:\n{joined}"
+    );
+    assert!(
+        !joined.contains("later_tests"),
+        "expected the second cfg(test) block's own content to be excluded, got:\n{joined}"
+    );
+    assert!(
+        !joined.contains("assert!(true)"),
+        "expected every test-module body line to be excluded, got:\n{joined}"
+    );
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+/// End-to-end twin of the span test above: the full gate
+/// (`unclassified_raw_scans`) must actually flag the unclassified scan
+/// sitting in the interleaved production span, and must not flag anything
+/// inside either surrounding test module.
+#[test]
+fn gate_detects_a_violation_interleaved_between_two_cfg_test_blocks() {
+    let dir = std::env::temp_dir().join(format!(
+        "smelt-walk-coverage-probe-interleaved-gate-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(&dir).expect("create temp probe dir");
+    let probe = dir.join("propagate_shape_gate.rs");
+    fs::write(
+        &probe,
+        "#[cfg(test)]\n\
+         mod day_interval_tests {\n\
+         \x20   #[test]\n\
+         \x20   fn probe() {\n\
+         \x20       assert!(\"y\".to_lowercase().contains(\"should not be flagged\"));\n\
+         \x20   }\n\
+         }\n\
+         \n\
+         fn normalize(x: &str) -> bool {\n\
+         \x20   x.to_lowercase().contains(\"group by\")\n\
+         }\n\
+         \n\
+         #[cfg(test)]\n\
+         mod later_tests {\n\
+         \x20   #[test]\n\
+         \x20   fn probe2() {\n\
+         \x20       assert!(\"z\".to_lowercase().contains(\"also not flagged\"));\n\
+         \x20   }\n\
+         }\n",
+    )
+    .expect("write probe fixture");
+
+    let violations = unclassified_raw_scans(&probe);
+    assert_eq!(
+        violations.len(),
+        1,
+        "expected exactly one violation (the interleaved production scan), got: {violations:?}"
+    );
+    assert!(
+        violations[0]
+            .1
+            .contains("x.to_lowercase().contains(\"group by\")"),
+        "expected the flagged line to be the production scan, got: {violations:?}"
+    );
+    // The flagged line number must point at the actual production line in
+    // the file, not a shifted index from dropping the preceding test span.
+    let expected_line_no = std::fs::read_to_string(&probe)
+        .expect("reread probe")
+        .lines()
+        .position(|l| l.contains("x.to_lowercase().contains(\"group by\")"))
+        .map(|idx| idx + 1)
+        .expect("scan line present in probe");
+    assert_eq!(violations[0].0, expected_line_no);
 
     let _ = fs::remove_dir_all(&dir);
 }

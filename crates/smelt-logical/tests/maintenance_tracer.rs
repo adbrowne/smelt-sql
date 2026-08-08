@@ -492,8 +492,7 @@ fn ex36_in_place_update_reads_nothing_upstream() {
             "referrer_domain".to_string(),
             "regexp_extract(referrer, '://([^/]+)', 1)".to_string(),
         )],
-        "event_date",
-        &region,
+        Some(("event_date", &region)),
     );
     let sql = &stmts[0];
     assert!(sql.starts_with("UPDATE clickstream SET referrer_domain ="));

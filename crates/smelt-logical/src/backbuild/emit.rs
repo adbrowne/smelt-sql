@@ -43,19 +43,14 @@ pub fn emit_alter_drop_column(table: &str, column: &str) -> String {
     format!("ALTER TABLE {table} DROP COLUMN {column}")
 }
 
-/// `UPDATE t SET c1 = e1, c2 = e2, ...;` — the unregioned sibling of
-/// `maintenance::emit::emit_in_place_update` (which requires a maintenance
-/// `Region` bound for a partition-scoped backfill). Backbuild's B1/D1
-/// self-read backfill touches every row unconditionally — there is no
-/// region predicate to render — so this is its own, simpler emitter rather
-/// than a fork of the maintenance one.
+/// `UPDATE t SET c1 = e1, c2 = e2, ...;` — backbuild's B1/D1 self-read
+/// backfill touches every row unconditionally, so this is
+/// `maintenance::emit::emit_in_place_update` called with an absent region,
+/// not a forked sibling emitter
+/// (`docs/plans/20260808-substrate-unification.md`, "emitter unification":
+/// the two shapes are one statement family with an optional predicate).
 pub fn emit_in_place_update(table: &str, assignments: &[(String, String)]) -> String {
-    let sets = assignments
-        .iter()
-        .map(|(c, expr)| format!("{c} = {expr}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("UPDATE {table} SET {sets}")
+    crate::maintenance::emit::render_in_place_update(table, assignments, None)
 }
 
 /// `UPDATE t SET c1 = e1, ... FROM <upstream> u WHERE t.k1 = u.k1 AND

@@ -2834,6 +2834,23 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
     }
 }
 
+/// `src/`-relative file paths excluded from the scan entirely: the two
+/// single-owner emitter modules (`docs/specs/architecture.md`
+/// §"Constraints & Invariants" item 12 — every maintenance/backbuild
+/// statement is the output of a pure emitter in one of these two files;
+/// scanning them for the shapes they themselves author would be circular).
+const EMITTER_MODULE_EXCLUSIONS: &[&str] = &[
+    "smelt-logical/src/maintenance/emit.rs",
+    "smelt-logical/src/backbuild/emit.rs",
+];
+
+fn is_emitter_module(path: &Path) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    EMITTER_MODULE_EXCLUSIONS
+        .iter()
+        .any(|suffix| normalized.ends_with(suffix))
+}
+
 fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -2855,18 +2872,30 @@ fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit
             if path.file_name().map(|n| n == "tests.rs").unwrap_or(false) {
                 continue;
             }
+            if is_emitter_module(&path) {
+                continue;
+            }
             scan_statement_authoring_file(&path, hits);
         }
     }
 }
 
 /// Structural gate: `DELETE FROM`/`MERGE INTO`/`CREATE TABLE {}.{} AS`-shaped
-/// statement text must not be constructed anywhere in `smelt-backend*/src`
-/// or `smelt-runtime/src` production code outside the single-owner emitters
-/// in `crates/smelt-logical/src/maintenance/emit.rs` (which is not scanned
-/// — it is not a `smelt-backend*` or `smelt-runtime` crate). Backends
-/// execute emitted `StatementGroup`s (`Backend::execute_statement_group`);
-/// they never author maintenance-statement text of their own
+/// statement text must not be constructed anywhere in `smelt-backend*/src`,
+/// `smelt-runtime/src`, or `smelt-logical/src` production code outside the
+/// two single-owner emitter modules
+/// (`crates/smelt-logical/src/maintenance/emit.rs`,
+/// `crates/smelt-logical/src/backbuild/emit.rs` —
+/// [`EMITTER_MODULE_EXCLUSIONS`], excluded rather than unscanned entirely so
+/// a *new* statement-shaped file dropped anywhere else in `smelt-logical`
+/// is still caught). `smelt-logical` joined the scan in
+/// `docs/plans/20260808-substrate-unification.md` ("emitter unification and
+/// gate extension") — the no-authoring rule already applied crate-wide in
+/// spec (`docs/specs/architecture.md` §"Constraints & Invariants" item 12:
+/// "backends execute, never author"), this widens the structural gate to
+/// match. Backends execute emitted `StatementGroup`s
+/// (`Backend::execute_statement_group`); they never author
+/// maintenance-statement text of their own
 /// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 #[test]
 fn no_maintenance_statement_authoring_outside_the_emitter() {
@@ -2878,6 +2907,7 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
         "smelt-backend-spark",
         "smelt-backends",
         "smelt-runtime",
+        "smelt-logical",
     ] {
         scan_statement_authoring_dir(&crates_dir.join(crate_name).join("src"), &mut hits);
     }
