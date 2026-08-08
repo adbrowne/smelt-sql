@@ -625,11 +625,16 @@ pub fn arb_adversarial_recipe() -> impl Strategy<Value = AdversarialLeafRecipe> 
 /// `examples/timeseries/models/daily_events_enriched.sql` shape): one
 /// append-only clocked fact source (`events(d, id, val)`) joined 1:1 to one
 /// unclocked `mutable_snapshot` dimension source
-/// ([`SourceRecipe::mutable_dimension`]), producing a
-/// `ColumnScopedMerge`-eligible cell (MP11) for the dimension-sourced `attr`
-/// column group, alongside a `{d, id, val}` group never sensitive to the
-/// dimension's mutations. Self-renders like [`AdversarialLeafRecipe`] — the
-/// join body sits outside [`BodyConstruct`]'s exhaustive match, and
+/// ([`SourceRecipe::mutable_dimension`]), whose key is read in the join's
+/// `ON` predicate (a row-admission read) and whose `attr` feeds the select
+/// list. Per `incremental_models.md` §"The plan matrix" the ON-read
+/// makes the dimension-sourced `attr` column group membership-sensitive, so
+/// the derived plan carries an `UpstreamMutation(dim)` cell assigned
+/// `Technique::DeleteInsert` (the recompute family), never
+/// `Technique::ColumnScopedMerge` — mirroring
+/// `gate.rs::keyed_enriched_recipe_admits_membership_recompute`'s outcome
+/// for the same join shape. Self-renders like [`AdversarialLeafRecipe`] —
+/// the join body sits outside [`BodyConstruct`]'s exhaustive match, and
 /// `render.rs` is outside this phase's edit scope (plan Critical files).
 #[derive(Debug, Clone)]
 pub struct MutableEnrichedRecipe {

@@ -16,18 +16,19 @@
 //!   `verdict.rs::adversarial_leaves_refuse_or_collapse_conservatively`
 //!   already asserts holds for every case, restated here as a per-id
 //!   staleness ledger.
-//! - **`KnownBug` structural entries** — the two production gaps this plan
+//! - **`KnownBug` structural entries** — a production gap this plan
 //!   discovered and deliberately did not fix (this plan's own "Deferred
-//!   during implementation" section): the `maintenance.cells[].technique`
-//!   pin is parsed but never wired into a real call site, and the
-//!   incremental (windowed) execute path never persists a deployed-schema
-//!   snapshot. Neither is reachable through a generated case today (the
-//!   pin has no call site to observe; the schema-evolution gap is
-//!   deliberately routed around by every Phase 9 case), so each is verified
+//!   during implementation" section): the incremental (windowed) execute
+//!   path never persists a deployed-schema snapshot. It is not reachable
+//!   through a generated case today (the schema-evolution gap is
+//!   deliberately routed around by every Phase 9 case), so it is verified
 //!   by a structural check against the exact call site named in the plan —
-//!   the moment either gap closes, the check stops matching and this test
+//!   the moment the gap closes, the check stops matching and this test
 //!   reports it as stale, the signal to delete the entry and file the fix
-//!   as its own change.
+//!   as its own change. (A sibling entry, `known_bug_technique_pin_inert`,
+//!   was closed once `resolve_cell_choice`/`effective_override` wired the
+//!   frontmatter pin ladder into the live call site — see
+//!   `crates/smelt-runtime/src/maintenance_driver.rs`.)
 //!
 //! A registry entry that never fired over the deterministic sample is
 //! reported (`eprintln!`), never a test failure — warn-level by design, so
@@ -97,14 +98,6 @@ fn registry() -> Vec<DivergenceEntry> {
             status: DivergenceStatus::Documented,
         },
         DivergenceEntry {
-            id: "known_bug_technique_pin_inert",
-            description: "maintenance.cells[].technique (CellTechnique) is parsed and its \
-                resolvers are unit-tested, but resolve_live_column_scoped_cell's one production \
-                call site hardcodes pin: None — a pin set in frontmatter has zero effect on which \
-                technique executes. See this plan's 'Deferred during implementation' section.",
-            status: DivergenceStatus::KnownBug,
-        },
-        DivergenceEntry {
             id: "known_bug_incremental_path_skips_schema_snapshot",
             description: "save_deployed_schema is called only from execute.rs's full-refresh \
                 branch, never the incremental (windowed DELETE+INSERT) branch, so \
@@ -157,23 +150,13 @@ fn fired_adversarial_ids() -> BTreeSet<&'static str> {
     fired
 }
 
-/// Structurally verify the two `KnownBug` entries still reproduce — grep
+/// Structurally verify each `KnownBug` entry still reproduces — grep
 /// the exact call site each entry names for the literal text that makes the
-/// gap true today. When either gap closes, the matching text disappears and
+/// gap true today. When a gap closes, the matching text disappears and
 /// this returns `false`, which `divergence_registry_staleness_report`
 /// reports (never fails) as a stale entry to prune.
 fn known_bug_still_reproduces(id: &str) -> bool {
     match id {
-        "known_bug_technique_pin_inert" => {
-            // `resolve_live_column_scoped_cell`'s one production call site
-            // (`crates/smelt-runtime/src/maintenance_driver.rs`) passes a
-            // literal `None` pin to `resolve_cell_technique` — never a
-            // frontmatter-derived value.
-            let src = include_str!("../../../smelt-runtime/src/maintenance_driver.rs");
-            src.contains(
-                "let resolved = resolve_cell_technique(\n            &result.plan,\n            &trigger,\n            None,",
-            )
-        }
         "known_bug_incremental_path_skips_schema_snapshot" => {
             // `save_deployed_schema` is called from exactly one place in
             // `execute.rs` (the full-refresh branch) — never a second call
