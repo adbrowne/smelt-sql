@@ -1,5 +1,42 @@
 # TODO
 
+## `ColumnScopedMerge` reachability gap + pin/override silent no-op on membership-sensitive `grain: partition` cells (2026-08-08)
+
+`docs/plans/20260808-membership-sensitivity.md` Phase 3 surfaced (confirmed empirically while
+rewriting `crates/smelt-cli/tests/{bakeoff,bakeoff_seam,maintenance_pins,explain_model,
+explain_show_sql}.rs`) that Phase 1's membership-sensitivity derivation left two real gaps:
+
+1. **`Technique::ColumnScopedMerge` is unreachable from any currently-shipped SQL shape.** Any
+   `JOIN`'s `ON` predicate (inner or left) reading a `MutableSnapshot` source makes EVERY column
+   group of that `SELECT` membership-sensitive (`Technique::DeleteInsert`), not only the columns
+   the dimension itself contributes — membership sensitivity is row-scoped, not per-column
+   (`membership_sensitivity_sources`, `crates/smelt-logical/src/maintenance/grouping.rs`). There is
+   no currently-shipped shape where a mutable, row-admission-joined dimension is ALSO read in a
+   select item with *only* value sensitivity toward the same source (Phase 2's own note). Knock-on
+   effect: `smelt bakeoff`'s measured/`--pin` code path (`run_bakeoff`'s branch past the
+   `candidates.is_empty()` early return, `crates/smelt-cli/src/bakeoff.rs`) has **zero reachable
+   test coverage** anywhere in the crate — `admitted_family` maps `Technique::DeleteInsert` to
+   `None`.
+2. **A `grain: partition` model's `DeleteInsert` membership cell has no live runtime dispatch at
+   all** (`resolve_live_membership_recompute_cell`'s own doc comment,
+   `crates/smelt-runtime/src/maintenance_driver.rs`: left to the plain unconditional region
+   `DELETE`+`INSERT` batch loop). Consequence: a frontmatter `cells[].technique`/`cells[].prefer`
+   pin AND a request-scope `ExecuteRequest::technique_overrides` entry are now BOTH silently never
+   consulted for that cell — an inadmissible pin that used to refuse loudly
+   (`ChoiceRefusal`/`MaintenanceUnboundedFootprint`) now succeeds silently instead.
+
+Neither is a deliberate design choice; both are inherited fallout of Phase 1's derivation swap that
+nothing in Phases 1-3's critical-file scope was positioned to fix (fixing #1 needs a genuinely new
+SQL shape or a relaxed derivation rule — arguably the "Outer-join membership semantics"/"Monotone-
+join admission relaxation" deferred items in that plan's Scope section; fixing #2 needs a new
+runtime dispatch path for `grain: partition` DeleteInsert membership cells, symmetric to Phase 2's
+keyed-path wiring). Tracked here rather than silently accepted. Candidate follow-up: extend
+`docs/plans/20260808-membership-sensitivity.md`'s successor work (or a new plan) to either (a) wire
+a `grain: partition` live dispatch for membership cells so pins/overrides are honored (refuse or
+apply, never silently ignore), and/or (b) reassess whether `ColumnScopedMerge`'s bakeoff/pin
+machinery should be retired as dead code now that its only reachable shape is gone, rather than kept
+around with zero test coverage.
+
 ## `maintenance::grouping`'s column-ref collector keeps a known under-collection bug (2026-08-08)
 
 Phase 2 of `docs/plans/20260808-substrate-unification.md` unified five crate-wide copies of

@@ -662,6 +662,129 @@ pub fn emit_staged_candidate_conditional(
     }
 }
 
+/// The staged-candidate conditional `DELETE`+`INSERT`, **full-recompute**
+/// variant (`docs/plans/20260808-membership-sensitivity.md` Phase 3): the
+/// membership-sensitive counterpart of [`emit_staged_candidate_conditional`]
+/// above, for the single production caller whose `candidate_select` is
+/// always the model's own FULL (unwindowed) recompute — never a
+/// region/window-scoped delta
+/// (`smelt-runtime`'s `execute_staged_membership_recompute`). Because the
+/// candidate is genuinely the model's entire current state, a stored row
+/// whose key is absent from it is not "out of this run's touched region" —
+/// it has genuinely **departed** (e.g. the dimension row a fact joined on
+/// was itself deleted, so the fact no longer appears in the recompute at
+/// all), and must be deleted.
+///
+/// This is a distinct emitter, not a modified [`emit_staged_candidate_conditional`],
+/// because that function's own "absence = out of this run's touched region,
+/// leave untouched" contract is *correct* and load-bearing for its own
+/// region/window-scoped callers (`crates/smelt-runtime/tests/
+/// statement_parity.rs::staged_candidate_conditional_statements_come_from_the_emitter`'s
+/// "user 3 … must be left untouched entirely"; `crates/smelt-cli/tests/
+/// maintenance_conformance/gate.rs::keyed_pool_t1_t2_and_full_refresh_agree_at_fixed_s`'s
+/// "device 3 (absent from the delta) must never be touched") — conflating
+/// the two absence semantics into one function would silently break one
+/// caller to fix the other. Single-owner discipline
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)")
+/// is preserved by keeping both variants declared side by side in this
+/// module, sharing every predicate-building helper's *shape*.
+///
+/// Adds one more transactional step to [`emit_staged_candidate_conditional`]'s
+/// five:
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `DELETE FROM <table> USING <staged_relation> WHERE <key join> AND
+///    (<IS DISTINCT FROM over compared_columns>)` — matched-and-changed rows.
+/// 4. **`DELETE FROM <table> WHERE NOT EXISTS (SELECT 1 FROM
+///    <staged_relation> WHERE <key join>)`** — departed rows: every stored
+///    row whose key does not appear in the staged candidate at all. A
+///    no-op (deletes zero rows) whenever every stored key is still present
+///    in the candidate — the change-suppression contract for step 3's
+///    matched-unchanged rows is untouched by this step, since it never
+///    matches a still-present key.
+/// 5. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — reinserts rows
+///    deleted by step 3, plus brand-new keys. A row deleted by step 4
+///    (departed) is never reinserted here: its key is absent from
+///    `<staged_relation>` by construction, so it is not among `s.*`.
+/// 6. `DROP TABLE <staged_relation>`
+///
+/// The whole group runs in one transaction, same as
+/// [`emit_staged_candidate_conditional`].
+///
+/// # Panics
+/// Same contract as [`emit_staged_candidate_conditional`]: panics if `key`
+/// or `compared_columns` is empty.
+pub fn emit_staged_candidate_conditional_recompute(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_staged_candidate_conditional_recompute requires a non-empty row identity (key) \
+         for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_staged_candidate_conditional_recompute requires a non-empty compared-column set \
+         for {table}"
+    );
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_table_s_departed = key
+        .iter()
+        .map(|k| format!("{table}.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete_changed = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression})"
+    );
+    let delete_departed = format!(
+        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM {staged_relation} AS s WHERE \
+         {key_join_table_s_departed})"
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete_changed),
+            MaintenanceStatement::new(delete_departed),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
 /// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
 /// §"Key temporal locality", route 3): a read-only query the caller

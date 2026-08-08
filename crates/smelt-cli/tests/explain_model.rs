@@ -3,7 +3,6 @@
 //! to another maintained model derives a creation-trigger cell clocked by the
 //! upstream's own `timeseries:` declaration.
 
-use std::fs;
 use std::path::Path;
 
 use smelt_cli::argument_resolution::{compute_scope, resolve_argument};
@@ -839,142 +838,202 @@ SELECT d, amount FROM smelt.sources.payments
 // on model edges", §"What the composed shape uniquely enables" — "Exact
 // key→partition dirt projection").
 //
-// `examples/timeseries/models/daily_events_enriched.sql` is the real fixture
-// already exercising a `Technique::ColumnScopedMerge` cell (a single-input
-// mutable dimension enrichment) — the only technique family D2 wired
-// observed-delta recording for. No fixture today combines that technique
-// with the composed (key + time) shape in one model (`docs/specs/
-// incremental_models.md` §Known Divergences: keyed-fold/staged-candidate
-// recording is still unbuilt, and `daily_events_enriched` itself has no
-// identity axis), so the recording-status assertion and the
-// projection-form assertion are exercised over their own real fixtures
-// rather than a single model — recording status off the `ColumnScopedMerge`
-// cell here, projection form off the composed `user_daily_spend` (route 1)
-// and `silver.events_deduped` (route 3) fixtures below.
+// `examples/timeseries/models/daily_events_enriched.sql` USED to be the
+// real fixture exercising a `Technique::ColumnScopedMerge` cell (a
+// single-input mutable dimension enrichment) — the only technique family D2
+// wired observed-delta recording for. As of `docs/plans/
+// 20260808-membership-sensitivity.md` Phase 1, `raw.users` being read in
+// that model's `JOIN`'s own `ON` predicate makes it membership-sensitive
+// instead (`Technique::DeleteInsert`), so NO fixture in this workspace
+// reaches `ColumnScopedMerge` anymore (Phase 2's own reachability verdict);
+// the recording-status test below is now built over a synthetic
+// `MaintenancePlan`, not a real fixture — see its own doc comment. The
+// projection-form assertion still uses real fixtures (route 1's
+// `user_daily_spend`, route 3's `silver.events_deduped`), unaffected by
+// this change.
 ///
-/// `daily_events_enriched` declares `batched.unique_key: [event_id]`, not a
-/// top-level `unique_key:` — and `derive::ModelInputs::declared_unique_key`
-/// only ever reads the top-level field for a `Grain::Partition` model
-/// (`crates/smelt-logical/src/maintenance/derive.rs`), so the `batched:`
-/// block's key never reaches P2 row-identity derivation here. With no
-/// provable FD key either (the fact+dimension join is not fan-out-free
-/// enough for `derive::row_identity`'s SQL-side proof), this cell's own
-/// `region key:` is genuinely `WholeRow` — the report already said as much
-/// ("no identity axis") before this test was corrected, but the
-/// recording-status line still printed "yes" unconditionally for every
-/// `ColumnScopedMerge` cell regardless of identity. It now correctly prints
-/// "no": a `WholeRow` cell's matched arm always falls back to unconditional
-/// rewrite at runtime (`choice::resolve_write_suppression`), so nothing is
-/// ever recorded for it.
+/// **Post-`docs/plans/20260808-membership-sensitivity.md` Phase 3 note:**
+/// `daily_events_enriched` (the real fixture) no longer derives ANY
+/// `Technique::ColumnScopedMerge` cell at all — `raw.users` is read in the
+/// enrichment `JOIN`'s own `ON` predicate, a row-admission read, which
+/// makes EVERY column group's cell for that trigger membership-sensitive
+/// (`Technique::DeleteInsert`), never `ColumnScopedMerge` (Phase 1's review
+/// checklist: "membership cells cannot receive ColumnScopedMerge"). Per
+/// Phase 2's own reachability verdict, no fixture in this workspace reaches
+/// `ColumnScopedMerge` anymore — so this test (which exists to check the
+/// EXPLAIN PRINTING logic for a `ColumnScopedMerge` cell with `WholeRow` row
+/// identity, `crates/smelt-cli/src/explain.rs` lines ~353-364) is rewritten
+/// to build its `MaintenancePlan` synthetically, mirroring
+/// `write_variant_explain_surface`'s own pattern below — the printing logic
+/// is independent of whether real SQL derivation can currently produce this
+/// shape, and constructing a fictitious SQL fixture to keep the technique
+/// artificially reachable would misrepresent what the derivation actually
+/// admits today.
 #[test]
 fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
-    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/timeseries")
-        .canonicalize()
-        .expect("examples/timeseries exists");
+    use std::collections::BTreeSet;
 
-    let report = build_report_for(&project_dir, "daily_events_enriched")
-        .expect("daily_events_enriched has a maintenance plan");
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::maintenance::{
+        ColumnGroup, Corner, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity,
+        RowIdentityVerdict, Technique, Trigger,
+    };
+
+    let cell = PlanCell {
+        group: "{user_name}".to_string(),
+        trigger: Trigger::UpstreamMutation {
+            source: "raw.users".to_string(),
+        },
+        corner: Corner::ColumnMerge,
+        technique: Technique::ColumnScopedMerge,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+    };
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        column_groups: vec![ColumnGroup {
+            columns: vec!["user_name".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+    };
+    let report = build_maintenance_plan_report(
+        "daily_events_enriched",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+    )
+    .expect("build_maintenance_plan_report");
 
     assert_eq!(
         report
             .matches("observed-delta recording: yes (change-suppressed column-scoped MERGE)")
             .count(),
         0,
-        "daily_events_enriched's ColumnScopedMerge cell has WholeRow row identity — it must \
-         never claim recording: yes: {report}"
+        "a ColumnScopedMerge cell with WholeRow row identity must never claim recording: yes: \
+         {report}"
     );
     assert_eq!(
         report.matches("observed-delta recording: no").count(),
         1,
         "expected the negative recording row exactly once, on the model's one \
-         ColumnScopedMerge cell, and never on its DeleteInsert cells (which print no recording \
-         row at all): {report}"
+         ColumnScopedMerge cell: {report}"
     );
 }
 
 /// A `ColumnScopedMerge` cell whose P2 row identity resolves `WholeRow`
-/// (no `batched.unique_key:` declared, and the join is not fan-out-free
-/// enough for `derive::row_identity`'s own FD proof to establish one either)
 /// must print "no" for observed-delta recording, never "yes" — a
 /// `WholeRow` cell has no per-row join identity to compare on, so
 /// `choice::resolve_write_suppression` always fail-closes to
 /// `Unconditional` for it (`crates/smelt-logical/src/maintenance/
 /// choice.rs`'s `whole_row_identity_refuses_regardless_of_comparability`
 /// unit test covers the same fail-closed rule at the derivation layer; this
-/// covers the `smelt explain` reporting surface, which regressed to
-/// printing "yes" unconditionally for the whole `ColumnScopedMerge`
-/// technique family before this fix).
+/// covers the `smelt explain` reporting surface). The plan carries a
+/// SIBLING `Technique::DeleteInsert` cell alongside the `ColumnScopedMerge`
+/// cell under test, proving the "no" line is correctly isolated to the
+/// `ColumnScopedMerge` cell's own block and never leaks onto (or is
+/// swallowed by) an unrelated sibling cell's report lines.
+///
+/// **Post-`docs/plans/20260808-membership-sensitivity.md` Phase 3 note:**
+/// originally built over a real fact+dimension enrichment fixture (mirroring
+/// `examples/timeseries/models/daily_events_enriched.sql`); rewritten to a
+/// synthetic `MaintenancePlan` for the same reason as
+/// `explain_prints_observed_delta_recording_status_for_a_conditional_cell`
+/// above — no fixture in this workspace derives a `ColumnScopedMerge` cell
+/// anymore (Phase 1's membership-sensitivity derivation), so the EXPLAIN
+/// PRINTING logic under test needs a hand-built plan to reach it at all.
 #[test]
 fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let root = tmp.path();
-    let smelt_yml = r#"
-name: whole_row_recording_fixture
-version: 1
+    use std::collections::BTreeSet;
 
-paths:
-  - models
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::maintenance::{
+        ColumnGroup, Corner, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity,
+        RowIdentityVerdict, Technique, Trigger,
+    };
 
-targets:
-  dev:
-    type: duckdb
-    database: target/dev.duckdb
-    schema: main
-
-default_materialization: view
-"#;
-    // Mirrors `examples/timeseries/models/daily_events_enriched.sql`'s
-    // fact+dimension shape (a mutable, unclocked dimension whose column
-    // group derives an `UpstreamMutation` `ColumnScopedMerge` cell) but
-    // deliberately omits `batched.unique_key:` — with no declared key and
-    // no FD proof available from this join shape, P2 row identity resolves
-    // `WholeRow`.
-    let model = r#"---
-materialization: table
-refresh: incremental
-grain: partition
-timeseries:
-  partition_column: event_date
-  event_time_column: event_timestamp
-  granularity: day
-maintenance:
-  scan_bounds:
-    per_source:
-      users:
-        allow_full_scan: true
----
-SELECT
-    date_trunc('day', e.event_timestamp) AS event_date,
-    e.event_timestamp,
-    e.event_type,
-    u.user_name
-FROM smelt.sources.events e
-JOIN smelt.sources.users u ON e.user_id = u.user_id
-"#;
-    let events_source = r#"
-columns:
-  - { name: event_timestamp, type: TIMESTAMP, nullable: false }
-  - { name: user_id, type: INTEGER, nullable: false }
-  - { name: event_type, type: VARCHAR, nullable: false }
-mutation_profile:
-  kind: append_only
-"#;
-    let users_source = r#"
-columns:
-  - { name: user_id, type: INTEGER, nullable: false }
-  - { name: user_name, type: VARCHAR, nullable: false }
-mutation_profile:
-  kind: mutable_snapshot
-"#;
-    fs::write(root.join("smelt.yml"), smelt_yml).unwrap();
-    fs::create_dir_all(root.join("models")).unwrap();
-    fs::create_dir_all(root.join("models/sources")).unwrap();
-    fs::write(root.join("models/events_enriched.sql"), model).unwrap();
-    fs::write(root.join("models/sources/events.yml"), events_source).unwrap();
-    fs::write(root.join("models/sources/users.yml"), users_source).unwrap();
-
-    let report = build_report_for(root, "events_enriched").expect("model has a maintenance plan");
+    let merge_cell = PlanCell {
+        group: "{user_name}".to_string(),
+        trigger: Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        },
+        corner: Corner::ColumnMerge,
+        technique: Technique::ColumnScopedMerge,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+    };
+    let sibling_cell = PlanCell {
+        group: "{event_type, user_id}".to_string(),
+        trigger: Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        },
+        corner: Corner::RecomputeRegion,
+        technique: Technique::DeleteInsert,
+        partition_local: PartitionLocal::No {
+            source: "users".to_string(),
+            why: "unclocked source is read in full on every recompute".to_string(),
+        },
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+    };
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![merge_cell, sibling_cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        column_groups: vec![
+            ColumnGroup {
+                columns: vec!["user_name".to_string()],
+                mutation_sensitivity: Default::default(),
+                membership_sensitivity: BTreeSet::new(),
+            },
+            ColumnGroup {
+                columns: vec!["event_type".to_string(), "user_id".to_string()],
+                mutation_sensitivity: Default::default(),
+                membership_sensitivity: BTreeSet::new(),
+            },
+        ],
+        degenerate: vec![],
+    };
+    let report = build_maintenance_plan_report(
+        "events_enriched",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+    )
+    .expect("build_maintenance_plan_report");
 
     assert!(
         report.contains("region key: WholeRow"),
@@ -982,11 +1041,11 @@ mutation_profile:
     );
     // Each cell's block starts at its own "  - group ..." header line; split
     // on that marker to isolate the ColumnScopedMerge cell's own lines from
-    // any sibling cell (e.g. the model's other DeleteInsert/backfill cells).
+    // the sibling DeleteInsert cell.
     let cell_block = report
         .split("  - group ")
         .find(|block| block.contains("technique: ColumnScopedMerge"))
-        .expect("expected an admitted ColumnScopedMerge cell for the mutable-dimension trigger");
+        .expect("expected the admitted ColumnScopedMerge cell");
     assert!(
         cell_block.contains("observed-delta recording: no"),
         "a WholeRow-identity ColumnScopedMerge cell must never claim recording: yes: {cell_block}\n\nfull report:\n{report}"
@@ -994,6 +1053,15 @@ mutation_profile:
     assert!(
         !cell_block.contains("observed-delta recording: yes"),
         "a WholeRow-identity ColumnScopedMerge cell must never claim recording: yes: {cell_block}"
+    );
+    let sibling_block = report
+        .split("  - group ")
+        .find(|block| block.contains("technique: DeleteInsert"))
+        .expect("expected the sibling DeleteInsert cell");
+    assert!(
+        !sibling_block.contains("observed-delta recording"),
+        "a DeleteInsert cell must never print an observed-delta recording line at all — that \
+         reporting family is wired only for ColumnScopedMerge: {sibling_block}"
     );
 }
 

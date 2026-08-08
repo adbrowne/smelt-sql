@@ -43,8 +43,8 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect, Region,
-    TargetSlicePredicate,
+    emit_keyed_fold_suppressed, emit_recurrence_bound_probe,
+    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
@@ -1822,7 +1822,7 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
         group.transactional,
         "the staged-candidate group is transactional"
     );
-    assert_eq!(group.statements.len(), 5);
+    assert_eq!(group.statements.len(), 6);
 
     // Recover the caller-composed `candidate_select` from the recorded
     // INSERT statement (statement index 1: `INSERT INTO {staged} {select}`)
@@ -1837,7 +1837,7 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
     );
     let candidate_select = &insert_sql[candidate_prefix.len()..];
 
-    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_recompute(
         "main.user_lifetime_status",
         staged_relation,
         &["user_id".to_string()],
@@ -1848,7 +1848,9 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
     assert_eq!(
         &expected, group,
         "executed staged-candidate group must be byte-identical to a direct emitter call over \
-         the same inputs"
+         the same inputs (the full-recompute variant — this cell's candidate_select is always \
+         the model's own full unwindowed recompute, so a departed key must be genuinely \
+         deleted, not merely left untouched)"
     );
 
     // Result-equivalence: the staged-candidate recompute actually executed
@@ -2189,6 +2191,120 @@ async fn staged_candidate_conditional_statements_come_from_the_emitter() {
     assert_eq!(
         count, 0,
         "the staged temp relation must be dropped by the end of a successful group"
+    );
+}
+
+/// The full-recompute variant (`docs/plans/20260808-membership-sensitivity.md`
+/// Phase 3): the executed `StatementGroup` is byte-identical to a direct
+/// `emit_staged_candidate_conditional_recompute` call, and — unlike its
+/// region-scoped sibling above — a row whose key is entirely absent from the
+/// candidate (user 3) is genuinely DELETED, never merely left untouched:
+/// this variant's `candidate_select` always represents the model's own full
+/// current state, so absence means departure. A matched-but-unchanged row
+/// (user 1) is still suppressed (never deleted/reinserted), proving the
+/// extra departed-key `DELETE` is a no-op over still-present keys.
+#[tokio::test]
+async fn staged_candidate_conditional_recompute_deletes_departed_keys() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR, run_marker VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES (1, 'bronze', 'run1'), (2, 'silver', 'run1'), (3, \
+             'gold', 'run1')",
+        )
+        .await
+        .expect("seed target table");
+
+    // user 1: unchanged tier; user 2: changed tier; user 4: brand new. user
+    // 3 is genuinely departed — the model's own full recompute no longer
+    // produces a row for it at all (e.g. the dimension row a fact joined on
+    // was deleted).
+    let candidate_select = "SELECT * FROM (VALUES (1, 'bronze', 'run2'), (2, 'platinum', \
+                             'run2'), (4, 'new', 'run2')) AS t(user_id, tier, run_marker)";
+    let key = vec!["user_id".to_string()];
+    let compared_columns = vec!["tier".to_string()];
+
+    let group = emit_staged_candidate_conditional_recompute(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&group)
+        .await
+        .expect("staged-candidate recompute write must succeed");
+
+    let recorded = backend.recorded_groups();
+    assert_eq!(recorded.len(), 1);
+    let expected = emit_staged_candidate_conditional_recompute(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &recorded[0],
+        "executed staged-candidate recompute group must be byte-identical to a direct emitter \
+         call over the same inputs"
+    );
+
+    let rows = backend
+        .execute_sql("SELECT user_id, tier, run_marker FROM main.dim_users ORDER BY user_id")
+        .await
+        .expect("read back target");
+    let batch = &rows[0];
+    let ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("user_id is Int64");
+    assert_eq!(
+        ids.len(),
+        3,
+        "user 3 (departed — absent from the full-recompute candidate) must be deleted, leaving \
+         exactly users 1, 2, 4"
+    );
+    let markers: Vec<String> = {
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    assert_eq!(
+        markers,
+        vec!["run1".to_string(), "run2".to_string(), "run2".to_string()],
+        "user 1 (unchanged, suppressed) keeps its prior marker; user 2 (changed) and user 4 \
+         (new) carry the new run's marker"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT user_id, tier FROM main.dim_users",
+            "SELECT user_id, tier FROM (VALUES (1, 'bronze'), (2, 'platinum'), (4, 'new')) AS \
+             t(user_id, tier)"
+        )
+        .await,
+        "the staged-candidate recompute write must reproduce the full-refresh oracle — no \
+         departed row survives"
     );
 }
 

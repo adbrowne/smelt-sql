@@ -7,7 +7,8 @@
 
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
-    emit_keyed_fold, emit_recurrence_bound_probe, MaintenanceDialect, Region,
+    emit_keyed_fold, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
+    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region,
 };
 
 #[test]
@@ -501,4 +502,70 @@ fn maintenance_regioned_update_still_carries_the_where_clause() {
     assert_eq!(stmts.len(), 1);
     assert!(stmts[0].starts_with("UPDATE t SET total = price * qty WHERE"));
     assert!(stmts[0].contains("event_date >= DATE '2026-01-01'"));
+}
+
+/// `emit_staged_candidate_conditional_recompute`
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 3): six
+/// statements — the same five as [`emit_staged_candidate_conditional`], plus
+/// one extra `DELETE` (inserted between the matched-and-changed `DELETE` and
+/// the reinsert `INSERT`) that removes every stored row whose key is absent
+/// from the staged candidate entirely.
+#[test]
+fn staged_candidate_conditional_recompute_adds_a_departed_key_delete() {
+    let key = vec!["user_id".to_string()];
+    let compared_columns = vec!["tier".to_string()];
+    let candidate_select = "SELECT * FROM (VALUES (1, 'bronze')) AS t(user_id, tier)";
+
+    let region_scoped = emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    let recompute = emit_staged_candidate_conditional_recompute(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(region_scoped.statements.len(), 5);
+    assert_eq!(recompute.statements.len(), 6);
+    assert!(recompute.transactional);
+
+    // CREATE, INSERT candidates, and the matched-and-changed DELETE are
+    // byte-identical between the two variants.
+    assert_eq!(recompute.statements[0], region_scoped.statements[0]);
+    assert_eq!(recompute.statements[1], region_scoped.statements[1]);
+    assert_eq!(recompute.statements[2], region_scoped.statements[2]);
+
+    // The extra departed-key DELETE sits between the matched-changed DELETE
+    // and the reinsert INSERT.
+    assert_eq!(
+        recompute.statements[3].sql,
+        "DELETE FROM main.dim_users WHERE NOT EXISTS (SELECT 1 FROM \
+         __smelt_staged_dim_users AS s WHERE main.dim_users.user_id = s.user_id)"
+    );
+
+    // The reinsert INSERT and the final DROP are byte-identical to the
+    // region-scoped variant's own trailing two statements.
+    assert_eq!(recompute.statements[4], region_scoped.statements[3]);
+    assert_eq!(recompute.statements[5], region_scoped.statements[4]);
+}
+
+#[test]
+#[should_panic(expected = "non-empty row identity")]
+fn staged_candidate_conditional_recompute_panics_on_empty_key() {
+    emit_staged_candidate_conditional_recompute(
+        "main.t",
+        "__staged",
+        &[],
+        "SELECT 1",
+        &["a".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
 }

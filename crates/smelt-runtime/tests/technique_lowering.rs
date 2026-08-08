@@ -2190,28 +2190,24 @@ mod keyed_membership_recompute_e2e {
         );
     }
 
-    /// Genuine membership change (the reviewer-checklist requirement,
-    /// `docs/plans/20260808-membership-sensitivity.md` Phase 2): deleting a
-    /// dimension row that ALREADY has no staged facts is a no-op repair (the
-    /// membership-sensitive `{event_count}` cell has nothing to remove);
-    /// adding a dimension row that matches EXISTING, previously-unadmitted
-    /// facts is a genuine repair — the inner join now admits a user_id it
-    /// did not before, and only the staged-candidate recompute (never a
-    /// column-scoped `MERGE`, which cannot create rows) can pick it up.
-    ///
-    /// Deliberately does NOT delete a dimension row that has currently-
-    /// admitted facts: `emit_staged_candidate_conditional`'s own `DELETE`
-    /// only ever removes a row MATCHED to a staged candidate row (`table.key
-    /// = staged.key AND changed`) — a row whose key is entirely ABSENT from
-    /// the recomputed candidate (a genuinely departed key) is never matched
-    /// and is left stored, stale (see `resolve_live_membership_recompute_
-    /// cell`'s doc comment on this inherited emitter limitation, and
-    /// `crates/smelt-runtime/tests/statement_parity.rs::
-    /// staged_candidate_conditional_statements_come_from_the_emitter`'s own
-    /// "user 3 … must be left untouched entirely"). Exercising THAT
-    /// scenario here would assert a known-unsound repair; it is out of
-    /// Phase 2's critical-file scope (`crates/smelt-logical/src/maintenance/
-    /// emit.rs` is not touched by this phase) and tracked for Phase 3/4.
+    /// Genuine membership change (`docs/plans/20260808-membership-
+    /// sensitivity.md` Phases 2-3): deleting a dimension row that ALREADY
+    /// has no staged facts is a no-op repair (the membership-sensitive
+    /// `{event_count}` cell has nothing to remove); adding a dimension row
+    /// that matches EXISTING, previously-unadmitted facts is a genuine
+    /// repair — the inner join now admits a user_id it did not before, and
+    /// only the staged-candidate recompute (never a column-scoped `MERGE`,
+    /// which cannot create rows) can pick it up; a THIRD run then deletes a
+    /// dimension row that DOES have currently-admitted facts (user 2) — a
+    /// genuine departure, repaired by `emit_staged_candidate_conditional_
+    /// recompute`'s own anti-join `DELETE` (`docs/plans/
+    /// 20260808-membership-sensitivity.md` Phase 3; the region-scoped
+    /// `emit_staged_candidate_conditional` this driver used before Phase 3
+    /// would have left a departed row stale — see that emitter's own
+    /// "user 3 … must be left untouched entirely" contract in
+    /// `crates/smelt-runtime/tests/statement_parity.rs`, which is a
+    /// DIFFERENT, still-correct semantics for its own region-scoped
+    /// callers).
     #[tokio::test]
     async fn genuine_membership_change_repairs_to_full_refresh_state() {
         let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2375,6 +2371,59 @@ mod keyed_membership_recompute_e2e {
             "post-repair state must equal a full recompute of the model SQL: user 3 admitted \
              (its dim row now exists), users 1/2 unchanged, user 4 never appears (no staged \
              facts either way)"
+        );
+
+        // Third run: genuine departure. Delete user 2's dim row — user 2
+        // DOES have currently-admitted facts (a staged transaction and a
+        // row in `user_lifetime_status` right now), so the inner join can
+        // no longer admit it at all: the recomputed candidate has no row
+        // for user 2 whatsoever, not merely a changed one.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            backend
+                .execute_sql("DELETE FROM main.sources_raw_users WHERE user_id = 2")
+                .await
+                .expect("delete dim row with currently-admitted facts");
+        }
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-3".to_string(),
+                request_for_day("2025-01-12", "2025-01-13"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("third run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(record.strategy, "delete_insert_suppressed");
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect after run 3");
+        let mut stmt = conn
+            .prepare("SELECT user_id, event_count FROM main.user_lifetime_status ORDER BY user_id")
+            .expect("prepare");
+        let actual: Vec<(i64, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(
+            actual,
+            vec![(1, 1), (3, 1)],
+            "user 2 must be genuinely DELETED once its dim row departs — the recompute's own \
+             anti-join DELETE (`emit_staged_candidate_conditional_recompute`, Phase 3) removes \
+             it rather than leaving a stale row behind"
         );
     }
 }

@@ -34,7 +34,7 @@ use smelt_logical::maintenance::choice::{
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
     emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, emit_staged_candidate_conditional, MaintenanceDialect,
+    emit_fingerprint_sidecar_diff, emit_staged_candidate_conditional_recompute, MaintenanceDialect,
     MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
@@ -971,23 +971,15 @@ pub fn resolve_live_column_scoped_cell(
 /// has for its own write-variant dimension (see that function's own doc
 /// comment on the "known gap" this mirrors).
 ///
-/// **Known limitation, inherited from the emitter, not introduced here.**
-/// `emit_staged_candidate_conditional`'s `DELETE` only ever removes a
-/// *matched-and-changed* row (`table.key = staged.key AND (compared columns
-/// differ)`) — a row whose key is entirely **absent** from the staged
-/// candidate (a genuinely *departed* row: e.g. the dimension row a fact
-/// joined on was itself deleted, so the fact no longer appears in the
-/// recomputed candidate at all) is never matched by that `DELETE` and is
-/// left stored, stale, forever. This is the SAME "region-scoped, absent =
-/// out of scope" semantics `emit_staged_candidate_conditional`'s own
-/// `statement_parity` coverage documents and tests
-/// (`crates/smelt-runtime/tests/statement_parity.rs::
-/// staged_candidate_conditional_statements_come_from_the_emitter`'s "user 3
-/// … must be left untouched entirely"). Fixing it needs a genuine
-/// anti-join `DELETE` the emitter does not build today — out of Phase 2's
-/// critical-file scope (`crates/smelt-logical/src/maintenance/emit.rs` is
-/// not touched by this phase); tracked for Phase 3/4 alongside the
-/// conformance rewrite.
+/// **Departed keys.** Dispatches to [`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`] (`docs/plans/
+/// 20260808-membership-sensitivity.md` Phase 3), not the region-scoped
+/// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional`] —
+/// this resolver's `candidate_select` is always the model's own FULL
+/// (unwindowed) recompute, so a stored row whose key is entirely absent from
+/// it has genuinely *departed* (e.g. the dimension row a fact joined on was
+/// itself deleted) rather than merely being out of a run's touched region,
+/// and the recompute variant's extra anti-join `DELETE` removes it.
 pub fn resolve_live_membership_recompute_cell(
     sql: &str,
     table: &str,
@@ -1122,17 +1114,19 @@ pub fn resolve_live_membership_recompute_cell(
 
 /// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
 /// (`resolve_live_membership_recompute_cell` above) via the staged-candidate
-/// conditional `DELETE`+`INSERT` (`smelt_logical::maintenance::emit::
-/// emit_staged_candidate_conditional`) — the "full-model recompute staged,
-/// change-suppressed where comparable" realisation `incremental_models.md`
-/// §"The plan matrix" names for a membership-sensitive group. `key` is the
-/// cell's own proven `RowIdentity::Key` (never `WholeRow` — the caller only
-/// reaches here when the resolver above already proved a real key);
-/// `candidate_select` is the model's own FULL (unwindowed) recompiled SQL —
-/// the entire current admitted+enriched state, not a time-windowed slice —
-/// so a departed OR newly-admitted key is represented correctly (module the
-/// emitter's own documented departed-row limitation, see the resolver's doc
-/// comment above). `compared_columns` is the already fail-closed-admitted
+/// conditional `DELETE`+`INSERT`, full-recompute variant
+/// (`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`) — the "full-model recompute
+/// staged, change-suppressed where comparable" realisation
+/// `incremental_models.md` §"The plan matrix" names for a
+/// membership-sensitive group. `key` is the cell's own proven
+/// `RowIdentity::Key` (never `WholeRow` — the caller only reaches here when
+/// the resolver above already proved a real key); `candidate_select` is the
+/// model's own FULL (unwindowed) recompiled SQL — the entire current
+/// admitted+enriched state, not a time-windowed slice — so a departed OR
+/// newly-admitted key is represented correctly, and the recompute variant's
+/// own anti-join `DELETE` removes a departed key rather than leaving it
+/// stale. `compared_columns` is the already fail-closed-admitted
 /// `WriteSuppression::Suppressed` set.
 pub async fn execute_staged_membership_recompute(
     backend: &dyn Backend,
@@ -1147,7 +1141,7 @@ pub async fn execute_staged_membership_recompute(
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect());
     let staged_relation = format!("__smelt_staged_{table}");
-    let group = emit_staged_candidate_conditional(
+    let group = emit_staged_candidate_conditional_recompute(
         &full_table,
         &staged_relation,
         key,

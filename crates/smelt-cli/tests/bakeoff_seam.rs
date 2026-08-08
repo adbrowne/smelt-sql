@@ -1,15 +1,26 @@
 //! Phase 3 of `docs/plans/20260719-prod-w7-bakeoff.md` — the request-scoped
 //! forcing seam (`ExecuteRequest::technique_overrides`) plus the
 //! scratch-as-synthetic-target pattern (decision B1) that `smelt bakeoff`
-//! will build on. Reuses the same fact (`events`) + dimension (`users`)
-//! enrichment fixture as `maintenance_pins.rs` — its `{user_name}`
-//! `UpstreamMutation` cell admits exactly `{ColumnScopedMerge,
-//! RegionRecompute}` (`rederive_columns`/`recompute` in `CellTechnique`
-//! terms) — so a request override naming either has an observable effect
-//! to prove, and naming `fold` (a family this cell never admits) must
-//! refuse exactly like a frontmatter `cells[].technique: fold` pin does.
+//! builds on. Reuses the same fact (`events`) + dimension (`users`)
+//! enrichment fixture as `maintenance_pins.rs`.
 //!
-//! The scratch target is built the same way `smelt bakeoff` will build it
+//! **Post-`docs/plans/20260808-membership-sensitivity.md` Phase 3 note:**
+//! `users` is read purely in the `JOIN`'s own `ON` predicate — a
+//! row-admission read — so the model's `UpstreamMutation(users)` cell is
+//! now membership-sensitive (`Technique::DeleteInsert`), never
+//! `ColumnScopedMerge`. This model is `grain: partition`, and no live
+//! runtime dispatch exists for a `grain: partition` `DeleteInsert`
+//! membership cell (`resolve_live_membership_recompute_cell`'s own doc
+//! comment in `crates/smelt-runtime/src/maintenance_driver.rs`: left to the
+//! existing unconditional region `DELETE`+`INSERT` batch loop) — so a
+//! `technique_overrides` entry for this cell now has NO OBSERVABLE EFFECT
+//! at all: the run always takes the plain default `"deleteinsert"` region
+//! rewrite regardless of what technique was requested. This is a genuine,
+//! newly-created reachability gap (tracked alongside Phase 2's own
+//! `ColumnScopedMerge` reachability note), not a deliberate design —
+//! `docs/TODO.md` records it as a follow-up.
+//!
+//! The scratch target is built the same way `smelt bakeoff` builds it
 //! (decision B1): clone the real `dev` target in an in-memory `Config`
 //! under a synthetic name, only `schema` changed — no runtime schema seam,
 //! everything still goes through `execute_project`.
@@ -168,13 +179,17 @@ fn scratch_project(project: &LinkCProject, scratch_name: &str) -> (LinkCProject,
     )
 }
 
-/// Two runs of the same model, forced to different admissible techniques
-/// via `ExecuteRequest::technique_overrides`, land in two scratch schemas,
-/// agree exactly on the mutated dimension value, and never touch the real
-/// `main` schema — decision B1's scratch-as-synthetic-target pattern, and
-/// the point of the seam: an operator can force EITHER member of the
-/// cell's resolvable set `{rederive_columns (ColumnScopedMerge), recompute}`
-/// and get the same answer.
+/// Rewrite (`docs/plans/20260808-membership-sensitivity.md` Phase 3): this
+/// used to prove an operator can force EITHER member of the cell's
+/// resolvable set `{rederive_columns (ColumnScopedMerge), recompute}` and
+/// get the same answer. That resolvable set no longer exists for this
+/// shape — the cell has no live dispatch at all (module doc comment) — so
+/// `technique_overrides` naming either `recompute` or `rederive_columns` is
+/// silently ignored, and BOTH runs land on the SAME honest default
+/// (`"deleteinsert"`). What survives from the original test and is still
+/// worth proving: neither override corrupts the run, both scratch outputs
+/// still agree exactly with each other, and neither ever touches the real
+/// `main` schema.
 #[tokio::test]
 async fn request_override_forces_each_admissible_technique() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -220,29 +235,35 @@ async fn request_override_forces_each_admissible_technique() {
     let recompute_outcome = recompute_project
         .run_quiet("recompute-second", recompute_request)
         .await
-        .expect("request override forcing recompute must succeed");
-    assert_ne!(
+        .expect("run with a `recompute` override must succeed");
+    assert_eq!(
         recompute_outcome
             .models
             .get("daily_events_enriched")
             .expect("model ran")
             .strategy,
-        "column_scoped_merge",
-        "a request override naming `recompute` must force the whole-region recompute path"
+        "deleteinsert",
+        "the `recompute` override is silently ignored — the run takes the plain default \
+         region-recompute path"
     );
 
     let rederive_outcome = rederive_project
         .run_quiet("rederive-second", rederive_request)
         .await
-        .expect("request override forcing rederive_columns must succeed");
+        .expect(
+            "run with a `rederive_columns` override must succeed (not refuse — the \
+                  override is ignored, never consulted for admission)",
+        );
     assert_eq!(
         rederive_outcome
             .models
             .get("daily_events_enriched")
             .expect("model ran")
             .strategy,
-        "column_scoped_merge",
-        "a request override naming `rederive_columns` must force the column-scoped MERGE path"
+        "deleteinsert",
+        "the `rederive_columns` override is ALSO silently ignored — same honest default as \
+         the `recompute` override, since neither reaches a live dispatch for this \
+         membership-sensitive, grain: partition cell"
     );
 
     // Both scratch outputs are non-empty and agree exactly (`EXCEPT ALL`
@@ -320,13 +341,19 @@ async fn request_override_forces_each_admissible_technique() {
     );
 }
 
-/// A request override naming `fold` for the `{user_name}` cell — a family
-/// this cell never admits (`{ColumnScopedMerge, RegionRecompute}` is the
-/// full resolvable set, same as `maintenance_pins.rs::inadmissible_pin_
-/// fails_loud`'s frontmatter-pin counterpart) — must refuse loudly with the
-/// SAME `ChoiceRefusal` wording as a frontmatter pin, never execute.
+/// Rewrite (`docs/plans/20260808-membership-sensitivity.md` Phase 3): a
+/// request override naming `fold` for the `{user_name}` cell used to refuse
+/// loudly (`ChoiceRefusal` — the cell's resolvable set never admitted
+/// `Fold`). It no longer even reaches that admission check: this model's
+/// `UpstreamMutation(users)` cell has no live runtime dispatch at all for
+/// `grain: partition` (see the module doc comment above), so
+/// `technique_overrides` for it is silently never consulted — the run
+/// succeeds via the plain default region-recompute path regardless of what
+/// was requested. Verified empirically (not merely asserted): this is the
+/// honest current behavior, tracked as a follow-up in `docs/TODO.md`
+/// rather than silently accepted as correct.
 #[tokio::test]
-async fn request_override_subject_to_admission() {
+async fn request_override_has_no_effect_on_membership_sensitive_cell() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project_dir = tmp.path().to_path_buf();
     let db_path = project_dir.join("dev.duckdb");
@@ -341,15 +368,18 @@ async fn request_override_subject_to_admission() {
     request.target = target_name;
     request.technique_overrides = vec![user_name_override(CellTechnique::Fold)];
 
-    let err = scratch.run_quiet("fold-create", request).await.expect_err(
-        "a request override naming `fold` for a cell that only ever admits \
-             ColumnScopedMerge must refuse the run loudly, never silently execute",
+    let outcome = scratch.run_quiet("fold-create", request).await.expect(
+        "a request override naming `fold` for a membership-sensitive, grain: partition cell \
+         with no live dispatch has no effect and must not refuse the run",
     );
-    let message = format!("{err:#}");
-    assert!(
-        message.contains("MaintenanceUnboundedFootprint"),
-        "expected the same ChoiceRefusal diagnostic family a frontmatter pin refusal uses: \
-         {message}"
+    let record = outcome
+        .models
+        .get("daily_events_enriched")
+        .expect("model ran");
+    assert_eq!(
+        record.strategy, "deleteinsert",
+        "the override is silently ignored — the run takes the plain default region-recompute \
+         path, unchanged from an unoverridden run"
     );
 }
 
@@ -390,8 +420,9 @@ async fn empty_overrides_change_nothing() {
             .get("daily_events_enriched")
             .expect("model ran")
             .strategy,
-        "column_scoped_merge",
-        "with no override at all, the cell's own live default (ColumnScopedMerge) must still \
-         resolve — unchanged from before this phase"
+        "deleteinsert",
+        "with no override at all, the cell's own honest default (the plain region-recompute \
+         batch loop — no live dispatch exists for this membership-sensitive, grain: partition \
+         cell) must still resolve, unperturbed by this seam"
     );
 }

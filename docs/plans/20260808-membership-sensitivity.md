@@ -60,7 +60,7 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 |-------|----------|--------|------|
 | 1     | done     | 3d83305f | 2026-08-08 |
 | 2     | done     | 1c208806 | 2026-08-08 |
-| 3     | pending  |        |      |
+| 3     | done     | pending-review | 2026-08-08 |
 | 4     | pending  |        |      |
 
 ---
@@ -320,6 +320,105 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
   none of the already-catalogued fixtures has a WHERE/HAVING conjunct
   reading a mutable source that the ON-predicate scan hadn't already
   caught.
+
+- **Phase 3 (2026-08-08):** the departed-key repair bug the reviewer
+  checklist flagged as expected in this phase was fixed properly, not
+  worked around. `crates/smelt-logical/src/maintenance/emit.rs` gained
+  `emit_staged_candidate_conditional_recompute` — a SIBLING to
+  `emit_staged_candidate_conditional`, not a modification of it: that
+  function's own "absence from the candidate = out of this run's touched
+  region, leave untouched" contract is correct and load-bearing for its own
+  region/window-scoped callers (`crates/smelt-runtime/tests/
+  statement_parity.rs::staged_candidate_conditional_statements_come_from_the_emitter`'s
+  "user 3 … must be left untouched entirely";
+  `crates/smelt-cli/tests/maintenance_conformance/gate.rs::
+  keyed_pool_t1_t2_and_full_refresh_agree_at_fixed_s`'s "device 3 (absent
+  from the delta) must never be touched" — both still pass unmodified). The
+  new emitter's `candidate_select` is always a FULL, unwindowed recompute
+  (the single production caller, `crates/smelt-runtime/src/
+  maintenance_driver.rs::execute_staged_membership_recompute`, only ever
+  passes the model's own full re-derivation), so absence there genuinely
+  means departure, and the extra anti-join `DELETE FROM <table> WHERE NOT
+  EXISTS (SELECT 1 FROM <staged> WHERE <key join>)` removes it — a no-op
+  when nothing has departed, keeping the change-suppressed zero-write
+  contract intact (`crates/smelt-cli/tests/maintenance_conformance/
+  gate.rs::keyed_enriched_pool_upholds_equivalence_under_dim_mutation`'s
+  redelivery window: full table snapshot byte-identical before/after).
+
+  **A new, real reachability gap surfaced while rewriting the 12 CLI-surface
+  fixtures** (bakeoff ×4, bakeoff_seam ×3, explain_model ×2,
+  explain_show_sql ×1, maintenance_pins ×2), confirmed empirically, not
+  merely reasoned about: `daily_events_enriched`'s (and every JOIN-based
+  fact+mutable-dimension enrichment fixture's) `UpstreamMutation` cell
+  family is now uniformly membership-sensitive `Technique::DeleteInsert` —
+  `Technique::ColumnScopedMerge` is unreachable from ANY currently-shipped
+  SQL shape in this workspace (confirmed via
+  `membership_sensitivity_sources`, `crates/smelt-logical/src/maintenance/
+  grouping.rs`: ANY `JOIN`'s `ON` predicate — inner or left — reading a
+  `MutableSnapshot` source makes EVERY column group of that `SELECT`
+  membership-sensitive, not only the columns the dimension itself
+  contributes; membership sensitivity is row-scoped, not per-column). Two
+  concrete, previously-untested consequences:
+  - `smelt bakeoff`'s measured/`--pin` code path (`run_bakeoff`'s branch
+    past the `candidates.is_empty()` early return in
+    `crates/smelt-cli/src/bakeoff.rs`) now has **zero reachable test
+    coverage** anywhere in this crate — `admitted_family` maps
+    `Technique::DeleteInsert` to `None`, so a membership-sensitive cell is
+    never a bakeoff candidate, and no other fixture in the workspace admits
+    a genuine 2+-technique cell for an `UpstreamMutation` trigger.
+  - For a `grain: partition` model (no live runtime dispatch exists for a
+    `grain: partition` `DeleteInsert` membership cell —
+    `resolve_live_membership_recompute_cell`'s own doc comment), a
+    frontmatter `cells[].technique`/`cells[].prefer` pin AND a request-scope
+    `ExecuteRequest::technique_overrides` entry are now BOTH silently never
+    consulted at all for that cell — not merely "not steering," but not
+    even validated: an inadmissible pin (`technique: fold`) that used to
+    refuse loudly (`ChoiceRefusal`/`MaintenanceUnboundedFootprint`) now
+    succeeds silently, taking the plain default region-recompute path
+    regardless of what was pinned/overridden. Verified empirically across
+    `bakeoff_seam.rs::request_override_has_no_effect_on_membership_sensitive_cell`,
+    `bakeoff_seam.rs::request_override_forces_each_admissible_technique`,
+    and `maintenance_pins.rs::inadmissible_pin_has_no_effect_on_membership_sensitive_cell`.
+
+  Both gaps are genuinely new (they did not exist before Phase 1's
+  derivation swap — `ColumnScopedMerge` and its pin/override plumbing were
+  live and tested then) and are tracked in `docs/TODO.md` rather than
+  silently accepted; neither `crates/smelt-cli/src/bakeoff.rs`'s own logic
+  nor `crates/smelt-runtime/src/maintenance_driver.rs`'s admission gates
+  were modified to paper over them (per this phase's "do not weaken
+  bakeoff's own machinery" instruction) — the affected tests were rewritten
+  to assert the honest, verified-not-guessed current behavior instead.
+
+  Two `explain_model.rs` tests (`explain_prints_observed_delta_recording_
+  status_for_a_conditional_cell`, `explain_prints_no_recording_for_a_whole_
+  row_identity_conditional_cell`) were rewritten to build a synthetic
+  `MaintenancePlan` directly (mirroring the pre-existing
+  `write_variant_explain_surface`/`write_pin_explain_surface` modules'
+  pattern in the same file) rather than deriving one from real SQL — the
+  EXPLAIN PRINTING logic under test
+  (`crates/smelt-cli/src/explain.rs` lines ~353-364) is independent of
+  whether real derivation can currently reach `ColumnScopedMerge`, and
+  fabricating a contrived SQL shape to keep it artificially reachable would
+  have misrepresented what the derivation actually admits today.
+  `explain_show_sql.rs::show_sql_statements_unaffected_by_observed_delta_
+  report_rows` could not be rewritten the same way (it drives the real
+  `smelt` binary as a subprocess against a real project directory, not
+  something a synthetic in-process plan can stand in for) — it was narrowed
+  to prove the still-true, more general half of its original claim (report-
+  section additions/omissions never corrupt the statement section) over the
+  model's now-live `DeleteInsert` cell instead.
+
+  **Reviewer pass caught one missed fixture:**
+  `crates/smelt-runtime/tests/statement_parity.rs::
+  delete_insert_suppressed_keyed_membership_statements_come_from_the_emitter`
+  still asserted `group.statements.len() == 5` and diffed against a direct
+  `emit_staged_candidate_conditional` call — a leftover from before the
+  dispatch was repointed at the new `_recompute` variant's six statements.
+  Fixed to assert 6 and diff against `emit_staged_candidate_conditional_
+  recompute`; the fixture's own SQL shape (a genuinely mutated dimension,
+  no departure) meant the extra departed-key `DELETE` is a no-op there, so
+  the test's own result-equivalence assertion was passing for the wrong
+  reason until this was caught.
 
 ## Verification
 

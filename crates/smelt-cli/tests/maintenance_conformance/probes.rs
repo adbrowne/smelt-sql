@@ -63,15 +63,32 @@ fn read_maintained_rows(
     .expect("collect maintained rows")
 }
 
-/// `dimension_mutation_touches_only_sensitive_groups` (plan Phase 4 TDD
-/// list; design §7 row 3): for an admitted column-scoped-merge cell,
-/// mutating only the dimension leaves columns in groups not sensitive to it
-/// unchanged. Two fact rows land in the SAME window, referencing two
-/// DIFFERENT dimension keys, so a single catch-up run's column-scoped merge
-/// (full-input read under `allow_full_scan`) recomputes BOTH rows' `attr` —
-/// but only the mutated key's value should actually change.
+/// `dimension_mutation_recomputes_the_whole_touched_region` (rewrite of
+/// `dimension_mutation_touches_only_sensitive_groups`,
+/// `docs/plans/20260808-membership-sensitivity.md` Phase 3): the recipe's
+/// dimension is read purely in the `JOIN`'s `ON` predicate — a row-admission
+/// read — so per `incremental_models.md` §"The plan matrix" the model's
+/// admitted `UpstreamMutation` cell is now membership-sensitive
+/// (`Technique::DeleteInsert`), never `Technique::ColumnScopedMerge`
+/// (Phase 1's review checklist: "membership cells cannot receive
+/// ColumnScopedMerge"; Phase 2's own reachability verdict: no fixture in
+/// this workspace reaches `ColumnScopedMerge` anymore). The ORIGINAL
+/// premise this probe checked — "dim mutation touches only the
+/// value-sensitive columns" — is no longer true of anything reachable: a
+/// `grain: partition` model's `DeleteInsert` membership cell has no live
+/// runtime dispatch of its own (`resolve_live_membership_recompute_cell`'s
+/// own doc comment: left to the plain unconditional region `DELETE`+
+/// `INSERT` batch loop), so a dimension mutation followed by a catch-up run
+/// over the SAME window now recomputes the WHOLE touched region — rows, not
+/// columns — honestly matching `incremental_models.md` §"The plan matrix"'s
+/// rule that a membership-sensitive group "must be repaired by a technique
+/// that can create and delete rows". This probe now asserts exactly that:
+/// the cell is `DeleteInsert`, and the whole-region rewrite still reproduces
+/// the full-refresh oracle for BOTH the mutated and unmutated dimension
+/// keys, even though the unmutated key's row was rewritten too (its VALUES
+/// are unchanged, unlike a truly column-scoped, row-untouched merge).
 #[tokio::test]
-async fn dimension_mutation_touches_only_sensitive_groups() {
+async fn dimension_mutation_recomputes_the_whole_touched_region() {
     let recipe = MutableEnrichedRecipe::new();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project = stage_mixed_recipe(&recipe, &tmp).expect("stage mixed recipe");
@@ -86,8 +103,8 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
         Some(cell) => cell,
         None => {
             eprintln!(
-                "SKIP dimension_mutation_touches_only_sensitive_groups: no UpstreamMutation \
-                 cell admitted for {:?} — probe structurally does not apply",
+                "SKIP dimension_mutation_recomputes_the_whole_touched_region: no \
+                 UpstreamMutation cell admitted for {:?} — probe structurally does not apply",
                 recipe.model_name
             );
             return;
@@ -95,8 +112,9 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
     };
     assert_eq!(
         cell.technique,
-        Technique::ColumnScopedMerge,
-        "the admitted UpstreamMutation cell must be the column-scoped merge this probe checks"
+        Technique::DeleteInsert,
+        "a dimension read purely in the JOIN's ON predicate is membership-sensitive — the \
+         admitted UpstreamMutation cell must be the recompute family, never ColumnScopedMerge"
     );
 
     let d: NaiveDate = NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
@@ -126,11 +144,21 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
         .expect("mutate dimension id=1");
     }
 
-    // The catch-up run: same window, so the column-scoped merge resyncs it.
-    project
+    // The catch-up run: same window, so the whole-region recompute resyncs
+    // it (no column-scoped dispatch exists for this shape anymore).
+    let outcome = project
         .run_quiet("probe-catchup", request)
         .await
         .expect("catch-up run");
+    let record = outcome
+        .models
+        .get(&recipe.model_name)
+        .expect("model ran on catch-up");
+    assert_ne!(
+        record.strategy, "column_scoped_merge",
+        "no live dispatch exists for this cell's technique — the catch-up run must fall \
+         through to the plain region-recompute batch loop"
+    );
 
     let after = read_maintained_rows(&project, &recipe);
 
@@ -142,12 +170,12 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
     assert_eq!(
         (&before_1.0, before_1.1, before_1.2),
         (&after_1.0, after_1.1, after_1.2),
-        "the {{d, id, val}} group (never sensitive to the dimension) must stay byte-unchanged \
-         for the mutated row"
+        "the {{d, id, val}} values (folded from the append-only fact, never the dimension) \
+         must be unchanged for the mutated row even under a whole-region rewrite"
     );
     assert_ne!(
         before_1.3, after_1.3,
-        "the {{attr}} group (sensitive to the dimension) must reflect the mutation"
+        "the {{attr}} value (sourced from the dimension) must reflect the mutation"
     );
     assert_eq!(
         after_1.3, 999,
@@ -157,8 +185,9 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
     assert_eq!(
         (&before_2.0, before_2.1, before_2.2, before_2.3),
         (&after_2.0, after_2.1, after_2.2, after_2.3),
-        "a row referencing an UNMUTATED dimension key must be byte-unchanged in every \
-         column group, even though the merge recomputed it"
+        "a row referencing an UNMUTATED dimension key must still reproduce byte-identical \
+         values in every group — the honest claim after this rewrite is row-level correctness \
+         under a whole-region recompute, not that the row was left physically untouched"
     );
 }
 
