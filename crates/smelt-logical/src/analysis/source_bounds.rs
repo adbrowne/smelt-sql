@@ -994,6 +994,358 @@ fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Sec
     bounds
 }
 
+/// Cross-axis link evidence for the partition-locality projection
+/// (`docs/specs/model_properties.md` §"Partition-locality projection"): how
+/// a source's partition column relates to the output's own partition axis.
+///
+/// A cross-axis source (its partition column is not the output's) is local
+/// only through an **explicit, derivable predicate** connecting the two
+/// columns — smelt does not infer a relationship between two
+/// differently-named timestamp columns, so the absence of such a predicate
+/// is [`CrossAxisLink::Absent`] (the absence of a link), never a zero-cost
+/// default and never inferred from a nonzero scan margin elsewhere in the
+/// query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossAxisLink {
+    /// The source's partition column *is* the output's partition axis —
+    /// linked by identity.
+    SameAxis,
+    /// An explicit, derivable interval predicate (a Form B `BETWEEN`/
+    /// `>=`/`<` band — the same construct the bound derivation reads) relates
+    /// the source's partition column to the output axis (the axis column
+    /// itself, or the select-item expression that defines it).
+    ExplicitPredicate,
+    /// No derivable predicate relates the two columns.
+    Absent,
+}
+
+/// Derive the [`CrossAxisLink`] evidence for every source in `ctx` against
+/// the output's partition axis.
+///
+/// This is the evidence half of the partition-locality projection
+/// (`model_properties.md` §"Partition-locality projection"): the *same*
+/// Form B matchers the bound derivation runs ([`extract_form_b_bounds`]'s
+/// `BETWEEN` / `>=` / `<` recognisers, the same interval parser, the same
+/// LHS-column scoping via [`lhs_column_is_partition_col`]) are re-run here
+/// with the **anchor** side of each matched band inspected — the expression
+/// on the right of the comparison, which [`extract_form_b_bounds`]
+/// deliberately ignores for margin arithmetic. A band whose anchor names the
+/// output axis (or the axis's own defining select-item expression, e.g.
+/// `CAST(event_ts AS DATE)` for `… AS event_date`) is the explicit predicate
+/// the spec requires; the derived bound and this evidence therefore come
+/// from the same matched construct and cannot disagree.
+///
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): runs the whole-text Form B extraction exactly as
+/// [`derive_bound_for_source`]'s flat-scan floor does (the walk's per-region
+/// invocations only narrow the additive arithmetic, never which predicates
+/// exist), and only ever *narrows* admission relative to the derived bound —
+/// a link is recognised only where a bound-contributing anchored band
+/// exists, so this evidence can refuse but never widen a scan.
+pub fn derive_cross_axis_links(
+    sql: &str,
+    ctx: &BoundContext,
+    output_axis: &str,
+) -> HashMap<String, CrossAxisLink> {
+    let upper = sql.to_uppercase();
+    let axis_norm = normalize_anchor_text(output_axis);
+    let axis_anchors = output_axis_anchor_spellings(sql, output_axis);
+
+    ctx.source_partition_cols
+        .iter()
+        .map(|(name, col)| {
+            let link = if col.eq_ignore_ascii_case(output_axis) {
+                CrossAxisLink::SameAxis
+            } else if form_b_links_column_to_axis(
+                &upper,
+                &col.to_uppercase(),
+                &axis_norm,
+                &axis_anchors,
+            ) {
+                CrossAxisLink::ExplicitPredicate
+            } else {
+                CrossAxisLink::Absent
+            };
+            (name.clone(), link)
+        })
+        .collect()
+}
+
+/// The anchor spellings [`derive_cross_axis_links`] accepts as "names the
+/// output axis" beyond the axis column itself.
+#[derive(Debug, Default)]
+struct AxisAnchorSpellings {
+    /// Normalized (`normalize_anchor_text`) select-item expressions that
+    /// define the axis (`<expr> AS <axis>`), matched textually.
+    defining_norms: Vec<String>,
+    /// Bare (unqualified, uppercased) leaf column names the axis is a
+    /// **proven monotone grid truncation** of — matched with the same
+    /// bare-or-qualified identifier rules as the axis column itself.
+    leaf_idents: Vec<String>,
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): collect the anchor spellings that *mean* the output axis column,
+/// from the model's own parse tree — one pass over the already-parsed CST's
+/// select items (via the shared [`crate::analysis::select_stmt_items`]
+/// classification), never a raw-text scan.
+///
+/// Two derivable widenings beyond the axis column's own name:
+///
+/// 1. **The defining expression itself.** An anchored Form B band written
+///    against the axis's defining select-item expression (`arrival_date
+///    BETWEEN CAST(event_ts AS DATE) AND …` where `CAST(event_ts AS DATE)
+///    AS event_date`) is the same explicit link as one written against the
+///    axis column.
+/// 2. **The leaf column of a proven monotone grid truncation.** When the
+///    defining expression classifies as a monotone chain with a resolved
+///    grid unit ([`classify_truncation_grid_unit`] — e.g. `date_trunc('day',
+///    event_timestamp)`, `CAST(event_ts AS DATE)`) over a single leaf column
+///    ([`find_leaf_column_ref`]), a band anchored on that leaf column also
+///    links: the truncation is monotone with a bounded plateau (one grid
+///    unit), so a bounded band on the leaf projects onto a bounded band on
+///    the axis. A defining expression the monotonicity classifier cannot
+///    prove contributes no leaf spelling — fail-closed, never a guess.
+fn output_axis_anchor_spellings(sql: &str, output_axis: &str) -> AxisAnchorSpellings {
+    use crate::analysis::monotonicity::classify_truncation_grid_unit;
+
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let mut out = AxisAnchorSpellings::default();
+    for select in parse
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::SelectStmt::cast)
+    {
+        let Some(items) = crate::analysis::select_stmt_items(&select) else {
+            continue;
+        };
+        for item in &items {
+            let (text, alias, expr) = match item {
+                crate::analysis::SelectItemKind::GroupByKey { text, alias, expr }
+                | crate::analysis::SelectItemKind::OtherAggregate { text, alias, expr } => {
+                    (text.clone(), alias, expr)
+                }
+                crate::analysis::SelectItemKind::CountDistinct {
+                    argument,
+                    alias,
+                    expr,
+                } => (format!("COUNT(DISTINCT {argument})"), alias, expr),
+            };
+            if !alias.eq_ignore_ascii_case(output_axis) {
+                continue;
+            }
+            out.defining_norms.push(normalize_anchor_text(&text));
+            if classify_truncation_grid_unit(expr).is_some() {
+                if let Some(leaf) = find_leaf_column_ref(expr) {
+                    out.leaf_idents.push(leaf.name().to_uppercase());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Normalize an anchor/defining-expression spelling for comparison:
+/// uppercase, all whitespace removed. Both sides of every comparison are
+/// normalized the same way, so spacing differences never defeat a match.
+fn normalize_anchor_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_uppercase()
+}
+
+/// True when `anchor_text` (the raw expression on the anchor side of one
+/// matched Form B comparison, possibly still carrying its `± INTERVAL …` /
+/// `± <int>` tail) names the output axis: the axis column itself (bare or
+/// table-qualified), one of the axis's defining select-item expressions, or
+/// a leaf column the axis is a proven monotone grid truncation of (see
+/// [`output_axis_anchor_spellings`]).
+fn anchor_names_axis(
+    anchor_text: &str,
+    axis_norm: &str,
+    axis_anchors: &AxisAnchorSpellings,
+) -> bool {
+    // Strip the offset tail — the anchor is what remains to the left of the
+    // arithmetic that produced the band's margin.
+    let mut anchor = anchor_text;
+    for tail in ["- INTERVAL", "+ INTERVAL"] {
+        if let Some(pos) = anchor.find(tail) {
+            anchor = &anchor[..pos];
+        }
+    }
+    let norm = normalize_anchor_text(anchor);
+    if norm.is_empty() {
+        return false;
+    }
+    norm == *axis_norm
+        || norm.ends_with(&format!(".{axis_norm}"))
+        || axis_anchors.defining_norms.contains(&norm)
+        || axis_anchors
+            .leaf_idents
+            .iter()
+            .any(|leaf| norm == *leaf || norm.ends_with(&format!(".{leaf}")))
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): the anchored-band matcher behind [`derive_cross_axis_links`] —
+/// the same `BETWEEN` / `>=` / `<`(`<=`) recognisers, LHS scoping, interval
+/// parsing, and margin conditions as [`extract_form_b_bounds`] /
+/// [`extract_gte_lt_interval_bounds`] / [`extract_gte_lt_bare_integer_bounds`],
+/// with one addition: a match only counts as link evidence when its anchor
+/// names the output axis (see [`anchor_names_axis`]). Every band this
+/// recognises also contributes a derived bound; the converse is exactly the
+/// misclassification the locality proof exists to refuse (a margin with no
+/// anchored predicate is not a link).
+fn form_b_links_column_to_axis(
+    upper_sql: &str,
+    source_col_upper: &str,
+    axis_norm: &str,
+    axis_anchors: &AxisAnchorSpellings,
+) -> bool {
+    // BETWEEN form: `col BETWEEN anchor [- INTERVAL …] AND anchor [+ INTERVAL …]`.
+    let keyword = "BETWEEN ";
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(keyword) {
+        let abs = search_from + rel;
+        if !lhs_column_is_partition_col(upper_sql, abs, source_col_upper) {
+            search_from = abs + 1;
+            continue;
+        }
+        let after_between = &upper_sql[abs + keyword.len()..];
+        if let Some(and_pos) = find_and_at_depth0(after_between) {
+            let lower_expr = &after_between[..and_pos];
+            let upper_expr = expression_prefix(&after_between[and_pos + 4..]);
+
+            let before = if lower_expr.contains("INTERVAL") {
+                extract_interval_from_subtraction(lower_expr).unwrap_or(
+                    extract_interval_seconds_in_text(lower_expr).unwrap_or(Seconds::ZERO),
+                )
+            } else {
+                Seconds::ZERO
+            };
+            let after_secs = if upper_expr.contains("INTERVAL") {
+                extract_interval_from_addition(upper_expr).unwrap_or(
+                    extract_interval_seconds_in_text(upper_expr).unwrap_or(Seconds::ZERO),
+                )
+            } else {
+                Seconds::ZERO
+            };
+            // Same bound-contribution condition as `extract_form_b_bounds` —
+            // a band that contributes no margin contributes no bound, and a
+            // link is only ever recognised on a bound-contributing band.
+            if (before > Seconds::ZERO || after_secs > Seconds::ZERO)
+                && (anchor_names_axis(lower_expr, axis_norm, axis_anchors)
+                    || anchor_names_axis(upper_expr, axis_norm, axis_anchors))
+            {
+                return true;
+            }
+        }
+        search_from = abs + 1;
+    }
+
+    // `>= anchor - INTERVAL '…'` form.
+    let gte_kw = ">= ";
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(gte_kw) {
+        let abs = search_from + rel;
+        if !lhs_column_is_partition_col(upper_sql, abs, source_col_upper) {
+            search_from = abs + 1;
+            continue;
+        }
+        let after_gte = expression_prefix(&upper_sql[abs + gte_kw.len()..]);
+        if after_gte.contains("- INTERVAL")
+            && extract_interval_from_subtraction(after_gte).is_some()
+            && anchor_names_axis(after_gte, axis_norm, axis_anchors)
+        {
+            return true;
+        }
+        search_from = abs + 1;
+    }
+
+    // `< anchor + INTERVAL '…'` / `<= anchor + INTERVAL '…'` form.
+    for lt_kw in &["< ", "<= "] {
+        let mut search_from2 = 0;
+        while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
+            let abs = search_from2 + rel;
+            if !lhs_column_is_partition_col(upper_sql, abs, source_col_upper) {
+                search_from2 = abs + 1;
+                continue;
+            }
+            let after_lt = expression_prefix(&upper_sql[abs + lt_kw.len()..]);
+            if after_lt.contains("+ INTERVAL")
+                && extract_interval_from_addition(after_lt).is_some()
+                && anchor_names_axis(after_lt, axis_norm, axis_anchors)
+            {
+                return true;
+            }
+            search_from2 = abs + 1;
+        }
+    }
+
+    // Bare-integer `>=`/`<`(`<=`) form for monotone integer partition keys —
+    // same whole-statement `INTERVAL` gating as
+    // [`extract_gte_lt_bare_integer_bounds`].
+    if !upper_sql.contains("INTERVAL") {
+        let gte_kw = ">= ";
+        let mut search_from = 0;
+        while let Some(rel) = upper_sql[search_from..].find(gte_kw) {
+            let abs = search_from + rel;
+            if !lhs_column_is_partition_col(upper_sql, abs, source_col_upper) {
+                search_from = abs + 1;
+                continue;
+            }
+            let after_gte = &upper_sql[abs + gte_kw.len()..];
+            if extract_scoped_bare_integer_after_op(after_gte, '-').is_some()
+                && bare_integer_anchor_names_axis(after_gte, '-', axis_norm, axis_anchors)
+            {
+                return true;
+            }
+            search_from = abs + 1;
+        }
+        for lt_kw in &["< ", "<= "] {
+            let mut search_from2 = 0;
+            while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
+                let abs = search_from2 + rel;
+                if !lhs_column_is_partition_col(upper_sql, abs, source_col_upper) {
+                    search_from2 = abs + 1;
+                    continue;
+                }
+                let after_lt = &upper_sql[abs + lt_kw.len()..];
+                if extract_scoped_bare_integer_after_op(after_lt, '+').is_some()
+                    && bare_integer_anchor_names_axis(after_lt, '+', axis_norm, axis_anchors)
+                {
+                    return true;
+                }
+                search_from2 = abs + 1;
+            }
+        }
+    }
+
+    false
+}
+
+/// Sub-helper of [`form_b_links_column_to_axis`]: the anchor of one matched
+/// bare-integer band — the text before the `<op> <int>` shift, scoped to the
+/// same pre-` AND ` window [`extract_scoped_bare_integer_after_op`] parses.
+fn bare_integer_anchor_names_axis(
+    text: &str,
+    op: char,
+    axis_norm: &str,
+    axis_anchors: &AxisAnchorSpellings,
+) -> bool {
+    let scoped = match text.find(" AND ") {
+        Some(pos) => &text[..pos],
+        None => text,
+    };
+    let pat = format!("{op} ");
+    let Some(pos) = scoped.rfind(pat.as_str()) else {
+        return false;
+    };
+    anchor_names_axis(&scoped[..pos], axis_norm, axis_anchors)
+}
+
 /// The model's own derived-partition-column skew bound (`docs/specs/
 /// model_transforms.md` §Semantics "The output window is derived, never
 /// assumed"): how far a Form B relation anchored on the model's own

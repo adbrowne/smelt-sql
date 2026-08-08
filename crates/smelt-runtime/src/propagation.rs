@@ -645,7 +645,7 @@ fn derive_clamp_and_locality_pass(
             // key-addressed, not partition-addressed: it structurally never
             // carries a `ScanClamp` (`partition_local: PartitionLocal::Yes,
             // scans: vec![]` unconditionally — there is no partition axis
-            // for `link_source` to bound against). This edge's real
+            // for `project_source_link` to bound against). This edge's real
             // key→partition inbound margin (B2, "Key→partition dirt
             // projection through composed nodes") is derived from the SAME
             // admitted `KeyLocality` verdict `locality_admitted` above was

@@ -9,6 +9,7 @@ pub mod functional_dependency;
 pub mod horizon_ceiling;
 pub mod input_delta;
 pub mod join_shape;
+pub mod locality_projection;
 pub mod model_diff;
 pub mod monotonicity;
 pub mod not_null;

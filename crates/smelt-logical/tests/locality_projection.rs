@@ -1,0 +1,257 @@
+//! Phase 3 TDD: the partition-locality projection proof
+//! (`docs/specs/model_properties.md` §"Partition-locality projection") —
+//! `LocalityVerdict = Local | NotLocal{reason}` per `(cell × source)`,
+//! composing the read-side bound (`derive_model_bounds`) and the reflected
+//! write footprint (`reflect_footprint`), with cross-axis linkage admitted
+//! only through an explicit, derivable predicate relating the source's
+//! partition column to the output's — never a margin-inferred guess.
+
+use std::collections::BTreeSet;
+
+use smelt_logical::analysis::footprint::{reflect_footprint, FootprintResult};
+use smelt_logical::analysis::locality_projection::{locality_verdict, LocalityVerdict};
+use smelt_logical::analysis::source_bounds::{
+    derive_cross_axis_links, derive_model_bounds, BoundContext, BoundResult, CrossAxisLink, Seconds,
+};
+use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
+use smelt_logical::maintenance::{
+    ColumnGroup, Grain, MutationProfile, OutputSpec, PartitionLocal, SourceFacts, Trigger,
+};
+
+fn bounded(col: &str, before: Seconds, after: Seconds) -> BoundResult {
+    BoundResult::Bounded {
+        source_partition_col: col.to_string(),
+        before,
+        after,
+    }
+}
+
+fn bounded_footprint(axis: &str, before: Seconds, after: Seconds) -> FootprintResult {
+    FootprintResult::Bounded {
+        output_partition_col: axis.to_string(),
+        before,
+        after,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 1. Same-axis source: bounded read + bounded reflected footprint → Local.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn same_axis_bounded_read_and_footprint_is_local() {
+    let verdict = locality_verdict(
+        &bounded("event_date", Seconds::ZERO, Seconds::ZERO),
+        &bounded_footprint("event_date", Seconds::ZERO, Seconds::ZERO),
+        Some("event_date"),
+        Some("event_date"),
+        CrossAxisLink::SameAxis,
+    );
+    assert_eq!(verdict, LocalityVerdict::Local);
+
+    // The evidence derivation itself classifies a shared axis as SameAxis.
+    let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.sources.events GROUP BY event_date";
+    let ctx = BoundContext::new().with_source("events", "event_date");
+    let links = derive_cross_axis_links(sql, &ctx, "event_date");
+    assert_eq!(links.get("events"), Some(&CrossAxisLink::SameAxis));
+}
+
+// ---------------------------------------------------------------------------
+// 2. Cross-axis source linked by an explicit, derivable interval predicate
+//    relating its partition column to the output axis → Local. The predicate
+//    — not the margin — is the evidence.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_axis_source_with_explicit_interval_predicate_is_local() {
+    // Output partitioned on event_date (defined as CAST(event_ts AS DATE));
+    // the source is arrival-partitioned. The WHERE band explicitly relates
+    // arrival_date to the output axis's own defining expression.
+    let sql = "SELECT event_id, CAST(event_ts AS DATE) AS event_date \
+               FROM smelt.sources.bronze_events \
+               WHERE arrival_date BETWEEN CAST(event_ts AS DATE) \
+                                      AND CAST(event_ts AS DATE) + INTERVAL '2 days'";
+    let ctx = BoundContext::new().with_source("bronze_events", "arrival_date");
+
+    let links = derive_cross_axis_links(sql, &ctx, "event_date");
+    assert_eq!(
+        links.get("bronze_events"),
+        Some(&CrossAxisLink::ExplicitPredicate),
+        "the anchored interval band is explicit predicate evidence"
+    );
+
+    let bounds = derive_model_bounds(sql, &ctx);
+    let footprints = reflect_footprint(sql, &ctx, Some("event_date"));
+    let verdict = locality_verdict(
+        &bounds["bronze_events"],
+        &footprints["bronze_events"],
+        Some("arrival_date"),
+        Some("event_date"),
+        links["bronze_events"],
+    );
+    assert_eq!(verdict, LocalityVerdict::Local);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Cross-axis source with NO derivable predicate relating the two columns
+//    → NotLocal naming the missing link, even though a nonzero margin exists
+//    elsewhere in the query (the false positive the old margin heuristic
+//    admitted: `before > 0 || after > 0` as cross-axis evidence).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_axis_source_without_predicate_is_not_local() {
+    // A rolling window frame gives the snapshots source a genuine 1-day read
+    // margin — but nothing relates snapshot_date to event_date.
+    let sql = "SELECT user_id, \
+               SUM(amount) OVER (ORDER BY snapshot_ts \
+                 RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS rolling, \
+               CAST(snapshot_ts AS DATE) AS event_date \
+               FROM smelt.sources.snapshots";
+    let ctx = BoundContext::new().with_source("snapshots", "snapshot_date");
+
+    let bounds = derive_model_bounds(sql, &ctx);
+    assert!(
+        matches!(&bounds["snapshots"], BoundResult::Bounded { before, .. } if *before > Seconds::ZERO),
+        "precondition: the frame really does produce a nonzero margin, got {:?}",
+        bounds["snapshots"]
+    );
+
+    let links = derive_cross_axis_links(sql, &ctx, "event_date");
+    assert_eq!(links.get("snapshots"), Some(&CrossAxisLink::Absent));
+
+    let footprints = reflect_footprint(sql, &ctx, Some("event_date"));
+    let verdict = locality_verdict(
+        &bounds["snapshots"],
+        &footprints["snapshots"],
+        Some("snapshot_date"),
+        Some("event_date"),
+        links["snapshots"],
+    );
+    match verdict {
+        LocalityVerdict::NotLocal { reason } => assert!(
+            reason.contains("no predicate links"),
+            "reason must name the missing link, got: {reason}"
+        ),
+        LocalityVerdict::Local => panic!("margin alone must never link a cross-axis source"),
+    }
+
+    // And through the plan derivation: the cell's verdict is non-local.
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "t".to_string(),
+            grain: Grain::Partition {
+                partition_col: "event_date".to_string(),
+            },
+            skeleton_columns: BTreeSet::new(),
+        },
+        sources: vec![SourceFacts {
+            name: "snapshots".to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: Some("snapshot_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        }],
+        column_groups: vec![],
+        fold: None,
+        column_add_proof: None,
+    };
+    let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
+    let cell = &plan.cells[0];
+    assert!(
+        matches!(&cell.partition_local, PartitionLocal::No { source, why }
+            if source == "snapshots" && why.contains("no predicate links")),
+        "expected the missing-link non-local verdict, got {:?}",
+        cell.partition_local
+    );
+    assert!(cell.scans.is_empty(), "no clamp without a derived link");
+}
+
+// ---------------------------------------------------------------------------
+// 4. An Unbounded reflected footprint defeats locality regardless of the
+//    read bound — the composition the spec requires.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn unbounded_footprint_is_not_local_even_with_bounded_read() {
+    let verdict = locality_verdict(
+        &bounded("event_date", Seconds::ZERO, Seconds::ZERO),
+        &FootprintResult::Unbounded,
+        Some("event_date"),
+        Some("event_date"),
+        CrossAxisLink::SameAxis,
+    );
+    match verdict {
+        LocalityVerdict::NotLocal { reason } => assert!(
+            reason.contains("write footprint"),
+            "reason must name the footprint side, got: {reason}"
+        ),
+        LocalityVerdict::Local => {
+            panic!("a bounded read must not outvote an unbounded write footprint")
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Verdicts are per (cell × source): a cell with one local and one
+//    non-local source carries both — the local source's derived clamp AND
+//    the first-failure-wins non-local fold.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verdicts_are_per_cell_per_source() {
+    let sql = "SELECT e.event_date, e.amount, s.label \
+               FROM smelt.sources.events e \
+               JOIN smelt.sources.snapshots s ON s.user_id = e.user_id";
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "t".to_string(),
+            grain: Grain::Partition {
+                partition_col: "event_date".to_string(),
+            },
+            skeleton_columns: BTreeSet::new(),
+        },
+        sources: vec![
+            SourceFacts {
+                name: "events".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: Some("event_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "snapshots".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: Some("snapshot_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+        ],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["amount".to_string(), "label".to_string()],
+            mutation_sensitivity: BTreeSet::new(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        fold: None,
+        column_add_proof: None,
+    };
+    let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
+    let cell = &plan.cells[0];
+
+    // The local source's verdict survives as its derived clamp…
+    assert!(
+        cell.scans.iter().any(|c| c.source == "events"),
+        "the same-axis source keeps its derived clamp, got {:?}",
+        cell.scans
+    );
+    // …while the non-local source decides the folded cell verdict
+    // (first failure wins).
+    assert!(
+        matches!(&cell.partition_local, PartitionLocal::No { source, .. }
+            if source == "snapshots"),
+        "expected snapshots to decide the folded verdict, got {:?}",
+        cell.partition_local
+    );
+}

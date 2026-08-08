@@ -27,7 +27,7 @@ timeseries:
 -- `raw.users`). `raw.user_status` is clocked (`timeseries.partition_column:
 -- changed_at`) and this join carries an explicit, derivable window
 -- predicate on that column relative to the fact's own `event_timestamp` —
--- `link_source` (`smelt-logical::maintenance::derive`) links it to the
+-- `project_source_link` (`smelt-logical::maintenance::derive`) links it to the
 -- output partition axis via a genuine `ScanClamp` instead of falling back
 -- to the accepted-full-scan corner.
 SELECT

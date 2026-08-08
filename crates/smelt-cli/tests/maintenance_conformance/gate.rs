@@ -1926,7 +1926,7 @@ fn full_refresh_interleave_resets_state_correctly() {
 /// calendar day further out (`just_outside`) does not.
 ///
 /// Every construct in `RecipePool::partition_append_only` (the only pool
-/// wired up so far) shares the output's partition axis, so `link_source`
+/// wired up so far) shares the output's partition axis, so `project_source_link`
 /// (`smelt-logical/src/maintenance/derive.rs`) always derives a `ScanClamp`
 /// with `before = after = 0` for it — there is no construct in the current
 /// pool that produces a genuinely nonzero margin. That means this test

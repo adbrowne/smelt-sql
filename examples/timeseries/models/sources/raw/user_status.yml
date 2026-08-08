@@ -9,7 +9,7 @@ columns:
 # Clocked (unlike `raw.users`): `changed_at` tracks when a row last mutated,
 # and `daily_events_status.sql`'s join carries an explicit, derivable
 # predicate on this column relative to the fact's own event timestamp — so
-# `link_source` (`smelt-logical::maintenance::derive`) links it to the
+# `project_source_link` (`smelt-logical::maintenance::derive`) links it to the
 # output partition axis via a genuine `ScanClamp` (`PartitionLocal::Yes`)
 # instead of falling back to the accepted-full-scan corner `raw.users`
 # exercises (`PartitionLocal::No`).

@@ -210,7 +210,7 @@ impl ScanClamp {
     /// time `t` writes output over `[t − after, t + before]`.
     ///
     /// For a **partition-addressed output** this is the *derived* verdict,
-    /// not an assumed mirror: clamp construction (`derive::link_source`)
+    /// not an assumed mirror: clamp construction (`derive::project_source_link`)
     /// consults [`crate::analysis::footprint::reflect_footprint`] and only
     /// builds a clamp when the derived footprint is
     /// [`crate::analysis::footprint::FootprintResult::Bounded`] — whose

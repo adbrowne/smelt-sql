@@ -24,9 +24,11 @@ use crate::analysis::input_delta::{
     input_delta_discovery, MutationProfile as DeltaMutationProfile, SourceShape,
 };
 use crate::analysis::join_shape::JoinContext;
+use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use crate::analysis::model_diff::ModelDiff;
 use crate::analysis::source_bounds::{
-    derive_model_bounds, resolve_table_ref_source_name, BoundContext, BoundResult, Seconds,
+    derive_cross_axis_links, derive_model_bounds, resolve_table_ref_source_name, BoundContext,
+    BoundResult, CrossAxisLink, Seconds,
 };
 use crate::analysis::walk::model_property_vector;
 use crate::analysis::{item_expr, select_stmt_items, SelectItemKind};
@@ -312,7 +314,7 @@ pub struct ModelEdge {
 ///
 /// A clocked upstream contributes a `{*}` creation cell whose scan clamp is
 /// anchored to the downstream's output partition axis via the same
-/// [`link_source`] rule sources use; an upstream with no derivable clock is a
+/// [`project_source_link`] locality proof sources use; an upstream with no derivable clock is a
 /// [`Refusal::ReachNotDerivable`] naming the edge. Model edges only
 /// contribute to a **partition-addressed** downstream (`output_partition_col`
 /// is `Some`); a key-addressed downstream's model-edge creation is a keyed
@@ -358,9 +360,13 @@ pub fn append_model_edge_cells(
     let bounds = derive_model_bounds(sql, &ctx);
     // The write-scope dual of `bounds` over the same edge context
     // (`model_properties.md` §"Footprint reflection / bounded write
-    // footprint") — consulted by `link_source` before constructing each
+    // footprint") — consulted by the locality proof before constructing each
     // edge's clamp.
     let footprints = reflect_footprint(sql, &ctx, Some(output_partition_col));
+    // The cross-axis predicate evidence over the same edge context
+    // (`model_properties.md` §"Partition-locality projection") — the third
+    // input the locality proof composes.
+    let links = derive_cross_axis_links(sql, &ctx, output_partition_col);
 
     // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
     // closure"; T3, `docs/plans/20260715-composed-axes-conditional-
@@ -401,8 +407,13 @@ pub fn append_model_edge_cells(
         // `NewData`/`Backfill` region recompute), so an unlinked edge records
         // a non-local verdict but is never refused under the K8 guardrail —
         // only the *underivable-clock* case above refuses.
+        let loc = LocalityInputs {
+            bounds: &bounds,
+            footprints: &footprints,
+            links: &links,
+        };
         let (partition_local, scans) =
-            match link_source(Some(output_partition_col), &bounds, &footprints, &facts) {
+            match project_source_link(Some(output_partition_col), &loc, &facts) {
                 SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
                 SourceLink::Unlinked { why } => (
                     PartitionLocal::No {
@@ -636,75 +647,113 @@ enum SourceLink {
     Unclocked,
 }
 
-/// Link `facts` to the output partition axis via the derived bounds.
+/// The three per-source derivations the partition-locality projection
+/// composes (`model_properties.md` §"Partition-locality projection") —
+/// read bounds ([`derive_model_bounds`]), reflected write footprints
+/// ([`reflect_footprint`]), and cross-axis predicate evidence
+/// ([`derive_cross_axis_links`]) — derived once per model (or per edge
+/// context) and threaded together to every clamp-construction site.
+struct LocalityInputs<'a> {
+    bounds: &'a HashMap<String, BoundResult>,
+    footprints: &'a HashMap<String, FootprintResult>,
+    links: &'a HashMap<String, CrossAxisLink>,
+}
+
+/// Project one source's partition-locality verdict onto a [`SourceLink`] —
+/// the adapter between the pure locality proof
+/// ([`locality_verdict`] — `model_properties.md` §"Partition-locality
+/// projection") and the clamp/refusal plumbing the derivation sites share.
 ///
-/// The load-bearing v0 rule: a **cross-axis** source (its partition column is
-/// not the output's) is linked only by an *explicit, derivable* predicate on
-/// its partition column — the zero-margin `Bounded{0,0}` fallback means "no
-/// predicate found at all", which for a cross-axis source is the absence of a
-/// link, not a zero-cost one. Neither smelt nor the engine can know how an
-/// undeclared timestamp relates to the partition column, so this fails
-/// closed. (A same-axis source is linked by identity; zero margin is real
-/// there.)
-/// `footprints` is the derived write-footprint verdict per source
-/// ([`reflect_footprint`] — `model_properties.md` §"Footprint reflection /
-/// bounded write footprint"), consulted before a clamp is constructed: a
-/// clamp promises a mirror-bounded write footprint
-/// ([`ScanClamp::footprint`]), so a source whose *derived* footprint is
-/// `Unbounded`/`NotDerivable` (a trajectory column; an underivable write
-/// scope) must not receive one — it falls back to the same fail-closed
-/// `Unlinked` verdict an underivable read takes. A source absent from
-/// `footprints` (a key-grain output — no partition axis, so the footprint
-/// question is not posed) links exactly as before.
-fn link_source(
+/// For a **partition-addressed** output, the verdict is the proof's,
+/// verbatim: read bound ([`derive_model_bounds`]) AND reflected write
+/// footprint ([`reflect_footprint`]) must both be `Bounded`, and a
+/// cross-axis source (its partition column is not the output's) is linked
+/// only by the explicit-predicate evidence
+/// ([`derive_cross_axis_links`]) — never by a nonzero scan margin. A
+/// `Local` verdict over a `Bounded` read constructs the derived
+/// [`ScanClamp`] exactly as before; every `NotLocal` reason becomes the
+/// `Unlinked` why. Policy (creation cells never refuse; the K8
+/// `ScanUnbounded` refusal honoring `allow_full_scan`) stays at each call
+/// site — this adapter is policy-free.
+///
+/// For a **keyed-grain** output (`output_partition_col` is `None`), the
+/// locality question is not posed — there is no output partition axis to
+/// project a write onto — and the proof is not consulted. The pre-proof
+/// linking rule is kept verbatim as documented vacuous-locality residue
+/// (`model_properties.md` §Known Divergences: a locality-admitted keyed
+/// model's clamps still carry the assumed mirror into propagation): a
+/// nonzero-margin `Bounded` read links, a zero-margin one does not.
+fn project_source_link(
     output_partition_col: Option<&str>,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
     facts: &SourceFacts,
 ) -> SourceLink {
+    let LocalityInputs {
+        bounds,
+        footprints,
+        links,
+    } = loc;
     let Some(col) = &facts.partition_col else {
         return SourceLink::Unclocked;
     };
-    let same_axis = output_partition_col == Some(col.as_str());
-    match bounds.get(&facts.name) {
-        Some(BoundResult::Bounded { before, after, .. }) => {
-            if same_axis || *before > Seconds::ZERO || *after > Seconds::ZERO {
-                match footprints.get(&facts.name) {
-                    Some(FootprintResult::Unbounded) => SourceLink::Unlinked {
-                        why: "derived write footprint on the output partition axis is \
-                              unbounded — a delta can rewrite arbitrarily distant output \
-                              partitions"
-                            .to_string(),
-                    },
-                    Some(FootprintResult::NotDerivable) => SourceLink::Unlinked {
-                        why: "write footprint on the output partition axis is not derivable"
-                            .to_string(),
-                    },
-                    // `Bounded` — the derived mirror the clamp carries — or
-                    // no verdict at all (key-grain output: the footprint
-                    // question is not posed against a partition axis).
-                    Some(FootprintResult::Bounded { .. }) | None => SourceLink::Clamp(ScanClamp {
+    let Some(output_axis) = output_partition_col else {
+        // Keyed-grain residue policy (see doc comment above) — not the proof.
+        return match bounds.get(&facts.name) {
+            Some(BoundResult::Bounded { before, after, .. }) => {
+                if *before > Seconds::ZERO || *after > Seconds::ZERO {
+                    SourceLink::Clamp(ScanClamp {
                         source: facts.name.clone(),
                         column: col.clone(),
                         before: *before,
                         after: *after,
-                    }),
-                }
-            } else {
-                SourceLink::Unlinked {
-                    why: format!(
-                        "no predicate links '{col}' to the output partition axis — the \
-                         scan cannot be partition-pruned"
-                    ),
+                    })
+                } else {
+                    SourceLink::Unlinked {
+                        why: format!(
+                            "no predicate links '{col}' to the output partition axis — the \
+                             scan cannot be partition-pruned"
+                        ),
+                    }
                 }
             }
-        }
-        Some(BoundResult::Unbounded) => SourceLink::Unlinked {
-            why: "derived scan is unbounded".to_string(),
+            Some(BoundResult::Unbounded) => SourceLink::Unlinked {
+                why: "derived scan is unbounded".to_string(),
+            },
+            Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
+                why: "scan bound not derivable".to_string(),
+            },
+        };
+    };
+
+    let read = bounds
+        .get(&facts.name)
+        .unwrap_or(&BoundResult::NotDerivable);
+    // `bounds` and `footprints` are derived from the same SQL over the same
+    // context, so their key sets agree; a source absent from both is refused
+    // through the read leg (`NotDerivable`) before the footprint is read.
+    let footprint = footprints
+        .get(&facts.name)
+        .unwrap_or(&FootprintResult::NotDerivable);
+    let link = links
+        .get(&facts.name)
+        .copied()
+        .unwrap_or(CrossAxisLink::Absent);
+
+    match locality_verdict(read, footprint, Some(col), Some(output_axis), link) {
+        LocalityVerdict::Local => match read {
+            BoundResult::Bounded { before, after, .. } => SourceLink::Clamp(ScanClamp {
+                source: facts.name.clone(),
+                column: col.clone(),
+                before: *before,
+                after: *after,
+            }),
+            // Unreachable: the proof only ever answers `Local` over a
+            // `Bounded` read; kept fail-closed rather than panicking.
+            BoundResult::Unbounded | BoundResult::NotDerivable => SourceLink::Unlinked {
+                why: "scan bound not derivable".to_string(),
+            },
         },
-        Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
-            why: "scan bound not derivable".to_string(),
-        },
+        LocalityVerdict::NotLocal { reason } => SourceLink::Unlinked { why: reason },
     }
 }
 
@@ -753,13 +802,27 @@ fn derive_maintenance_plan_impl(
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
     // The write-scope dual of `bounds` (`model_properties.md` §"Footprint
     // reflection / bounded write footprint"), derived once per model and
-    // consulted at every clamp-construction site via `link_source`. A
+    // consulted at every clamp-construction site via `project_source_link`. A
     // key-grain output has no partition axis to spread a write across, so
-    // the footprint question is not posed (empty map — `link_source` links
-    // exactly as before).
+    // the footprint question is not posed (empty map — the keyed residue
+    // policy in `project_source_link` links instead).
     let footprints = match inputs.output_partition_col() {
         Some(axis) => reflect_footprint(inputs.sql, &inputs.bound_context(), Some(axis)),
         None => HashMap::new(),
+    };
+    // The cross-axis predicate evidence (`model_properties.md`
+    // §"Partition-locality projection") — like the footprint, posed only
+    // against a partition-addressed output (a keyed output has no axis to
+    // link a source's partition column to; `project_source_link` keeps the
+    // documented keyed residue policy instead).
+    let links = match inputs.output_partition_col() {
+        Some(axis) => derive_cross_axis_links(inputs.sql, &inputs.bound_context(), axis),
+        None => HashMap::new(),
+    };
+    let loc = LocalityInputs {
+        bounds: &bounds,
+        footprints: &footprints,
+        links: &links,
     };
     let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
     // The set of sources this model's own trigger list covers with an
@@ -786,8 +849,7 @@ fn derive_maintenance_plan_impl(
         match trigger {
             Trigger::NewData { source } => derive_new_data(
                 inputs,
-                &bounds,
-                &footprints,
+                &loc,
                 source,
                 &identity,
                 &covered_by_mutation,
@@ -795,19 +857,16 @@ fn derive_maintenance_plan_impl(
             ),
             Trigger::UpstreamMutation { source } => derive_mutation(
                 inputs,
-                &bounds,
-                &footprints,
+                &loc,
                 source,
                 &identity,
                 source_referential_integrity,
                 &mut plan,
             ),
             Trigger::ColumnAdded { columns } => {
-                derive_column_added(inputs, &bounds, &footprints, columns, &identity, &mut plan)
+                derive_column_added(inputs, &loc, columns, &identity, &mut plan)
             }
-            Trigger::Backfill => {
-                derive_backfill(inputs, &bounds, &footprints, &identity, &mut plan)
-            }
+            Trigger::Backfill => derive_backfill(inputs, &loc, &identity, &mut plan),
         }
     }
 
@@ -846,8 +905,7 @@ fn model_fingerprint_projections(inputs: &ModelInputs) -> BTreeMap<String, Finge
 /// append-only source (`01-framework.md` §4).
 fn derive_new_data(
     inputs: &ModelInputs,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
     source: &str,
     identity: &RowIdentityVerdict,
     covered_by_mutation: &BTreeSet<String>,
@@ -858,7 +916,7 @@ fn derive_new_data(
     };
     match &inputs.output.grain {
         Grain::Partition { .. } => {
-            let (partition_local, scans) = read_locality(inputs, bounds, footprints);
+            let (partition_local, scans) = read_locality(inputs, loc);
             plan.cells.push(PlanCell {
                 group: "{*}".to_string(),
                 trigger,
@@ -1036,8 +1094,7 @@ fn derive_new_data(
 /// the `None`-vs-attempted-and-`Open` distinction this preserves.
 fn derive_mutation(
     inputs: &ModelInputs,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
     source: &str,
     identity: &RowIdentityVerdict,
     source_referential_integrity: &SourceReferentialIntegrity,
@@ -1082,26 +1139,26 @@ fn derive_mutation(
         // group whose sensitivity to `source` is *purely* value (never
         // membership) is eligible for the cheaper column-scoped merge.
         let membership_sensitive = group.membership_sensitivity.contains(source);
-        let (locality, scans) =
-            match link_source(inputs.output_partition_col(), bounds, footprints, facts) {
-                SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
-                SourceLink::Unclocked => (
-                    PartitionLocal::No {
-                        source: source.to_string(),
-                        why: "unclocked source: a change's footprint projects onto no bounded \
+        let (locality, scans) = match project_source_link(inputs.output_partition_col(), loc, facts)
+        {
+            SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
+            SourceLink::Unclocked => (
+                PartitionLocal::No {
+                    source: source.to_string(),
+                    why: "unclocked source: a change's footprint projects onto no bounded \
                           partition interval of the output"
-                            .to_string(),
-                    },
-                    vec![],
-                ),
-                SourceLink::Unlinked { why } => (
-                    PartitionLocal::No {
-                        source: source.to_string(),
-                        why,
-                    },
-                    vec![],
-                ),
-            };
+                        .to_string(),
+                },
+                vec![],
+            ),
+            SourceLink::Unlinked { why } => (
+                PartitionLocal::No {
+                    source: source.to_string(),
+                    why,
+                },
+                vec![],
+            ),
+        };
         if matches!(locality, PartitionLocal::No { .. }) && !facts.allow_full_scan {
             plan.refusals.push(Refusal::ScanUnbounded {
                 source: source.to_string(),
@@ -1139,8 +1196,7 @@ fn derive_mutation(
 /// `S = ∅` (the catch-up flag).
 fn derive_column_added(
     inputs: &ModelInputs,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
     columns: &[String],
     identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
@@ -1214,7 +1270,7 @@ fn derive_column_added(
                 refused = true;
                 break;
             };
-            match link_source(inputs.output_partition_col(), bounds, footprints, facts) {
+            match project_source_link(inputs.output_partition_col(), loc, facts) {
                 SourceLink::Clamp(clamp) => scans.push(clamp),
                 SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
                     plan.refusals.push(Refusal::ScanUnbounded {
@@ -1264,12 +1320,11 @@ fn derive_column_added(
 /// replayable input, unconditionally correct (`01-framework.md` §3).
 fn derive_backfill(
     inputs: &ModelInputs,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
     identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
-    let (partition_local, scans) = read_locality(inputs, bounds, footprints);
+    let (partition_local, scans) = read_locality(inputs, loc);
     plan.cells.push(PlanCell {
         group: "{*}".to_string(),
         trigger: Trigger::Backfill,
@@ -1291,18 +1346,21 @@ fn derive_backfill(
 /// named, never silent).
 fn read_locality(
     inputs: &ModelInputs,
-    bounds: &HashMap<String, BoundResult>,
-    footprints: &HashMap<String, FootprintResult>,
+    loc: &LocalityInputs<'_>,
 ) -> (PartitionLocal, Vec<ScanClamp>) {
-    // Keyed grain: a backfill is a whole-table rebuild; there is no output
-    // partition axis to be local to.
+    // Keyed grain: a whole-table rebuild over a key-addressed output — there
+    // is no output partition axis to be local to, so the locality question
+    // is not posed and the sentinel `PartitionLocal::Yes` records the
+    // vacuous verdict (policy, not a proof outcome — the locality proof is
+    // only ever consulted against a partition-addressed output;
+    // `model_properties.md` §Known Divergences keeps this keyed residue).
     if inputs.output_partition_col().is_none() {
         return (PartitionLocal::Yes, vec![]);
     }
     let mut scans = Vec::new();
     let mut verdict = PartitionLocal::Yes;
     for s in &inputs.sources {
-        match link_source(inputs.output_partition_col(), bounds, footprints, s) {
+        match project_source_link(inputs.output_partition_col(), loc, s) {
             SourceLink::Clamp(clamp) => scans.push(clamp),
             SourceLink::Unclocked => {
                 if matches!(verdict, PartitionLocal::Yes) {
