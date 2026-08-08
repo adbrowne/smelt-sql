@@ -67,6 +67,7 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
+| 6     | pending  |        |      |
 
 ---
 
@@ -252,6 +253,31 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 - [ ] `/smelt:validate` drift report triaged
 
 **Commit.** `docs(spec): four maintenance-plan proofs derived — divergence entries closed`
+
+---
+
+### Phase 6: Mutation campaign over the new proof layer
+
+**Goal.** Run a `cargo-mutants` campaign over the four new proof modules and the rewired `derive.rs` regions, kill or triage every surviving mutant, and record the residue — the same gate-attribution pattern as the prior campaign (`docs/plans/` mutation-campaign history; staged `--iterate` runs).
+
+**Pre-conditions.** Phases 1–5 done.
+
+**TDD tests to write first.** The campaign *produces* the test list: each surviving mutant that represents a real coverage gap gets an explicit killing test added to the relevant proof test file before the survivor is re-run; each survivor that is provably equivalent or unreachable is recorded with its justification.
+
+**Implementation shape.** `cargo mutants --package smelt-logical --file 'src/analysis/faithful_fold.rs' --file 'src/analysis/footprint.rs' --file 'src/analysis/locality_projection.rs' --file 'src/analysis/definition_change.rs' --file 'src/maintenance/derive.rs' --iterate`, tier-1 gates first (`-p smelt-logical` unit/tracer/admission suites) then the conformance gate for stubborn survivors. Kill-tests land in the phase's proof test files; a survivors ledger (mutant → verdict → gate or justification) is appended to this plan under "Deferred during implementation" if any residue remains.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-logical/tests/{faithful_fold,footprint_reflection,locality_projection,definition_change}.rs` — kill tests
+- This plan file — survivors ledger
+
+**Docs touched.** None (test-only phase).
+
+**Review checklist** (material findings only):
+- [ ] Every surviving mutant is either killed by a new test or ledgered with an equivalence/unreachability justification
+- [ ] Kill tests assert proof semantics (spec vocabulary), not implementation internals
+- [ ] No production code changes smuggled in (unless a mutant exposes a real bug — then it gets its own red-green fix and a note here)
+
+**Commit.** `test(logical): mutation campaign over the derived proof layer`
 
 ---
 
