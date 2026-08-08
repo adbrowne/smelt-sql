@@ -1511,6 +1511,28 @@ pub async fn execute_project(
                 )?,
                 None => None,
             };
+            // Membership-sensitive counterpart of `column_scoped_cell` above
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 2): a
+            // live `Technique::DeleteInsert` cell over a proven keyed row
+            // identity, dispatched through the staged-candidate conditional
+            // recompute instead of a column-scoped `MERGE`. Mutually
+            // exclusive with `column_scoped_cell` by construction — the two
+            // resolvers filter on disjoint `Technique`s of the SAME derived
+            // plan, so at most one of them is ever `Some` for a given
+            // `explicitly_mutable` source set.
+            let membership_recompute_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => {
+                    crate::maintenance_driver::resolve_live_membership_recompute_cell(
+                        &clean_sql_for_merge,
+                        &db_table_name,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &request.technique_overrides,
+                    )?
+                }
+                None => None,
+            };
 
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
@@ -1719,12 +1741,76 @@ pub async fn execute_project(
                     }
                 }
             }
-            if !used_column_scoped_merge {
+            // The membership-sensitive counterpart of the block above
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 2):
+            // a live `Technique::DeleteInsert` cell dispatches the
+            // staged-candidate conditional recompute over the model's own
+            // FULL (unwindowed) recompiled SQL — the entire current
+            // admitted+enriched state, not this run's time-windowed slice —
+            // so a key whose row admission changed (new or changed, per
+            // `resolve_live_membership_recompute_cell`'s own doc comment on
+            // the departed-row limitation it inherits from the emitter) is
+            // repaired. `column_scoped_cell` and `membership_recompute_cell`
+            // are mutually exclusive (disjoint `Technique` filters over the
+            // SAME derived plan), so this never double-dispatches a source
+            // `column_scoped_cell` already handled.
+            let mut used_membership_recompute = false;
+            if let Some((_source, cell, suppression)) = membership_recompute_cell.as_ref() {
+                if table_exists_before_run && !used_column_scoped_merge {
+                    let smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
+                        compared_columns,
+                    } = suppression
+                    else {
+                        unreachable!(
+                            "resolve_live_membership_recompute_cell only ever returns \
+                             WriteSuppression::Suppressed"
+                        );
+                    };
+                    let smelt_logical::maintenance::RowIdentity::Key(key) =
+                        &cell.row_identity.identity
+                    else {
+                        unreachable!(
+                            "resolve_live_membership_recompute_cell only ever returns a cell \
+                             with a proven RowIdentity::Key"
+                        );
+                    };
+                    // The model's own FULL, unwindowed recompute — same
+                    // `clean_sql_for_merge` source text `column_scoped_cell`'s
+                    // dispatch above compiles for its own `compiled.sql`,
+                    // recompiled here independently since the two branches
+                    // are mutually exclusive per-run (never both compiled).
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql_for_merge,
+                        resolver,
+                    )?;
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    let recompute_result =
+                        crate::maintenance_driver::execute_staged_membership_recompute(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            key,
+                            &compiled.sql,
+                            compared_columns,
+                            &retry_policy,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    used_membership_recompute = true;
+                    total_rows = recompute_result.row_count;
+                }
+            }
+            if !used_column_scoped_merge && !used_membership_recompute {
                 total_rows = exec_result.row_count;
             }
             total_rows_overall += total_rows;
             let keyed_strategy_label = if used_column_scoped_merge {
                 "column_scoped_merge".to_string()
+            } else if used_membership_recompute {
+                "delete_insert_suppressed".to_string()
             } else {
                 "cumulative_aggregate".to_string()
             };

@@ -34,8 +34,8 @@ use smelt_logical::maintenance::choice::{
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
     emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, MaintenanceDialect, MaintenanceStatement, Region,
-    StatementGroup, TargetSlicePredicate,
+    emit_fingerprint_sidecar_diff, emit_staged_candidate_conditional, MaintenanceDialect,
+    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -934,6 +934,239 @@ pub fn resolve_live_column_scoped_cell(
         return Ok(Some((source.clone(), cell, suppression)));
     }
     Ok(None)
+}
+
+/// Find the first `explicitly_mutable` source whose `Trigger::
+/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` over a
+/// proven `RowIdentity::Key` — the membership-sensitive counterpart of
+/// [`resolve_live_column_scoped_cell`] above, added for the **keyed run
+/// loop only** (`docs/plans/20260808-membership-sensitivity.md` Phase 2).
+///
+/// Per `incremental_models.md` §"The plan matrix": "A membership-sensitive
+/// group … must be repaired by a technique that can create and delete rows:
+/// the recompute family (delete+insert, change-suppressed where the staged
+/// candidate is comparable), never a column-scoped merge, which cannot fix
+/// which rows exist." `derive_model_maintenance_plan` (Phase 1 of that plan)
+/// now assigns exactly such a cell `Technique::DeleteInsert` +
+/// `Corner::RecomputeRegion` for a membership-sensitive column group.
+///
+/// A `Technique::DeleteInsert` cell is deliberately **not** surfaced here
+/// unless the cell's own [`RowIdentity`] proved a real `Key(_)` — a `grain:
+/// partition` output's `WholeRow` identity has no key
+/// `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` can
+/// join stored rows to candidate rows on (that emitter panics on an empty
+/// key), and the whole-row `EXCEPT ALL`-both-ways realisation for a keyless
+/// region remains unbuilt (`docs/specs/model_transforms.md` §Known
+/// Divergences). A `grain: partition` model's `DeleteInsert` membership cell
+/// is left to the existing unconditional region `DELETE`+`INSERT` batch loop
+/// (`execute.rs`'s plain incremental path, unchanged by this phase) — the
+/// always-correct, always-available fallback the plan matrix names for
+/// exactly this shape.
+///
+/// This function only ever surfaces a cell when [`resolve_write_variant`]
+/// resolves `WriteSuppression::Suppressed` — `emit_staged_candidate_
+/// conditional` has no unconditional counterpart (unlike the column-scoped
+/// `MERGE` family), so an `Unconditional`/refused verdict falls through to
+/// `None`, same fail-soft posture `resolve_live_column_scoped_cell` already
+/// has for its own write-variant dimension (see that function's own doc
+/// comment on the "known gap" this mirrors).
+///
+/// **Known limitation, inherited from the emitter, not introduced here.**
+/// `emit_staged_candidate_conditional`'s `DELETE` only ever removes a
+/// *matched-and-changed* row (`table.key = staged.key AND (compared columns
+/// differ)`) — a row whose key is entirely **absent** from the staged
+/// candidate (a genuinely *departed* row: e.g. the dimension row a fact
+/// joined on was itself deleted, so the fact no longer appears in the
+/// recomputed candidate at all) is never matched by that `DELETE` and is
+/// left stored, stale, forever. This is the SAME "region-scoped, absent =
+/// out of scope" semantics `emit_staged_candidate_conditional`'s own
+/// `statement_parity` coverage documents and tests
+/// (`crates/smelt-runtime/tests/statement_parity.rs::
+/// staged_candidate_conditional_statements_come_from_the_emitter`'s "user 3
+/// … must be left untouched entirely"). Fixing it needs a genuine
+/// anti-join `DELETE` the emitter does not build today — out of Phase 2's
+/// critical-file scope (`crates/smelt-logical/src/maintenance/emit.rs` is
+/// not touched by this phase); tracked for Phase 3/4 alongside the
+/// conformance rewrite.
+pub fn resolve_live_membership_recompute_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    technique_overrides: &[crate::types::CellTechniqueOverride],
+) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        None,
+        &[],
+    ) else {
+        return Ok(None);
+    };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
+    for source in explicitly_mutable {
+        let trigger = Trigger::UpstreamMutation {
+            source: source.clone(),
+        };
+        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
+            continue;
+        };
+        if cell.technique != Technique::DeleteInsert {
+            continue;
+        }
+        let RowIdentity::Key(key) = &cell.row_identity.identity else {
+            continue;
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let group_columns = result
+            .column_groups
+            .iter()
+            .find(|g| g.name() == cell.group)
+            .map(|g| g.columns.clone())
+            .unwrap_or_default();
+        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+            &cell,
+            &result.column_groups,
+            cells_cfg,
+        )
+        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+        let overrides = effective_override(
+            metadata
+                .maintenance
+                .as_ref()
+                .and_then(|m| m.defaults.as_ref()),
+            &combined_cells,
+            source,
+            &group_columns,
+        );
+        // `resolve_cell_choice`'s resolvable set for this cell is `{recompute,
+        // DeleteInsert}` (the cell's own admitted technique IS the always-
+        // available region recompute for this family, per `resolve_cell_
+        // choice`'s own doc comment: "the second live alternative … is the
+        // always-admissible whole-region recompute"). Absent an override that
+        // asks for something this narrow resolver has no lowering for, both
+        // resolvable members land here as `Admitted(Technique::DeleteInsert)`
+        // — a `RegionRecompute` choice from a `technique: recompute` pin/
+        // `prefer` is handled the same way `resolve_live_column_scoped_cell`
+        // handles it: it simply isn't THIS live cell, so this source is
+        // skipped and the caller's own default (the plain incremental batch
+        // loop, unaware of this dimension) applies.
+        let chosen = resolve_cell_choice(
+            &result.plan,
+            &trigger,
+            &overrides,
+            write_pin,
+            // Column-scoped MERGE backend capability is irrelevant to this
+            // resolver's own resolvable set (`{recompute, DeleteInsert}`
+            // never contains `ColumnScopedMerge`) — passed `false` so a
+            // `write_pin`/pin naming `ColumnScopedMerge` correctly refuses
+            // here rather than appearing spuriously "live".
+            false,
+        )
+        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+        if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
+            continue;
+        }
+        let comparability = model_property_vector(sql, &JoinContext::new())
+            .map(|v| v.comparability)
+            .unwrap_or_default();
+        let raw_suppression =
+            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
+        let write_variant_result = resolve_write_variant(
+            &raw_suppression,
+            &cell.trigger,
+            cell.ledger_catch_up,
+            &overrides,
+        );
+        let Ok((suppression, _variant_reason)) = write_variant_result else {
+            continue;
+        };
+        // `emit_staged_candidate_conditional` has no unconditional
+        // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
+        // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
+        // sound lowering this resolver can hand the caller, so it is treated
+        // exactly like a refused write-variant: skip this source, fall
+        // through to the caller's safe default.
+        if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
+            continue;
+        }
+        return Ok(Some((source.clone(), cell, suppression)));
+    }
+    Ok(None)
+}
+
+/// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
+/// (`resolve_live_membership_recompute_cell` above) via the staged-candidate
+/// conditional `DELETE`+`INSERT` (`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional`) — the "full-model recompute staged,
+/// change-suppressed where comparable" realisation `incremental_models.md`
+/// §"The plan matrix" names for a membership-sensitive group. `key` is the
+/// cell's own proven `RowIdentity::Key` (never `WholeRow` — the caller only
+/// reaches here when the resolver above already proved a real key);
+/// `candidate_select` is the model's own FULL (unwindowed) recompiled SQL —
+/// the entire current admitted+enriched state, not a time-windowed slice —
+/// so a departed OR newly-admitted key is represented correctly (module the
+/// emitter's own documented departed-row limitation, see the resolver's doc
+/// comment above). `compared_columns` is the already fail-closed-admitted
+/// `WriteSuppression::Suppressed` set.
+pub async fn execute_staged_membership_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = format!("__smelt_staged_{table}");
+    let group = emit_staged_candidate_conditional(
+        &full_table,
+        &staged_relation,
+        key,
+        candidate_select,
+        compared_columns,
+        dialect,
+    );
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
+        })?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an

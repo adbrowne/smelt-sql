@@ -1430,136 +1430,88 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
     }
 }
 
-/// The column-scoped `MERGE` family (`Technique::ColumnScopedMerge`, MP11):
-/// re-runs `technique_lowering.rs::column_scoped_merge_e2e`'s
-/// `examples/timeseries/daily_events_enriched` fixture — a fact+dimension
-/// enrichment whose `raw.users` mutation drives the `{user_name}` cell's
-/// live column-scoped MERGE — through the recording reporter/backend, and
-/// asserts the executed `MERGE` is byte-identical to a direct call of
-/// `emit_column_scoped_merge` over the same table/unique_key/source_select.
+/// The column-scoped `MERGE` family (`Technique::ColumnScopedMerge`, MP11).
+///
+/// **Reachability note** (`docs/plans/20260808-membership-sensitivity.md`
+/// Phase 2): before that plan, `examples/timeseries/daily_events_enriched`'s
+/// `raw.users` mutation drove the `{user_name}` cell's live column-scoped
+/// MERGE, and this test drove it end to end through `execute_project`. Phase
+/// 1 of that plan derives membership sensitivity directly from the join's
+/// `ON e.user_id = u.user_id` predicate (a row-admission read), which makes
+/// `{user_name}` — and every other column group that same join admits —
+/// membership-sensitive, so the cell now admits `Technique::DeleteInsert`,
+/// never `ColumnScopedMerge`
+/// (`technique_lowering.rs::real_fixture_examples_timeseries_admits_
+/// membership_recompute_cell` proves the derivation). No fixture in this
+/// workspace reaches `ColumnScopedMerge` today: value sensitivity alone,
+/// without any row-admission read of the SAME mutable source, has no
+/// currently-shipped shape (every `mutation_profile: mutable_snapshot`
+/// dimension example workspaces ship is also the driving join's own
+/// partner). `ColumnScopedMerge`'s emitter parity is therefore proven the
+/// same way the family's OTHER legs in this file prove theirs when no real
+/// fixture reaches them — a direct call of the single production dispatch
+/// function ([`execute_column_scoped_merge_full`]) against a `RecordingBackend`,
+/// asserting the executed `MERGE` is byte-identical to a direct
+/// `emit_column_scoped_merge` call over the same inputs. Tracked as a real
+/// reachability gap, not silently worked around: `docs/plans/
+/// 20260808-membership-sensitivity.md`'s Deferred section and
+/// `incremental_models.md` §Known Divergences (Phase 4 of that plan).
 #[tokio::test]
 async fn column_scoped_merge_statements_come_from_the_emitter() {
-    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/timeseries")
-        .canonicalize()
-        .expect("examples/timeseries exists");
-
     let tmp = tempfile::TempDir::new().expect("tempdir");
-    let project_dir = tmp.path().join("project");
-    copy_dir_recursive(&source_dir, &project_dir);
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
 
-    let db_path = tmp.path().join("run.duckdb");
-    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
-
-    // Stage the two source tables `execute_project` reads (same fixture
-    // data as `technique_lowering.rs::column_scoped_merge_e2e`).
-    {
-        let backend = DuckDbBackend::new(&db_path, "main")
-            .await
-            .expect("open duckdb");
-        backend
-            .execute_sql(
-                "CREATE TABLE main.sources_raw_events (event_id INTEGER, user_id INTEGER, \
-                 event_type VARCHAR, event_timestamp TIMESTAMP)",
-            )
-            .await
-            .expect("create events source table");
-        backend
-            .execute_sql(
-                "INSERT INTO main.sources_raw_events VALUES \
-                 (1, 1, 'login', TIMESTAMP '2025-01-10 08:00:00'), \
-                 (2, 2, 'login', TIMESTAMP '2025-01-10 09:00:00')",
-            )
-            .await
-            .expect("seed events");
-        backend
-            .execute_sql(
-                "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
-                 signup_date DATE)",
-            )
-            .await
-            .expect("create users source table");
-        backend
-            .execute_sql(
-                "INSERT INTO main.sources_raw_users VALUES \
-                 (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
-            )
-            .await
-            .expect("seed users");
-    }
-
-    let request = select_request("dev", "daily_events_enriched", "2025-01-10", "2025-01-11");
-
-    // Run 1: creates the target (table doesn't exist yet) — never the
-    // column-scoped MERGE path.
-    {
-        let (db, graph) = build_db_and_graph(&project_dir, &config);
-        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
-        let factory = RecordingBackendFactory {
-            db_path: db_path.clone(),
-            backend: Arc::clone(&backend_slot),
-        };
-        execute_project(
-            "column-scoped-merge-parity-run-1".to_string(),
-            request.clone(),
-            Arc::clone(&config),
-            graph,
-            db,
-            &project_dir,
-            &factory,
-            &smelt_runtime::NoOpReporter,
-            CancellationToken::new(),
+    backend
+        .execute_sql(
+            "CREATE TABLE main.daily_events_enriched (event_id INTEGER, user_id INTEGER, \
+             user_name VARCHAR)",
         )
         .await
-        .expect("first run (create) must succeed");
-    }
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.daily_events_enriched VALUES (1, 1, 'Alice'), (2, 2, 'Bob')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql(
+            "CREATE TABLE main.sources_raw_users (event_id INTEGER, user_id INTEGER, user_name \
+             VARCHAR)",
+        )
+        .await
+        .expect("create dim/source table");
+    backend
+        .execute_sql("INSERT INTO main.sources_raw_users VALUES (1, 1, 'Alicia'), (2, 2, 'Bob')")
+        .await
+        .expect("seed source table (user 1 mutated)");
 
-    // Mutate the dimension in place, making the `{user_name}` cell live.
-    {
-        let backend = DuckDbBackend::new(&db_path, "main")
-            .await
-            .expect("reopen duckdb");
-        backend
-            .execute_sql("UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1")
-            .await
-            .expect("mutate dimension");
-    }
-
-    // Run 2: the dimension mutation dispatches the column-scoped MERGE.
-    let (db, graph) = build_db_and_graph(&project_dir, &config);
-    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
-    let factory = RecordingBackendFactory {
-        db_path: db_path.clone(),
-        backend: Arc::clone(&backend_slot),
+    let dimension_batch_sql = "SELECT event_id, user_id, user_name FROM main.sources_raw_users";
+    let suppression = smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
+        why: "unit-level parity probe — the family's Unconditional variant is exercised, the \
+              Suppressed one by `suppressed_column_scoped_merge_statements_come_from_the_emitter`"
+            .to_string(),
     };
-    let outcome = execute_project(
-        "column-scoped-merge-parity-run-2".to_string(),
-        request,
-        Arc::clone(&config),
-        graph,
-        db,
-        &project_dir,
-        &factory,
-        &smelt_runtime::NoOpReporter,
-        CancellationToken::new(),
+    let window = smelt_backend::PartitionRange {
+        column: String::new(),
+        start: "2025-01-10".to_string(),
+        end: "2025-01-11".to_string(),
+    };
+    smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "daily_events_enriched",
+        &["event_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &window,
+        &no_retry_policy(),
     )
     .await
-    .expect("second run (column-scoped merge) must succeed");
+    .expect("column-scoped merge must succeed");
 
-    let record = outcome
-        .models
-        .get("daily_events_enriched")
-        .expect("daily_events_enriched ran");
-    assert_eq!(
-        record.strategy, "column_scoped_merge",
-        "the dimension mutation must dispatch the column-scoped MERGE technique"
-    );
-
-    let backend = backend_slot
-        .lock()
-        .unwrap()
-        .clone()
-        .expect("backend recorded");
     let groups = backend.recorded_groups();
     let merge_groups: Vec<_> = groups
         .iter()
@@ -1579,21 +1531,10 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
     );
     assert_eq!(group.statements.len(), 1);
 
-    let sql = &group.statements[0].sql;
-    let prefix = "MERGE INTO main.daily_events_enriched AS target USING (";
-    let suffix = ") AS source ON target.event_id = source.event_id \
-                  WHEN MATCHED THEN UPDATE SET * \
-                  WHEN NOT MATCHED THEN INSERT *";
-    assert!(
-        sql.starts_with(prefix) && sql.ends_with(suffix),
-        "unexpected merge statement: {sql}"
-    );
-    let source_select = &sql[prefix.len()..sql.len() - suffix.len()];
-
     let expected = emit_column_scoped_merge(
         "main.daily_events_enriched",
         &["event_id".to_string()],
-        source_select,
+        dimension_batch_sql,
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -1601,20 +1542,16 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
         "executed MERGE group must be byte-identical to a direct emitter call over the same inputs"
     );
 
-    // Result-equivalence: the column-scoped MERGE the run actually executed
-    // must leave `daily_events_enriched` multiset-equal to a full refresh of
-    // the model's own fact+dimension join, post-mutation.
+    // Result-equivalence: the column-scoped MERGE actually executed must
+    // leave the target multiset-equal to a full refresh of the source.
     assert!(
         multiset_equal(
-            backend.as_ref(),
+            &backend,
             "SELECT * FROM main.daily_events_enriched",
-            "SELECT e.event_id, date_trunc('day', e.event_timestamp) AS event_date, \
-             e.user_id, e.event_type, u.user_name \
-             FROM main.sources_raw_events e \
-             JOIN main.sources_raw_users u ON e.user_id = u.user_id"
+            "SELECT event_id, user_id, user_name FROM main.sources_raw_users"
         )
         .await,
-        "the column-scoped MERGE execute_project actually ran must reproduce a full refresh"
+        "the column-scoped MERGE actually executed must reproduce a full refresh"
     );
 }
 
@@ -1711,6 +1648,221 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         )
         .await,
         "the suppressed MERGE must reproduce a full refresh"
+    );
+}
+
+/// The keyed membership-recompute family
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 2): drives
+/// `examples/timeseries` with an added `grain: key` model (mirrors
+/// `technique_lowering.rs::keyed_membership_recompute_e2e`'s fixture — a
+/// `COUNT`-folded fact inner-joined to a `mutation_profile: mutable_snapshot`
+/// dimension purely for row admission) through `execute_project` twice: a
+/// creation run, then a dimension mutation that makes the `{event_count}`
+/// cell's `Trigger::UpstreamMutation` live. Asserts the executed staged-
+/// candidate `DELETE`+`INSERT` group is byte-identical to a direct
+/// `emit_staged_candidate_conditional` call over the same table/key/
+/// candidate-select/compared-columns.
+#[tokio::test]
+async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emitter() {
+    const MODEL_SQL: &str = "SELECT t.user_id AS user_id, COUNT(t.transaction_id) AS \
+         event_count FROM smelt.sources.raw.transactions t \
+         JOIN smelt.sources.raw.users u ON t.user_id = u.user_id \
+         GROUP BY t.user_id";
+    const MODEL_FILE: &str = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: user_id\n\
+         maintenance:\n  \
+           scan_bounds:\n    \
+             per_source:\n      \
+               raw.users:\n        \
+                 allow_full_scan: true\n\
+         ---\n";
+
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir_recursive(&source_dir, &project_dir);
+    std::fs::write(
+        project_dir.join("models/user_lifetime_status.sql"),
+        format!("{MODEL_FILE}{MODEL_SQL}\n"),
+    )
+    .expect("write keyed model fixture");
+
+    let db_path = tmp.path().join("run.duckdb");
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_transactions (transaction_id INTEGER, user_id \
+                 INTEGER, amount DECIMAL(10,2), transaction_timestamp TIMESTAMP, \
+                 transaction_type VARCHAR)",
+            )
+            .await
+            .expect("create transactions source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_transactions VALUES \
+                 (1, 1, 10.00, TIMESTAMP '2025-01-10 08:00:00', 'purchase'), \
+                 (2, 2, 20.00, TIMESTAMP '2025-01-10 09:00:00', 'purchase')",
+            )
+            .await
+            .expect("seed transactions");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                 signup_date DATE)",
+            )
+            .await
+            .expect("create users source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_users VALUES \
+                 (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
+            )
+            .await
+            .expect("seed users");
+    }
+
+    // Run 1: creation — never the membership-recompute path.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        execute_project(
+            "keyed-membership-parity-run-1".to_string(),
+            select_request("dev", "user_lifetime_status", "2025-01-10", "2025-01-11"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &RecordingBackendFactory {
+                db_path: db_path.clone(),
+                backend: Arc::new(Mutex::new(None)),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Mutate the dimension in place, making the `{event_count}` cell live.
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1")
+            .await
+            .expect("mutate dimension");
+    }
+
+    // Run 2: the dimension mutation dispatches the staged-candidate
+    // membership recompute.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "keyed-membership-parity-run-2".to_string(),
+        select_request("dev", "user_lifetime_status", "2025-01-11", "2025-01-12"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("second run (membership recompute) must succeed");
+
+    let record = outcome
+        .models
+        .get("user_lifetime_status")
+        .expect("user_lifetime_status ran");
+    assert_eq!(
+        record.strategy, "delete_insert_suppressed",
+        "the dimension mutation must dispatch the staged-candidate membership-recompute \
+         technique"
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let staged_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| {
+            g.statements
+                .first()
+                .is_some_and(|s| s.sql.starts_with("CREATE TEMP TABLE"))
+        })
+        .collect();
+    assert_eq!(
+        staged_groups.len(),
+        1,
+        "exactly one staged-candidate group must have executed: {:?}",
+        groups
+    );
+    let group = staged_groups[0];
+    assert!(
+        group.transactional,
+        "the staged-candidate group is transactional"
+    );
+    assert_eq!(group.statements.len(), 5);
+
+    // Recover the caller-composed `candidate_select` from the recorded
+    // INSERT statement (statement index 1: `INSERT INTO {staged} {select}`)
+    // and the staged relation name from statement 0's `CREATE TEMP TABLE
+    // {name} AS SELECT * FROM ({select}) AS __smelt_staged_shape LIMIT 0`.
+    let insert_sql = &group.statements[1].sql;
+    let staged_relation = "__smelt_staged_user_lifetime_status";
+    let candidate_prefix = format!("INSERT INTO {staged_relation} ");
+    assert!(
+        insert_sql.starts_with(&candidate_prefix),
+        "unexpected staged-candidate INSERT statement: {insert_sql}"
+    );
+    let candidate_select = &insert_sql[candidate_prefix.len()..];
+
+    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.user_lifetime_status",
+        staged_relation,
+        &["user_id".to_string()],
+        candidate_select,
+        &["event_count".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed staged-candidate group must be byte-identical to a direct emitter call over \
+         the same inputs"
+    );
+
+    // Result-equivalence: the staged-candidate recompute actually executed
+    // must leave the target multiset-equal to a full refresh of the model.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT user_id, event_count FROM main.user_lifetime_status",
+            "SELECT t.user_id, COUNT(t.transaction_id) AS event_count FROM \
+             main.sources_raw_transactions t JOIN main.sources_raw_users u ON t.user_id = \
+             u.user_id GROUP BY t.user_id"
+        )
+        .await,
+        "the staged-candidate recompute actually executed must reproduce a full refresh"
     );
 }
 

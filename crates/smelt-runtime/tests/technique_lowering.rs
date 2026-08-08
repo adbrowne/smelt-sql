@@ -700,6 +700,81 @@ async fn merge_affected_row_count(
     counts.value(0)
 }
 
+/// The staged-candidate `DELETE`+`INSERT` analogue of [`merge_affected_row_count`]
+/// above (`docs/plans/20260808-membership-sensitivity.md` Phase 2): builds
+/// the SAME [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional`]
+/// group the real dispatch (`maintenance_driver::
+/// execute_staged_membership_recompute`) already ran, executes each
+/// statement directly, and reads DuckDB's own affected-row `Count` off the
+/// `DELETE`'s and `INSERT`'s own query results — proving an unchanged
+/// redelivery's change-suppressed matched arm and NOT-EXISTS insert arm
+/// both touch zero rows. `staged_relation` must be a name not already in
+/// use (this helper does not check for a colliding relation; the caller's
+/// own group has already run to completion by the time this probe fires).
+async fn staged_candidate_affected_row_counts(
+    backend: &DuckDbBackend,
+    target: &str,
+    staged_relation: &str,
+    key: &[&str],
+    candidate_select: &str,
+    compared: &[&str],
+) -> (i64, i64) {
+    use smelt_logical::maintenance::emit::{emit_staged_candidate_conditional, MaintenanceDialect};
+
+    let key_owned: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+    let compared_owned: Vec<String> = compared.iter().map(|s| s.to_string()).collect();
+    let group = emit_staged_candidate_conditional(
+        target,
+        staged_relation,
+        &key_owned,
+        candidate_select,
+        &compared_owned,
+        MaintenanceDialect::DuckDb,
+    );
+    // Statement order per `emit_staged_candidate_conditional`: [CREATE
+    // staged, INSERT candidates into staged, DELETE changed, INSERT new,
+    // DROP staged].
+    backend
+        .execute_sql(&group.statements[0].sql)
+        .await
+        .expect("probe: create staged relation");
+    backend
+        .execute_sql(&group.statements[1].sql)
+        .await
+        .expect("probe: insert candidates into staged relation");
+    let deleted = {
+        let batches = backend
+            .execute_sql(&group.statements[2].sql)
+            .await
+            .expect("probe: staged-candidate DELETE must succeed");
+        let batch = batches.first().expect("DELETE returns one Count row");
+        let counts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("Count column is Int64");
+        counts.value(0)
+    };
+    let inserted = {
+        let batches = backend
+            .execute_sql(&group.statements[3].sql)
+            .await
+            .expect("probe: staged-candidate INSERT must succeed");
+        let batch = batches.first().expect("INSERT returns one Count row");
+        let counts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("Count column is Int64");
+        counts.value(0)
+    };
+    backend
+        .execute_sql(&group.statements[4].sql)
+        .await
+        .expect("probe: drop staged relation");
+    (deleted, inserted)
+}
+
 /// Phase G1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
 /// — the conditional-variant dimension enters `choice.rs`'s override ladder:
 /// `resolve_write_variant` folds the first-build/definition-change-backfill
@@ -1024,17 +1099,22 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
 
 /// Real fixture: `examples/timeseries/models/daily_events_enriched.sql`
 /// (fact `raw.events` × dimension `raw.users`, the latter declared
-/// `mutation_profile: mutable_snapshot`) is the MP11 shape wired into the
-/// example workspace. This derives the SAME `MaintenancePlan` `smelt
-/// explain` reports (`smelt-db::maintenance_plan_report`), reading the
-/// model + source YAML straight off disk with no Salsa layer, and asserts
-/// the `{user_name}` group's `UpstreamMutation { source: "raw.users" }`
-/// cell is admitted with `Technique::ColumnScopedMerge` — the derivation
-/// this phase's `resolve_cell_technique`/`execute_column_scoped_merge`
-/// consume. `example_diagnostics` (`crates/smelt-cli/tests/`) is the
-/// standing gate that this fixture carries no diagnostics.
+/// `mutation_profile: mutable_snapshot`) reads `raw.users` in its `ON
+/// e.user_id = u.user_id` join predicate — a row-admission read, so the
+/// `{user_name}` group is membership-sensitive to `raw.users`
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 1), not merely
+/// value-sensitive. This derives the SAME `MaintenancePlan` `smelt explain`
+/// reports (`smelt-db::maintenance_plan_report`), reading the model +
+/// source YAML straight off disk with no Salsa layer, and asserts the
+/// `{user_name}` group's `UpstreamMutation { source: "raw.users" }` cell is
+/// admitted with `Technique::DeleteInsert` (`Corner::RecomputeRegion`), never
+/// `Technique::ColumnScopedMerge` — a membership-sensitive group "must be
+/// repaired by a technique that can create and delete rows"
+/// (`incremental_models.md` §"The plan matrix"), which a column-scoped
+/// `MERGE` cannot do. `example_diagnostics` (`crates/smelt-cli/tests/`) is
+/// the standing gate that this fixture carries no diagnostics.
 #[test]
-fn real_fixture_examples_timeseries_admits_column_scoped_merge_cell() {
+fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/timeseries")
         .canonicalize()
@@ -1108,18 +1188,35 @@ fn real_fixture_examples_timeseries_admits_column_scoped_merge_cell() {
     let mutation_trigger = Trigger::UpstreamMutation {
         source: "raw.users".to_string(),
     };
-    let cell = result.plan.cell_for(&mutation_trigger).unwrap_or_else(|| {
-        panic!(
-            "no cell admitted for {mutation_trigger:?}: {:#?}",
-            result.plan
-        )
-    });
+    // Membership sensitivity is a row-admission property of the WHOLE join,
+    // so every column group the fact+dimension join admits (not only
+    // `{user_name}`) now carries its own `UpstreamMutation { raw.users }`
+    // cell — `MaintenancePlan::cell_for`'s "first matching trigger" lookup
+    // is only safe when a trigger has a single admitted cell, which no
+    // longer holds here. Find the `{user_name}` cell explicitly rather than
+    // relying on `cell_for`'s arbitrary first-match order (a real, pre-
+    // existing `cell_for` API limitation this phase's derivation exposes,
+    // out of this phase's critical files — `crates/smelt-logical/src/
+    // maintenance/mod.rs` is not touched by Phase 2 — flagged for a
+    // follow-up rather than silently worked around).
+    let cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| c.trigger == mutation_trigger && c.group == "{user_name}")
+        .unwrap_or_else(|| {
+            panic!(
+                "no {{user_name}} cell admitted for {mutation_trigger:?}: {:#?}",
+                result.plan
+            )
+        });
     assert_eq!(
         cell.technique,
-        Technique::ColumnScopedMerge,
-        "the dimension-mutation cell must admit column-scoped MERGE"
+        Technique::DeleteInsert,
+        "a membership-sensitive dimension-mutation cell must admit the recompute family, never \
+         column-scoped MERGE"
     );
-    assert_eq!(cell.group, "{user_name}");
+    assert_eq!(cell.corner, Corner::RecomputeRegion);
 }
 
 /// Real fixture, the `PartitionLocal::Yes` corner:
@@ -1253,21 +1350,34 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
     let mutation_trigger = Trigger::UpstreamMutation {
         source: "raw.user_status".to_string(),
     };
+    // See `real_fixture_examples_timeseries_admits_membership_recompute_cell`'s
+    // comment above: membership sensitivity now spreads the same trigger
+    // over every admitted column group, so `cell_for`'s first-match lookup
+    // is not safe here either — find the `{status}` cell explicitly.
     let cell = plan
-        .cell_for(&mutation_trigger)
-        .unwrap_or_else(|| panic!("no cell admitted for {mutation_trigger:?}: {plan:#?}"));
+        .cells
+        .iter()
+        .find(|c| c.trigger == mutation_trigger && c.group == "{status}")
+        .unwrap_or_else(|| {
+            panic!("no {{status}} cell admitted for {mutation_trigger:?}: {plan:#?}")
+        });
     assert_eq!(
         cell.technique,
-        Technique::ColumnScopedMerge,
-        "the dimension-mutation cell must admit column-scoped MERGE"
+        Technique::DeleteInsert,
+        "raw.user_status is read in the join's ON predicate (both `s.user_id` and \
+         `s.changed_at`) — a row-admission read — so the {{status}} group is \
+         membership-sensitive and must admit the recompute family, never column-scoped MERGE"
     );
-    assert_eq!(cell.group, "{status}");
+    assert_eq!(cell.corner, Corner::RecomputeRegion);
     assert_eq!(
         cell.partition_local,
         PartitionLocal::Yes,
         "raw.user_status is clocked with an explicit, derivable window predicate — this must \
          be the genuine scan-clamp corner, not the accepted-full-scan corner \
-         daily_events_enriched.sql exercises"
+         daily_events_enriched.sql exercises. The clocked-source scan-locality derivation is \
+         orthogonal to the family (value vs membership) sensitivity this phase adds — a \
+         membership-sensitive cell still carries its own derived scan bound, even though \
+         today's runtime dispatch for it (whole-model recompute) does not yet consume it."
     );
     let scan = cell
         .scans
@@ -1417,16 +1527,26 @@ mod column_scoped_merge_e2e {
     /// region-recompute path (the table doesn't exist yet). A dimension
     /// mutation is then applied directly to the staged `raw.users` source
     /// table, and a SECOND `execute_project` call over the SAME window must
-    /// route through `execute.rs`'s regular incremental batch-execution
-    /// branch to the live `Trigger::UpstreamMutation` cell's
-    /// `ColumnScopedMerge` technique
-    /// (`maintenance_driver::resolve_live_column_scoped_cell` +
-    /// `execute_column_scoped_merge_full`) — reported back as
-    /// `RunOutcome.models["daily_events_enriched"].strategy ==
-    /// "column_scoped_merge"`, never the default region-recompute path a
-    /// plain incremental run would otherwise take for every batch.
+    /// pick up the mutated dimension value.
+    ///
+    /// `daily_events_enriched.sql` reads `raw.users` in its join's `ON`
+    /// predicate — a row-admission read — so the `{user_name}` group is
+    /// membership-sensitive (`docs/plans/20260808-membership-sensitivity.md`
+    /// Phase 1) and its `Trigger::UpstreamMutation` cell admits
+    /// `Technique::DeleteInsert`, never `ColumnScopedMerge`
+    /// (`real_fixture_examples_timeseries_admits_membership_recompute_cell`
+    /// above proves the derivation). This is a `grain: partition` output
+    /// with `WholeRow` row identity (no declared `unique_key`) — Phase 2's
+    /// new staged-candidate recompute dispatch requires a proven
+    /// `RowIdentity::Key` (`maintenance_driver::
+    /// resolve_live_membership_recompute_cell`'s own doc comment), so this
+    /// shape is deliberately left to the EXISTING, always-correct,
+    /// unconditional region `DELETE`+`INSERT` batch loop
+    /// (`execute.rs`'s plain incremental path) — unchanged by Phase 2, and
+    /// already reported as `RunOutcome.models["daily_events_enriched"]
+    /// .strategy == "deleteinsert"` for every batch, mutation or not.
     #[tokio::test]
-    async fn column_scoped_merge_dispatches_through_execute_project() {
+    async fn membership_recompute_dispatches_through_execute_project() {
         let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/timeseries")
             .canonicalize()
@@ -1503,10 +1623,10 @@ mod column_scoped_merge_e2e {
                 .models
                 .get("daily_events_enriched")
                 .expect("daily_events_enriched ran");
-            assert_ne!(
-                record.strategy, "column_scoped_merge",
-                "the creation run must not take the column-scoped merge path — the target \
-                 doesn't exist yet"
+            assert_eq!(
+                record.strategy, "deleteinsert",
+                "the creation run takes the region-recompute path (`Trigger::NewData`); this \
+                 fixture's membership-sensitive cell never reaches column-scoped MERGE"
             );
         }
 
@@ -1544,9 +1664,10 @@ mod column_scoped_merge_e2e {
             .get("daily_events_enriched")
             .expect("daily_events_enriched ran");
         assert_eq!(
-            record.strategy, "column_scoped_merge",
-            "a dimension mutation must dispatch the regular incremental run through the \
-             column-scoped MERGE technique (MP11), not the default region-recompute path"
+            record.strategy, "deleteinsert",
+            "a membership-sensitive dimension mutation dispatches the regular incremental run \
+             through the SAME region DELETE+INSERT technique every batch already uses — never \
+             column-scoped MERGE, which cannot repair which rows exist"
         );
 
         let conn = duckdb::Connection::open(&db_path).expect("reconnect");
@@ -1559,7 +1680,7 @@ mod column_scoped_merge_e2e {
             .expect("read maintained user_name");
         assert_eq!(
             maintained_user_name, "Alicia",
-            "column-scoped MERGE must pick up the mutated dimension value"
+            "the region recompute must pick up the mutated dimension value"
         );
 
         let untouched_user_name: String = conn
@@ -1576,13 +1697,13 @@ mod column_scoped_merge_e2e {
     }
 }
 
-/// W10 Phase 4 (`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`):
-/// the keyed run path's own live `ColumnScopedMerge` dispatch — the
-/// `plan_is_keyed` branch of `execute.rs` now consults
-/// `resolve_live_column_scoped_cell` exactly as the non-keyed incremental
-/// branch already does (`column_scoped_merge_e2e` above), reached now that
-/// W10 Phases 1-3 narrow the key-grain `NewData` append-only obligation to
-/// admit a keyed model that consumes an `explicitly_mutable` dimension.
+/// `docs/plans/20260808-membership-sensitivity.md` Phase 2: the keyed run
+/// path's own live membership-recompute dispatch — the `plan_is_keyed`
+/// branch of `execute.rs` now ALSO consults
+/// `resolve_live_membership_recompute_cell` alongside the existing
+/// `resolve_live_column_scoped_cell` (W10 Phase 4, `column_scoped_merge_e2e`
+/// above uses the latter for a `grain: partition`/`WholeRow`-identity
+/// shape).
 ///
 /// **The fixture shape this module is forced into, and why.** A `grain:
 /// key` body must satisfy `classify_cumulative`'s aggregate/`GROUP BY`
@@ -1601,35 +1722,30 @@ mod column_scoped_merge_e2e {
 /// `crates/smelt-logical/tests/maintenance_new_data_enrich_only_waiver.rs`
 /// pins). The one shape that DOES reach a live cell today is a fold
 /// aggregate whose own argument does not mention the dimension at all
-/// (`COUNT(t.transaction_id)`, reading only the append-only fact) joined against
-/// the mutable dimension purely for row admission — `maintenance::grouping`'s
-/// per-column provenance walk has a pre-existing gap (documented at
-/// `examples/timeseries/models/daily_events_enriched.sql`'s own comment on
-/// `model_property_vector`/skeleton-closure: "a bare `FUNCTION_CALL`-shaped
-/// [reference] once 2+ FROM sources are in scope... the call's own name
-/// token is misread as an unqualified column reference") that also affects
-/// `derive_column_groups`'s `collect_column_refs`: an aggregate's own
-/// function-name token is misresolved as an ambiguous unqualified column
-/// reference once 2+ sources are joined, and the fail-closed collapse this
-/// triggers (`degenerate_whole_model` — "never silently narrower", the
-/// classifier's own documented safety net) widens the fold column's
-/// mutation-sensitivity to every source the model references, including
-/// the dimension it never actually reads. That collapse is what
-/// legitimately (if conservatively) admits the `ColumnScopedMerge` cell
-/// this module exercises. It is real, reachable, deterministic
-/// `derive_model_maintenance_plan` output — not a fabricated shape — but it
-/// also means the merged column's TRUE value never depends on the
-/// dimension's own data, only on the fact: a dimension mutation can never
-/// make the compared column's value diverge from what full-refresh would
-/// already produce, so every dispatched merge in this fixture is a genuine
-/// `WriteSuppression::Suppressed` no-op by construction, not merely by
-/// coincidence of the staged data. `grouping.rs`/`derive.rs` are both
-/// outside this phase's critical files (fixing the collapse would remove
-/// the only reachable live cell, not produce a "cleaner" one — there is no
-/// currently-implemented shape where a mutable dimension's own attribute is
-/// both non-skeleton and non-fold-contributing); this is flagged here for
-/// review rather than silently worked around.
-mod keyed_column_scoped_merge_e2e {
+/// (`COUNT(t.transaction_id)`, reading only the append-only fact) joined
+/// against the mutable dimension purely for row admission.
+///
+/// **Why this cell is `Technique::DeleteInsert`, honestly, not by
+/// accident.** Before `docs/plans/20260808-membership-sensitivity.md`, this
+/// fixture's `{event_count}` cell reached `ColumnScopedMerge` only through a
+/// pre-existing `maintenance::grouping` collector bug (a bare aggregate's
+/// own function-name token misresolved as an ambiguous unqualified column
+/// reference once 2+ sources are joined, fail-closed-collapsing sensitivity
+/// onto every source including the dimension it never actually reads) — see
+/// `docs/plans/20260808-membership-sensitivity.md`'s own "Context" section.
+/// Phase 1 of that plan derives membership sensitivity directly from the
+/// join's `ON t.user_id = u.user_id` predicate — a row-admission read of
+/// `raw.users` — independent of that collector bug, so `{event_count}` is
+/// now genuinely, legitimately membership-sensitive: deleting `raw.users`'
+/// row for a user with staged transactions removes that user's whole group
+/// from the join's admitted row set, something no column-scoped `MERGE`
+/// (which only ever rewrites columns of rows that already match) can
+/// repair. `Technique::DeleteInsert` (`Corner::RecomputeRegion`) is the
+/// correct, honest verdict, and the module below now exercises the Phase 2
+/// dispatch for it (`resolve_live_membership_recompute_cell` +
+/// `execute_staged_membership_recompute`) rather than the retired
+/// `ColumnScopedMerge` path.
+mod keyed_membership_recompute_e2e {
     use std::collections::HashSet;
     use std::path::Path;
     use std::sync::Arc;
@@ -1642,7 +1758,7 @@ mod keyed_column_scoped_merge_e2e {
     use smelt_logical::maintenance::choice::WriteSuppression;
     use smelt_logical::maintenance::{MutationProfile, SourceFacts};
     use smelt_runtime::execute::{BackendFactory, BackendFuture};
-    use smelt_runtime::maintenance_driver::resolve_live_column_scoped_cell;
+    use smelt_runtime::maintenance_driver::resolve_live_membership_recompute_cell;
     use smelt_runtime::types::ExecuteRequest;
     use smelt_runtime::{execute_project, NoOpReporter};
     use tokio_util::sync::CancellationToken;
@@ -1677,16 +1793,17 @@ mod keyed_column_scoped_merge_e2e {
         format!("{MODEL_FILE}{MODEL_SQL}\n")
     }
 
-    /// Unit-level proof (no backend): `resolve_live_column_scoped_cell` —
-    /// the exact resolver `execute.rs`'s `plan_is_keyed` branch now calls —
-    /// resolves this model's `raw.users` `UpstreamMutation` cell to
-    /// `Technique::ColumnScopedMerge` with `WriteSuppression::Suppressed`
-    /// (P3 comparability holds for `event_count`, an INTEGER column, and
-    /// this is a steady-state trigger with no ledger catch-up — the
-    /// suppressed arm is preferred over unconditional per
-    /// `choice::resolve_write_variant`).
+    /// Unit-level proof (no backend): `resolve_live_membership_recompute_cell`
+    /// — the exact resolver `execute.rs`'s `plan_is_keyed` branch now calls
+    /// alongside `resolve_live_column_scoped_cell` — resolves this model's
+    /// `raw.users` `UpstreamMutation` cell to `Technique::DeleteInsert` over
+    /// the proven `RowIdentity::Key(["user_id"])` (the declared
+    /// `unique_key`), with `WriteSuppression::Suppressed` (P3 comparability
+    /// holds for `event_count`, an INTEGER column, and this is a
+    /// steady-state trigger with no ledger catch-up — the suppressed arm is
+    /// preferred over unconditional per `choice::resolve_write_variant`).
     #[test]
-    fn resolves_suppressed_column_scoped_merge_for_keyed_dimension_cell() {
+    fn resolves_suppressed_membership_recompute_for_keyed_dimension_cell() {
         let text = model_file_text();
         let smelt_core::FileMetadata::Single {
             metadata,
@@ -1716,22 +1833,25 @@ mod keyed_column_scoped_merge_e2e {
         let mut explicitly_mutable = HashSet::new();
         explicitly_mutable.insert("raw.users".to_string());
 
-        let (source, cell, suppression) = resolve_live_column_scoped_cell(
+        let (source, cell, suppression) = resolve_live_membership_recompute_cell(
             sql_body,
             "user_lifetime_status",
             &metadata,
             &sources,
             &explicitly_mutable,
-            true,
             &[],
         )
         .expect("resolver must not error")
-        .expect("a live ColumnScopedMerge cell must resolve for raw.users");
+        .expect("a live membership-recompute cell must resolve for raw.users");
 
         assert_eq!(source, "raw.users");
         assert_eq!(
             cell.technique,
-            smelt_logical::maintenance::Technique::ColumnScopedMerge
+            smelt_logical::maintenance::Technique::DeleteInsert
+        );
+        assert_eq!(
+            cell.row_identity.identity,
+            smelt_logical::maintenance::RowIdentity::Key(vec!["user_id".to_string()])
         );
         assert!(
             matches!(suppression, WriteSuppression::Suppressed { .. }),
@@ -1844,23 +1964,21 @@ mod keyed_column_scoped_merge_e2e {
     /// `execute_project` itself (root `CLAUDE.md` §"Run pipeline parity
     /// rule"). First run creates the target via the ordinary `KeyedFold`
     /// creation path (the table doesn't exist yet — the creation run must
-    /// never take the column-scoped-merge path). A SECOND run over the
+    /// never take the membership-recompute path). A SECOND run over the
     /// SAME window, with the table now present, must route through
     /// `execute.rs`'s `plan_is_keyed` branch's new live-cell dispatch to
-    /// `Technique::ColumnScopedMerge` (`RunOutcome.models["user_lifetime_
-    /// status"].strategy == "column_scoped_merge"`) — never the default
+    /// `Technique::DeleteInsert` (`RunOutcome.models["user_lifetime_
+    /// status"].strategy == "delete_insert_suppressed"`) — never the default
     /// `cumulative_aggregate` fold label a plain keyed run would otherwise
     /// report every time. A THIRD run (no data changes at all since the
     /// second) must still dispatch the same technique (the known "fires on
     /// every run, not gated on a genuine change" divergence,
     /// `incremental_models.md` §Known Divergences) and must write ZERO
-    /// affected rows — the change-suppressed `IS DISTINCT FROM` arm
-    /// actually suppressing, read directly off DuckDB via the SAME
-    /// `emit_column_scoped_merge_suppressed`-shaped probe
-    /// `column_scoped_merge_e2e`'s siblings already use
-    /// (`super::merge_affected_row_count`).
+    /// affected rows — the change-suppressed staged-candidate `DELETE`+
+    /// `INSERT` actually suppressing, read directly off DuckDB via the SAME
+    /// staged-candidate shape (`super::staged_candidate_affected_row_counts`).
     #[tokio::test]
-    async fn keyed_run_loop_dispatches_column_scoped_merge_through_execute_project() {
+    async fn keyed_run_loop_dispatches_membership_recompute_through_execute_project() {
         let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/timeseries")
             .canonicalize()
@@ -1924,7 +2042,7 @@ mod keyed_column_scoped_merge_e2e {
                 .expect("seed users");
         }
 
-        // First run: creation. Must not take the column-scoped-merge path.
+        // First run: creation. Must not take the membership-recompute path.
         {
             let (db, graph) = build_db_and_graph(&project_dir, &config);
             let outcome = execute_project(
@@ -1945,8 +2063,8 @@ mod keyed_column_scoped_merge_e2e {
                 .get("user_lifetime_status")
                 .expect("user_lifetime_status ran");
             assert_ne!(
-                record.strategy, "column_scoped_merge",
-                "the creation run must not take the column-scoped merge path — the target \
+                record.strategy, "delete_insert_suppressed",
+                "the creation run must not take the membership-recompute path — the target \
                  doesn't exist yet"
             );
         }
@@ -1988,9 +2106,10 @@ mod keyed_column_scoped_merge_e2e {
                 .get("user_lifetime_status")
                 .expect("user_lifetime_status ran");
             assert_eq!(
-                record.strategy, "column_scoped_merge",
+                record.strategy, "delete_insert_suppressed",
                 "a live UpstreamMutation cell must dispatch the keyed run loop through the \
-                 column-scoped MERGE technique (W10 Phase 4), not the default cumulative-fold \
+                 staged-candidate membership-recompute technique (`docs/plans/\
+                 20260808-membership-sensitivity.md` Phase 2), not the default cumulative-fold \
                  label a plain keyed run would otherwise report"
             );
         }
@@ -2016,8 +2135,8 @@ mod keyed_column_scoped_merge_e2e {
         assert_eq!(
             (user1_count, user2_count),
             (1, 1),
-            "the column-scoped MERGE must not corrupt the fact-derived event_count — both \
-             users still show exactly the one event staged for them"
+            "the staged-candidate membership recompute must not corrupt the fact-derived \
+             event_count — both users still show exactly the one event staged for them"
         );
 
         // Third run: no data change since run 2 at all. The dispatch still
@@ -2042,7 +2161,7 @@ mod keyed_column_scoped_merge_e2e {
                 .models
                 .get("user_lifetime_status")
                 .expect("user_lifetime_status ran");
-            assert_eq!(record.strategy, "column_scoped_merge");
+            assert_eq!(record.strategy, "delete_insert_suppressed");
         }
 
         let backend = DuckDbBackend::new(&db_path, "main")
@@ -2054,18 +2173,208 @@ mod keyed_column_scoped_merge_e2e {
                 "main.sources_raw_transactions",
             )
             .replace("smelt.sources.raw.users", "main.sources_raw_users");
-        let source_subquery = format!("({recompute_sql}) recomputed");
-        let affected = super::merge_affected_row_count(
+        let (deleted, inserted) = super::staged_candidate_affected_row_counts(
             &backend,
             "main.user_lifetime_status",
-            &source_subquery,
+            "__smelt_probe_zero_write",
             &["user_id"],
+            &recompute_sql,
             &["event_count"],
         )
         .await;
         assert_eq!(
-            affected, 0,
-            "an unchanged redelivery must write zero rows through the change-suppressed arm"
+            (deleted, inserted),
+            (0, 0),
+            "an unchanged redelivery must write zero rows through the change-suppressed \
+             staged-candidate DELETE+INSERT"
+        );
+    }
+
+    /// Genuine membership change (the reviewer-checklist requirement,
+    /// `docs/plans/20260808-membership-sensitivity.md` Phase 2): deleting a
+    /// dimension row that ALREADY has no staged facts is a no-op repair (the
+    /// membership-sensitive `{event_count}` cell has nothing to remove);
+    /// adding a dimension row that matches EXISTING, previously-unadmitted
+    /// facts is a genuine repair — the inner join now admits a user_id it
+    /// did not before, and only the staged-candidate recompute (never a
+    /// column-scoped `MERGE`, which cannot create rows) can pick it up.
+    ///
+    /// Deliberately does NOT delete a dimension row that has currently-
+    /// admitted facts: `emit_staged_candidate_conditional`'s own `DELETE`
+    /// only ever removes a row MATCHED to a staged candidate row (`table.key
+    /// = staged.key AND changed`) — a row whose key is entirely ABSENT from
+    /// the recomputed candidate (a genuinely departed key) is never matched
+    /// and is left stored, stale (see `resolve_live_membership_recompute_
+    /// cell`'s doc comment on this inherited emitter limitation, and
+    /// `crates/smelt-runtime/tests/statement_parity.rs::
+    /// staged_candidate_conditional_statements_come_from_the_emitter`'s own
+    /// "user 3 … must be left untouched entirely"). Exercising THAT
+    /// scenario here would assert a known-unsound repair; it is out of
+    /// Phase 2's critical-file scope (`crates/smelt-logical/src/maintenance/
+    /// emit.rs` is not touched by this phase) and tracked for Phase 3/4.
+    #[tokio::test]
+    async fn genuine_membership_change_repairs_to_full_refresh_state() {
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        copy_dir_recursive(&source_dir, &project_dir);
+        std::fs::write(
+            project_dir.join("models/user_lifetime_status.sql"),
+            model_file_text(),
+        )
+        .expect("write keyed model fixture");
+
+        let db_path = tmp.path().join("run.duckdb");
+        let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+        let backend_factory = DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        };
+
+        // Three users: 1 and 2 have staged transactions AND a matching dim
+        // row (both admitted from the start). User 3 has staged
+        // transactions but NO matching dim row yet — the inner join
+        // excludes user 3 entirely, so `user_lifetime_status` never gets a
+        // row for them on the first run. User 4's dim row has no staged
+        // transactions at all — deleting it is the "no currently-admitted
+        // facts" no-op leg.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_transactions (transaction_id INTEGER, \
+                     user_id INTEGER, amount DECIMAL(10,2), transaction_timestamp TIMESTAMP, \
+                     transaction_type VARCHAR)",
+                )
+                .await
+                .expect("create transactions source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_transactions VALUES \
+                     (1, 1, 10.00, TIMESTAMP '2025-01-10 08:00:00', 'purchase'), \
+                     (2, 2, 20.00, TIMESTAMP '2025-01-10 09:00:00', 'purchase'), \
+                     (3, 3, 30.00, TIMESTAMP '2025-01-10 10:00:00', 'purchase')",
+                )
+                .await
+                .expect("seed transactions");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                     signup_date DATE)",
+                )
+                .await
+                .expect("create users source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_users VALUES \
+                     (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02'), \
+                     (4, 'Dana', DATE '2025-01-03')",
+                )
+                .await
+                .expect("seed users — user 3 deliberately has no matching dim row yet");
+        }
+
+        // First run: creation. Only users 1 and 2 are admitted (user 3's
+        // dim row does not exist yet; user 4 has no staged transactions so
+        // contributes no row either way).
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            execute_project(
+                "run-1".to_string(),
+                request_for_day("2025-01-10", "2025-01-11"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first run must succeed");
+        }
+        {
+            let conn = duckdb::Connection::open(&db_path).expect("reconnect after run 1");
+            let mut stmt = conn
+                .prepare("SELECT user_id FROM main.user_lifetime_status ORDER BY user_id")
+                .expect("prepare");
+            let admitted: Vec<i64> = stmt
+                .query_map([], |row| row.get(0))
+                .expect("query")
+                .collect::<Result<_, _>>()
+                .expect("collect");
+            assert_eq!(
+                admitted,
+                vec![1, 2],
+                "user 3 must not be admitted before its dim row exists"
+            );
+        }
+
+        // Genuine membership change: delete user 4's dim row (no currently-
+        // admitted facts — a no-op repair) AND add user 3's dim row (matches
+        // EXISTING staged facts — a genuine new admission).
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            backend
+                .execute_sql("DELETE FROM main.sources_raw_users WHERE user_id = 4")
+                .await
+                .expect("delete dim row with no admitted facts");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_users VALUES (3, 'Carol', DATE '2025-01-04')",
+                )
+                .await
+                .expect("add dim row matching existing facts");
+        }
+
+        // Second run: the membership recompute must pick up user 3's newly
+        // admitted row.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-2".to_string(),
+                request_for_day("2025-01-11", "2025-01-12"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(record.strategy, "delete_insert_suppressed");
+        }
+
+        // Post-repair state must equal a full recompute of the model SQL
+        // over the CURRENT (post-mutation) source state.
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect after run 2");
+        let mut stmt = conn
+            .prepare("SELECT user_id, event_count FROM main.user_lifetime_status ORDER BY user_id")
+            .expect("prepare");
+        let actual: Vec<(i64, i64)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(
+            actual,
+            vec![(1, 1), (2, 1), (3, 1)],
+            "post-repair state must equal a full recompute of the model SQL: user 3 admitted \
+             (its dim row now exists), users 1/2 unchanged, user 4 never appears (no staged \
+             facts either way)"
         );
     }
 }

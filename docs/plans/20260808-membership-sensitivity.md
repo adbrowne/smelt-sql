@@ -59,7 +59,7 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 3d83305f | 2026-08-08 |
-| 2     | pending  |        |      |
+| 2     | done     | pending-review | 2026-08-08 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 
@@ -210,6 +210,92 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
   unclocked source only in the `ON` predicate, so both of the model's
   payload groups are now correctly membership-sensitive and each refuses
   independently.
+
+- **Phase 2 (2026-08-08):** wired the runtime dispatch. `crates/smelt-runtime/
+  src/maintenance_driver.rs` gained `resolve_live_membership_recompute_cell`
+  (mirrors `resolve_live_column_scoped_cell` but filters on
+  `Technique::DeleteInsert` over a proven `RowIdentity::Key(_)`, never
+  `WholeRow` — `emit_staged_candidate_conditional` panics on an empty key)
+  and `execute_staged_membership_recompute` (dispatches through
+  `smelt_logical::maintenance::emit::emit_staged_candidate_conditional`,
+  never a new emitter). `crates/smelt-runtime/src/execute.rs`'s
+  `plan_is_keyed` branch now consults both resolvers side by side and
+  reports the new dispatch's strategy label as `"delete_insert_suppressed"`
+  (the plan's own suggested convention-consistent label — no existing label
+  named this exact shape; `"column_scoped_merge"`/`"cumulative_aggregate"`
+  are the sibling hand-picked snake_case strings this mirrors).
+
+  **ColumnScopedMerge reachability verdict.** No fixture in this workspace
+  reaches `ColumnScopedMerge` anymore. Both real fixtures that used to
+  (`examples/timeseries/models/daily_events_enriched.sql`'s `{user_name}`
+  cell, `daily_events_status.sql`'s `{status}` cell) read their mutable
+  dimension in the join's own `ON` predicate — a row-admission read — so
+  Phase 1's derivation correctly makes them membership-sensitive
+  (`Technique::DeleteInsert`), and there is no currently-shipped shape where
+  a mutable, row-admission-joined dimension is ALSO read in a select item
+  with *only* value sensitivity (never membership) toward the same source.
+  `statement_parity.rs::column_scoped_merge_statements_come_from_the_emitter`
+  is rewritten to drive `execute_column_scoped_merge_full` directly against a
+  `RecordingBackend` (the same synthetic-input pattern its
+  `suppressed_column_scoped_merge_statements_come_from_the_emitter` sibling
+  already used) rather than through a real fixture. Tracked here as a real
+  reachability gap for Phase 4's spec/Known-Divergences pass, not silently
+  worked around.
+
+  **`emit_staged_candidate_conditional`'s departed-row limitation (inherited,
+  not introduced).** That emitter's `DELETE` only ever removes a row MATCHED
+  to a staged candidate row (`table.key = staged.key AND changed`) — a row
+  whose key is entirely ABSENT from the recomputed candidate (a genuinely
+  *departed* key: e.g. the dimension row a fact joined on was itself
+  deleted, so the fact no longer appears in the model's own recompute at
+  all) is never matched and is left stored, stale, forever. This is the
+  SAME "region-scoped, absent = out of scope" semantics
+  `staged_candidate_conditional_statements_come_from_the_emitter`
+  (`statement_parity.rs`) already documents and tests ("user 3 … must be
+  left untouched entirely"). `resolve_live_membership_recompute_cell`'s own
+  doc comment records this; `crates/smelt-logical/src/maintenance/emit.rs`
+  is outside Phase 2's critical files, so it is not fixed here. The new
+  `technique_lowering.rs::keyed_membership_recompute_e2e::
+  genuine_membership_change_repairs_to_full_refresh_state` test proves the
+  dispatch correctly repairs an add-admission (a dim row added that matches
+  EXISTING staged facts) and a delete-with-no-admitted-facts no-op, but
+  deliberately does NOT exercise deleting a dim row that has currently-
+  admitted facts (a genuine departure) — that scenario is a known-unsound
+  repair under the current emitter and is tracked for Phase 3/4 alongside
+  the conformance rewrite (`docs/specs/incremental_models.md` §Known
+  Divergences already tracks reachability/soundness gaps in this family).
+
+  **`MaintenancePlan::cell_for`'s first-match ambiguity (discovered, not
+  introduced).** Membership sensitivity is a row-admission property of the
+  WHOLE join, so every column group a membership-sensitive join admits (not
+  only the group whose select item reads the mutable source) now carries
+  its own `UpstreamMutation` cell for the SAME trigger —
+  `daily_events_enriched.sql`'s fixture derives BOTH a `{user_name}` cell
+  AND an `{event_id, event_type, user_id}` cell for `UpstreamMutation {
+  raw.users }`. `MaintenancePlan::cell_for` (`crates/smelt-logical/src/
+  maintenance/mod.rs`) returns only the FIRST matching cell for a trigger —
+  safe when a trigger has one admitted cell, not when several groups share
+  it. Both `resolve_live_column_scoped_cell` and `resolve_live_membership_
+  recompute_cell` call `cell_for`, so in principle a keyed model with
+  MULTIPLE membership-sensitive groups on the same trigger could have this
+  phase's dispatch see only one group's `compared_columns`, under-covering
+  the staged candidate's change-comparison set for the other group's
+  columns. No currently-shipped fixture exercises this (the real fixtures
+  either fall through to the always-correct region-recompute default
+  regardless of which cell `cell_for` picks, or — `user_lifetime_status` —
+  only ever derive a single group for the trigger). `crates/smelt-logical/
+  src/maintenance/mod.rs` is outside Phase 2's critical files; the two
+  `real_fixture_*` unit tests in `technique_lowering.rs` were adapted to
+  search `plan.cells` for the specific group under test rather than rely on
+  `cell_for`. Flagged here as a genuine finding for a follow-up, not
+  silently worked around.
+
+  **Full failure survey after Phase 2**, `cargo test --workspace
+  --no-fail-fast`: identical 15-test failure set to Phase 1's own survey
+  above (`bakeoff` ×4, `bakeoff_seam` ×3, `explain_model` ×2,
+  `explain_show_sql` ×1, `maintenance_conformance` ×3, `maintenance_pins`
+  ×2) — no new failures, no flips. `smelt-runtime`, `smelt-logical`,
+  `smelt-db` all fully green.
 
 - **Phase 1 reviewer follow-up (2026-08-08):** the first pass only scanned
   `JOIN` `ON` predicates; a reviewer pass found the same silent-hole shape
