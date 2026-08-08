@@ -510,7 +510,11 @@ be repaired by a technique that can create and delete rows: the recompute family
 (delete+insert, change-suppressed where the staged candidate is comparable), never a
 column-scoped merge, which cannot fix which rows exist. A mutable join partner never read in
 any select item still produces mutation cells through membership sensitivity; its absence from
-every value-sensitivity set is not admissibility for cheaper repair.
+every value-sensitivity set is not admissibility for cheaper repair. The one admissible
+pruning is a proof, not a default: an enrichment join whose skeleton-source closure is proven
+`Closed` over a provably outer join contributes no membership sensitivity — the closure
+establishes its deltas cannot change which rows exist, so only its value sensitivity remains
+(`model_properties.md` §"Per-column mutation-sensitivity / column provenance").
 
 **Triggers.** Four trigger classes index the plan:
 
