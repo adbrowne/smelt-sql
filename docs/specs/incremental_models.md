@@ -2102,13 +2102,17 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   seam, so its parity leg uses an idempotent fixture; `Backend::delete_partitions` /
   `insert_overwrite` still hand-author SQL for the production-unreachable `InsertOverwrite`
   strategy (dead code, allowlisted in the structural no-authoring gate).
-- **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
-  footprint reflection, partition-locality projection, faithful-fold conditions, and
-  definition-change column classification. Column-group-scoped dirt coarsens to whole-partition
-  (safe, over-running); hour granularity is declared surface but propagation is day-ordinal.
-  The built grain-alignment check validates only the declaration (widen-never-narrow,
-  `MaintenanceGranularityMismatch`); graph edges still take the declaration directly.
-  Refs: `model_properties.md` §Surface; `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Proof-layer residues.** All seven maintenance-plan proofs are derived
+  (`model_properties.md` §Surface), with these gaps surviving: a keyed-grain output poses no
+  partition-locality question, so a locality-admitted keyed model's clamps carry an assumed
+  (underived) write-footprint mirror into propagation; no production caller derives a
+  `ColumnAdded` trigger, so definition-change classification runs only under the tracer and
+  `MaintenanceSkeletonColumnAdded` is unreachable from a real build. Column-group-scoped dirt
+  coarsens to whole-partition (safe, over-running); hour granularity is declared surface but
+  propagation is day-ordinal. The built grain-alignment check validates only the declaration
+  (widen-never-narrow, `MaintenanceGranularityMismatch`); graph edges still take the
+  declaration directly. Refs: `model_properties.md` §Known Divergences;
+  `docs/plans/20260808-derived-maintenance-proofs.md`.
 - **The ledger's warehouse substrate is DuckDB-only.** An additive-graded cell on another
   backend fails loudly (`UnsupportedFeature`); a Spark-dialect ledger builder is unbuilt.
 - **Graph-layer gaps.** Bare `grain: key` nodes with no admitted locality refuse
