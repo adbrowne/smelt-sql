@@ -1395,11 +1395,13 @@ impl EnrichmentEdgeRecipe {
             smelt_logical::maintenance::derive::ModelEdge {
                 name: self.driving_source().to_string(),
                 clock_col: Some("event_date".to_string()),
+                clock_col_aliases: vec![],
                 unique_key: vec!["event_id".to_string()],
             },
             smelt_logical::maintenance::derive::ModelEdge {
                 name: self.joined_source().to_string(),
                 clock_col: Some("event_date".to_string()),
+                clock_col_aliases: vec![],
                 unique_key: vec!["device_id".to_string()],
             },
         ]

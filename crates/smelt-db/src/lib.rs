@@ -1354,6 +1354,13 @@ fn ref_model_edge(
         return None;
     }
     let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    // Sibling spellings of `clock_col` within the upstream's own SQL
+    // (`ModelEdge::clock_col_aliases`'s doc comment) — derived from the same
+    // `text` the metadata above was extracted from.
+    let clock_col_aliases = clock_col
+        .as_deref()
+        .map(|c| smelt_logical::analysis::source_bounds::defining_expr_siblings(text, c))
+        .unwrap_or_default();
     // The upstream's own declared top-level `unique_key:` (`models.md`
     // §"The Relation Contract"), threaded through so a downstream's P1
     // skeleton-source-closure proof over this edge can prove the join
@@ -1363,6 +1370,7 @@ fn ref_model_edge(
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
+        clock_col_aliases,
         unique_key,
     })
 }

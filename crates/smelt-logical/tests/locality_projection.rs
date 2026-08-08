@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use smelt_logical::analysis::footprint::{reflect_footprint, FootprintResult};
 use smelt_logical::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use smelt_logical::analysis::source_bounds::{
-    derive_cross_axis_links, derive_model_bounds, BoundContext, BoundResult, CrossAxisLink, Seconds,
+    defining_expr_siblings, derive_cross_axis_links, derive_model_bounds, BoundContext,
+    BoundResult, CrossAxisLink, Seconds,
 };
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::{
@@ -167,6 +168,89 @@ fn cross_axis_source_without_predicate_is_not_local() {
         cell.partition_local
     );
     assert!(cell.scans.is_empty(), "no clamp without a derived link");
+}
+
+// ---------------------------------------------------------------------------
+// 2b. A downstream predicate anchored on a SIBLING column of the source's
+//     partition column — a different alias in the SOURCE's own SELECT whose
+//     defining expression is textually identical to the partition column's
+//     own (e.g. a historical column name kept for a pre-existing consumer,
+//     `MIN(x) AS legacy_name` alongside `MIN(x) AS declared_partition_col`)
+//     — links exactly as an anchor on the partition column itself would.
+//     `derive_cross_axis_links` never sees this without the sibling
+//     registered on `BoundContext` (that's the previously-missing plumbing:
+//     `defining_expr_siblings` over the UPSTREAM's own SQL, threaded through
+//     `ModelEdge::clock_col_aliases`).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn defining_expr_siblings_finds_duplicate_aliased_expression() {
+    // Mirrors `examples/web_analytics/models/silver/events_deduped.sql`'s
+    // shape: two output aliases, `event_date` (kept for a pre-existing
+    // consumer) and `first_seen_date` (the declared partition column),
+    // assigned the exact same aggregate expression.
+    let upstream_sql = "SELECT event_id, \
+                         MIN(CAST(event_date AS DATE)) AS event_date, \
+                         MIN(CAST(event_date AS DATE)) AS first_seen_date \
+                         FROM smelt.sources.raw.events GROUP BY event_id";
+    let siblings = defining_expr_siblings(upstream_sql, "first_seen_date");
+    assert_eq!(
+        siblings,
+        vec!["event_date".to_string()],
+        "the identically-defined sibling alias must be found"
+    );
+
+    // Symmetric: querying from the other alias finds the reverse sibling.
+    let reverse = defining_expr_siblings(upstream_sql, "event_date");
+    assert_eq!(reverse, vec!["first_seen_date".to_string()]);
+}
+
+#[test]
+fn defining_expr_siblings_is_empty_for_a_column_with_no_duplicate() {
+    let sql = "SELECT event_id, MIN(event_date) AS event_date, MIN(user_id) AS user_id \
+               FROM smelt.sources.raw.events GROUP BY event_id";
+    assert!(defining_expr_siblings(sql, "event_date").is_empty());
+    // Unknown alias: no target expression to compare against, so no siblings.
+    assert!(defining_expr_siblings(sql, "no_such_column").is_empty());
+}
+
+#[test]
+fn cross_axis_source_links_via_registered_partition_col_alias() {
+    // The downstream WHERE band anchors on `event_date` (the source's
+    // sibling column) and `session_start_date` (the output's own axis) —
+    // never mentioning the source's declared partition column
+    // `first_seen_date` at all. Without the alias registered, the LHS
+    // column-name match fails and the link is `Absent` (the regression this
+    // pins: `docs/plans/20260715-composed-axes-conditional-maintenance.md`'s
+    // `silver.sessions` ← `silver.events_deduped` composed-model edge).
+    let downstream_sql = "SELECT device_id, \
+                           CAST(event_ts AS DATE) AS session_start_date \
+                           FROM smelt.silver.events_deduped \
+                           WHERE event_date BETWEEN session_start_date \
+                                              AND session_start_date + INTERVAL '1 day'";
+
+    let mut ctx_without_alias = BoundContext::new();
+    ctx_without_alias.add_source("silver.events_deduped", "first_seen_date");
+    let links_without_alias =
+        derive_cross_axis_links(downstream_sql, &ctx_without_alias, "session_start_date");
+    assert_eq!(
+        links_without_alias.get("silver.events_deduped"),
+        Some(&CrossAxisLink::Absent),
+        "no alias registered: the sibling-anchored band must not be seen"
+    );
+
+    let mut ctx_with_alias = BoundContext::new();
+    ctx_with_alias.add_source("silver.events_deduped", "first_seen_date");
+    ctx_with_alias
+        .add_source_partition_col_aliases("silver.events_deduped", vec!["event_date".to_string()]);
+    let links_with_alias =
+        derive_cross_axis_links(downstream_sql, &ctx_with_alias, "session_start_date");
+    assert_eq!(
+        links_with_alias.get("silver.events_deduped"),
+        Some(&CrossAxisLink::ExplicitPredicate),
+        "the sibling-column alias must license the same explicit-predicate link \
+         as the partition column's own name would"
+    );
 }
 
 // ---------------------------------------------------------------------------

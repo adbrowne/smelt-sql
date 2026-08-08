@@ -1010,6 +1010,7 @@ fn restrict_ctx_for_constructs(
 ) -> Result<BoundContext, String> {
     let unchanged = || BoundContext {
         source_partition_cols: ctx.source_partition_cols.clone(),
+        source_partition_col_aliases: ctx.source_partition_col_aliases.clone(),
     };
 
     let Some(ts_config) = &model.timeseries_config else {
@@ -1326,6 +1327,7 @@ fn restrict_ctx_for_derived_tables(
 
     let new_ctx = BoundContext {
         source_partition_cols: ctx.source_partition_cols.clone(),
+        source_partition_col_aliases: ctx.source_partition_col_aliases.clone(),
     };
     for (label, trace) in derived {
         match trace {

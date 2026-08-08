@@ -307,6 +307,17 @@ pub struct ModelEdge {
     /// Phase E3) stays `Open` for it rather than optimistically assuming
     /// uniqueness.
     pub unique_key: Vec<String>,
+    /// Sibling spellings of `clock_col` within the upstream's own SQL —
+    /// other select-item aliases whose defining expression is textually
+    /// identical to `clock_col`'s own
+    /// ([`crate::analysis::source_bounds::defining_expr_siblings`]), hence
+    /// provably equal to it. Threaded into the cross-axis-link derivation
+    /// ([`crate::analysis::source_bounds::derive_cross_axis_links`]) so a
+    /// downstream predicate anchored on a same-value sibling column (kept,
+    /// e.g., for a pre-existing consumer's column-name compatibility) links
+    /// exactly as an anchor on `clock_col` itself would. Empty when
+    /// `clock_col` is `None` or has no such sibling — never a guess.
+    pub clock_col_aliases: Vec<String>,
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
@@ -359,6 +370,7 @@ pub fn append_model_edge_cells(
     for edge in model_edges {
         if let Some(clock) = &edge.clock_col {
             ctx.add_source(&edge.name, clock);
+            ctx.add_source_partition_col_aliases(&edge.name, edge.clock_col_aliases.clone());
         }
     }
     let bounds = derive_model_bounds(sql, &ctx);

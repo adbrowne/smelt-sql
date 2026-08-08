@@ -60,11 +60,13 @@ fn model_edges() -> Vec<ModelEdge> {
         ModelEdge {
             name: "silver.events_deduped".to_string(),
             clock_col: Some("event_date".to_string()),
+            clock_col_aliases: vec![],
             unique_key: vec!["event_id".to_string()],
         },
         ModelEdge {
             name: "silver.sessions".to_string(),
             clock_col: Some("event_date".to_string()),
+            clock_col_aliases: vec![],
             unique_key: vec!["device_id".to_string()],
         },
     ]

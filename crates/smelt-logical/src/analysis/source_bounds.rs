@@ -269,6 +269,17 @@ pub struct BoundContext {
     /// Maps source name (as it appears in `smelt.<path>` refs, e.g. "silver.events_parsed")
     /// to its `timeseries.partition_column`.
     pub source_partition_cols: HashMap<String, String>,
+    /// Maps source name to **sibling** column names of its own partition
+    /// column, within the SOURCE's own SQL — other select-item aliases whose
+    /// defining expression is textually identical (`defining_expr_siblings`)
+    /// to the partition column's own, hence provably equal to it. A downstream
+    /// Form B band anchored on a sibling (e.g. a same-source `event_date`
+    /// column carrying the same value as `first_seen_date` under a different
+    /// name, kept for a pre-existing consumer's column-name compatibility) is
+    /// exactly as good cross-axis-link evidence as one anchored on the
+    /// partition column itself — see [`derive_cross_axis_links`]. Empty for a
+    /// source whose partition column has no such sibling (never a guess).
+    pub source_partition_col_aliases: HashMap<String, Vec<String>>,
 }
 
 impl BoundContext {
@@ -285,6 +296,16 @@ impl BoundContext {
     pub fn add_source(&mut self, source: &str, partition_col: &str) {
         self.source_partition_cols
             .insert(source.to_string(), partition_col.to_string());
+    }
+
+    /// Register `aliases` (from [`defining_expr_siblings`]) as sibling
+    /// spellings of `source`'s own partition column, for the cross-axis-link
+    /// matcher to try alongside the primary column name.
+    pub fn add_source_partition_col_aliases(&mut self, source: &str, aliases: Vec<String>) {
+        if !aliases.is_empty() {
+            self.source_partition_col_aliases
+                .insert(source.to_string(), aliases);
+        }
     }
 }
 
@@ -1056,18 +1077,95 @@ pub fn derive_cross_axis_links(
         .map(|(name, col)| {
             let link = if col.eq_ignore_ascii_case(output_axis) {
                 CrossAxisLink::SameAxis
-            } else if form_b_links_column_to_axis(
-                &upper,
-                &col.to_uppercase(),
-                &axis_norm,
-                &axis_anchors,
-            ) {
-                CrossAxisLink::ExplicitPredicate
             } else {
-                CrossAxisLink::Absent
+                // Try the source's declared partition column first, then any
+                // sibling spellings the source's own SQL proves equal to it
+                // (`BoundContext::source_partition_col_aliases`) — a downstream
+                // predicate anchored on a same-value sibling column links
+                // exactly as an anchor on the partition column itself would.
+                let aliases = ctx
+                    .source_partition_col_aliases
+                    .get(name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
+                let matched = std::iter::once(col.as_str())
+                    .chain(aliases.iter().map(String::as_str))
+                    .any(|candidate| {
+                        form_b_links_column_to_axis(
+                            &upper,
+                            &candidate.to_uppercase(),
+                            &axis_norm,
+                            &axis_anchors,
+                        )
+                    });
+                if matched {
+                    CrossAxisLink::ExplicitPredicate
+                } else {
+                    CrossAxisLink::Absent
+                }
             };
             (name.clone(), link)
         })
+        .collect()
+}
+
+/// Sibling output columns of `target_alias` within `sql`'s own SELECT whose
+/// select-item expression is textually identical (mod whitespace/case,
+/// [`normalize_anchor_text`]) to `target_alias`'s own defining expression —
+/// a derivable equivalence (`docs/specs/model_properties.md` §"Partition-
+/// locality projection"): two aliases assigned the exact same expression in
+/// the same query are provably equal, so a downstream Form B band anchored
+/// on the sibling is exactly as good evidence as one anchored on
+/// `target_alias` itself (e.g. `MIN(CAST(event_date AS DATE)) AS event_date`
+/// and `MIN(CAST(event_date AS DATE)) AS first_seen_date` in the same
+/// `SELECT … GROUP BY` — a historical column name kept for a pre-existing
+/// consumer, carrying the identical value as the declared partition column
+/// under a different alias). Returns an empty `Vec` when `target_alias` is
+/// not found or has no textually-identical sibling — fail-closed, never a
+/// guess from value semantics or a nonzero margin.
+///
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): one pass over the already-parsed CST's select items, mirroring
+/// [`output_axis_anchor_spellings`]'s enumeration — it only ever *narrows*
+/// (a sibling exists only where its defining text is byte-for-byte identical
+/// to the target's, post-normalization), never widens by inference.
+pub fn defining_expr_siblings(sql: &str, target_alias: &str) -> Vec<String> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let mut target_norm: Option<String> = None;
+    let mut items_by_alias: Vec<(String, String)> = Vec::new();
+    for select in parse
+        .syntax()
+        .descendants()
+        .filter_map(smelt_parser::SelectStmt::cast)
+    {
+        let Some(items) = crate::analysis::select_stmt_items(&select) else {
+            continue;
+        };
+        for item in &items {
+            let (text, alias) = match item {
+                crate::analysis::SelectItemKind::GroupByKey { text, alias, .. }
+                | crate::analysis::SelectItemKind::OtherAggregate { text, alias, .. } => {
+                    (text.clone(), alias.clone())
+                }
+                crate::analysis::SelectItemKind::CountDistinct {
+                    argument, alias, ..
+                } => (format!("COUNT(DISTINCT {argument})"), alias.clone()),
+            };
+            let norm = normalize_anchor_text(&text);
+            if alias.eq_ignore_ascii_case(target_alias) {
+                target_norm.get_or_insert_with(|| norm.clone());
+            }
+            items_by_alias.push((alias, norm));
+        }
+    }
+    let Some(target_norm) = target_norm else {
+        return Vec::new();
+    };
+    items_by_alias
+        .into_iter()
+        .filter(|(alias, norm)| !alias.eq_ignore_ascii_case(target_alias) && *norm == target_norm)
+        .map(|(alias, _)| alias)
         .collect()
 }
 

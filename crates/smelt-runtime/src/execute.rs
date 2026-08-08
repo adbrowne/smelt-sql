@@ -3505,12 +3505,21 @@ fn model_edges_for(
         let clock_col = up_meta
             .and_then(|m| m.timeseries.as_ref())
             .map(|ts| ts.partition_column.clone());
+        // Sibling spellings of `clock_col` within the upstream's own SQL
+        // (`ModelEdge::clock_col_aliases`'s doc comment).
+        let clock_col_aliases = clock_col
+            .as_deref()
+            .map(|c| {
+                smelt_logical::analysis::source_bounds::defining_expr_siblings(&upstream.content, c)
+            })
+            .unwrap_or_default();
         let unique_key = up_meta
             .and_then(|m| m.unique_key.clone())
             .unwrap_or_default();
         edges.push(smelt_logical::maintenance::derive::ModelEdge {
             name: addr,
             clock_col,
+            clock_col_aliases,
             unique_key,
         });
     }
