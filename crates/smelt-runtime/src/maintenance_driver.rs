@@ -34,8 +34,9 @@ use smelt_logical::maintenance::choice::{
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
     emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, emit_staged_candidate_conditional_recompute, MaintenanceDialect,
-    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
+    emit_fingerprint_sidecar_diff, emit_in_place_update,
+    emit_staged_candidate_conditional_recompute, MaintenanceDialect, MaintenanceStatement, Region,
+    StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -572,6 +573,10 @@ pub fn resolve_incremental_strategy(
         // (a locality refusal already yields an empty-cells plan either
         // way, falling back to `backend_default` below).
         &[],
+        // This resolver only reads the creation (`NewData`) cell — a
+        // `ColumnAdded` trigger never affects it, so no deployed-schema
+        // snapshot is needed here.
+        &[],
     ) else {
         return backend_default;
     };
@@ -804,6 +809,10 @@ pub fn resolve_live_column_scoped_cell(
         // this resolver only inspects mutation-trigger cells, which key
         // temporal locality's routes do not gate.
         &[],
+        // This resolver only inspects `UpstreamMutation` cells — a
+        // `ColumnAdded` trigger never affects them, so no deployed-schema
+        // snapshot is needed here.
+        &[],
     ) else {
         return Ok(None);
     };
@@ -974,6 +983,117 @@ pub fn resolve_live_column_scoped_cell(
     Ok(None)
 }
 
+/// Resolve a live `Trigger::ColumnAdded` cell that resolves to
+/// `Technique::InPlaceUpdate` (`docs/plans/20260809-sensitivity-precision.md`
+/// Phase 6, `docs/specs/incremental_models.md` §"The definition-change
+/// trigger") — the production entry point for the definition-change
+/// trigger, distinct from [`resolve_live_column_scoped_cell`]/
+/// [`resolve_live_membership_recompute_cell`] above (which only ever
+/// inspect `NewData`/`UpstreamMutation` cells).
+///
+/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` is the
+/// one caller with real access to the deployed-schema snapshot the runtime
+/// `schema_evolution` module already reads/writes
+/// (`crate::schema_evolution::infer_deployed_columns`/
+/// `save_deployed_schema`) — `derive_model_maintenance_plan` itself does no
+/// I/O (Salsa-purity rule). An empty slice (no known deployed schema) derives
+/// no trigger at all, same as `smelt-db`'s own diagnostic path.
+///
+/// Returns the admitted cell plus its ready-to-execute `(column,
+/// expression)` assignment pairs — the added columns' own defining
+/// expressions read straight from the model's current SQL via
+/// [`smelt_logical::maintenance::derive::column_def_from_sql`], the SAME
+/// source [`crate::diagnostics::build_technique_statements`]'s
+/// `Technique::InPlaceUpdate` preview arm reads, and the same source the
+/// `PureBackfill` classification (`smelt_logical::analysis::
+/// definition_change::classify_definition_change`) was proven against —
+/// never a fresh re-derivation of either the trigger or the assignments.
+/// `None` when the model carries no maintenance plan, no deployed snapshot
+/// is known, or no cell resolves to `InPlaceUpdate` (no `ColumnAdded`
+/// trigger fired, the added column(s) classified `UpstreamRederive`, or a
+/// skeleton add refused).
+pub fn resolve_live_in_place_update_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    deployed_column_names: &[String],
+) -> Option<(PlanCell, Vec<(String, String)>)> {
+    if deployed_column_names.is_empty() {
+        return None;
+    }
+    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        &HashSet::new(),
+        None,
+        &[],
+        deployed_column_names,
+    )?;
+    let cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| {
+            matches!(c.trigger, Trigger::ColumnAdded { .. })
+                && c.technique == Technique::InPlaceUpdate
+        })?
+        .clone();
+    let Trigger::ColumnAdded { columns } = &cell.trigger else {
+        unreachable!("filtered above")
+    };
+    let mut assignments = Vec::with_capacity(columns.len());
+    for col in columns {
+        let def = smelt_logical::maintenance::derive::column_def_from_sql(sql, col)?;
+        assignments.push((col.clone(), def.expr.syntax().text().to_string()));
+    }
+    Some((cell, assignments))
+}
+
+/// Execute the `Technique::InPlaceUpdate` cell [`resolve_live_in_place_update_cell`]
+/// resolved: an unconditional (whole-table) `UPDATE` backfilling every
+/// added column's own defining expression over every currently-stored row.
+/// Unconditional (not partition-scoped) because a definition-change
+/// backfill is a one-time migration over the model's *existing* rows — the
+/// same posture `schema_evolution`'s own `ALTER TABLE ... ADD COLUMN`
+/// (which must already have run first, physically creating the column) —
+/// not a windowed catch-up over a moving horizon (`docs/specs/
+/// incremental_models.md` §"The definition-change trigger": "instantiating
+/// their ledger entries at `S = ∅`").
+///
+/// The statement is built and executed exactly once via
+/// [`emit_in_place_update`] — the single-owner emitter — never
+/// re-authored here (`CLAUDE.md` §"Maintenance-plan purity").
+pub async fn execute_in_place_update(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    assignments: &[(String, String)],
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let group = StatementGroup {
+        statements: emit_in_place_update(&full_table, assignments, None)
+            .into_iter()
+            .map(|sql| MaintenanceStatement { sql })
+            .collect(),
+        transactional: false,
+    };
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| anyhow::anyhow!("in-place UPDATE failed for '{full_table}': {e}"))?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
 /// Find the first `explicitly_mutable` source whose `Trigger::
 /// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` over a
 /// proven `RowIdentity::Key` — the membership-sensitive counterpart of
@@ -1033,6 +1153,10 @@ pub fn resolve_live_membership_recompute_cell(
         sources,
         explicitly_mutable,
         None,
+        &[],
+        // This resolver only inspects `UpstreamMutation` cells — a
+        // `ColumnAdded` trigger never affects them, so no deployed-schema
+        // snapshot is needed here.
         &[],
     ) else {
         return Ok(None);
@@ -1950,6 +2074,10 @@ pub fn resolve_live_delta_restriction_facts(
         // reads the model-edge creation cell's closure/row-identity facts,
         // which key temporal locality's routes do not gate.
         None,
+        &[],
+        // This resolver only reads the model-edge `NewData` creation cell —
+        // a `ColumnAdded` trigger never affects it, so no deployed-schema
+        // snapshot is needed here.
         &[],
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {

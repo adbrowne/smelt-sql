@@ -31,10 +31,10 @@ use smelt_logical::analysis::walk::{
 use smelt_logical::maintenance::choice::technique_requires_row_identity;
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region,
-    StatementGroup,
+    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
+    MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
 };
-use smelt_logical::maintenance::{PlanCell, RowIdentity, RowIdentityVerdict, Technique};
+use smelt_logical::maintenance::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 use smelt_planner::SourceTimeseriesMap;
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
@@ -439,10 +439,9 @@ pub struct PlanCellDiagnostics {
 /// Returns `Err(reason)` when this technique's structural preconditions
 /// (a declared `timeseries.partition_column` for `DeleteInsert`, a
 /// classifiable cumulative shape for `KeyedFold`, a non-empty `unique_key`
-/// for `ColumnScopedMerge`) cannot be assembled from `cell`/`model`'s own
-/// data, or when the technique has no production consumer yet
-/// (`Technique::InPlaceUpdate`, `docs/specs/incremental_models.md` §Known
-/// Divergences) — never a fabricated statement group.
+/// for `ColumnScopedMerge`, a `Trigger::ColumnAdded` cell for
+/// `InPlaceUpdate`) cannot be assembled from `cell`/`model`'s own data —
+/// never a fabricated statement group.
 #[allow(clippy::too_many_arguments)]
 fn build_technique_statements(
     technique: Technique,
@@ -454,6 +453,7 @@ fn build_technique_statements(
     dialect: MaintenanceDialect,
     unique_key: &[String],
     source_timeseries: &SourceTimeseriesMap,
+    trigger: &Trigger,
 ) -> Result<StatementGroup, String> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let table_name = format!("{schema}.{}", model.db_name_owned());
@@ -571,9 +571,50 @@ fn build_technique_statements(
                 dialect,
             ))
         }
-        Technique::InPlaceUpdate => Err("Technique::InPlaceUpdate has no production consumer yet \
-             (docs/specs/incremental_models.md § Known Divergences)"
-            .to_string()),
+        Technique::InPlaceUpdate => {
+            let Trigger::ColumnAdded { columns } = trigger else {
+                return Err(
+                    "Technique::InPlaceUpdate only serves a Trigger::ColumnAdded cell — this \
+                     cell's own trigger is not one"
+                        .to_string(),
+                );
+            };
+            if columns.is_empty() {
+                return Err(
+                    "Trigger::ColumnAdded carries no columns — nothing to backfill".to_string(),
+                );
+            }
+            // Every emitter in this module only assembles plain strings a
+            // caller already resolved (this module's own doc comment on
+            // `emit_keyed_fold`'s `folds` parameter) — the added columns'
+            // defining expressions come straight from the model's own
+            // current SQL, the same source
+            // `smelt_logical::maintenance::derive::derive_column_added`
+            // reads via `column_def_from_sql` to classify each column
+            // `PureBackfill` in the first place. A `PureBackfill` verdict
+            // means every dependency is an already-stored target column —
+            // no upstream compile/read is needed, unlike
+            // `ColumnScopedMerge`'s `compiled.sql` above.
+            let mut assignments = Vec::with_capacity(columns.len());
+            for col in columns {
+                let def =
+                    smelt_logical::maintenance::derive::column_def_from_sql(&stripped_sql, col)
+                        .ok_or_else(|| {
+                            format!(
+                                "could not resolve added column '{col}''s expression in the \
+                                 model's own SQL"
+                            )
+                        })?;
+                assignments.push((col.clone(), def.expr.syntax().text().to_string()));
+            }
+            Ok(StatementGroup {
+                statements: emit_in_place_update(&table_name, &assignments, None)
+                    .into_iter()
+                    .map(|sql| MaintenanceStatement { sql })
+                    .collect(),
+                transactional: false,
+            })
+        }
     }
 }
 
@@ -671,6 +712,7 @@ pub fn build_plan_cell_diagnostics(
                 dialect,
                 unique_key,
                 source_timeseries,
+                &cell.trigger,
             );
             let (statements, transactional) = match &build_result {
                 Ok(group) => (
@@ -921,6 +963,7 @@ mod tests {
             MaintenanceDialect::DuckDb,
             &[],
             &source_timeseries,
+            &Trigger::Backfill,
         )
         .unwrap_or_else(|e| {
             panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")

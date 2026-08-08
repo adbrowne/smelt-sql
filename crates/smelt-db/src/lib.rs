@@ -1612,6 +1612,10 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
+        // `smelt explain`'s report path has no I/O access to the
+        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
+        // own call site for the same rationale.
+        &[],
     )
 }
 
@@ -2172,6 +2176,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
+                    (
+                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
+                        format!(
+                            "column '{column}' occupies a row-membership/identity (skeleton) \
+                         position — a grain change, never a column backfill (EX-39, \
+                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                        ),
+                    )
+                }
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
                     grain,
                     tracking_plan,

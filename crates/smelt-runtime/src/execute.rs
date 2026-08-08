@@ -41,6 +41,7 @@ use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
 use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
+    SchemaEvolutionResult,
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{
@@ -1378,12 +1379,63 @@ pub async fn execute_project(
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
 
+        // The deployed-schema snapshot's column names, captured BEFORE the
+        // schema-evolution gate below runs `check_and_migrate` (which, on
+        // an `AlterTable` migration, updates the stored schema forward to
+        // already include the new column) — this is the "old" snapshot the
+        // definition-change trigger (`Trigger::ColumnAdded`) diffs the
+        // model's current SQL against, read once here so the later
+        // `resolve_live_in_place_update_cell` call sees the schema as it
+        // was BEFORE this run's own ALTER, not after
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). Empty
+        // when no deployed schema exists yet (first run) — fail-closed, no
+        // trigger derived, same as `smelt-db`'s own diagnostic path.
+        let deployed_column_names: Vec<String> = file_store
+            .load_schema(&plan.model_file.db_name_owned())
+            .ok()
+            .flatten()
+            .map(|s| s.columns.into_iter().map(|c| c.name).collect())
+            .unwrap_or_default();
+
+        // The `Trigger::ColumnAdded` → `Technique::InPlaceUpdate` cell,
+        // resolved ONCE here — before the schema-evolution gate runs its
+        // `ALTER TABLE` — so its backfill assignments can be folded into
+        // the SAME `StatementGroup` as the `ADD COLUMN` below
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6 review
+        // finding: a crash between the migration's `save_schema` and a
+        // standalone backfill dispatch left the column permanently NULL
+        // with no repair path, since the next run's snapshot already
+        // contains the column and the trigger never re-derives). Reused,
+        // never re-derived, by both the migration gate below and the
+        // fallback standalone dispatch after it.
+        let clean_sql_for_definition_change = smelt_parser::strip_frontmatter(&plan.sql);
+        let in_place_update_cell = if plan.incremental.is_some() && !deployed_column_names.is_empty()
+        {
+            let (in_place_sources, _) = build_maint_source_facts(&plan.model_file, source_infos);
+            plan.model_file.metadata.as_deref().and_then(|metadata| {
+                crate::maintenance_driver::resolve_live_in_place_update_cell(
+                    &clean_sql_for_definition_change,
+                    &plan.model_file.db_name_owned(),
+                    metadata,
+                    &in_place_sources,
+                    &deployed_column_names,
+                )
+            })
+        } else {
+            None
+        };
+
         // ── Schema evolution gate (incremental models only) ──────────────
         // For incremental models that have a deployed schema, check whether
         // the inferred columns have changed and apply (or block) the required
         // migration. `force_full_refresh` overrides the planned incremental
         // strategy to a full-table rebuild when evolution requires it.
         let mut force_full_refresh = false;
+        // Columns whose `InPlaceUpdate` backfill was already folded into
+        // and executed as part of the migration's own `StatementGroup`
+        // below — the standalone dispatch after this gate must skip these
+        // (idempotency: never re-run the same backfill twice).
+        let mut migration_backfilled_columns: Vec<String> = Vec::new();
         if plan.incremental.is_some() {
             let evolution_strategy = plan
                 .model_file
@@ -1407,8 +1459,31 @@ pub async fn execute_project(
                     };
                     if !inferred_columns.is_empty() {
                         let db_table_name = plan.model_file.db_name_owned();
-                        let (column_defaults, backfill_exprs) =
+                        let (column_defaults, mut backfill_exprs) =
                             extract_evolution_maps(plan.model_file.metadata.as_deref());
+                        // Fold the derived `InPlaceUpdate` cell's own
+                        // backfill assignments into the SAME map the
+                        // declared `backfill:` directive mechanism already
+                        // uses — `check_and_migrate`/`plan_migration_for_
+                        // backend` (`schema_tracking.rs`) emits the
+                        // `ADD COLUMN` and its `UPDATE ... SET` into ONE
+                        // `StatementGroup`, so routing the derived
+                        // assignment through this map makes it atomic with
+                        // the migration for free, reusing the existing
+                        // atomic mechanism rather than re-authoring it.
+                        // A user's explicit `default:`/`backfill:`
+                        // directive always wins (checked first) — the
+                        // derived assignment only fills a gap the user
+                        // left undeclared.
+                        if let Some((_cell, assignments)) = &in_place_update_cell {
+                            for (col, expr) in assignments {
+                                if !column_defaults.contains_key(col)
+                                    && !backfill_exprs.contains_key(col)
+                                {
+                                    backfill_exprs.insert(col.clone(), expr.clone());
+                                }
+                            }
+                        }
                         let target_config = config
                             .targets
                             .get(model_target)
@@ -1440,6 +1515,13 @@ pub async fn execute_project(
                         .await
                         {
                             Ok(result) => {
+                                if let SchemaEvolutionResult::Migrated {
+                                    backfilled_columns,
+                                    ..
+                                } = &result
+                                {
+                                    migration_backfilled_columns = backfilled_columns.clone();
+                                }
                                 match crate::safety::should_force_full_refresh(
                                     &result,
                                     &plan.name,
@@ -1461,6 +1543,52 @@ pub async fn execute_project(
                         }
                     }
                 }
+            }
+        }
+
+        // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
+        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
+        // Runs once per incremental model per run, common to both the keyed
+        // and non-keyed branches below — a one-time migration-style
+        // backfill over the model's existing rows, orthogonal to whichever
+        // window/creation/mutation technique the rest of this run
+        // dispatches (`docs/specs/incremental_models.md` §"The
+        // definition-change trigger"). The cell was already resolved once,
+        // above, before the migration gate ran — reused here, never
+        // re-derived. Any column the migration gate already folded into
+        // its own `StatementGroup` (`migration_backfilled_columns`) is
+        // skipped — dispatching it again here would be a redundant,
+        // non-atomic re-run of a backfill that already committed
+        // atomically with its `ADD COLUMN`
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
+        // standalone path remains the ONLY route when the migration gate
+        // did not run at all this run (e.g. `schema_evolution: strategy:
+        // full_refresh` on the model, or the target table not yet
+        // existing) — see `docs/specs/incremental_models.md` §"Known
+        // Divergences" for that residual non-atomicity.
+        let mut used_in_place_update = false;
+        if let Some((_cell, assignments)) = &in_place_update_cell {
+            let remaining: Vec<(String, String)> = assignments
+                .iter()
+                .filter(|(col, _)| !migration_backfilled_columns.iter().any(|c| c == col))
+                .cloned()
+                .collect();
+            if remaining.len() != assignments.len() {
+                used_in_place_update = true; // some/all columns already backfilled atomically above
+            }
+            if !remaining.is_empty() {
+                let retry_policy =
+                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                crate::maintenance_driver::execute_in_place_update(
+                    backend,
+                    schema,
+                    &plan.model_file.db_name_owned(),
+                    &remaining,
+                    &retry_policy,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                used_in_place_update = true;
             }
         }
 
@@ -1807,7 +1935,9 @@ pub async fn execute_project(
                 total_rows = exec_result.row_count;
             }
             total_rows_overall += total_rows;
-            let keyed_strategy_label = if used_column_scoped_merge {
+            let keyed_strategy_label = if used_in_place_update {
+                "in_place_update".to_string()
+            } else if used_column_scoped_merge {
                 "column_scoped_merge".to_string()
             } else if used_membership_recompute {
                 "delete_insert_suppressed".to_string()
@@ -2537,7 +2667,9 @@ pub async fn execute_project(
                     ),
                     _ => (String::new(), String::new()),
                 };
-                let strategy_label = if used_column_scoped_merge {
+                let strategy_label = if used_in_place_update {
+                    "in_place_update".to_string()
+                } else if used_column_scoped_merge {
                     "column_scoped_merge".to_string()
                 } else {
                     format!("{:?}", resolved_strategy).to_lowercase()

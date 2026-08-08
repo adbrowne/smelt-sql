@@ -297,7 +297,7 @@ async fn test_e2e_struct_field_addition() -> Result<()> {
     .await?;
 
     match result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have ALTER statements");
             // Verify the DDL added the struct field
             assert!(
@@ -379,7 +379,7 @@ async fn test_e2e_array_element_widening() -> Result<()> {
     .await?;
 
     match result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty());
             assert!(
                 statements.iter().any(|s| s.contains("BIGINT[]")),
@@ -663,7 +663,7 @@ async fn test_e2e_nested_type_widening() -> Result<()> {
     .await?;
 
     match result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have ALTER statements");
             // Should use ALTER COLUMN TYPE with struct_pack or dot-notation
             let all_stmts = statements.join(" ");
@@ -888,7 +888,7 @@ async fn test_e2e_struct_field_removal() -> Result<()> {
     .await?;
 
     match result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have ALTER statements");
             assert!(
                 statements.iter().any(|s| s.contains("meta.b")),
@@ -969,7 +969,7 @@ async fn test_e2e_map_value_widening() -> Result<()> {
     .await?;
 
     match result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have ALTER statements");
             let all_stmts = statements.join(" ");
             assert!(
@@ -1035,7 +1035,7 @@ async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(
                 !statements.is_empty(),
                 "Should have migration statements for array-of-struct field add"
@@ -1114,7 +1114,7 @@ async fn test_e2e_nested_struct_field_addition() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have ALTER statements");
             // Should reference the nested path
             let all_stmts = statements.join(" ");
@@ -1216,7 +1216,7 @@ async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(
                 statements.len() >= 2,
                 "Should have at least 2 ALTER statements (struct + array), got: {:?}",
@@ -1438,7 +1438,7 @@ async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have migration statements");
         }
         other => panic!("Expected Migrated, got {:?}", other),
@@ -1519,7 +1519,7 @@ async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(!statements.is_empty(), "Should have migration statements");
         }
         other => panic!("Expected Migrated, got {:?}", other),
@@ -1595,7 +1595,7 @@ async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(
                 !statements.is_empty(),
                 "Should have migration statements for map value struct field add"
@@ -1673,7 +1673,7 @@ async fn test_e2e_map_value_type_widening() -> Result<()> {
     .await?;
 
     match &result {
-        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements } => {
+        smelt_cli::migration::SchemaEvolutionResult::Migrated { statements, .. } => {
             assert!(
                 !statements.is_empty(),
                 "Should have ALTER statements for map value widening"

@@ -194,6 +194,19 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// (`docs/specs/incremental_models.md` §"Key temporal locality"). Build via
 /// [`build_key_recurrences`], the sibling of [`build_source_facts`] over the
 /// same `(ref_string, source_info)` pairs.
+/// `deployed_column_names` is the model's previously-deployed output
+/// column names (world-fact, read by the caller from the deployed-schema
+/// snapshot the runtime's `schema_evolution` module already consults —
+/// `smelt-db` itself does no I/O, per the Salsa-purity rule). An empty
+/// slice means "no known deployed schema" and derives no `Trigger::
+/// ColumnAdded` at all — the same fail-closed posture as before this
+/// parameter existed (`docs/specs/incremental_models.md` §"The
+/// definition-change trigger"); every existing `smelt-db`-internal caller
+/// (diagnostics, `smelt explain`) has no such snapshot to hand and passes
+/// `&[]` unchanged. `smelt-runtime`'s maintenance driver is the one caller
+/// with real I/O access to the deployed-schema store, and is the only one
+/// that ever supplies a non-empty slice.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_model_maintenance_plan(
     sql: &str,
     table: &str,
@@ -202,6 +215,7 @@ pub fn derive_model_maintenance_plan(
     explicitly_mutable: &std::collections::HashSet<String>,
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
+    deployed_column_names: &[String],
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -367,13 +381,23 @@ pub fn derive_model_maintenance_plan(
         grain: plan_grain,
         skeleton_columns: skeleton,
     };
+    // The definition-change trigger's inputs: `None`/unclassifiable and
+    // "no deployed snapshot supplied" both fall back to "no old columns, no
+    // added columns" — fail-closed, never a guessed `ColumnAdded` trigger
+    // (`incremental_models.md` §"The definition-change trigger").
+    let (old_columns, added_columns) = if deployed_column_names.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        smelt_logical::maintenance::derive::diff_deployed_columns(sql, deployed_column_names)
+            .unwrap_or_default()
+    };
     let inputs = ModelInputs {
         sql,
         output,
         sources: sources.to_vec(),
         column_groups: grouping.groups.clone(),
         fold,
-        old_columns: Vec::new(),
+        old_columns,
     };
 
     let mut triggers = Vec::new();
@@ -419,6 +443,11 @@ pub fn derive_model_maintenance_plan(
         }
     }
     triggers.push(Trigger::Backfill);
+    if !added_columns.is_empty() {
+        triggers.push(Trigger::ColumnAdded {
+            columns: added_columns,
+        });
+    }
 
     let mut plan = derive_maintenance_plan(&inputs, &triggers);
     plan.key_locality = established_key_locality.map(|slice| {
@@ -460,6 +489,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
+    deployed_column_names: &[String],
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -469,6 +499,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         explicitly_mutable,
         driving_source_granularity,
         key_recurrences,
+        deployed_column_names,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -625,6 +656,13 @@ pub enum MaintenanceRefusal {
     },
     LocalityNotEstablished {
         message: String,
+    },
+    /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
+    /// row-membership/identity (skeleton) position, a grain change rather
+    /// than a column backfill (EX-39, `incremental_models.md` §"The
+    /// definition-change trigger").
+    SkeletonColumnAdded {
+        column: String,
     },
 }
 
@@ -907,6 +945,11 @@ pub fn maintenance_plan_diagnostics(
         &explicitly_mutable,
         driving_source_granularity,
         &key_recurrences,
+        // `smelt-db` diagnostics/`smelt explain` have no I/O access to the
+        // deployed-schema snapshot (Salsa purity) — no `ColumnAdded`
+        // trigger is derivable here; `smelt-runtime`'s maintenance driver
+        // is the production caller that supplies a real snapshot.
+        &[],
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -930,10 +973,11 @@ pub fn maintenance_plan_diagnostics(
                     why: why.clone(),
                 })
             }
-            // A definition-change grain refusal — not reachable in this
-            // phase (no `ColumnAdded` trigger is derived yet); leave
-            // unmapped so a future phase's own diagnostic lands it.
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. } => None,
+            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column } => {
+                Some(MaintenanceRefusal::SkeletonColumnAdded {
+                    column: column.clone(),
+                })
+            }
             // An underivable upstream-model clock. Recorded in the plan (and
             // surfaced by `smelt explain`'s Refusals section), but not yet
             // folded into `file_diagnostics()` — `MaintenanceReachNotDerivable`
@@ -1148,6 +1192,7 @@ mod tests {
             &std::collections::HashSet::new(),
             None,
             &[],
+            &[],
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1201,6 +1246,7 @@ mod tests {
             &std::collections::HashSet::new(),
             None,
             &[],
+            &[],
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1244,6 +1290,7 @@ mod tests {
             &[],
             &std::collections::HashSet::new(),
             None,
+            &[],
             &[],
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
@@ -1307,6 +1354,7 @@ mod tests {
             &sources,
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
+            &[],
             &[],
         )
         .expect("route 1 must derive a plan");
@@ -1385,6 +1433,7 @@ mod tests {
             &sources,
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
+            &[],
             &[],
         )
         .expect("route 1 must derive a plan");

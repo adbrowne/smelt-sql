@@ -16,19 +16,22 @@
 //!   `verdict.rs::adversarial_leaves_refuse_or_collapse_conservatively`
 //!   already asserts holds for every case, restated here as a per-id
 //!   staleness ledger.
-//! - **`KnownBug` structural entries** — a production gap this plan
-//!   discovered and deliberately did not fix (this plan's own "Deferred
-//!   during implementation" section): the incremental (windowed) execute
-//!   path never persists a deployed-schema snapshot. It is not reachable
-//!   through a generated case today (the schema-evolution gap is
-//!   deliberately routed around by every Phase 9 case), so it is verified
-//!   by a structural check against the exact call site named in the plan —
-//!   the moment the gap closes, the check stops matching and this test
-//!   reports it as stale, the signal to delete the entry and file the fix
-//!   as its own change. (A sibling entry, `known_bug_technique_pin_inert`,
-//!   was closed once `resolve_cell_choice`/`effective_override` wired the
-//!   frontmatter pin ladder into the live call site — see
-//!   `crates/smelt-runtime/src/maintenance_driver.rs`.)
+//! - **`KnownBug` structural entries** — a production gap this suite
+//!   discovered and deliberately did not fix yet, verified by a structural
+//!   check against the exact call site named in the entry — the moment the
+//!   gap closes, the check stops matching and this test reports it as
+//!   stale, the signal to delete the entry and file the fix as its own
+//!   change. No entry currently holds this status: the family's two prior
+//!   members were both closed this way —
+//!   `known_bug_technique_pin_inert` once `resolve_cell_choice`/
+//!   `effective_override` wired the frontmatter pin ladder into the live
+//!   call site (`crates/smelt-runtime/src/maintenance_driver.rs`), and
+//!   `known_bug_incremental_path_skips_schema_snapshot` once the
+//!   deployed-schema snapshot the definition-change trigger reads became
+//!   current on the incremental path too
+//!   (`docs/plans/20260809-sensitivity-precision.md` Phase 6,
+//!   `crates/smelt-runtime/src/execute.rs`'s pre-schema-evolution-gate
+//!   snapshot capture).
 //!
 //! A registry entry that never fired over the deterministic sample is
 //! reported (`eprintln!`), never a test failure — warn-level by design, so
@@ -50,7 +53,16 @@ enum DivergenceStatus {
     /// (`model_properties.md`/`incremental_models.md` §Known Divergences).
     Documented,
     /// A confirmed production gap, deliberately not fixed by this plan
-    /// (this plan's "Deferred during implementation" section).
+    /// (this plan's "Deferred during implementation" section). Currently
+    /// unused — the sole entry that carried this status
+    /// (`known_bug_incremental_path_skips_schema_snapshot`) was closed and
+    /// deleted (`docs/plans/20260809-sensitivity-precision.md` Phase 6: the
+    /// deployed-schema snapshot the definition-change trigger reads is now
+    /// current on the incremental path too). Kept, not deleted, so the next
+    /// genuine production gap this suite finds has a status to reach for
+    /// (see `known_bug_technique_pin_inert`'s own prior close/reopen
+    /// history in this module's doc comment).
+    #[allow(dead_code)]
     KnownBug,
 }
 
@@ -96,14 +108,6 @@ fn registry() -> Vec<DivergenceEntry> {
                 column cannot populate a Bounded scan window — NotDerivable, not an approximate \
                 fixed-day guess (model_properties.md interval-literal parsing note).",
             status: DivergenceStatus::Documented,
-        },
-        DivergenceEntry {
-            id: "known_bug_incremental_path_skips_schema_snapshot",
-            description: "save_deployed_schema is called only from execute.rs's full-refresh \
-                branch, never the incremental (windowed DELETE+INSERT) branch, so \
-                schema_evolution::check_and_migrate never fires for a plain windowed re-run after \
-                a column-add rewrite. See this plan's 'Deferred during implementation' section.",
-            status: DivergenceStatus::KnownBug,
         },
     ]
 }

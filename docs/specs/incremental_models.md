@@ -851,6 +851,17 @@ the new group. The classification of an added field — `SkeletonAdd` / `PureBac
   and forms its own catch-up group; mid-catch-up, a delta folds into the sibling group but is
   refused on the new group's unbackfilled regions (never fold ahead of the entry). The groups
   merge only once the new group's processed vector equals its sibling's over every region.
+- **The backfill is atomic with the column's own migration.** A `PureBackfill` field's
+  physical column and its backfilled values are created by the SAME statement group as the
+  schema migration that adds the column — never a separately-dispatched write that could
+  observe the column already added but not yet backfilled. Concretely: the backfill's
+  `UPDATE` is folded into the migration's `ADD COLUMN` statement group before it executes,
+  the same mechanism a declared `backfill:`/`default:` frontmatter directive already used.
+  A group failure (a transactional-DDL backend) leaves neither the physical column nor the
+  saved deployed-schema snapshot changed, so the next run's diff still sees the column
+  missing and retries the whole migration+backfill together — there is no window in which
+  the deployed-schema snapshot can outrun the column's real values (cross-ref §Known
+  Divergences for the one case this does not cover).
 
 ### The reconciliation ledger
 
@@ -2084,6 +2095,18 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   propagation and `smelt explain`, but the propagated region is materialized by the ordinary
   incremental run loop rather than a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
+- **The definition-change backfill's atomicity is conditional on the schema-evolution gate
+  actually running this run.** The fold described in §"The definition-change trigger" only
+  happens inside `schema_evolution`'s migration call; a model whose `schema_evolution:
+  strategy: full_refresh` frontmatter skips that gate entirely (columns instead arrive via a
+  full-table rebuild, where there is nothing to backfill in place) falls back to a
+  standalone, independently-dispatched `UPDATE` for `PureBackfill` fields — the same
+  non-atomic two-step the general mechanism now avoids. This standalone path is also the
+  only one exercised on a non-transactional-DDL backend (`BackendCapabilities::
+  supports_transactional_ddl == false`): the migration's own statement group is no longer
+  all-or-nothing there either, so a mid-group failure can still leave an added-but-unbackfilled
+  column with an already-advanced schema snapshot. Neither case has a repair path today.
+  Tracked: `docs/plans/20260809-sensitivity-precision.md` Phase 6.
 - **Plan-consumer gaps.** The horizon-clamped partition-local mutation corner is not reachable
   from any real workspace (trigger construction emits `UpstreamMutation` only for unclocked
   sources; clocked mutable-source scan-bound derivation is deferred); dispatch cannot
@@ -2092,17 +2115,24 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   parse but are not consumed (every refusal is an Error); the cost model between two admissible
   techniques is unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Emission remainders.** `emit_in_place_update` has no production consumer; the additive
-  fold's MERGE-inside-ledger-transaction interior is not observable at the statement-group
-  seam, so its parity leg uses an idempotent fixture; `Backend::delete_partitions` /
-  `insert_overwrite` still hand-author SQL for the production-unreachable `InsertOverwrite`
-  strategy (dead code, allowlisted in the structural no-authoring gate).
+- **Emission remainders.** The additive fold's MERGE-inside-ledger-transaction interior is
+  not observable at the statement-group seam, so its parity leg uses an idempotent fixture;
+  `Backend::delete_partitions` / `insert_overwrite` still hand-author SQL for the
+  production-unreachable `InsertOverwrite` strategy (dead code, allowlisted in the structural
+  no-authoring gate).
 - **Proof-layer residues.** All seven maintenance-plan proofs are derived
   (`model_properties.md` §Surface), with these gaps surviving: a keyed-grain output poses no
   partition-locality question, so a locality-admitted keyed model's clamps carry an assumed
-  (underived) write-footprint mirror into propagation; no production caller derives a
-  `ColumnAdded` trigger, so definition-change classification runs only under the tracer and
-  `MaintenanceSkeletonColumnAdded` is unreachable from a real build. Column-group-scoped dirt
+  (underived) write-footprint mirror into propagation. `smelt-runtime`'s maintenance driver is
+  the one production caller that derives a real `ColumnAdded` trigger (it alone has I/O access
+  to the deployed-schema snapshot the trigger diffs against, read once per run before the
+  schema-evolution gate); `smelt-db`'s own diagnostics/`smelt explain` path has no such access
+  and always derives an empty trigger set, so `MaintenanceSkeletonColumnAdded` is reachable
+  (`derive_model_maintenance_plan`'s own unit coverage) but not yet surfaced as an LSP/CLI
+  diagnostic ahead of a run, nor does a skeleton-position add block the run itself today — an
+  unadmitted `ColumnAdded` cell (skeleton add, or `UpstreamRederive` with no source to scan)
+  simply leaves the ordinary region-recompute technique as the run's only dispatch, same as
+  before this trigger existed. Column-group-scoped dirt
   coarsens to whole-partition (safe, over-running); hour granularity is declared surface but
   propagation is day-ordinal. The built grain-alignment check validates only the declaration
   (widen-never-narrow, `MaintenanceGranularityMismatch`); graph edges still take the

@@ -860,6 +860,12 @@ pub enum DiagnosticCode {
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
+    /// Emitted (Error) when a model's definition-change `Trigger::
+    /// ColumnAdded` names a column that occupies a row-membership/identity
+    /// (skeleton) position — a grain change, never a column backfill
+    /// (EX-39, `incremental_models.md` §"The definition-change trigger").
+    /// Anchored at the model SQL body start.
+    MaintenanceSkeletonColumnAdded,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`

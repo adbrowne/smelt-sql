@@ -98,6 +98,7 @@ fn derive_plan_cells(model: &ModelFile, source_infos: &[SourceInfo]) -> Vec<Plan
         &std::collections::HashSet::new(),
         None,
         &[],
+        &[],
     )
     .map(|r| r.plan.cells)
     .unwrap_or_default()

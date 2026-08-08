@@ -607,6 +607,10 @@ fn derive_clamp_and_locality_pass(
             // composed node admits identically here as it does for `smelt
             // explain` — never a separately re-derived admission.
             &smelt_db::queries::maintenance::build_key_recurrences(&source_refs),
+            // The propagation graph walk only reads model-edge `NewData`
+            // creation cells — a `ColumnAdded` trigger never affects them,
+            // so no deployed-schema snapshot is needed here.
+            &[],
         ) else {
             continue;
         };

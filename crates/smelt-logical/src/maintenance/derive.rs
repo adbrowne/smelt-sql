@@ -1217,7 +1217,7 @@ fn derive_mutation(
 /// the rest of this derivation already reads. `None` when `sql` has no
 /// classifiable top-level `SELECT`, or `name` isn't one of its projected
 /// aliases — the caller fails closed rather than guessing an expression.
-fn column_def_from_sql(sql: &str, name: &str) -> Option<ColumnDef> {
+pub fn column_def_from_sql(sql: &str, name: &str) -> Option<ColumnDef> {
     let stripped = crate::types::Frontmatter::strip(sql);
     let parse = smelt_parser::parse(stripped);
     let file = smelt_parser::File::cast(parse.syntax())?;
@@ -1230,6 +1230,52 @@ fn column_def_from_sql(sql: &str, name: &str) -> Option<ColumnDef> {
             name: name.to_string(),
             expr: item_expr(item).clone(),
         })
+}
+
+/// Diff `sql`'s own currently-projected output columns against
+/// `deployed_column_names` (a prior deployed-schema snapshot's column
+/// names, world-fact supplied by the caller — this function does no I/O of
+/// its own, per the Salsa-purity/plan-purity rule) to derive the two
+/// ingredients a production `Trigger::ColumnAdded` needs:
+///
+/// - `old_columns` — every currently-projected column whose name is ALSO
+///   in `deployed_column_names` (i.e. still-present, pre-existing output
+///   columns), with its defining expression read from `sql` itself. This
+///   is [`ModelInputs::old_columns`] — [`classify_definition_change`]'s
+///   `ctx.old_columns` (leg 2's collision check, leg 3's "already stored"
+///   set).
+/// - `added` — every currently-projected column name that is NOT in
+///   `deployed_column_names`: the genuinely new columns a `Trigger::
+///   ColumnAdded { columns: added }` should carry.
+///
+/// `None` when `sql` has no classifiable top-level `SELECT` — the caller
+/// fails closed (no trigger derived) rather than guessing, exactly like
+/// [`column_def_from_sql`] above.
+pub fn diff_deployed_columns(
+    sql: &str,
+    deployed_column_names: &[String],
+) -> Option<(Vec<ColumnDef>, Vec<String>)> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let items = select_stmt_items(&select)?;
+    let deployed: std::collections::HashSet<&str> =
+        deployed_column_names.iter().map(|s| s.as_str()).collect();
+    let mut old_columns = Vec::new();
+    let mut added = Vec::new();
+    for item in &items {
+        let name = item_alias(item);
+        if deployed.contains(name) {
+            old_columns.push(ColumnDef {
+                name: name.to_string(),
+                expr: item_expr(item).clone(),
+            });
+        } else {
+            added.push(name.to_string());
+        }
+    }
+    Some((old_columns, added))
 }
 
 /// Definition change: the model gained fields. Skeleton adds are grain
