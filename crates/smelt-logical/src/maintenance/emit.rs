@@ -713,6 +713,24 @@ pub fn emit_staged_candidate_conditional(
 /// The whole group runs in one transaction, same as
 /// [`emit_staged_candidate_conditional`].
 ///
+/// # NULL-keyed rows (known caveat, not yet closed)
+/// Every join this emitter builds (steps 3-5) compares keys with plain
+/// `=`, never a NULL-safe join — mirroring [`emit_staged_candidate_conditional`]'s
+/// own predicate-building style. SQL's `NULL = NULL` is never true, so a
+/// stored row whose key is (or contains) `NULL` never matches ANY staged
+/// candidate row on ANY of these joins, on ANY run — not even one where its
+/// own key is still genuinely present, unchanged, in the candidate. The
+/// practical effect: step 4's departed-key `DELETE` deletes it, and step 5's
+/// reinsert immediately reinserts it (its key is genuinely absent from the
+/// live `<table>` at that point, by step 4's own action) — every single
+/// run, forever. End-state equivalence with a full-refresh oracle still
+/// holds (the reinserted row's values are correct), but the change-
+/// suppression contract ("nothing changed → nothing written") silently does
+/// not hold for that one row: it is delete+reinserted even when genuinely
+/// unchanged. `key_expr_for_columns` (below, ~line 1093) already has a
+/// `COALESCE`-based NULL-safe join pattern for a different call site; this
+/// emitter does not yet use it — tracked in `docs/TODO.md`.
+///
 /// # Panics
 /// Same contract as [`emit_staged_candidate_conditional`]: panics if `key`
 /// or `compared_columns` is empty.

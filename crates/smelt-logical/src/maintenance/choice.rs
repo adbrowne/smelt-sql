@@ -28,7 +28,7 @@ use smelt_core::config::{
 
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
-use super::{MaintenancePlan, RowIdentity, RowIdentityVerdict, Technique, Trigger};
+use super::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 
 /// The technique the ladder resolves to for one cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,6 +115,51 @@ fn matching_cell<'a>(
             && c.columns
                 .iter()
                 .any(|col| group_columns.iter().any(|g| g == col))
+    })
+}
+
+/// A HARD `cells[].technique` pin naming `on: trigger_address` whose
+/// `columns` intersect NONE of `sibling_group_columns` — every derived
+/// column group the trigger's own admitted cells actually carry
+/// (`MaintenancePlan::cells_for`, `docs/plans/20260808-membership-
+/// sensitivity.md` Phase 3). A trigger commonly derives MULTIPLE sibling
+/// cells, one per membership-sensitive column group a shared join admits;
+/// a pin whose `columns` name none of them at all is not "no override for
+/// this cell" (silent, fine) — it is a dangling/misconfigured pin that
+/// will never be consulted by anything, which fail-loud discipline
+/// (root `CLAUDE.md` §"Fail-loud discipline") says must surface, not
+/// vanish.
+///
+/// **Only a hard `technique:` pin is checked here.** A soft `cells[].prefer`
+/// naming the same unaddressed columns is not an error — `prefer` is
+/// documented to never refuse even when it names a technique outside the
+/// resolvable set (`resolve_cell_choice`'s own doc comment: "falling back
+/// silently to the deterministic default when the preferred family isn't
+/// resolvable"); the SAME silent-fallback contract extends naturally to a
+/// `prefer` that fails to address any sibling group at all — there is
+/// nothing new to refuse about that case that plain "prefer had no
+/// admissible target" didn't already cover. A `cells[].write` pin has its
+/// own, separately-checked matching rule
+/// (`smelt-db`'s `matching_write_pin`/`write_pin_diagnostics`, unaffected by
+/// this function) — not this function's concern.
+///
+/// A `columns: []` entry (the whole-row `{*}` trigger shape,
+/// `NewData`/`Backfill`) is never flagged — [`matching_cell`]'s own
+/// "any column member" rule never matches an empty `columns` list either,
+/// so an empty-`columns` pin addresses its trigger by `on:` alone and is
+/// out of this per-column-group check's scope.
+pub fn unaddressed_technique_pin<'a>(
+    cells: &'a [MaintenanceCellConfig],
+    trigger_address: &str,
+    sibling_group_columns: &[Vec<String>],
+) -> Option<&'a MaintenanceCellConfig> {
+    cells.iter().find(|c| {
+        c.on == trigger_address
+            && c.technique.is_some()
+            && !c.columns.is_empty()
+            && !sibling_group_columns
+                .iter()
+                .any(|group| c.columns.iter().any(|col| group.contains(col)))
     })
 }
 
@@ -222,14 +267,29 @@ fn admits_write_selection(
 /// but this particular trigger's cell happens to have admitted
 /// `ColumnScopedMerge`, not `KeyedFold`) still refuses, never silently
 /// substitutes a different technique than the one named.
+///
+/// **`cell` is the caller's responsibility to pick.** This function no
+/// longer looks a cell up from a whole [`MaintenancePlan`] by `trigger`
+/// alone — a trigger commonly derives MULTIPLE sibling cells, one per
+/// membership-sensitive column group a shared join admits
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 1), and picking
+/// "the" cell by trigger alone (`MaintenancePlan::cell_for`'s own
+/// first-match semantics) silently evaluated every override against only
+/// the FIRST sibling, regardless of which sibling's own `columns` an
+/// override actually named (Phase 3's fix). The caller must resolve the
+/// correct sibling itself — typically by iterating
+/// [`MaintenancePlan::cells_for`] and matching each candidate's own derived
+/// column group against the override, mirroring [`effective_override`]'s
+/// own per-group `matching_cell` logic — and pass that specific cell (or
+/// `None`, when the trigger has no admitted cell at all: an override still
+/// resolves against `{recompute}` alone, per the `None` arms below).
 pub fn resolve_cell_choice(
-    plan: &MaintenancePlan,
+    cell: Option<&PlanCell>,
     trigger: &Trigger,
     overrides: &EffectiveOverride,
     write_pin: Option<&'static super::WritePattern>,
     backend_supports_column_scoped_merge: bool,
 ) -> Result<ChosenTechnique, ChoiceRefusal> {
-    let cell = plan.cell_for(trigger);
     let admitted_technique = cell.map(|c| &c.technique);
     let live_technique = admitted_technique.filter(|t| match t {
         Technique::ColumnScopedMerge => backend_supports_column_scoped_merge,
@@ -1270,7 +1330,7 @@ mod write_variant_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::{Corner, PartitionLocal, PlanCell};
+    use crate::maintenance::{Corner, MaintenancePlan, PartitionLocal, PlanCell};
     use smelt_core::config::MaintenanceCellConfig;
 
     fn admitted_plan(source: &str, technique: Technique, corner: Corner) -> MaintenancePlan {
@@ -1310,8 +1370,9 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
-            .expect("pin naming the admitted technique must resolve");
+        let resolved =
+            resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, true)
+                .expect("pin naming the admitted technique must resolve");
         assert_eq!(
             resolved,
             ChosenTechnique::Admitted(Technique::ColumnScopedMerge)
@@ -1324,14 +1385,20 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Fold),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, None, true)
-            .expect_err("pinning an unadmitted technique must refuse");
+        let err = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &bad_overrides,
+            None,
+            true,
+        )
+        .expect_err("pinning an unadmitted technique must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Pinning `rederive_columns` when the backend cannot run it is the
         // same refusal shape — a capability gap is indistinguishable from
         // an unadmitted cell.
-        let err2 = resolve_cell_choice(&plan, &trigger, &overrides, None, false)
+        let err2 = resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, false)
             .expect_err("pin naming a capability-gapped backend must refuse");
         assert!(err2.to_string().contains("MaintenanceUnboundedFootprint"));
 
@@ -1341,8 +1408,14 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Recompute),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, None, true)
-            .expect("recompute is always resolvable");
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &recompute_overrides,
+            None,
+            true,
+        )
+        .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }
 
@@ -1357,14 +1430,19 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
+        let err = resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, true)
             .expect_err("a pin naming a cell the plan never admitted must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Absent a pin, the safe default resolves with no error.
-        let resolved =
-            resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), None, true)
-                .expect("no pin + unadmitted cell must fall back safely, not error");
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            None,
+            true,
+        )
+        .expect("no pin + unadmitted cell must fall back safely, not error");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }
 
@@ -1447,8 +1525,158 @@ mod tests {
         let trigger = Trigger::UpstreamMutation {
             source: "sources.users".to_string(),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &effective, None, true)
-            .expect("recompute is always resolvable");
+        let resolved =
+            resolve_cell_choice(plan.cell_for(&trigger), &trigger, &effective, None, true)
+                .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
+    }
+
+    /// Regression test (`docs/plans/20260808-membership-sensitivity.md`
+    /// Phase 3 reviewer fix): a trigger with TWO sibling cells — pin
+    /// resolution must consult BOTH, matching each sibling's own columns,
+    /// never only the first (`MaintenancePlan::cell_for`'s first-match
+    /// pitfall). Mirrors the empirically-found bug: `daily_events_
+    /// enriched`'s `UpstreamMutation(users)` trigger derives a `{user_name}`
+    /// cell AND an `{event_id, event_type, user_id}` sibling cell — a pin
+    /// scoped to the SECOND cell's own columns must be consulted (loud
+    /// refusal for an inadmissible technique, honored for an admissible
+    /// one), never silently ignored just because it isn't the first cell in
+    /// `plan.cells`.
+    #[test]
+    fn pin_scoped_to_a_sibling_cell_is_consulted_not_only_the_first() {
+        fn cell(group: &str, source: &str) -> PlanCell {
+            PlanCell {
+                group: group.to_string(),
+                trigger: Trigger::UpstreamMutation {
+                    source: source.to_string(),
+                },
+                corner: Corner::RecomputeRegion,
+                technique: Technique::DeleteInsert,
+                partition_local: PartitionLocal::Yes,
+                scans: vec![],
+                ledger_catch_up: false,
+                row_identity: RowIdentityVerdict {
+                    identity: RowIdentity::WholeRow,
+                    proven_mismatch: None,
+                },
+                skeleton_source_closure: None,
+                fingerprint_projections: std::collections::BTreeMap::new(),
+            }
+        }
+        let plan = MaintenancePlan {
+            cells: vec![
+                cell("{user_name}", "users"),
+                cell("{event_id,event_type,user_id}", "users"),
+            ],
+            refusals: vec![],
+            key_locality: None,
+        };
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+
+        // Every sibling's own derived column group — the SAME shape
+        // `maintenance_driver.rs`'s fixed loop builds before consulting any
+        // override.
+        let sibling_group_columns: Vec<Vec<String>> = plan
+            .cells_for(&trigger)
+            .map(|c| match c.group.as_str() {
+                "{user_name}" => vec!["user_name".to_string()],
+                "{event_id,event_type,user_id}" => vec![
+                    "event_id".to_string(),
+                    "event_type".to_string(),
+                    "user_id".to_string(),
+                ],
+                other => panic!("unexpected group {other}"),
+            })
+            .collect();
+
+        // --- Inadmissible pin scoped to the SECOND sibling: must refuse. ---
+        let inadmissible_cells_cfg = vec![cell_cfg(
+            "users",
+            &["event_id"],
+            None,
+            Some(CellTechnique::Fold),
+        )];
+        assert!(
+            unaddressed_technique_pin(&inadmissible_cells_cfg, "users", &sibling_group_columns)
+                .is_none(),
+            "the pin's columns DO address the second sibling — must not be flagged dangling"
+        );
+        let mut refused = false;
+        for (c, group_columns) in plan.cells_for(&trigger).zip(sibling_group_columns.iter()) {
+            let overrides =
+                effective_override(None, &inadmissible_cells_cfg, "users", group_columns);
+            let result = resolve_cell_choice(Some(c), &trigger, &overrides, None, true);
+            if c.group == "{event_id,event_type,user_id}" {
+                let err = result.expect_err(
+                    "the pin scoped to this sibling's own columns must be consulted and refuse \
+                     — Fold is not in this cell's resolvable set {recompute, DeleteInsert}",
+                );
+                assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+                refused = true;
+            } else {
+                result.expect(
+                    "the FIRST sibling carries no matching override — it must resolve its own \
+                     safe default, never see the second sibling's pin",
+                );
+            }
+        }
+        assert!(
+            refused,
+            "the pin scoped to the second sibling's columns must have been consulted"
+        );
+
+        // --- Admissible pin scoped to the SECOND sibling: must be honored. ---
+        let admissible_cells_cfg = vec![cell_cfg(
+            "users",
+            &["event_id"],
+            None,
+            Some(CellTechnique::Recompute),
+        )];
+        assert!(
+            unaddressed_technique_pin(&admissible_cells_cfg, "users", &sibling_group_columns)
+                .is_none()
+        );
+        let mut honored = false;
+        for (c, group_columns) in plan.cells_for(&trigger).zip(sibling_group_columns.iter()) {
+            let overrides = effective_override(None, &admissible_cells_cfg, "users", group_columns);
+            let chosen = resolve_cell_choice(Some(c), &trigger, &overrides, None, true)
+                .expect("recompute is always resolvable");
+            if c.group == "{event_id,event_type,user_id}" {
+                assert_eq!(chosen, ChosenTechnique::RegionRecompute);
+                honored = true;
+            }
+        }
+        assert!(honored, "the admissible pin must have been honored");
+
+        // --- A pin naming columns from NEITHER sibling: dangling, refused. ---
+        let dangling_cells_cfg = vec![cell_cfg(
+            "users",
+            &["totally_unrelated_column"],
+            None,
+            Some(CellTechnique::Fold),
+        )];
+        let dangling =
+            unaddressed_technique_pin(&dangling_cells_cfg, "users", &sibling_group_columns);
+        assert!(
+            dangling.is_some(),
+            "a hard technique pin naming columns absent from every sibling group must be \
+             flagged as dangling, never silently ignored"
+        );
+
+        // --- The same dangling pin as a SOFT `prefer` never refuses. ---
+        let dangling_prefer_cfg = vec![cell_cfg(
+            "users",
+            &["totally_unrelated_column"],
+            Some(TechniquePreference::Fold),
+            None,
+        )];
+        assert!(
+            unaddressed_technique_pin(&dangling_prefer_cfg, "users", &sibling_group_columns)
+                .is_none(),
+            "a soft `prefer` naming columns absent from every sibling group is not flagged — \
+             `prefer` never refuses"
+        );
     }
 }

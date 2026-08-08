@@ -2515,7 +2515,7 @@ mod write_pattern_registry_pin {
         //    resolver picks the cell's own admitted `KeyedFold`, not region
         //    recompute.
         let unpinned = resolve_cell_choice(
-            &plan,
+            plan.cell_for(&trigger),
             &trigger,
             &effective_override(None, &[], "unused", &[]),
             None,
@@ -2564,7 +2564,7 @@ mod write_pattern_registry_pin {
         //    found missing: the pin must actually change what this
         //    function picks, not just have been checked upstream.
         let pinned = resolve_cell_choice(
-            &plan,
+            plan.cell_for(&trigger),
             &trigger,
             &effective_override(None, &[], "unused", &[]),
             Some(looked_up),
@@ -2740,7 +2740,7 @@ mod write_pattern_registry_pin {
         .expect("`column` resolves fine against the registry for an identity-bearing output");
 
         let err = resolve_cell_choice(
-            &plan,
+            plan.cell_for(&trigger),
             &trigger,
             &effective_override(None, &[], "unused", &[]),
             Some(resolved_pattern),
@@ -2829,7 +2829,7 @@ mod write_pattern_registry_pin {
 
         let keyed_pattern = lookup_write_pattern("keyed").expect("registered pattern");
         let chosen = resolve_cell_choice(
-            &plan,
+            plan.cell_for(&trigger),
             &trigger,
             &effective_override(None, &[], "unused", &[]),
             Some(keyed_pattern),
@@ -2854,7 +2854,7 @@ mod write_pattern_registry_pin {
 
         let update_pattern = lookup_write_pattern("update").expect("registered pattern");
         let err = resolve_cell_choice(
-            &plan,
+            plan.cell_for(&trigger),
             &trigger,
             &effective_override(None, &[], "unused", &[]),
             Some(update_pattern),

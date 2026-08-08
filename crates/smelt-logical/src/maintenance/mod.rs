@@ -367,10 +367,41 @@ pub struct MaintenancePlan {
 }
 
 impl MaintenancePlan {
-    /// The admitted cell for `trigger`, if any (v0 plans hold at most one
-    /// cell per trigger × group).
+    /// The FIRST admitted cell for `trigger`, if any (v0 plans hold at most
+    /// one cell per trigger × group, but a trigger commonly has MULTIPLE
+    /// sibling cells — one per membership-sensitive group a shared join
+    /// admits, `docs/plans/20260808-membership-sensitivity.md` Phase 1).
+    ///
+    /// **First-match, not "the" cell.** A caller resolving a per-cell
+    /// override (`maintenance.cells[].technique`/`prefer`/`write`) must
+    /// never use this alone to decide admissibility — the override's own
+    /// `columns` may address a DIFFERENT sibling cell than whichever one
+    /// this happens to return first. Use [`Self::cells_for`] and match each
+    /// sibling's own derived column group instead (`docs/plans/
+    /// 20260808-membership-sensitivity.md` Phase 3's own fix — the bug this
+    /// doc comment now flags: `smelt-runtime`'s pin-resolution loops used to
+    /// call this and evaluate overrides against only the first sibling,
+    /// silently never consulting a pin scoped to a later sibling's
+    /// columns). Safe call sites for `cell_for` alone are ones that only
+    /// ever derive a single cell per trigger for their own shape (e.g. a
+    /// `NewData`/`Backfill` whole-row `{*}` trigger, or a keyed model's
+    /// single-group recipe) — read the call site's own shape before adding
+    /// a new one.
     pub fn cell_for(&self, trigger: &Trigger) -> Option<&PlanCell> {
         self.cells.iter().find(|c| &c.trigger == trigger)
+    }
+
+    /// Every admitted cell sharing `trigger` — one per column group the
+    /// trigger's mutation source contributes sensitivity to. Iteration
+    /// order matches `self.cells`' own derivation order (not
+    /// group-name-sorted); a caller that needs to pick ONE specific sibling
+    /// must match on the sibling's own derived group/columns, never rely on
+    /// this order to mean anything.
+    pub fn cells_for<'a, 'b>(
+        &'a self,
+        trigger: &'b Trigger,
+    ) -> impl Iterator<Item = &'a PlanCell> + use<'a, 'b> {
+        self.cells.iter().filter(move |c| &c.trigger == trigger)
     }
 }
 

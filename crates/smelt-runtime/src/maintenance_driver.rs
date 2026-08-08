@@ -841,97 +841,135 @@ pub fn resolve_live_column_scoped_cell(
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
-            continue;
-        };
-        let group_columns = result
-            .column_groups
-            .iter()
-            .find(|g| g.name() == cell.group)
-            .map(|g| g.columns.clone())
-            .unwrap_or_default();
-        // An already-validated `cells[].write` pin for this trigger's cell
-        // (`smelt-db`'s pre-execution diagnostic gate already ran
-        // `resolve_write_pin`'s registry/capability/equivalence checks — an
-        // invalid pin never reaches here, the run would already have been
-        // refused with `MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
-        // *name* to its registry entry so `resolve_cell_choice` can consult
-        // which [`smelt_logical::maintenance::WriteSelection`] it maps to,
-        // never re-deriving admission itself.
-        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
-            &cell,
-            &result.column_groups,
-            cells_cfg,
-        )
-        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
-        // The override ladder (`defaults.prefer` → `cells[].prefer` →
-        // `cells[].technique`, narrower scope winning) narrowed to this
-        // cell's own trigger + column group — the SAME `overrides` value
-        // feeds both the family choice below and the write-suppression
-        // variant resolution further down, so a `cells[].technique` entry
-        // naming e.g. `suppress`/`unconditional` for this cell is visible
-        // to both dimensions from one ladder evaluation.
-        let overrides = effective_override(
-            metadata
-                .maintenance
-                .as_ref()
-                .and_then(|m| m.defaults.as_ref()),
-            &combined_cells,
-            source,
-            &group_columns,
-        );
-        let chosen = resolve_cell_choice(
-            &result.plan,
-            &trigger,
-            &overrides,
-            write_pin,
-            backend_supports_column_scoped_merge,
-        )
-        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-        if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+        // A trigger commonly derives MULTIPLE sibling cells, one per
+        // membership-sensitive column group a shared join admits
+        // (`docs/plans/20260808-membership-sensitivity.md` Phase 1) — every
+        // one of them must be offered a chance to match a `cells[]`
+        // override scoped to ITS OWN columns, never only the first
+        // (`MaintenancePlan::cell_for`'s own doc comment on this exact bug,
+        // `docs/plans/20260808-membership-sensitivity.md` Phase 3's fix).
+        let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+        if sibling_cells.is_empty() {
             continue;
         }
-        let comparability = model_property_vector(sql, &JoinContext::new())
-            .map(|v| v.comparability)
-            .unwrap_or_default();
-        let raw_suppression =
-            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
-        // Fold the first-build/definition-change-backfill posture (or an
-        // explicit `prefer`/`technique` override on this dimension) into
-        // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
-        // or `Trigger::Backfill` — no prior stored state on this group to
-        // diff against) resolves the unconditional matched arm by default,
-        // exactly as if the P2/P3 proof itself had refused — unless an
-        // explicit pin/preference overrides that default. This is the
-        // resolver's own rule, never a runtime special case here.
-        //
-        // A `technique: suppress` pin forcing suppression on over a genuine
-        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
-        // dimension just resolved above — where `resolve_cell_choice`'s
-        // refusal is now a real run error — there is currently NO
-        // pre-execution diagnostic gate for this write-*variant* pin
-        // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
-        // `continue` below on `Err` is a REAL silent fallback: an
-        // inadmissible variant pin is not refused here, it just falls
-        // through to the safe region-recompute batch loop instead of
-        // failing the run loudly. This is a known gap, not by design; see
-        // `docs/specs/incremental_models.md` §"Known Divergences" and
-        // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
-        // Phase G1 for the tracked follow-up to extend the diagnostic gate
-        // to this dimension — out of scope for Phase 2 of
-        // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
-        // family (Fold/Recompute/RederiveColumns) dimension.
-        let write_variant_result = resolve_write_variant(
-            &raw_suppression,
-            &cell.trigger,
-            cell.ledger_catch_up,
-            &overrides,
-        );
-        let Ok((suppression, _variant_reason)) = write_variant_result else {
-            continue;
-        };
-        return Ok(Some((source.clone(), cell, suppression)));
+        let sibling_group_columns: Vec<Vec<String>> = sibling_cells
+            .iter()
+            .map(|c| {
+                result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == c.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Fail-loud: a HARD `cells[on: source].technique` pin whose
+        // `columns` address NONE of this trigger's own sibling groups is a
+        // dangling/misconfigured pin — under the pre-Phase-3 first-match
+        // lookup it would silently never be consulted by anything; refuse
+        // instead of vanishing (root `CLAUDE.md` §"Fail-loud discipline").
+        // A soft `prefer` in the same situation is not flagged here — it
+        // never refuses even when it names a resolvable technique the cell
+        // doesn't have (`resolve_cell_choice`'s own contract).
+        if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
+            &combined_cells,
+            source,
+            &sibling_group_columns,
+        ) {
+            bail!(
+                "MaintenanceUnboundedFootprint: cells[on: {source}].technique pin (columns: \
+                 {:?}) does not address any of this trigger's own derived column groups ({:?}) \
+                 — a hard technique pin must name columns belonging to exactly one of the \
+                 trigger's admitted cells, never columns absent from every one of them",
+                dangling.columns,
+                sibling_group_columns,
+            );
+        }
+        for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+            // An already-validated `cells[].write` pin for this cell
+            // (`smelt-db`'s pre-execution diagnostic gate already ran
+            // `resolve_write_pin`'s registry/capability/equivalence checks —
+            // an invalid pin never reaches here, the run would already have
+            // been refused with `MaintenanceWritePatternUnavailable`/
+            // `MaintenanceWriteAddressingRefused`); this only re-resolves
+            // the *name* to its registry entry so `resolve_cell_choice` can
+            // consult which [`smelt_logical::maintenance::WriteSelection`]
+            // it maps to, never re-deriving admission itself.
+            let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            )
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+            // The override ladder (`defaults.prefer` → `cells[].prefer` →
+            // `cells[].technique`, narrower scope winning) narrowed to THIS
+            // sibling cell's own trigger + column group — the SAME
+            // `overrides` value feeds both the family choice below and the
+            // write-suppression variant resolution further down, so a
+            // `cells[].technique` entry naming e.g. `suppress`/
+            // `unconditional` for this cell is visible to both dimensions
+            // from one ladder evaluation.
+            let overrides = effective_override(
+                metadata
+                    .maintenance
+                    .as_ref()
+                    .and_then(|m| m.defaults.as_ref()),
+                &combined_cells,
+                source,
+                group_columns,
+            );
+            let chosen = resolve_cell_choice(
+                Some(cell),
+                &trigger,
+                &overrides,
+                write_pin,
+                backend_supports_column_scoped_merge,
+            )
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+            if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+                continue;
+            }
+            let comparability = model_property_vector(sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let raw_suppression =
+                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+            // Fold the first-build/definition-change-backfill posture (or an
+            // explicit `prefer`/`technique` override on this dimension) into
+            // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
+            // or `Trigger::Backfill` — no prior stored state on this group to
+            // diff against) resolves the unconditional matched arm by default,
+            // exactly as if the P2/P3 proof itself had refused — unless an
+            // explicit pin/preference overrides that default. This is the
+            // resolver's own rule, never a runtime special case here.
+            //
+            // A `technique: suppress` pin forcing suppression on over a genuine
+            // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
+            // dimension just resolved above — where `resolve_cell_choice`'s
+            // refusal is now a real run error — there is currently NO
+            // pre-execution diagnostic gate for this write-*variant* pin
+            // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
+            // `continue` below on `Err` is a REAL silent fallback: an
+            // inadmissible variant pin is not refused here, it just falls
+            // through to the safe region-recompute batch loop instead of
+            // failing the run loudly. This is a known gap, not by design; see
+            // `docs/specs/incremental_models.md` §"Known Divergences" and
+            // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+            // Phase G1 for the tracked follow-up to extend the diagnostic gate
+            // to this dimension — out of scope for Phase 2 of
+            // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
+            // family (Fold/Recompute/RederiveColumns) dimension.
+            let write_variant_result = resolve_write_variant(
+                &raw_suppression,
+                &cell.trigger,
+                cell.ledger_catch_up,
+                &overrides,
+            );
+            let Ok((suppression, _variant_reason)) = write_variant_result else {
+                continue;
+            };
+            return Ok(Some((source.clone(), cell.clone(), suppression)));
+        }
     }
     Ok(None)
 }
@@ -1023,91 +1061,118 @@ pub fn resolve_live_membership_recompute_cell(
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
-            continue;
-        };
-        if cell.technique != Technique::DeleteInsert {
-            continue;
-        }
-        let RowIdentity::Key(key) = &cell.row_identity.identity else {
-            continue;
-        };
-        if key.is_empty() {
+        // Same sibling-cell fix as `resolve_live_column_scoped_cell` above
+        // (`docs/plans/20260808-membership-sensitivity.md` Phase 3) — a
+        // trigger can derive multiple membership-sensitive sibling cells,
+        // and a `cells[]` override must be matched against each one's own
+        // columns, never only the first.
+        let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+        if sibling_cells.is_empty() {
             continue;
         }
-        let group_columns = result
-            .column_groups
+        let sibling_group_columns: Vec<Vec<String>> = sibling_cells
             .iter()
-            .find(|g| g.name() == cell.group)
-            .map(|g| g.columns.clone())
-            .unwrap_or_default();
-        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
-            &cell,
-            &result.column_groups,
-            cells_cfg,
-        )
-        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
-        let overrides = effective_override(
-            metadata
-                .maintenance
-                .as_ref()
-                .and_then(|m| m.defaults.as_ref()),
+            .map(|c| {
+                result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == c.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
             &combined_cells,
             source,
-            &group_columns,
-        );
-        // `resolve_cell_choice`'s resolvable set for this cell is `{recompute,
-        // DeleteInsert}` (the cell's own admitted technique IS the always-
-        // available region recompute for this family, per `resolve_cell_
-        // choice`'s own doc comment: "the second live alternative … is the
-        // always-admissible whole-region recompute"). Absent an override that
-        // asks for something this narrow resolver has no lowering for, both
-        // resolvable members land here as `Admitted(Technique::DeleteInsert)`
-        // — a `RegionRecompute` choice from a `technique: recompute` pin/
-        // `prefer` is handled the same way `resolve_live_column_scoped_cell`
-        // handles it: it simply isn't THIS live cell, so this source is
-        // skipped and the caller's own default (the plain incremental batch
-        // loop, unaware of this dimension) applies.
-        let chosen = resolve_cell_choice(
-            &result.plan,
-            &trigger,
-            &overrides,
-            write_pin,
-            // Column-scoped MERGE backend capability is irrelevant to this
-            // resolver's own resolvable set (`{recompute, DeleteInsert}`
-            // never contains `ColumnScopedMerge`) — passed `false` so a
-            // `write_pin`/pin naming `ColumnScopedMerge` correctly refuses
-            // here rather than appearing spuriously "live".
-            false,
-        )
-        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-        if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
-            continue;
+            &sibling_group_columns,
+        ) {
+            bail!(
+                "MaintenanceUnboundedFootprint: cells[on: {source}].technique pin (columns: \
+                 {:?}) does not address any of this trigger's own derived column groups ({:?}) \
+                 — a hard technique pin must name columns belonging to exactly one of the \
+                 trigger's admitted cells, never columns absent from every one of them",
+                dangling.columns,
+                sibling_group_columns,
+            );
         }
-        let comparability = model_property_vector(sql, &JoinContext::new())
-            .map(|v| v.comparability)
-            .unwrap_or_default();
-        let raw_suppression =
-            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
-        let write_variant_result = resolve_write_variant(
-            &raw_suppression,
-            &cell.trigger,
-            cell.ledger_catch_up,
-            &overrides,
-        );
-        let Ok((suppression, _variant_reason)) = write_variant_result else {
-            continue;
-        };
-        // `emit_staged_candidate_conditional` has no unconditional
-        // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
-        // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
-        // sound lowering this resolver can hand the caller, so it is treated
-        // exactly like a refused write-variant: skip this source, fall
-        // through to the caller's safe default.
-        if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
-            continue;
+        for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+            if cell.technique != Technique::DeleteInsert {
+                continue;
+            }
+            let RowIdentity::Key(key) = &cell.row_identity.identity else {
+                continue;
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            )
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+            let overrides = effective_override(
+                metadata
+                    .maintenance
+                    .as_ref()
+                    .and_then(|m| m.defaults.as_ref()),
+                &combined_cells,
+                source,
+                group_columns,
+            );
+            // `resolve_cell_choice`'s resolvable set for this cell is `{recompute,
+            // DeleteInsert}` (the cell's own admitted technique IS the always-
+            // available region recompute for this family, per `resolve_cell_
+            // choice`'s own doc comment: "the second live alternative … is the
+            // always-admissible whole-region recompute"). Absent an override that
+            // asks for something this narrow resolver has no lowering for, both
+            // resolvable members land here as `Admitted(Technique::DeleteInsert)`
+            // — a `RegionRecompute` choice from a `technique: recompute` pin/
+            // `prefer` is handled the same way `resolve_live_column_scoped_cell`
+            // handles it: it simply isn't THIS live cell, so this source is
+            // skipped and the caller's own default (the plain incremental batch
+            // loop, unaware of this dimension) applies.
+            let chosen = resolve_cell_choice(
+                Some(cell),
+                &trigger,
+                &overrides,
+                write_pin,
+                // Column-scoped MERGE backend capability is irrelevant to this
+                // resolver's own resolvable set (`{recompute, DeleteInsert}`
+                // never contains `ColumnScopedMerge`) — passed `false` so a
+                // `write_pin`/pin naming `ColumnScopedMerge` correctly refuses
+                // here rather than appearing spuriously "live".
+                false,
+            )
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+            if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
+                continue;
+            }
+            let comparability = model_property_vector(sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let raw_suppression =
+                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+            let write_variant_result = resolve_write_variant(
+                &raw_suppression,
+                &cell.trigger,
+                cell.ledger_catch_up,
+                &overrides,
+            );
+            let Ok((suppression, _variant_reason)) = write_variant_result else {
+                continue;
+            };
+            // `emit_staged_candidate_conditional` has no unconditional
+            // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
+            // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
+            // sound lowering this resolver can hand the caller, so it is treated
+            // exactly like a refused write-variant: skip this source, fall
+            // through to the caller's safe default.
+            if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
+                continue;
+            }
+            return Ok(Some((source.clone(), cell.clone(), suppression)));
         }
-        return Ok(Some((source.clone(), cell, suppression)));
     }
     Ok(None)
 }

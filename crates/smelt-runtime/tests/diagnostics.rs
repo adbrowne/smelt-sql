@@ -706,8 +706,14 @@ fn choice_rs_execution_semantics_unchanged() {
     };
 
     // No override: an admitted+live technique is preferred over recompute.
-    let resolved = resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), None, true)
-        .expect("no pin — never refuses");
+    let resolved = resolve_cell_choice(
+        plan.cell_for(&trigger),
+        &trigger,
+        &EffectiveOverride::default(),
+        None,
+        true,
+    )
+    .expect("no pin — never refuses");
     assert_eq!(
         resolved,
         ChosenTechnique::Admitted(Technique::ColumnScopedMerge)
@@ -719,8 +725,14 @@ fn choice_rs_execution_semantics_unchanged() {
         prefer: None,
         technique: Some(CellTechnique::Fold),
     };
-    let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, None, true)
-        .expect_err("pinning an unadmitted technique must still refuse");
+    let err = resolve_cell_choice(
+        plan.cell_for(&trigger),
+        &trigger,
+        &bad_overrides,
+        None,
+        true,
+    )
+    .expect_err("pinning an unadmitted technique must still refuse");
     assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
     // `recompute` remains always resolvable.
@@ -728,7 +740,13 @@ fn choice_rs_execution_semantics_unchanged() {
         prefer: None,
         technique: Some(CellTechnique::Recompute),
     };
-    let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, None, true)
-        .expect("recompute is always resolvable");
+    let resolved = resolve_cell_choice(
+        plan.cell_for(&trigger),
+        &trigger,
+        &recompute_overrides,
+        None,
+        true,
+    )
+    .expect("recompute is always resolvable");
     assert_eq!(resolved, ChosenTechnique::RegionRecompute);
 }

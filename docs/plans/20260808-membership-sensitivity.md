@@ -420,6 +420,88 @@ Established empirically (2026-08-08, steering session for `docs/plans/20260808-s
   the test's own result-equivalence assertion was passing for the wrong
   reason until this was caught.
 
+  **Reviewer REQUEST-CHANGES pass (2026-08-08): sibling-cell pin ambiguity,
+  found live, fixed.** Gating check 2 of the review caught that the
+  "no live dispatch" attribution the previous pass gave for the silent
+  `[user_name]`-scoped pins in `maintenance_pins.rs`/`bakeoff_seam.rs` was
+  WRONG, proven empirically: renaming the SAME pin's `columns` from
+  `[user_name]` to `[event_id]` made it refuse loudly
+  (`MaintenanceUnboundedFootprint`). Root cause: `daily_events_enriched`'s
+  `UpstreamMutation(users)` trigger derives TWO sibling cells (`{user_name}`
+  and `{event_id, event_type, user_id}` — membership sensitivity is
+  row-scoped, so a shared join admits a cell per column group, not one cell
+  per trigger, `docs/specs/incremental_models.md` §"The plan matrix"), and
+  `MaintenancePlan::cell_for`'s first-match lookup meant every pin-
+  resolution call site only ever evaluated an override against whichever
+  sibling happened to be derived first — a pin scoped to the OTHER
+  sibling's own columns was silently never matched, regardless of whether
+  it named an admissible or inadmissible technique. This is the exact
+  ambiguity Phase 2's own Deferred entry flagged ("`MaintenancePlan::
+  cell_for`'s first-match ambiguity (discovered, not introduced)") as a
+  finding for a follow-up, now live and fixed under this phase's review
+  rather than deferred again.
+
+  Fixed:
+  - `crates/smelt-logical/src/maintenance/mod.rs`: `MaintenancePlan` gains
+    `cells_for(&self, trigger) -> impl Iterator<Item = &PlanCell>` (every
+    sibling cell sharing a trigger); `cell_for`'s own doc comment now warns
+    against using it alone to resolve a per-cell override.
+  - `crates/smelt-logical/src/maintenance/choice.rs`: `resolve_cell_choice`
+    no longer takes `&MaintenancePlan` and does its own internal
+    `cell_for(trigger)` lookup — it takes the already-resolved
+    `Option<&PlanCell>` directly, so the caller (not this function) is
+    responsible for picking the RIGHT sibling. New
+    `unaddressed_technique_pin` helper: a HARD `cells[].technique` pin
+    naming `on: <trigger>` whose `columns` intersect NONE of a trigger's
+    sibling groups is a dangling/misconfigured pin — fail-loud discipline
+    (root `CLAUDE.md`) says this must refuse, never silently vanish; a soft
+    `prefer` in the same situation is not flagged (it never refuses even
+    when it names a resolvable technique the cell lacks — the existing
+    contract already covers "no admissible target to steer toward").
+  - `crates/smelt-runtime/src/maintenance_driver.rs`: both
+    `resolve_live_column_scoped_cell` and `resolve_live_membership_
+    recompute_cell`'s per-source loops now collect ALL of a trigger's
+    sibling cells (`cells_for`), check for a dangling hard pin across all
+    of them up front (loud `bail!` if found), then try each sibling in turn
+    — matching `effective_override`/`resolve_cell_choice` against that
+    sibling's own group columns, never a different sibling's.
+  - New regression test:
+    `crates/smelt-logical/src/maintenance/choice.rs::tests::
+    pin_scoped_to_a_sibling_cell_is_consulted_not_only_the_first` — a
+    2-sibling-cell plan, proving a pin scoped to the SECOND cell's own
+    columns is consulted (loud refusal for `Fold`, honored for
+    `Recompute`), a pin naming columns absent from EITHER sibling is
+    flagged dangling, and the SAME dangling pin as a soft `prefer` is not
+    flagged (never refuses).
+  - Restored to loud-refusal expectations: `maintenance_pins.rs::
+    inadmissible_pin_fails_loud` (was `inadmissible_pin_has_no_effect_on_
+    membership_sensitive_cell`), `bakeoff_seam.rs::
+    request_override_subject_to_admission` (was `request_override_has_no_
+    effect_on_membership_sensitive_cell`), and `bakeoff_seam.rs::
+    request_override_forces_each_admissible_technique` — the last one's
+    honest post-Phase-1 claim is narrower than its pre-Phase-1 original:
+    `recompute` is still always resolvable (unchanged), but `rederive_
+    columns` (→ `ColumnScopedMerge`) is now genuinely, permanently
+    inadmissible for THIS shape regardless of the sibling-matching fix
+    (`ColumnScopedMerge`'s own reachability gap, item #1 in `docs/TODO.md`
+    — a real, separate, still-open finding, not the bug this pass fixed),
+    so the test now proves `recompute` succeeds and `rederive_columns`
+    refuses loud, rather than "both succeed silently."
+  - `docs/TODO.md`'s entry corrected: item #2's "no live dispatch" framing
+    was true of the write PATH (still is — `grain: partition` genuinely has
+    no live `DeleteInsert`-membership dispatch) but was never the reason a
+    PIN was silent; the doc now says both things accurately, and item #2 is
+    marked resolved (loud refusal restored) rather than open.
+  - **NULL-keyed row caveat (advisory, not fixed):** the departed-key
+    `DELETE` in `emit_staged_candidate_conditional_recompute` joins on
+    plain `=`, so a `NULL`-keyed row is delete+reinserted every run
+    (`NULL = NULL` is never true in SQL) — end-state equivalence still
+    holds, but change-suppression silently doesn't for that one row. Noted
+    on the emitter and tracked in `docs/TODO.md`; not fixed under this pass
+    (out of the reviewer's gating scope, and a `COALESCE`-based NULL-safe
+    key join risked destabilizing the statement-shape parity legs this late
+    in the phase without dedicated red-green coverage of its own).
+
 ## Verification
 
 - `cargo test -p smelt-cli --test maintenance_conformance` green, including the dim-mutation pool

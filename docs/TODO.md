@@ -1,10 +1,12 @@
 # TODO
 
-## `ColumnScopedMerge` reachability gap + pin/override silent no-op on membership-sensitive `grain: partition` cells (2026-08-08)
+## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells (2026-08-08, corrected same day)
 
 `docs/plans/20260808-membership-sensitivity.md` Phase 3 surfaced (confirmed empirically while
 rewriting `crates/smelt-cli/tests/{bakeoff,bakeoff_seam,maintenance_pins,explain_model,
-explain_show_sql}.rs`) that Phase 1's membership-sensitivity derivation left two real gaps:
+explain_show_sql}.rs`) two things about Phase 1's membership-sensitivity derivation — only the
+first of which is a genuine, still-open gap; the second was a real bug in this repo's OWN pin-
+resolution code, found by review and fixed the same day (see item #2's correction below):
 
 1. **`Technique::ColumnScopedMerge` is unreachable from any currently-shipped SQL shape.** Any
    `JOIN`'s `ON` predicate (inner or left) reading a `MutableSnapshot` source makes EVERY column
@@ -17,25 +19,53 @@ explain_show_sql}.rs`) that Phase 1's membership-sensitivity derivation left two
    `candidates.is_empty()` early return, `crates/smelt-cli/src/bakeoff.rs`) has **zero reachable
    test coverage** anywhere in the crate — `admitted_family` maps `Technique::DeleteInsert` to
    `None`.
-2. **A `grain: partition` model's `DeleteInsert` membership cell has no live runtime dispatch at
+2. **A `grain: partition` model's `DeleteInsert` membership cell has no live runtime DISPATCH at
    all** (`resolve_live_membership_recompute_cell`'s own doc comment,
    `crates/smelt-runtime/src/maintenance_driver.rs`: left to the plain unconditional region
-   `DELETE`+`INSERT` batch loop). Consequence: a frontmatter `cells[].technique`/`cells[].prefer`
-   pin AND a request-scope `ExecuteRequest::technique_overrides` entry are now BOTH silently never
-   consulted for that cell — an inadmissible pin that used to refuse loudly
-   (`ChoiceRefusal`/`MaintenanceUnboundedFootprint`) now succeeds silently instead.
+   `DELETE`+`INSERT` batch loop). This is still true and is NOT a bug — it is the documented,
+   correct posture for this shape (no key-addressable staged-candidate write exists for a
+   `WholeRow`-identity output). **It is not, however, why a pin/override was ever silently
+   ignored** — an earlier pass of this entry conflated the two. A `cells[].technique`/`prefer`
+   pin and a request-scope `technique_overrides` entry are validated by `resolve_live_column_
+   scoped_cell`'s OWN pin-consulting loop (called unconditionally by the `grain: partition` batch
+   loop while looking for a live `ColumnScopedMerge` opportunity, entirely independent of whether
+   `resolve_live_membership_recompute_cell`'s dispatch is reachable) — an inadmissible pin refuses
+   loudly there via `?`, before the "not ColumnScopedMerge, discard" branch is ever reached. The
+   REAL bug (found by review, fixed same day): `Trigger::UpstreamMutation(users)` derives TWO
+   sibling cells (`{user_name}` and `{event_id, event_type, user_id}` — membership sensitivity is
+   row-scoped, so a shared join admits a cell per column group, not one cell per trigger), and
+   `MaintenancePlan::cell_for`'s first-match lookup meant the pin-consulting loop only ever
+   evaluated an override against whichever sibling happened to be derived first — a pin scoped to
+   the OTHER sibling's columns was silently never matched. Fixed via `MaintenancePlan::cells_for`
+   (`crates/smelt-logical/src/maintenance/mod.rs`) — every sibling cell sharing a trigger is now
+   offered the override, matched against its own columns
+   (`crates/smelt-runtime/src/maintenance_driver.rs`); a hard `technique:` pin naming columns that
+   address NONE of a trigger's sibling groups now refuses loudly too
+   (`smelt_logical::maintenance::choice::unaddressed_technique_pin`) rather than silently vanishing.
+   Loud refusal is restored for both `maintenance_pins.rs::inadmissible_pin_fails_loud` and
+   `bakeoff_seam.rs::request_override_subject_to_admission`/
+   `request_override_forces_each_admissible_technique`.
 
-Neither is a deliberate design choice; both are inherited fallout of Phase 1's derivation swap that
-nothing in Phases 1-3's critical-file scope was positioned to fix (fixing #1 needs a genuinely new
-SQL shape or a relaxed derivation rule — arguably the "Outer-join membership semantics"/"Monotone-
-join admission relaxation" deferred items in that plan's Scope section; fixing #2 needs a new
-runtime dispatch path for `grain: partition` DeleteInsert membership cells, symmetric to Phase 2's
-keyed-path wiring). Tracked here rather than silently accepted. Candidate follow-up: extend
-`docs/plans/20260808-membership-sensitivity.md`'s successor work (or a new plan) to either (a) wire
-a `grain: partition` live dispatch for membership cells so pins/overrides are honored (refuse or
-apply, never silently ignore), and/or (b) reassess whether `ColumnScopedMerge`'s bakeoff/pin
-machinery should be retired as dead code now that its only reachable shape is gone, rather than kept
-around with zero test coverage.
+Item #1 is a deliberate-shape consequence of Phase 1's derivation swap, not a bug — nothing in
+Phases 1-3's critical-file scope was positioned to change the reachability of `ColumnScopedMerge`
+itself (that needs a genuinely new SQL shape or a relaxed derivation rule — arguably the "Outer-join
+membership semantics"/"Monotone-join admission relaxation" deferred items in that plan's Scope
+section). Tracked here rather than silently accepted. Candidate follow-up: extend
+`docs/plans/20260808-membership-sensitivity.md`'s successor work (or a new plan) to reassess whether
+`ColumnScopedMerge`'s bakeoff/pin machinery should be retired as dead code now that its only
+reachable shape is gone, rather than kept around with zero test coverage.
+
+**NULL-keyed row caveat (advisory, found in Phase 3 review).** `emit_staged_candidate_conditional_
+recompute`'s departed-key `DELETE` (`crates/smelt-logical/src/maintenance/emit.rs`) joins stored
+rows to staged-candidate rows on plain `=` key equality — SQL's `NULL = NULL` is never true, so a
+row whose key is (or contains) `NULL` is treated as absent from the staged candidate on EVERY run,
+even when it is still genuinely present: it is deleted and immediately reinserted every run rather
+than left alone. End-state equivalence with the full-refresh oracle still holds (the row's values
+are correct either way), but the change-suppression contract ("nothing changed → nothing written")
+silently does not hold for that one row. A NULL-safe key join (mirroring `key_expr_for_columns`'s
+`COALESCE`-based pattern, `crates/smelt-logical/src/maintenance/emit.rs` lines ~1093-1135) would
+close this; not fixed here — `RowIdentity::Key` is not documented anywhere as excluding a nullable
+column, so this is a real, if narrow, gap worth a follow-up.
 
 ## `maintenance::grouping`'s column-ref collector keeps a known under-collection bug (2026-08-08)
 
