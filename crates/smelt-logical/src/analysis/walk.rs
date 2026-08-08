@@ -893,6 +893,134 @@ pub fn resolve_reference_leaf(
     lineage.leaf
 }
 
+/// Per-scope resolution context, built once for every [`SelectNode`] scope
+/// [`enumerate_select_scopes`] finds — the top scope, every CTE body, every
+/// derived-table body, and every set-operation branch, each at its own
+/// definition site. Resolves a bare `(qualifier, name)` reference collected
+/// from *that scope's own* clauses to its base-relation leaf, chasing
+/// through that scope's own CTE/derived-table aliases exactly as
+/// [`resolve_reference_leaf`] does for the top scope alone — the
+/// generalization `maintenance::grouping`'s membership pass needs to scan
+/// every scope the walk enumerates rather than only the outermost one
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 3).
+pub struct ScopeResolver {
+    aliases: BTreeMap<String, RelationSource>,
+    env: WalkEnv<()>,
+    derived_lineage: BTreeMap<String, Vec<ColumnLineage>>,
+}
+
+impl ScopeResolver {
+    /// Resolve one reference against this scope's own alias table. `None`
+    /// on the same fail-closed conditions [`resolve_reference_leaf`]
+    /// documents (unresolved qualifier, ambiguous unqualified reference, a
+    /// self-join anywhere along the chase, or a chase shape the walk cannot
+    /// normalize) — scoped to this scope's own alias table rather than the
+    /// tree's top scope.
+    pub fn resolve(&self, qualifier: Option<&str>, name: &str) -> Option<LeafColumn> {
+        let source = match qualifier {
+            Some(q) => self.aliases.get(&q.to_ascii_lowercase())?,
+            None if self.aliases.len() == 1 => self.aliases.values().next()?,
+            None => return None,
+        };
+        let mut lineage = resolve_leaf(source, name, &self.env, &self.derived_lineage)?;
+        if table_is_self_joined(source, &self.aliases) {
+            lineage.ambiguous = true;
+        }
+        if lineage.ambiguous {
+            return None;
+        }
+        lineage.leaf
+    }
+}
+
+/// Every [`SelectNode`] scope the walk enumerates, each paired with its own
+/// [`ScopeResolver`]: the top scope, every CTE body, every derived-table
+/// body, and every set-operation branch — each visited exactly once, at its
+/// own definition site (a `CteRef` input's target is not revisited per
+/// reference site, matching the value-pass fold's "each CTE body evaluated
+/// once at its definition site" convention: [`walk_ctes`]). Consumer:
+/// `maintenance::grouping`'s membership-sensitivity pass, which scans each
+/// returned scope's own `JOIN`-`ON`/`WHERE`/`HAVING` conjuncts
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 3) — this function
+/// is the same recursion shape [`walk_node`]/[`walk_select`] use for the
+/// generic [`Transfer`] fold, specialized to collect resolvers instead of
+/// running a transfer function.
+pub fn enumerate_select_scopes(tree: &QueryTree) -> Vec<(&SelectNode, ScopeResolver)> {
+    let mut out = Vec::new();
+    collect_select_scopes(&tree.root, &WalkEnv::default(), &mut out);
+    out
+}
+
+fn collect_select_scopes<'a>(
+    node: &'a QueryNode,
+    env: &WalkEnv<()>,
+    out: &mut Vec<(&'a SelectNode, ScopeResolver)>,
+) -> Vec<ColumnLineage> {
+    match node {
+        QueryNode::Unsupported { .. } => Vec::new(),
+        QueryNode::Select(sn) => {
+            let mut env = env.clone();
+            for cte in &sn.ctes {
+                let lineage = collect_select_scopes(&cte.body, &env, out);
+                env.ctes
+                    .insert(cte.name.to_ascii_lowercase(), ((), lineage));
+            }
+
+            let mut aliases = BTreeMap::new();
+            let mut derived_lineage: BTreeMap<String, Vec<ColumnLineage>> = BTreeMap::new();
+            for input in &sn.inputs {
+                match input {
+                    InputItem::Table { name, alias } => {
+                        let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                        aliases.insert(key, RelationSource::Table(name.clone()));
+                    }
+                    InputItem::CteRef { name, alias } => {
+                        let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                        aliases.insert(key, RelationSource::Cte(name.clone()));
+                    }
+                    InputItem::Derived { alias, body } => {
+                        let lineage = collect_select_scopes(body, &env, out);
+                        if let Some(alias) = alias {
+                            let key = alias.to_ascii_lowercase();
+                            aliases
+                                .insert(key.clone(), RelationSource::DerivedTable(alias.clone()));
+                            derived_lineage.insert(key, lineage);
+                        }
+                    }
+                    InputItem::Unsupported { .. } => {}
+                }
+            }
+
+            let columns = select_lineage(&sn.select, &aliases, &env, &derived_lineage);
+            out.push((
+                sn,
+                ScopeResolver {
+                    aliases,
+                    env,
+                    derived_lineage,
+                },
+            ));
+            columns
+        }
+        QueryNode::SetOp(so) => {
+            let mut env = env.clone();
+            for cte in &so.ctes {
+                let lineage = collect_select_scopes(&cte.body, &env, out);
+                env.ctes
+                    .insert(cte.name.to_ascii_lowercase(), ((), lineage));
+            }
+            let mut first_branch_lineage = None;
+            for branch in &so.branches {
+                let lineage = collect_select_scopes(branch, &env, out);
+                if first_branch_lineage.is_none() {
+                    first_branch_lineage = Some(lineage);
+                }
+            }
+            first_branch_lineage.unwrap_or_default()
+        }
+    }
+}
+
 // ===== Scope enumeration: the first Transfer =====
 
 /// The kind of a composition-relevant scope.

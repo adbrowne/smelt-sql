@@ -439,3 +439,146 @@ fn where_filter_on_append_only_fact_contributes_no_membership() {
         );
     }
 }
+
+/// Phase 3 (`docs/plans/20260809-sensitivity-precision.md`): a mutable
+/// dimension joined *inside* a CTE must still attach membership sensitivity
+/// at the model level — the outer scope only projects the CTE's payload
+/// columns and never itself joins `dim`, so before this phase the model
+/// would have collapsed whole-model rather than silently miss the join.
+/// Now the interior scope's own `ON` predicate is scanned directly.
+#[test]
+fn cte_interior_mutable_join_attaches_membership() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "WITH enriched AS ( \
+                   SELECT f.id, f.val, d.tier \
+                   FROM smelt.sources.fact f \
+                   JOIN smelt.sources.dim d ON f.id = d.id \
+               ) \
+               SELECT e.id, e.val, e.tier FROM enriched e";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        !result.groups.is_empty(),
+        "must not collapse to zero groups: {result:?}"
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim"])),
+        "a mutable dim joined inside a CTE must attach membership sensitivity \
+         at the model level: {:?}",
+        result.groups
+    );
+    let tier_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"tier".to_string()))
+        .expect("tier is grouped");
+    assert_eq!(
+        tier_group.mutation_sensitivity,
+        set(&["dim"]),
+        "value sensitivity for the dim-sourced payload column must still \
+         chase through the CTE rename: {:?}",
+        tier_group
+    );
+    let val_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert!(
+        val_group.mutation_sensitivity.is_empty(),
+        "val reads only the append-only fact, non-aggregated: {:?}",
+        val_group
+    );
+}
+
+/// Phase 3: two distinct scopes each contribute a distinct mutable
+/// admission source — a CTE's own `WHERE` conjunct reads one mutable
+/// dimension, and the top-level scope joins a second, different mutable
+/// dimension. Both must compose into the top-level membership union.
+#[test]
+fn membership_composes_across_nested_scopes() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source("dim_a", MutationProfile::MutableSnapshot, None, &["id"]),
+        source("dim_b", MutationProfile::MutableSnapshot, None, &["id"]),
+    ];
+    let sql = "WITH filtered AS ( \
+                   SELECT f.id, f.val \
+                   FROM smelt.sources.fact f \
+                   JOIN smelt.sources.dim_a a ON f.id = a.id \
+                   WHERE a.tier = 'gold' \
+               ) \
+               SELECT ft.id, ft.val \
+               FROM filtered ft \
+               JOIN smelt.sources.dim_b b ON ft.id = b.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        !result.groups.is_empty(),
+        "must not collapse to zero groups: {result:?}"
+    );
+    assert!(
+        result
+            .groups
+            .iter()
+            .all(|g| g.membership_sensitivity == set(&["dim_a", "dim_b"])),
+        "both scopes' mutable admission sources must union at the top: {:?}",
+        result.groups
+    );
+}
+
+/// Phase 3: unchanged fail-closed posture for a subquery admission
+/// predicate — now proven inside a nested (CTE) scope too, not just the
+/// top-level scope.
+#[test]
+fn subquery_conjunct_still_fails_closed() {
+    let sources = vec![
+        source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+        source(
+            "customers",
+            MutationProfile::MutableSnapshot,
+            None,
+            &["user_id"],
+        ),
+    ];
+    let sql = "WITH filtered AS ( \
+                   SELECT f.order_id, f.amount, f.user_id \
+                   FROM smelt.sources.fact f \
+                   WHERE f.user_id IN (SELECT user_id FROM smelt.sources.customers) \
+               ) \
+               SELECT ft.order_id, ft.amount FROM filtered ft";
+    let skeleton = set(&["order_id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        !result.degenerate.is_empty(),
+        "a WHERE-clause subquery inside a nested scope must collapse, never \
+         silently derive zero sensitivity: {result:?}"
+    );
+    assert_eq!(result.groups.len(), 1);
+    assert_eq!(
+        result.groups[0].membership_sensitivity,
+        set(&["fact", "customers"]),
+        "the collapse must widen membership sensitivity too, not just value \
+         sensitivity: {:?}",
+        result.groups[0]
+    );
+}

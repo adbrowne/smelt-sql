@@ -42,46 +42,42 @@
 //! reference the item's expression collects (matching the pre-walk
 //! behaviour exactly).
 //!
-//! **Membership sensitivity is a second, independent pass — still
-//! outer-scope this phase.** Alongside the per-select-item value-sensitivity
-//! walk above, this module also scans the model's own **outermost**
-//! `SELECT` scope's row-admission positions (its own `JOIN` `ON`
-//! predicates and top-level `WHERE`/`HAVING` conjuncts, via the shared
-//! `analysis::expr_util` conjunct-splitter and column-ref collector — never
-//! an ad hoc text scan) for reads of a `MutableSnapshot` source, resolving
-//! each reference the same way the value pass does
-//! (`resolve_reference_leaf`) — so a top-level `ON`/`WHERE`/`HAVING`
-//! conjunct that names a CTE or derived-table alias still resolves to that
-//! alias's own base-relation provenance when the alias is a simple rename
-//! chain. **This pass does not itself descend into a nested scope's own
-//! `WHERE`/`HAVING`/`JOIN` clauses** — a CTE body's or derived table's own
-//! admission-relevant predicates are invisible to it, exactly as before
-//! this phase (extending the membership scan itself to every scope the walk
-//! enumerates is Phase 3's job, `docs/plans/20260809-sensitivity-precision.md`).
-//!
-//! **The membership-safety boundary this phase enforces.** Because value
-//! sensitivity can now see through a CTE/derived-table wrapper while
-//! membership sensitivity still cannot see *inside* one, a model whose
-//! non-top-level scope hides its own admission-relevant structure — a JOIN,
-//! or a `WHERE`/`HAVING` clause, inside a CTE body or a derived table — must
-//! not be allowed to produce a nondegenerate plan: doing so would let a
-//! mutable join partner buried in that hidden scope silently vanish from
-//! every group's membership sensitivity, the exact silent-hole hazard the
-//! fail-closed constraint (`incremental_models.md` §"Constraints &
-//! Invariants") forbids. [`has_hidden_admission_structure`] checks for
-//! exactly this before either pass runs, forcing the same whole-model
-//! collapse as an unsupported construct when it finds one. A CTE/derived
-//! table that is a **pure projection** over a single source (no JOIN, no
-//! `WHERE`/`HAVING` of its own) is not flagged — its own row set is exactly
-//! its one source's row set, so there is no hidden admission decision to
-//! miss, and the enclosing scope's own JOIN/`WHERE`/`HAVING` (visible to the
-//! outer-scope membership pass) governs admission as usual.
+//! **Membership sensitivity is a second, independent pass — now
+//! walk-composed too.** Alongside the per-select-item value-sensitivity
+//! walk above, this module also scans **every scope**
+//! [`crate::analysis::walk::enumerate_select_scopes`] finds in the model's
+//! tree — the outermost `SELECT` scope, and every CTE body and
+//! derived-table body reachable from it — for row-admission positions (each
+//! scope's own `JOIN` `ON` predicates and `WHERE`/`HAVING` conjuncts, via
+//! the shared `analysis::expr_util` conjunct-splitter and column-ref
+//! collector — never an ad hoc text scan) that read a `MutableSnapshot`
+//! source. Each scope resolves its own conjuncts' references against *that
+//! scope's own* alias table (a [`crate::analysis::walk::ScopeResolver`]
+//! built once per scope), so a conjunct naming a CTE or derived-table alias
+//! still resolves to that alias's own base-relation provenance when the
+//! alias is a simple rename chain — a mutable dimension joined only inside
+//! a CTE, never visible to the model's top-level `FROM`, is no longer
+//! invisible to this pass. A contribution found in *any* scope attaches to
+//! the model-level membership union: composition is uniform attachment (the
+//! same derived set governs every payload group), not per-scope refinement
+//! of which groups it governs — narrowing to just the groups a given
+//! admission read actually affects is a further precision improvement, not
+//! this phase's job. Because every scope's own admission-relevant structure
+//! is now scanned directly, there is no longer a class of hidden structure
+//! that must instead be detected and rejected up front — the collapse
+//! conditions below (an unresolvable reference, a `JOIN` with no usable
+//! `ON` predicate, a subquery inside a `WHERE`/`HAVING` conjunct) are the
+//! only conditions any scope's scan cannot resolve, and each is reported by
+//! [`scan_scope_membership`] fail-closed exactly where it is found.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{ColumnGroup, MutationProfile, SourceFacts};
 use crate::analysis::expr_util::{collect_column_refs, split_top_level_conjuncts};
-use crate::analysis::walk::{resolve_reference_leaf, InputItem, QueryNode, QueryTree};
+use crate::analysis::walk::{
+    enumerate_select_scopes, resolve_reference_leaf, QueryNode, QueryTree, ScopeResolver,
+    SelectNode,
+};
 use crate::analysis::{item_alias, item_expr, select_stmt_items, SelectItemKind};
 
 /// One column the derivation could not resolve cleanly — surfaced,
@@ -158,31 +154,19 @@ pub fn derive_column_groups(
              yet classified across set-operation arms",
         );
     }
-    if has_hidden_admission_structure(&tree.root, true) {
-        return degenerate_whole_model(
-            &payload_columns,
-            &all_source_names,
-            "a nested CTE or derived-table scope contains its own JOIN or WHERE/HAVING \
-             admission predicate the outer-scope membership pass cannot see (Phase 3, \
-             `docs/plans/20260809-sensitivity-precision.md`, extends the membership scan \
-             to every scope the walk enumerates)",
-        );
-    }
-
     let source_by_name: BTreeMap<&str, &SourceFacts> =
         sources.iter().map(|s| (s.name.as_str(), s)).collect();
 
-    let Some(from_clause) = select.from_clause() else {
+    if select.from_clause().is_none() {
         return GroupingResult::default();
-    };
+    }
 
-    let membership_sensitivity =
-        match membership_sensitivity_sources(&tree, &select, &from_clause, &source_by_name) {
-            Ok(set) => set,
-            Err(reason) => {
-                return degenerate_whole_model(&payload_columns, &all_source_names, &reason);
-            }
-        };
+    let membership_sensitivity = match membership_sensitivity_sources(&tree, &source_by_name) {
+        Ok(set) => set,
+        Err(reason) => {
+            return degenerate_whole_model(&payload_columns, &all_source_names, &reason);
+        }
+    };
 
     let mut per_column: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut degenerate = Vec::new();
@@ -279,88 +263,63 @@ pub fn derive_column_groups(
     GroupingResult { groups, degenerate }
 }
 
-/// The membership-safety boundary (module doc, "The membership-safety
-/// boundary this phase enforces"): `true` when some scope reachable from
-/// `node` **other than the top-level scope itself** (`is_top` is only
-/// `true` for the very first call) has more than one FROM input (a JOIN) or
-/// its own `WHERE`/`HAVING` clause — admission-relevant structure the
-/// outer-scope-only membership pass (`membership_sensitivity_sources`)
-/// cannot see. `QueryNode::Unsupported` is not re-checked here — the caller
-/// already rejects `has_unsupported()` trees before this runs.
-fn has_hidden_admission_structure(node: &QueryNode, is_top: bool) -> bool {
-    match node {
-        QueryNode::Unsupported { .. } => false,
-        QueryNode::Select(sn) => {
-            let risky_here = !is_top
-                && (sn.inputs.len() > 1
-                    || sn.select.where_clause().is_some()
-                    || sn.select.having_clause().is_some());
-            if risky_here {
-                return true;
-            }
-            if sn
-                .ctes
-                .iter()
-                .any(|c| has_hidden_admission_structure(&c.body, false))
-            {
-                return true;
-            }
-            sn.inputs.iter().any(|input| match input {
-                InputItem::Derived { body, .. } => has_hidden_admission_structure(body, false),
-                InputItem::Table { .. }
-                | InputItem::CteRef { .. }
-                | InputItem::Unsupported { .. } => false,
-            })
-        }
-        QueryNode::SetOp(so) => {
-            so.ctes
-                .iter()
-                .any(|c| has_hidden_admission_structure(&c.body, false))
-                || so
-                    .branches
-                    .iter()
-                    .any(|b| has_hidden_admission_structure(b, false))
-        }
-    }
-}
-
 /// Row-admission-position membership sensitivity
 /// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
 /// column provenance", membership paragraph): every `MutableSnapshot`
 /// source read in a position that decides whether an output row exists —
-/// a `JOIN`'s `ON` predicate, or a top-level `WHERE`/`HAVING` conjunct
-/// (the spec's semi-join case: `WHERE x IN (SELECT ... FROM
-/// smelt.sources.<mutable>)` is exactly a semi-join admission read). Column
-/// references resolve via `resolve_reference_leaf` — the same walk-composed
-/// chase the value pass uses — so a conjunct naming a CTE/derived-table
-/// alias that is itself a simple rename chain still resolves to its
-/// base-relation provenance (module doc). Scoped to conjuncts of the
-/// model's own **outermost** scope: a `JOIN` with no resolvable `ON`
-/// predicate (`USING`, natural, or the ANSI-89 implicit comma form), an
+/// a `JOIN`'s `ON` predicate, or a `WHERE`/`HAVING` conjunct (the spec's
+/// semi-join case: `WHERE x IN (SELECT ... FROM smelt.sources.<mutable>)`
+/// is exactly a semi-join admission read) — in **any** scope
+/// [`enumerate_select_scopes`] finds: the model's own outermost scope, and
+/// every CTE body and derived-table body reachable from it. Each scope's
+/// conjuncts resolve against *that scope's own* alias table via its
+/// [`ScopeResolver`] — the same walk-composed chase the value pass uses,
+/// specialized per scope — so a mutable dimension joined only inside a CTE
+/// (never visible to the model's top-level `FROM`) still attaches. A
+/// contribution found in any scope joins the model-level union: composition
+/// is uniform-attachment, not per-scope refinement of *which* groups the
+/// contribution governs (module doc; per-scope refinement is future work).
+/// Fail-closed per scope: a `JOIN` with no resolvable `ON` predicate
+/// (`USING`, natural, or the ANSI-89 implicit comma form), an
 /// `ON`/`WHERE`/`HAVING` column reference that cannot be resolved
 /// (ambiguous, self-joined, or reaching a shape the walk cannot chase), or
 /// ANY subquery inside a `WHERE`/`HAVING` conjunct (`IN`/`EXISTS`/scalar —
-/// this pass never resolves into a nested `SELECT`'s own FROM/aliases) is
-/// outside its resolution and reported as an `Err` so the caller collapses
-/// fail-closed rather than silently deriving an empty (falsely-safe)
-/// membership set. `Ok` is returned even when there are no joins and no
-/// `WHERE`/`HAVING` at all (an empty set — nothing governs row admission
-/// beyond the base table).
+/// no scope's own scan ever resolves into a nested `SELECT`'s own
+/// FROM/aliases) is outside this pass's resolution and reported as an `Err`
+/// so the caller collapses fail-closed rather than silently deriving an
+/// empty (falsely-safe) membership set. `Ok` is returned even when no scope
+/// has any joins and no `WHERE`/`HAVING` at all (an empty set — nothing
+/// governs row admission beyond the base tables).
 fn membership_sensitivity_sources(
     tree: &QueryTree,
-    select: &smelt_parser::SelectStmt,
-    from_clause: &smelt_parser::FromClause,
     source_by_name: &BTreeMap<&str, &SourceFacts>,
 ) -> Result<BTreeSet<String>, String> {
     let mut sensitivity = BTreeSet::new();
+    for (sn, resolver) in enumerate_select_scopes(tree) {
+        scan_scope_membership(sn, &resolver, source_by_name, &mut sensitivity)?;
+    }
+    Ok(sensitivity)
+}
 
+/// One scope's own contribution to [`membership_sensitivity_sources`]: its
+/// own `JOIN`-`ON`/`WHERE`/`HAVING` conjuncts, resolved via `resolver`
+/// (built for exactly this scope's own alias table). Mirrors the
+/// top-scope-only scan Phase 2 shipped, generalized to run once per scope
+/// [`enumerate_select_scopes`] hands back rather than only the model's
+/// outermost one.
+fn scan_scope_membership(
+    sn: &SelectNode,
+    resolver: &ScopeResolver,
+    source_by_name: &BTreeMap<&str, &SourceFacts>,
+    sensitivity: &mut BTreeSet<String>,
+) -> Result<(), String> {
     // Resolve one conjunct's column references into `sensitivity`,
     // fail-closed on an unresolvable reference. `position` names the
     // syntactic position for the error message only.
     let mut resolve_conjunct =
         |conjunct: &smelt_parser::Expr, position: &str| -> Result<(), String> {
             for cref in collect_column_refs(conjunct) {
-                let Some(leaf) = resolve_reference_leaf(tree, cref.qualifier(), cref.name()) else {
+                let Some(leaf) = resolver.resolve(cref.qualifier(), cref.name()) else {
                     return Err(format!(
                         "{position} column reference '{}' does not resolve to a base-relation \
                      column the composition walk can chase",
@@ -393,39 +352,41 @@ fn membership_sensitivity_sources(
             Ok(())
         };
 
-    for join in from_clause.joins() {
-        let Some(condition) = join.condition() else {
-            return Err(
-                "a JOIN has no resolvable ON predicate (USING, natural, or an implicit \
-                 comma join) — membership admission cannot be derived for it"
-                    .to_string(),
-            );
-        };
-        if !condition.is_on() {
-            return Err(
-                "a JOIN's condition is a USING clause, not an ON predicate — membership \
-                 admission cannot be derived for it"
-                    .to_string(),
-            );
-        }
-        let Some(on_expr) = condition.on_expression() else {
-            return Err("a JOIN's ON condition has no expression".to_string());
-        };
-        let mut conjuncts = Vec::new();
-        split_top_level_conjuncts(&on_expr, &mut conjuncts);
-        for conjunct in &conjuncts {
-            resolve_conjunct(conjunct, "ON-predicate")?;
+    if let Some(from_clause) = sn.select.from_clause() {
+        for join in from_clause.joins() {
+            let Some(condition) = join.condition() else {
+                return Err(
+                    "a JOIN has no resolvable ON predicate (USING, natural, or an implicit \
+                     comma join) — membership admission cannot be derived for it"
+                        .to_string(),
+                );
+            };
+            if !condition.is_on() {
+                return Err(
+                    "a JOIN's condition is a USING clause, not an ON predicate — membership \
+                     admission cannot be derived for it"
+                        .to_string(),
+                );
+            }
+            let Some(on_expr) = condition.on_expression() else {
+                return Err("a JOIN's ON condition has no expression".to_string());
+            };
+            let mut conjuncts = Vec::new();
+            split_top_level_conjuncts(&on_expr, &mut conjuncts);
+            for conjunct in &conjuncts {
+                resolve_conjunct(conjunct, "ON-predicate")?;
+            }
         }
     }
 
     // WHERE/HAVING: a mutable source read directly in a top-level conjunct
-    // is a row-admission read exactly like a JOIN's ON predicate. A
-    // subquery (IN/EXISTS/scalar) is a semi-join admission read the spec
-    // explicitly names, but this pass never recurses into a nested
-    // SELECT's own FROM/aliases — it fails closed instead of silently
-    // treating the predicate as if it read nothing.
-    let where_expr = select.where_clause().and_then(|w| w.expression());
-    let having_expr = select.having_clause().and_then(|h| h.expression());
+    // of this scope is a row-admission read exactly like a JOIN's ON
+    // predicate. A subquery (IN/EXISTS/scalar) is a semi-join admission
+    // read the spec explicitly names, but this pass never recurses into a
+    // nested SELECT's own FROM/aliases — it fails closed instead of
+    // silently treating the predicate as if it read nothing.
+    let where_expr = sn.select.where_clause().and_then(|w| w.expression());
+    let having_expr = sn.select.having_clause().and_then(|h| h.expression());
     for (clause_expr, position) in [(where_expr, "WHERE"), (having_expr, "HAVING")] {
         let Some(clause_expr) = clause_expr else {
             continue;
@@ -446,7 +407,7 @@ fn membership_sensitivity_sources(
             resolve_conjunct(conjunct, position)?;
         }
     }
-    Ok(sensitivity)
+    Ok(())
 }
 
 /// The fail-closed collapse: every payload column lands in one group
