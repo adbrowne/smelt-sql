@@ -26,6 +26,14 @@ residue:
 - [ ] **Conformance-generator extensions** suggested by the campaign's blind spots: recipes with
   `cells[].write` pins, ColumnAdded triggers with `allow_full_scan: true`, December/era-boundary
   date pools, backends without column-scoped MERGE.
+- [ ] **walk.rs campaign residue (untriaged)** — a second 196-mutant campaign over
+  `analysis/walk.rs` scored only 76.7% tier-1 kill (vs 91.3% for maintenance) with 38 survivors,
+  including the fail-closed spine: `QueryNode::has_unsupported -> false`,
+  `PartitionGrainAdmission`/`PropertyTransfer` `leaf -> Default` + operator mutants,
+  deleted `INTERSECT`/`EXCEPT` arms in `setop_kind_after`, `is_constant_literal -> true`,
+  `union_discriminated_grain` comparison flip. Full list in the research doc §"Bonus campaign".
+  Needs the same treatment: tier-2 triage, per-survivor analysis, killing tests — the
+  `has_unsupported` cluster first (it guards everything downstream).
 
 ## Cross-Model Type Inference
 

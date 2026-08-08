@@ -92,6 +92,29 @@ catch, attributed every survivor to a cause, and closed the real holes with targ
 | Provably equivalent | `derive.rs:240` match guard | Delete the guard (cleanup) or accept. |
 | Gated suite only | `emit.rs:850` Spark Text/Varchar arm | Killable only by the Spark parity suites (needs live server). |
 
+## Bonus campaign: the property-composition walk
+
+A second campaign over `crates/smelt-logical/src/analysis/walk.rs` (196 mutants, same tier-1
+battery, with the flaky `a_hand_corrupted_stamp` test excluded from the baseline):
+**125 caught / 38 missed / 33 unviable — a 76.7% kill rate**, materially weaker than the
+maintenance layer's 91.3% despite the standing `walk_coverage` gate. Untriaged (no tier-2
+pass run), but the survivor list includes the walk's fail-closed spine:
+
+- `QueryNode::has_unsupported -> false` (+ two `||`→`&&` inside it) — the "refuse what we
+  can't prove" valve can claim everything is supported and no tier-1 test notices.
+- `PartitionGrainAdmission::leaf -> Default` and its operator's deleted `!` — partition-grain
+  admission verdicts.
+- `PropertyTransfer::leaf -> Default` and `|=`→`&=` in its operator — the property-vector
+  fold at the heart of the walk.
+- `setop_kind_after`: deleted `INTERSECT_KW`/`EXCEPT_KW` arms.
+- `is_constant_literal -> true`; `union_discriminated_grain` `<`→`>`;
+  `Grain::has_subset_key -> false`; the `own_region_text*` collector guards;
+  `AdmissionViolation::path_display` (label class).
+
+The walk_coverage gate asserts *which properties are produced by the walk*; this campaign
+shows it under-constrains *what the walk computes*. Survivor list preserved in the TODO
+residue block; triage + kills are follow-up work.
+
 ## Takeaways for the proof surface
 
 - Mutation testing is cheap here (~1.5h warm, incremental via `--iterate`) and its finding
