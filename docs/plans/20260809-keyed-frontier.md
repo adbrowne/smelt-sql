@@ -40,7 +40,7 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | 030b5cd2 | 2026-08-09 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
