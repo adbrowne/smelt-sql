@@ -63,7 +63,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 | 1     | done     | bfd0453b | 2026-08-08 |
 | 2     | done     | 6827ea9e | 2026-08-08 |
 | 3     | done     | 9073e141 | 2026-08-08 |
-| 4     | done     | pending-review | 2026-08-08 |
+| 4     | done     | 34529973 | 2026-08-08 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -189,7 +189,7 @@ The audit of 2026-08-08 (conversation-level; findings reproduced in the phase no
 - `crates/smelt-logical/tests/backbuild_property.rs::skeleton_reason_structured` — G1-vs-G2 catalogue classification is driven by `SkeletonDiff` variants, asserted by constructing a diff whose *prose* mentions "join" but whose structural cause is a grain change (kills the string-scan).
 - All existing `backbuild_conformance` oracle cases pass unmodified.
 
-**Implementation shape.** `BackbuildInputs` gains optional walk-derived facts (a `PropertyVector`/lineage handle per side where SQL is available; the plain-data `not_null_columns`/`unique_key` fields remain as the declared-fact fallback). `resolve_representative` becomes a thin adapter over `ColumnLineage`. `classify_skeleton_reason(reason: &str)` is deleted; `SkeletonDiff` carries a structured cause enum and the catalogue label derives from it. Behaviour-preserving except the named rename-chasing admission widening.
+**Implementation shape.** `BackbuildInputs` gains optional walk-derived facts (a `PropertyVector`/lineage handle per side where SQL is available; the plain-data `not_null_columns`/`unique_key` fields remain as the declared-fact fallback). `resolve_representative` becomes a thin adapter over `ColumnLineage`. `classify_skeleton_reason(reason: &str)` is deleted; `SkeletonDiff` carries a structured cause enum and the catalogue label derives from it. Also collapse `classify.rs`'s `expr_equal_modulo_trivia` (~classify.rs:4392, an `Expr`-typed duplicate whose doc comment cites touch-scope) onto the shared `analysis::expr_util::same_modulo_trivia` primitive. Behaviour-preserving except the named rename-chasing admission widening.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{mod.rs,classify.rs,diff.rs}`
