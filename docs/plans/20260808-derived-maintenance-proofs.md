@@ -64,7 +64,7 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 |-------|----------|--------|------|
 | 1     | done     | 73751148 | 2026-08-08 |
 | 2     | done     | b7c44bee | 2026-08-08 |
-| 3     | pending  |        |      |
+| 3     | done     | 42fbfa71 | 2026-08-08 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
