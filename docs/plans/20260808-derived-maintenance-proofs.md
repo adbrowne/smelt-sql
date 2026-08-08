@@ -63,7 +63,7 @@ The maintenance plan's admission layer consumes seven proofs by name (`model_pro
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 73751148 | 2026-08-08 |
-| 2     | pending  |        |      |
+| 2     | done     | (this commit) | 2026-08-08 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |

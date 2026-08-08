@@ -19,6 +19,7 @@ use super::{
 };
 use crate::analysis::faithful_fold::{faithful_fold, ConditionVerdict, FaithfulFold};
 use crate::analysis::fingerprint::fingerprint_projection;
+use crate::analysis::footprint::{reflect_footprint, FootprintResult};
 use crate::analysis::input_delta::{
     input_delta_discovery, MutationProfile as DeltaMutationProfile, SourceShape,
 };
@@ -355,6 +356,11 @@ pub fn append_model_edge_cells(
         }
     }
     let bounds = derive_model_bounds(sql, &ctx);
+    // The write-scope dual of `bounds` over the same edge context
+    // (`model_properties.md` §"Footprint reflection / bounded write
+    // footprint") — consulted by `link_source` before constructing each
+    // edge's clamp.
+    let footprints = reflect_footprint(sql, &ctx, Some(output_partition_col));
 
     // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
     // closure"; T3, `docs/plans/20260715-composed-axes-conditional-
@@ -396,7 +402,7 @@ pub fn append_model_edge_cells(
         // a non-local verdict but is never refused under the K8 guardrail —
         // only the *underivable-clock* case above refuses.
         let (partition_local, scans) =
-            match link_source(Some(output_partition_col), &bounds, &facts) {
+            match link_source(Some(output_partition_col), &bounds, &footprints, &facts) {
                 SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
                 SourceLink::Unlinked { why } => (
                     PartitionLocal::No {
@@ -640,9 +646,20 @@ enum SourceLink {
 /// undeclared timestamp relates to the partition column, so this fails
 /// closed. (A same-axis source is linked by identity; zero margin is real
 /// there.)
+/// `footprints` is the derived write-footprint verdict per source
+/// ([`reflect_footprint`] — `model_properties.md` §"Footprint reflection /
+/// bounded write footprint"), consulted before a clamp is constructed: a
+/// clamp promises a mirror-bounded write footprint
+/// ([`ScanClamp::footprint`]), so a source whose *derived* footprint is
+/// `Unbounded`/`NotDerivable` (a trajectory column; an underivable write
+/// scope) must not receive one — it falls back to the same fail-closed
+/// `Unlinked` verdict an underivable read takes. A source absent from
+/// `footprints` (a key-grain output — no partition axis, so the footprint
+/// question is not posed) links exactly as before.
 fn link_source(
     output_partition_col: Option<&str>,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
     facts: &SourceFacts,
 ) -> SourceLink {
     let Some(col) = &facts.partition_col else {
@@ -652,12 +669,27 @@ fn link_source(
     match bounds.get(&facts.name) {
         Some(BoundResult::Bounded { before, after, .. }) => {
             if same_axis || *before > Seconds::ZERO || *after > Seconds::ZERO {
-                SourceLink::Clamp(ScanClamp {
-                    source: facts.name.clone(),
-                    column: col.clone(),
-                    before: *before,
-                    after: *after,
-                })
+                match footprints.get(&facts.name) {
+                    Some(FootprintResult::Unbounded) => SourceLink::Unlinked {
+                        why: "derived write footprint on the output partition axis is \
+                              unbounded — a delta can rewrite arbitrarily distant output \
+                              partitions"
+                            .to_string(),
+                    },
+                    Some(FootprintResult::NotDerivable) => SourceLink::Unlinked {
+                        why: "write footprint on the output partition axis is not derivable"
+                            .to_string(),
+                    },
+                    // `Bounded` — the derived mirror the clamp carries — or
+                    // no verdict at all (key-grain output: the footprint
+                    // question is not posed against a partition axis).
+                    Some(FootprintResult::Bounded { .. }) | None => SourceLink::Clamp(ScanClamp {
+                        source: facts.name.clone(),
+                        column: col.clone(),
+                        before: *before,
+                        after: *after,
+                    }),
+                }
             } else {
                 SourceLink::Unlinked {
                     why: format!(
@@ -719,6 +751,16 @@ fn derive_maintenance_plan_impl(
 ) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
+    // The write-scope dual of `bounds` (`model_properties.md` §"Footprint
+    // reflection / bounded write footprint"), derived once per model and
+    // consulted at every clamp-construction site via `link_source`. A
+    // key-grain output has no partition axis to spread a write across, so
+    // the footprint question is not posed (empty map — `link_source` links
+    // exactly as before).
+    let footprints = match inputs.output_partition_col() {
+        Some(axis) => reflect_footprint(inputs.sql, &inputs.bound_context(), Some(axis)),
+        None => HashMap::new(),
+    };
     let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
     // The set of sources this model's own trigger list covers with an
     // `UpstreamMutation` cell — i.e. every source name for which `triggers`
@@ -745,6 +787,7 @@ fn derive_maintenance_plan_impl(
             Trigger::NewData { source } => derive_new_data(
                 inputs,
                 &bounds,
+                &footprints,
                 source,
                 &identity,
                 &covered_by_mutation,
@@ -753,15 +796,18 @@ fn derive_maintenance_plan_impl(
             Trigger::UpstreamMutation { source } => derive_mutation(
                 inputs,
                 &bounds,
+                &footprints,
                 source,
                 &identity,
                 source_referential_integrity,
                 &mut plan,
             ),
             Trigger::ColumnAdded { columns } => {
-                derive_column_added(inputs, &bounds, columns, &identity, &mut plan)
+                derive_column_added(inputs, &bounds, &footprints, columns, &identity, &mut plan)
             }
-            Trigger::Backfill => derive_backfill(inputs, &bounds, &identity, &mut plan),
+            Trigger::Backfill => {
+                derive_backfill(inputs, &bounds, &footprints, &identity, &mut plan)
+            }
         }
     }
 
@@ -801,6 +847,7 @@ fn model_fingerprint_projections(inputs: &ModelInputs) -> BTreeMap<String, Finge
 fn derive_new_data(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
     source: &str,
     identity: &RowIdentityVerdict,
     covered_by_mutation: &BTreeSet<String>,
@@ -811,7 +858,7 @@ fn derive_new_data(
     };
     match &inputs.output.grain {
         Grain::Partition { .. } => {
-            let (partition_local, scans) = read_locality(inputs, bounds);
+            let (partition_local, scans) = read_locality(inputs, bounds, footprints);
             plan.cells.push(PlanCell {
                 group: "{*}".to_string(),
                 trigger,
@@ -990,6 +1037,7 @@ fn derive_new_data(
 fn derive_mutation(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
     source: &str,
     identity: &RowIdentityVerdict,
     source_referential_integrity: &SourceReferentialIntegrity,
@@ -1034,25 +1082,26 @@ fn derive_mutation(
         // group whose sensitivity to `source` is *purely* value (never
         // membership) is eligible for the cheaper column-scoped merge.
         let membership_sensitive = group.membership_sensitivity.contains(source);
-        let (locality, scans) = match link_source(inputs.output_partition_col(), bounds, facts) {
-            SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
-            SourceLink::Unclocked => (
-                PartitionLocal::No {
-                    source: source.to_string(),
-                    why: "unclocked source: a change's footprint projects onto no bounded \
+        let (locality, scans) =
+            match link_source(inputs.output_partition_col(), bounds, footprints, facts) {
+                SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
+                SourceLink::Unclocked => (
+                    PartitionLocal::No {
+                        source: source.to_string(),
+                        why: "unclocked source: a change's footprint projects onto no bounded \
                           partition interval of the output"
-                        .to_string(),
-                },
-                vec![],
-            ),
-            SourceLink::Unlinked { why } => (
-                PartitionLocal::No {
-                    source: source.to_string(),
-                    why,
-                },
-                vec![],
-            ),
-        };
+                            .to_string(),
+                    },
+                    vec![],
+                ),
+                SourceLink::Unlinked { why } => (
+                    PartitionLocal::No {
+                        source: source.to_string(),
+                        why,
+                    },
+                    vec![],
+                ),
+            };
         if matches!(locality, PartitionLocal::No { .. }) && !facts.allow_full_scan {
             plan.refusals.push(Refusal::ScanUnbounded {
                 source: source.to_string(),
@@ -1091,6 +1140,7 @@ fn derive_mutation(
 fn derive_column_added(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
     columns: &[String],
     identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
@@ -1164,7 +1214,7 @@ fn derive_column_added(
                 refused = true;
                 break;
             };
-            match link_source(inputs.output_partition_col(), bounds, facts) {
+            match link_source(inputs.output_partition_col(), bounds, footprints, facts) {
                 SourceLink::Clamp(clamp) => scans.push(clamp),
                 SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
                     plan.refusals.push(Refusal::ScanUnbounded {
@@ -1215,10 +1265,11 @@ fn derive_column_added(
 fn derive_backfill(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
     identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
-    let (partition_local, scans) = read_locality(inputs, bounds);
+    let (partition_local, scans) = read_locality(inputs, bounds, footprints);
     plan.cells.push(PlanCell {
         group: "{*}".to_string(),
         trigger: Trigger::Backfill,
@@ -1241,6 +1292,7 @@ fn derive_backfill(
 fn read_locality(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    footprints: &HashMap<String, FootprintResult>,
 ) -> (PartitionLocal, Vec<ScanClamp>) {
     // Keyed grain: a backfill is a whole-table rebuild; there is no output
     // partition axis to be local to.
@@ -1250,7 +1302,7 @@ fn read_locality(
     let mut scans = Vec::new();
     let mut verdict = PartitionLocal::Yes;
     for s in &inputs.sources {
-        match link_source(inputs.output_partition_col(), bounds, s) {
+        match link_source(inputs.output_partition_col(), bounds, footprints, s) {
             SourceLink::Clamp(clamp) => scans.push(clamp),
             SourceLink::Unclocked => {
                 if matches!(verdict, PartitionLocal::Yes) {

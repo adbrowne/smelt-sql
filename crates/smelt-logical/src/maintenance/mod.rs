@@ -205,9 +205,26 @@ pub struct ScanClamp {
 }
 
 impl ScanClamp {
-    /// The reflected footprint (`01-framework.md` §5): a delta of this
-    /// source at time `t` writes output over `[t − after, t + before]`.
-    /// Scan `(before, after)` and footprint are reflections of each other.
+    /// The derived write footprint (`model_properties.md` §"Footprint
+    /// reflection / bounded write footprint"): a delta of this source at
+    /// time `t` writes output over `[t − after, t + before]`.
+    ///
+    /// For a **partition-addressed output** this is the *derived* verdict,
+    /// not an assumed mirror: clamp construction (`derive::link_source`)
+    /// consults [`crate::analysis::footprint::reflect_footprint`] and only
+    /// builds a clamp when the derived footprint is
+    /// [`crate::analysis::footprint::FootprintResult::Bounded`] — whose
+    /// value is by definition the mirror `(after, before)` of the read
+    /// reach this clamp carries, so reading the mirror here IS reading the
+    /// derived value. A source whose derived footprint is `Unbounded` (a
+    /// trajectory column) or `NotDerivable` never receives a clamp at all;
+    /// its cell falls back to the fail-closed non-local verdict instead.
+    ///
+    /// For a **keyed-grain output** (no output partition axis) the footprint
+    /// question is not posed at clamp construction, so this mirror is
+    /// unverified there — a locality-admitted keyed model's propagation
+    /// edges still size dirt intervals from it. Recorded as a residue in
+    /// `model_properties.md` §Known Divergences.
     pub fn footprint(
         &self,
     ) -> (

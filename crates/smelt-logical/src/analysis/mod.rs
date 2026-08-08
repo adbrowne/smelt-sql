@@ -4,6 +4,7 @@ pub mod discriminants;
 pub(crate) mod expr_util;
 pub mod faithful_fold;
 pub mod fingerprint;
+pub mod footprint;
 pub mod functional_dependency;
 pub mod horizon_ceiling;
 pub mod input_delta;
