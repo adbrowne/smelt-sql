@@ -502,6 +502,16 @@ provenance" owns the proof and its degenerate-collapse rule; this spec consumes 
 Creation is shared by every column — all columns of a new row are computed together; mutation is
 what partitions them.
 
+Sensitivity carries its kind into the cell. A **value-sensitive** group's mutation cell may be
+repaired column-scoped (a `MERGE` that rewrites the group's columns in place). A
+**membership-sensitive** group — one governed by a mutable source read in row-admission
+position (`model_properties.md` §"Per-column mutation-sensitivity / column provenance") — must
+be repaired by a technique that can create and delete rows: the recompute family
+(delete+insert, change-suppressed where the staged candidate is comparable), never a
+column-scoped merge, which cannot fix which rows exist. A mutable join partner never read in
+any select item still produces mutation cells through membership sensitivity; its absence from
+every value-sensitivity set is not admissibility for cheaper repair.
+
 **Triggers.** Four trigger classes index the plan:
 
 - **creation** — new rows arrived in the driving source;
@@ -1631,6 +1641,19 @@ otherwise the plan degenerates and the targeted cells are lost. This is what mak
 append-only declaration on a source load-bearing.
 (`docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §5.)
 
+**Membership sensitivity is derived, never inferred from collapse.** The complementary hazard
+to over-attribution is silent under-attribution: a mutable source read only in row-admission
+position has empty value sensitivity, and a derivation that stopped there would leave its
+mutations entirely unmaintained — no cell, no refusal, a quiet equivalence hole. Membership
+sensitivity exists as its own derived kind so that admission for such a source is decided by
+the join-predicate read it actually performs, and so that its repair is forced into the
+membership-capable recompute family. A degenerate whole-model collapse that happens to cover
+the source is not an acceptable substitute: collapse-admitted cells assign repair by accident
+(a column-scoped merge for what is really a membership change) and vanish the moment the
+collapse is fixed. (Established empirically: the keyed-enriched shape's dimension cell was
+admitted solely by a collector misparse until membership sensitivity was made a first-class
+derivation.)
+
 **Per-edge dirt keys trigger cells.** The trigger taxonomy is per-edge: a dirty set merged per
 model would erase which repair runs where, and two sources landing in one tick genuinely drive
 different techniques over different regions of the same table.
@@ -2065,11 +2088,15 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   parse but are not consumed (every refusal is an Error); the cost model between two admissible
   techniques is unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **The keyed dispatch path cannot yet exercise a genuinely changed merged value.** A
-  column-reference reader misreads an aggregate's function-name token as an ambiguous column
-  once two-plus FROM sources are joined; the resulting fail-closed whole-model collapse is what
-  admits the cell, so every keyed-path dispatched merge is a suppressed no-op by construction.
-  Tracked: `docs/plans/20260720-prod-w10-keyed-mutable-admission.md`.
+- **Membership sensitivity is not yet derived; the keyed-enriched dimension cell is admitted
+  by a collector misparse.** The column-group derivation still uses a reader that misreads an
+  aggregate's function-name token as an ambiguous column once two-plus FROM sources are
+  joined; the resulting fail-closed whole-model collapse is what admits the dimension's
+  mutation cell, and the column-scoped merge it assigns is a suppressed no-op by construction —
+  it could not repair a genuine membership change (§"The plan matrix", sensitivity kinds).
+  Fixing the reader alone would leave the dimension's mutations silently unmaintained (no
+  cell, no refusal), so the reader fix and the membership-sensitivity derivation land
+  together. Tracked: `docs/plans/20260808-membership-sensitivity.md`.
 - **Emission remainders.** `emit_in_place_update` has no production consumer; the additive
   fold's MERGE-inside-ledger-transaction interior is not observable at the statement-group
   seam, so its parity leg uses an idempotent fixture; `Backend::delete_partitions` /
