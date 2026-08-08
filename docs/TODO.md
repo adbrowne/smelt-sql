@@ -26,14 +26,23 @@ residue:
 - [ ] **Conformance-generator extensions** suggested by the campaign's blind spots: recipes with
   `cells[].write` pins, ColumnAdded triggers with `allow_full_scan: true`, December/era-boundary
   date pools, backends without column-scoped MERGE.
-- [ ] **walk.rs campaign residue (untriaged)** — a second 196-mutant campaign over
-  `analysis/walk.rs` scored only 76.7% tier-1 kill (vs 91.3% for maintenance) with 38 survivors,
-  including the fail-closed spine: `QueryNode::has_unsupported -> false`,
-  `PartitionGrainAdmission`/`PropertyTransfer` `leaf -> Default` + operator mutants,
-  deleted `INTERSECT`/`EXCEPT` arms in `setop_kind_after`, `is_constant_literal -> true`,
-  `union_discriminated_grain` comparison flip. Full list in the research doc §"Bonus campaign".
-  Needs the same treatment: tier-2 triage, per-survivor analysis, killing tests — the
-  `has_unsupported` cluster first (it guards everything downstream).
+- [x] **walk.rs campaign residue, triaged (2026-08-08)** — the second `analysis/walk.rs`
+  campaign's 40-survivor list (see `docs/research/20260808-mutation-testing-maintenance-gates.md`
+  §"Bonus campaign addendum") is fully triaged. 21 killed by
+  `crates/smelt-logical/tests/walk_hardening.rs` (the `has_unsupported` fail-closed spine,
+  `INTERSECT`/`EXCEPT` recognition, `is_constant_literal`, the union discriminator, ambiguous-alias
+  guards in `select_lineage`/`resolve_alias_source`, `path_display`, `has_subset_key`, and the
+  operator-level property/admission folds). 5 are provably equivalent (every `Transfer::leaf`
+  impl + `Grain::unkeyed` literally return their type's `Default`; no test can distinguish the
+  mutant). New kill rate: 146/163 viable (89.6%), up from 76.7%.
+- [ ] **walk.rs `own_region_text*` collector-guard residue (14 mutants, deferred)** — the
+  `own_region_text`/`own_region_text_excluding_self_relations` `node==root`/`TABLE_REF` guards
+  (13 mutants) and `scope_self_qualifiers`'s `last != key` guard (1 mutant) survived the Phase 1
+  triage session; see the research doc addendum's "Deferred, with reason" section for why a
+  discriminating test needs a scenario where duplicated/omitted region text changes which
+  `derive_partition_skew` text-heuristic pattern matches (not just how many times the same
+  pattern matches — `Skew::union`'s max-fold makes the naive construction an equivalent mutant
+  in practice), plus a precisely-shaped unaliased-dotted self-reference for the qualifier guard.
 
 ## Cross-Model Type Inference
 

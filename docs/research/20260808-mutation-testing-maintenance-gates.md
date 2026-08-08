@@ -115,6 +115,96 @@ The walk_coverage gate asserts *which properties are produced by the walk*; this
 shows it under-constrains *what the walk computes*. Survivor list preserved in the TODO
 residue block; triage + kills are follow-up work.
 
+## Bonus campaign addendum: walk.rs survivor triage (2026-08-08)
+
+Follow-up session (`docs/plans/20260808-substrate-unification.md` Phase 1). A fresh
+`cargo mutants --file crates/smelt-logical/src/analysis/walk.rs --iterate -p smelt-logical`
+run (same tier-1 battery: `cargo test -p smelt-logical`) reproduced **40 missed / 123 caught /
+33 unviable** (196 total; the 2-mutant difference from the original 38 is run-to-run
+mutant-generation variance, not a behavior change). Every survivor was triaged and either
+killed by a new test in `crates/smelt-logical/tests/walk_hardening.rs`, or classified below.
+A second `--iterate` pass against only the 40 previously-missed mutants confirms the kills:
+**21 caught / 19 missed** — every one of the new tests kills exactly the mutant(s) its doc
+comment names, and no previously-caught mutant regressed.
+
+New kill rate: **146/163 viable (89.6%)**, up from 76.7%, closing the gap with the
+maintenance layer's 91.3%.
+
+### Per-survivor verdict
+
+| Mutant (line:col) | Verdict | Disposition |
+|---|---|---|
+| `241:9` `has_unsupported -> false` | Genuine gap | Killed: `unsupported_node_fails_closed` |
+| `245:21` `\|\|`→`&&` (Select arm) | Genuine gap | Killed: `unsupported_node_fails_closed` |
+| `253:21` `\|\|`→`&&` (SetOp arm) | Genuine gap | Killed: `unsupported_node_fails_closed` |
+| `458:13` delete `INTERSECT_KW` arm | Genuine gap | Killed: `intersect_except_degrade` |
+| `459:13` delete `EXCEPT_KW` arm | Genuine gap | Killed: `intersect_except_degrade` |
+| `692:25` `select_lineage` `aliases.len()==1`→`true` | Genuine gap | Killed: `select_lineage_ambiguous_ref_not_resolved` |
+| `789:9` `ScopeEnum::leaf`→`Default` | Provably equivalent | No action (see below) |
+| `943:9` `path_display`→`String::new()`/`"xyzzy"` (×2) | Genuine gap (unpinned diagnostic text) | Killed: `admission_violation_path_display_is_pinned` |
+| `952:49` `alias.is_empty()`→`true`/`false` (×2) | Genuine gap | Killed: `admission_violation_path_display_is_pinned` |
+| `977:9` `PartitionGrainAdmission::leaf`→`Default` | Provably equivalent | No action |
+| `998:24` delete `!` (`PartitionGrainAdmission::operator`) | Genuine gap | Killed: `leaf_transfer_not_default` |
+| `1197:36`/`1197:41` `own_region_text` `node==root` guard (×3 encodings) | Deferred | See below |
+| `1198:33`/`1198:45` `own_region_text` `TABLE_REF` guard (×3 encodings) | Deferred | See below |
+| `1254:9` `SkewTransfer::leaf`→`Default` | Provably equivalent | No action |
+| `1300:21` `scope_self_qualifiers` `!=`→`==` | Deferred | See below |
+| `1359:21` delete `WITH_CLAUSE` arm (excluding-self variant) | Deferred | See below |
+| `1360:36`/`1360:41` excluding-self `node==root` guard (×3) | Deferred | See below |
+| `1361:33`/`1361:45` excluding-self `TABLE_REF` guard (×3) | Deferred | See below |
+| `1487:23` `!tree.root.has_unsupported()`→`true` | Genuine gap | Killed: `unsupported_sql_falls_back_to_whole_text_skew` |
+| `1522:9` `Grain::unkeyed`→`Default` | Provably equivalent | No action |
+| `1528:9` `has_subset_key`→`false` | Genuine gap | Killed: `declared_fd_survives_via_subset_key` |
+| `1873:9` `PropertyTransfer::leaf`→`Default` | Provably equivalent | No action |
+| `1892:35` `\|=`→`&=` (`PropertyTransfer::operator`) | Genuine gap | Killed: `leaf_transfer_not_default` |
+| `1898:25` delete `InputItem::Derived{alias:Some(alias),..}` arm | Genuine gap | Killed: `leaf_transfer_not_default` |
+| `1913:59` delete `!` (distinct-grain guard) | Genuine gap | Killed: `leaf_transfer_not_default`, `distinct_grain_uses_projected_columns` |
+| `1997:17` `resolve_alias_source` `aliases.len()==1`→`true` | Genuine gap | Killed: `determinism_not_reduced_through_ambiguous_alias` |
+| `2052:23` `union_discriminated_grain` `<`→`>` | Genuine gap | Killed: `union_discriminator_requires_distinct_tags` |
+| `2192:5` `is_constant_literal`→`true` | Genuine gap | Killed: `constant_literal_rejects_function_call` |
+| `2207:17` delete `IDENT` arm (`is_constant_literal`) | Genuine gap | Killed: `constant_literal_rejects_function_call` |
+| `2209:24` delete `!` (`is_constant_literal` type-keyword guard) | Genuine gap | Killed: `constant_literal_rejects_function_call` |
+
+(Table rows group same-line mutant variants the survivor list reports separately; counts above
+match the raw 40.)
+
+### Provably equivalent (5 mutants, no action)
+
+Every concrete `Transfer` implementation in this file (`ScopeEnum`, `PartitionGrainAdmission`,
+`SkewTransfer`, `PropertyTransfer`) returns its verdict type's literal `Default` value from
+`leaf` — by design: a bare relation proves no properties of its own (grain, admission
+violations, skew, and the property vector are all established by the *consuming* scope's
+`operator`, never by a leaf in isolation — the fail-closed default IS the correct leaf verdict,
+not a placeholder standing in for one). Mutating `leaf` to `Default::default()` is therefore
+bit-identical to the unmutated body for every input; no test, however constructed, can
+distinguish them. `Grain::unkeyed()` is definitionally `Grain { keys: Vec::new() }`, exactly
+`Grain::default()`, for the same reason. These five survivors are permanent, expected residue
+of this pattern — documented here rather than chased with an unkillable test.
+
+### Deferred, with reason (14 mutants)
+
+The `own_region_text` / `own_region_text_excluding_self_relations` collector guards (13
+mutants across the two functions) prune nested-walk-node subtrees (the WITH clause, the next
+set-operation arm, a derived table's body) from the raw text handed to the skew leaf
+classifier (`derive_partition_skew`, a text-heuristic pattern match). A guard flipped to
+*never* prune only **duplicates** already-covered text into the same scope's own region; since
+`Skew::union` takes the max of `before`/`after` across every scope's contribution, and the
+duplicated text is byte-identical to what the referenced node already contributes on its own
+walk visit, the final model-level skew is frequently unchanged — the naive kill construction is
+an equivalent mutant in practice, not just in theory. `crates/smelt-logical/tests/
+skew_self_exclusion.rs`'s seven existing tests already exercise this exact code path
+heavily (self-exclusion, cross-scope alias reuse, an OR-guarded disjunction, a string-literal
+decoy) and still do not kill these mutants — corroborating that a discriminating case needs a
+scenario where the duplicated/omitted text changes which *pattern* `derive_partition_skew`
+matches, not merely how many times it matches the same one (e.g. a nested SELECT_STMT whose
+inclusion vs. exclusion changes which anchor expression sits adjacent to the driving column in
+the concatenated text). `scope_self_qualifiers`'s `last != key` guard (1 mutant) similarly
+needs a precisely-shaped self-reference — an *unaliased, dotted* self path (e.g.
+`FROM smelt.marts.balance`, no `AS`) whose WHERE/ON conditions use the *bare last segment*
+(`balance.col`) rather than the full dotted qualifier — and getting the walk's exact alias-map
+key convention right for that shape needs more space than this session's remaining budget.
+Tracked as residue below rather than landing a guessed, possibly-wrong test.
+
 ## Takeaways for the proof surface
 
 - Mutation testing is cheap here (~1.5h warm, incremental via `--iterate`) and its finding
