@@ -51,10 +51,10 @@ safe to grow (the contract lattice will grow it).
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
-| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | pending |
+| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | planned |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | pending |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
-| 8 | Surface: explain rendering of probes + cost, docs-site update | pending |
+| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
 
 ## Decision log
 
@@ -134,6 +134,18 @@ safe to grow (the contract lattice will grow it).
   that do speak the contract (phases 5–6's four). `ModelRunRecord.probes` exists and round-trips
   legacy manifests but is not yet populated by any dispatch site — recorded as follow-up, not a
   blocker. See `phases/04-summary.md`.
+
+- 2026-08-10: Reshape + phase 5 planned. Phase 4's deferred follow-up (`ModelRunRecord.probes` is
+  declared and round-trips but no dispatch site populates it) serves criterion 5 — probe status
+  visible in `smelt explain` — so it stays inside the outcome: phase 8's row now names it
+  explicitly rather than leaving it as a loose note in a summary. It is placed there, not in
+  phase 5, because phase 6 adds a fourth dispatch site and `explain` is the only consumer;
+  wiring the log once, after every site exists, avoids touching the sites twice. Phase 5 itself
+  is scoped to one new owner (`smelt-runtime::model_probes`) plus two `execute.rs` call sites —
+  the full-refresh/standard pre-write site and the incremental batch pre-write site — both of
+  which already have the run's `compiled.sql` (the run's own processed rows, exactly the
+  `scope_select` the three phase-2 emitters expect) and the existing
+  `probe_policy_for_model(...)` policy in scope.
 
 ## Blocked
 
