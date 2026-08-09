@@ -32,6 +32,18 @@ Add `--technique <name>` alongside `--show-sql` to preview a *different* techniq
 
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
 
+## Internal state columns
+
+Some presented columns (`AVG`, the `STDDEV_*`/`VAR_*` family, `MAX_BY`/`MIN_BY`, and the fallback-bearing or multi-candidate once-write spellings) don't fold their presented value directly — they fold hidden **state columns** instead, and recompute the presented value from that state on every read. `smelt explain <model>` lists these state columns as internal state, distinct from the model's public schema:
+
+```
+State columns:
+  - avg_amount (presented) folds through: avg_amount__sum, avg_amount__count
+      presentation: avg_amount__sum / avg_amount__count
+```
+
+A model with no decomposed-state columns prints no state section. With `--json`, the same information appears as a top-level `state_columns` array: `[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]`.
+
 See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report. The web UI's [model diagnostics page](../guide/model-diagnostics.md) renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.
 
 ## JSON output schema

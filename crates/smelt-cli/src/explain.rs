@@ -503,6 +503,28 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
+    // Internal state columns (`incremental_models.md` §"Decomposed state
+    // (rung 2) in keyed models", `docs/outcomes/20260809-rung2-state-shapes`
+    // row 9): one entry per presented column that folds through hidden
+    // decomposed state, read straight off `result.state_columns` — this
+    // function derives nothing, `classify_cumulative` is the single owner
+    // of which columns are state-bearing. Omitted entirely (no empty
+    // header) for a model with no state-bearing columns.
+    if !result.state_columns.is_empty() {
+        let _ = writeln!(out, "State columns:");
+        for summary in &result.state_columns {
+            let _ = writeln!(
+                out,
+                "  - {} (presented) folds through: {}",
+                summary.presented_column,
+                summary.state_columns.join(", ")
+            );
+            let _ = writeln!(out, "      presentation: {}", summary.presentation_expr);
+            let _ = writeln!(out, "      not part of the model's public schema");
+        }
+        let _ = writeln!(out);
+    }
+
     // Key temporal locality (`incremental_models.md` §"Key temporal
     // locality (the time-partitioned output)"): for an admitted `grain:
     // key` + `timeseries:` model, print the established route/slice and
@@ -1032,6 +1054,12 @@ pub struct ExplainMaintenanceJson {
     pub inbound_edges: Vec<InboundEdgeContract>,
     pub cells: Vec<ExplainCellJson>,
     pub properties: PropertySet,
+    /// One entry per presented column that folds through hidden decomposed
+    /// state (`incremental_models.md` §"Decomposed state (rung 2) in keyed
+    /// models"), empty for a model with none — an append-stable addition to
+    /// this JSON shape (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state_columns: Vec<smelt_logical::StateColumnSummary>,
 }
 
 /// Build the `--json --show-sql` report from the derived plan cells and
@@ -1043,6 +1071,7 @@ pub struct ExplainMaintenanceJson {
 /// `statements` — `smelt_runtime::diagnostics::build_model_diagnostics`
 /// maps 1:1 over the same `plan_cells` slice this report's own `statements`
 /// are built from, so a positional `zip` is exact, not an approximation.
+#[allow(clippy::too_many_arguments)]
 pub fn build_maintenance_plan_json(
     model_name: &str,
     plan_cells: &[PlanCell],
@@ -1051,6 +1080,7 @@ pub fn build_maintenance_plan_json(
     inbound_edges: Vec<InboundEdgeContract>,
     diagnostics_cells: &[PlanCellDiagnostics],
     properties: PropertySet,
+    state_columns: Vec<smelt_logical::StateColumnSummary>,
 ) -> ExplainMaintenanceJson {
     let cells = plan_cells
         .iter()
@@ -1095,6 +1125,7 @@ pub fn build_maintenance_plan_json(
         inbound_edges,
         cells,
         properties,
+        state_columns,
     }
 }
 

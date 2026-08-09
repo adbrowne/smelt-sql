@@ -645,6 +645,7 @@ async fn explain_maintenance_plan(
             edges.clone(),
             &diagnostics.cells,
             diagnostics.properties.clone(),
+            result.state_columns.clone(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

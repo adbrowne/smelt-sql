@@ -150,10 +150,15 @@ Contract": its clock, identity, and derived `grain` label), and one contract blo
 edge (upstream dependency) — a declared source or an upstream maintained model, rendered through
 the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
 so the reader knows which provider filled them; a row prints `(none)` when that provider declares
-neither fact. The report is read-only and plain text. `--select` is ignored when a model-name
-argument is given. `--json` is honored with a model-name argument — with or without `--show-sql`
-— and emits the per-model report as JSON (the same schema either way, since the JSON form always
-carries every cell's `statements` and `technique_previews` arrays; `--show-sql` only changes the
+neither fact. For every presented column that folds through decomposed state
+(`incremental_models.md` §"Decomposed state (rung 2) in keyed models"), the report also lists that
+column's hidden state columns and the presentation expression `π` that recomputes the presented
+value from them, labelled as internal state and explicitly not part of the model's public schema;
+a model with no decomposed-state columns prints no such section. The report is read-only and plain
+text. `--select` is ignored when a model-name argument is given. `--json` is honored with a
+model-name argument — with or without `--show-sql` — and emits the per-model report as JSON (the
+same schema either way, since the JSON form always carries every cell's `statements` and
+`technique_previews` arrays plus the model's `state_columns` array; `--show-sql` only changes the
 *text* rendering). A flag combination is never silently ignored.
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
@@ -172,7 +177,10 @@ in, so the emitted shape is inspectable without choosing a window. `--show-sql` 
 to a backend and never executes anything. With `--json`, the per-model report is emitted
 as JSON with a `statements` array per cell
 (`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable form
-documentation generators embed.
+documentation generators embed. The report also carries a top-level `state_columns` array, one
+entry per presented column that folds through decomposed state (empty when the model has none):
+`{"presented_column": "<name>", "state_columns": ["<name>", ...], "presentation_expr": "<expr>"}`
+— an append-stable addition (§Constraints item 5) to the same JSON shape.
 
 A model with no maintenance plan (not `refresh: incremental`, or no `grain:` declared) prints a
 one-line notice rather than an error, and exits `0`.

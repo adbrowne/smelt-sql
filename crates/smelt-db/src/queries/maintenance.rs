@@ -56,6 +56,16 @@ pub struct MaintenancePlanResult {
     /// single-source model still has `column_groups.len() == 1` with only
     /// one source in `mutation_sensitivity`).
     pub degenerate: Vec<DegenerateColumn>,
+    /// This model's decomposed-state summary — one entry per presented
+    /// column that folds through hidden state columns
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 9), empty for a
+    /// rung-1 model or one this function derives without classifying (every
+    /// site here except `smelt_db::maintenance_plan_report`, which is the
+    /// single caller that runs the keyed classifier and populates this
+    /// field — `smelt-db/src/lib.rs`'s Salsa purity rule: this crate's own
+    /// internal derivation never re-decides which columns are
+    /// state-bearing).
+    pub state_columns: Vec<smelt_logical::StateColumnSummary>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -361,6 +371,7 @@ pub fn derive_model_maintenance_plan(
             plan: smelt_logical::maintenance::unsupported_grain_plan("key_per_partition"),
             column_groups: Vec::new(),
             degenerate: Vec::new(),
+            state_columns: Vec::new(),
         });
     }
     let partition_col = metadata
@@ -409,6 +420,7 @@ pub fn derive_model_maintenance_plan(
                         )),
                         column_groups: Vec::new(),
                         degenerate: Vec::new(),
+                        state_columns: Vec::new(),
                     });
                 }
             }
@@ -473,6 +485,7 @@ pub fn derive_model_maintenance_plan(
                             plan: locality_refused_plan(refusal.message(table)),
                             column_groups: Vec::new(),
                             degenerate: Vec::new(),
+                            state_columns: Vec::new(),
                         });
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
@@ -581,6 +594,7 @@ pub fn derive_model_maintenance_plan(
         plan,
         column_groups: grouping.groups,
         degenerate: grouping.degenerate,
+        state_columns: Vec::new(),
     })
 }
 

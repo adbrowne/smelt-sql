@@ -780,6 +780,44 @@ pub fn diagnose_state_column_collisions(
         .collect()
 }
 
+/// One presented column's hidden decomposed state, summarized for reporting
+/// (`smelt explain`, `docs/outcomes/20260809-rung2-state-shapes` row 9). A
+/// pure read of `AggregatorColumn::state` — it never re-decides which
+/// spellings are state-bearing (single owner: `classify_cumulative` /
+/// `analysis::decomposed_state::decompose_to_state`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StateColumnSummary {
+    /// The output column name this state backs.
+    pub presented_column: String,
+    /// The hidden state columns' names, in declaration order.
+    pub state_columns: Vec<String>,
+    /// The presentation expression `π(state)` that recomputes
+    /// `presented_column`'s value from the state columns above.
+    pub presentation_expr: String,
+}
+
+/// One entry per [`CumulativeClassification::aggregator_columns`] entry
+/// whose `state` is `Some` — empty when no column folds through decomposed
+/// state (a rung-1 model reports no state section at all).
+pub fn state_column_summary(classification: &CumulativeClassification) -> Vec<StateColumnSummary> {
+    classification
+        .aggregator_columns
+        .iter()
+        .filter_map(|c| {
+            let state = c.state.as_ref()?;
+            Some(StateColumnSummary {
+                presented_column: c.output_name.clone(),
+                state_columns: state
+                    .state_columns
+                    .iter()
+                    .map(|sc| sc.name.clone())
+                    .collect(),
+                presentation_expr: state.presentation_expr.clone(),
+            })
+        })
+        .collect()
+}
+
 /// The result of classifying a `cumulative_aggregate` model.
 #[derive(Debug, Clone, Serialize)]
 pub struct CumulativeClassification {
@@ -2028,6 +2066,83 @@ GROUP BY e.device_id, e.user_id"#;
         let message = diagnostics[0].to_string();
         assert!(message.contains("spend__sum"), "{message}");
         assert!(message.contains("__"), "{message}");
+    }
+
+    /// `state_column_summary` reports one entry for an `AVG` column's hidden
+    /// `(sum, count)` state, naming both state columns and the presentation
+    /// expression (`docs/outcomes/20260809-rung2-state-shapes` row 9).
+    #[test]
+    fn state_summary_reports_hidden_columns_for_avg() {
+        let sql = r#"SELECT
+    device_id,
+    AVG(amount) AS avg_amount
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+            .expect("must classify");
+
+        let summary = state_column_summary(&classification);
+        assert_eq!(
+            summary,
+            vec![StateColumnSummary {
+                presented_column: "avg_amount".to_string(),
+                state_columns: vec![
+                    "avg_amount__sum".to_string(),
+                    "avg_amount__count".to_string()
+                ],
+                presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+            }]
+        );
+    }
+
+    /// A `SUM`/`MAX`-only classification carries no state, so the summary
+    /// section must not appear for rung-1 models.
+    #[test]
+    fn state_summary_is_empty_for_stateless_columns() {
+        let sql = r#"SELECT
+    device_id,
+    SUM(amount) AS total_amount,
+    MAX(event_ts) AS last_seen
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+            .expect("must classify");
+
+        assert!(state_column_summary(&classification).is_empty());
+    }
+
+    /// `MAX_BY`'s `(v, o)` state and a fallback-bearing once-write column's
+    /// `(value, written)` state both report — one entry per state-bearing
+    /// column, regardless of family.
+    #[test]
+    fn state_summary_covers_order_monotone_and_once_write() {
+        let sql = r#"SELECT
+    device_id,
+    MAX_BY(status, updated_at) AS status,
+    COALESCE(MAX(signup_referrer), 'unknown') AS first_referrer
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let fds = vec![smelt_core::config::FunctionalDependency {
+            key: vec!["device_id".to_string()],
+            determines: "signup_referrer".to_string(),
+        }];
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &fds)
+            .expect("must classify");
+
+        let summary = state_column_summary(&classification);
+        let names: Vec<&str> = summary
+            .iter()
+            .map(|s| s.presented_column.as_str())
+            .collect();
+        assert_eq!(names, vec!["status", "first_referrer"]);
+        assert_eq!(summary[0].state_columns, vec!["status__v", "status__o"]);
+        assert_eq!(
+            summary[1].state_columns,
+            vec!["first_referrer__value", "first_referrer__written"]
+        );
     }
 
     /// Every column family admitted today still classifies with `state:

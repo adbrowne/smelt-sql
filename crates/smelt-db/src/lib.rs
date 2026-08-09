@@ -1608,7 +1608,7 @@ pub fn maintenance_plan_report(
     clocked_granularities.extend(model_source_granularities);
     let driving_source_granularity =
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
-    crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
         &metadata,
@@ -1621,7 +1621,35 @@ pub fn maintenance_plan_report(
         // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
         // own call site for the same rationale.
         &[],
-    )
+    )?;
+
+    // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
+    // row 9): only a `grain: key` model can carry state-bearing columns
+    // (`rules::cumulative::classify_cumulative` is the keyed classifier),
+    // and only when it actually admits — an unadmitted model contributes an
+    // empty summary rather than a guess. `classify_cumulative` is the single
+    // owner of which spellings are state-bearing; this call derives nothing
+    // beyond assembling its inputs from the resolved `SourceInfo`s already
+    // gathered above, per the Salsa purity rule.
+    if metadata.is_keyed() {
+        let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
+        for r in &refs {
+            if let Some(ts) = ref_timeseries_config(db, workspace, project, r) {
+                source_timeseries.insert(r.clone(), ts);
+            }
+        }
+        if let Ok(classification) = smelt_logical::classify_cumulative(
+            sql_body,
+            &refs,
+            &source_timeseries,
+            metadata.timeseries.is_some(),
+            &metadata.functional_dependencies,
+        ) {
+            result.state_columns = smelt_logical::state_column_summary(&classification);
+        }
+    }
+
+    Some(result)
 }
 
 #[salsa::tracked]

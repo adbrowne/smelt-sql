@@ -909,6 +909,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
             membership_sensitivity: BTreeSet::new(),
         }],
         degenerate: vec![],
+        state_columns: vec![],
     };
     let report = build_maintenance_plan_report(
         "daily_events_enriched",
@@ -1024,6 +1025,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
             },
         ],
         degenerate: vec![],
+        state_columns: vec![],
     };
     let report = build_maintenance_plan_report(
         "events_enriched",
@@ -1205,6 +1207,7 @@ mod write_variant_explain_surface {
                 membership_sensitivity: BTreeSet::new(),
             }],
             degenerate: vec![],
+            state_columns: vec![],
         };
         build_maintenance_plan_report(
             "write_variant_fixture",

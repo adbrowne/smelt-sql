@@ -1,7 +1,7 @@
 # Outcome: Rung 2 — decomposed combiner state
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §2 P-A, §6 step 1
 **Spec anchors:** `docs/specs/incremental_models.md` (algebraic ladder, column-family catalogue), `docs/specs/model_properties.md` (algebraic discriminants)
 
@@ -52,7 +52,7 @@ success criteria above.
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
 | 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | done |
 | 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | done |
-| 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | planned |
+| 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | done |
 
 ## Decision log
 
@@ -309,6 +309,13 @@ success criteria above.
   columns inside `derive_model_maintenance_plan` (`SourceFacts` carries no `TimeseriesConfig`, so
   the classifier's inputs are not reconstructible there) and computing them in `smelt-cli`
   (analysis in the CLI, and a second answer to "which columns are state-bearing").
+
+- 2026-08-09 (implement 9): `smelt explain <model>` now renders a "State columns:" section
+  (text and `--json`) for every presented column that folds through decomposed state,
+  sourced from a new pure `smelt_logical::state_column_summary` reading
+  `AggregatorColumn::state` — `smelt_db::maintenance_plan_report` is the single caller that
+  runs `classify_cumulative` to populate it. All 6 success criteria are now met; this was
+  the outcome's last row. Status flipped to `done`.
 
 ## Blocked
 
