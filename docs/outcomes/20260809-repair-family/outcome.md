@@ -49,7 +49,7 @@ reconciliation runs and idempotent re-runs.
 | 8 | Conformance recipes for repair + diff-patch families | done |
 | 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | done |
 | 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | done |
-| 11 | Surface: `smelt explain` rendering, docs-site update | pending |
+| 11 | Surface: `smelt explain` rendering, docs-site update | planned |
 
 ## Decision log
 
@@ -259,6 +259,17 @@ reconciliation runs and idempotent re-runs.
   before building its group string. `repair_pool_upholds_equivalence_under_retraction` now drives
   `OrderMonotone` through the full mutation loop; the matching `KnownBug` registry entry and spec
   divergence are deleted.
+
+- 2026-08-10 (plan 11): no reshape — phase 10 closed clean and phase 11 is the last row; phase 10's
+  `group.name()`-adjacent audit note and phase 9's hardening items are not success-criteria work and
+  stay out. Phase 11 decides: the affected-key **discovery posture** (clamped current-source scan vs
+  group-grain sidecar diff) becomes a pure single-owner predicate in
+  `maintenance::repair` that both the runtime resolver and `smelt explain` call — explain never
+  re-derives `facts.mutation == MutableSnapshot` itself, and builds the trigger source's facts via
+  the existing `smelt_db::queries::maintenance::source_facts`. The repair stanza is
+  technique-scoped (`PerGroupRecompute` only), so every non-repair cell's rendering stays
+  byte-identical; the `diff_patch` delete-leg verdict comes from the real
+  `choice::resolve_cell_choice`, not a display-only re-derivation.
 
 ## Blocked
 
