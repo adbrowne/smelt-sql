@@ -48,7 +48,7 @@ reconciliation runs and idempotent re-runs.
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
 | 8 | Conformance recipes for repair + diff-patch families | done |
 | 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | done |
-| 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | pending |
+| 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | planned |
 | 11 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
@@ -233,6 +233,19 @@ reconciliation runs and idempotent re-runs.
   over-approximation, self-healing on refresh). Creation runs now seed the sidecar's initial
   comparandum so the first live repair doesn't take the absent-comparandum degradation every time.
   All standing gates green.
+
+- 2026-08-10 (plan 10): no reshape — phase 9 closed clean and phase 11 (surface) stands as
+  written; phase 9's three "for the next planner" notes (bit_xor digest collision risk, the
+  unconfirmed snapshot-reconcile sidecar seed, the untested *stale* group comparandum) are
+  hardening of an already-shipped mechanism, not success-criteria work, and stay out rather than
+  becoming rows. Phase 10 decides: the fix is the EXISTING `state_augmented_projection` applied to
+  the repair's raw pre-compile model SQL — the same widening `execute_windowed_keyed`/
+  `execute_snapshot_reconcile` already apply, not a repair-specific projection — with the
+  four-times-duplicated state-column collection promoted to
+  `CumulativeClassification::state_columns()`. Second decision: the `diff_patch` suppression
+  predicate compares hidden state columns alongside the presented compared columns, so a group
+  whose presented value is unchanged but whose state moved is still rewritten (strictly less
+  suppression, sound by construction) rather than left with stale state behind a correct value.
 
 ## Blocked
 
