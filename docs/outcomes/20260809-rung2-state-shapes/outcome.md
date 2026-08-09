@@ -44,7 +44,7 @@ success criteria above.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | pending |
+| 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | planned |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing) | pending |
 | 3 | Storage + emitters: state columns in the stored table, keyed fold over state, presentation projection | pending |
 | 4 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
@@ -55,6 +55,15 @@ success criteria above.
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-08-09 (plan 1): no reshape — phase list stands as scaffolded. Split of spec work
+  fixed: phase 1 writes the normative rung-2 semantics and *rewrites* the three rung-2
+  Known Divergences entries to the residual gap; phase 7 deletes them plus the docs-site
+  obligations once the code actually behaves that way (success criteria 1–2 need both).
+- 2026-08-09 (plan 1): physical-layout decision handed to the phase-1 spec pass — state
+  columns live in the same stored table as the presented columns (suffix `__part`),
+  hidden from the public schema, rather than a separate state table + presentation view;
+  keeps `ref()` a table and leaves backend DDL/atomic-swap paths untouched.
 
 ## Blocked
 
