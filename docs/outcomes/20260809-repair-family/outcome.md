@@ -40,7 +40,7 @@ reconciliation runs and idempotent re-runs.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | done |
-| 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | planned |
+| 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
 | 3 | Per-group recompute technique: derivation, admission, emitter | pending |
 | 4 | `diff_patch` write pattern: registry entry, emitter, statement parity | pending |
 | 5 | Wire refusal narrowing: retraction paths route to repair before full refresh | pending |
@@ -55,6 +55,14 @@ reconciliation runs and idempotent re-runs.
 - 2026-08-09 (implement 1): landed §"The repair family" in `incremental_models.md` — corner placement is column-scoped re-derivation (full read, targeted write), not a new corner; two of its three admission obligations are the *existing* obligations 4/6 cited by number, only affected-key discovery is new (obligation 7); slice completeness reuses key temporal locality rather than a new proof. `diff_patch` landed as a subsection under §"The write-pattern set is open" with its delete leg gated on the same slice-completeness premise. `model_properties.md` gained §"Affected-key discovery" (`derive_affected_keys`, fail-closed, sound-over-approximation-only). Refusal narrowing landed in §"Reprocessing" and both `KeyedReprocessedWindow`/`KeyedRetractableContribution` diagnostics prose (both spec files).
 
 - 2026-08-09 (plan 2): no reshape — phase 1 fixed `derive_affected_keys`'s entry point and verdict shape, so the remaining rows stand as scaffolded. Phase 2 scoped proof-only (pure `smelt-logical` classifier + spec §Surface status flip); plan-cell derivation, emission and refusal wiring stay in phases 3–5. Provenance resolution reuses `analysis::fingerprint`'s walk-backed per-column leaf classifier (parameterised by an output-column filter) rather than a second lineage implementation, keeping the property-composition-walk rule intact.
+
+- 2026-08-09 (implement 2): landed `derive_affected_keys` in
+  `crates/smelt-logical/src/analysis/affected_keys.rs` — grain precedence matches
+  `row_identity_with_context` exactly (declared `unique_key` else fan-out-gated proven grain,
+  no `WholeRow`-style fallback). Reused `analysis::fingerprint`'s leaf classifier via
+  `pub(crate)` visibility rather than a copy; introduced zero new `.contains("` sites. Flagged
+  for phase 3: a grain column with zero dependency on the delta's own source is treated as
+  "no requirement" — untested corner, no pinning spec sentence.
 
 ## Blocked
 

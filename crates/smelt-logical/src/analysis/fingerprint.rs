@@ -157,7 +157,7 @@ impl Transfer for FingerprintTransfer<'_> {
 /// Whether `relation`'s [`super::walk`] source name resolves to `source_ref`
 /// — the same bare/`sources.`-prefixed comparison
 /// `skeleton_closure::find_enrichment_join` uses.
-fn relation_matches_source(relation: &str, source_ref: &str) -> bool {
+pub(crate) fn relation_matches_source(relation: &str, source_ref: &str) -> bool {
     let bare = relation.strip_prefix("sources.").unwrap_or(relation);
     bare.eq_ignore_ascii_case(source_ref) || relation.eq_ignore_ascii_case(source_ref)
 }
@@ -176,7 +176,7 @@ fn relation_source_matches(source: &RelationSource, source_ref: &str) -> bool {
 /// How one embedded column reference (inside a computed expression) relates
 /// to `source_ref`, resolved against this scope's own FROM-alias map only
 /// (no further CTE/derived-table chase — see module doc).
-enum RefClass {
+pub(crate) enum RefClass {
     /// Resolves to `source_ref`'s own column `String`.
     Source(String),
     /// Resolves to a different relation entirely.
@@ -186,7 +186,7 @@ enum RefClass {
     Unresolved,
 }
 
-fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
+pub(crate) fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
     let key = match cref.qualifier() {
         Some(q) => q.to_ascii_lowercase(),
         None => {
@@ -218,7 +218,7 @@ use crate::analysis::expr_util::collect_column_refs;
 
 /// The result of scanning one non-simple-rename projected expression for
 /// provenance touching `source_ref`.
-enum ExprTouch {
+pub(crate) enum ExprTouch {
     /// Nothing in the expression resolves to `source_ref`.
     None,
     /// Exactly the `source_ref` columns this expression's value depends on.
@@ -230,8 +230,11 @@ enum ExprTouch {
 /// Leaf classifier over one already-bounded projected expression's own AST
 /// (never a raw-text scan): every function call it contains is checked
 /// against the shared function registry for opaqueness, and every embedded
-/// column reference is classified against `source_ref`.
-fn scan_expr_for_source(expr: &Expr, cx: &NodeCx, source_ref: &str) -> ExprTouch {
+/// column reference is classified against `source_ref`. Shared with
+/// `analysis::affected_keys`, which parameterises this same leaf classifier
+/// with a target-output-column filter instead of writing a second copy
+/// (`model_properties.md` §"Affected-key discovery").
+pub(crate) fn scan_expr_for_source(expr: &Expr, cx: &NodeCx, source_ref: &str) -> ExprTouch {
     // An opaque (registry-unrecognised) function call applied over a column
     // of `source_ref` is fail-closed regardless of what else the expression
     // contains — smelt has no basis to claim a narrower dependency than the
