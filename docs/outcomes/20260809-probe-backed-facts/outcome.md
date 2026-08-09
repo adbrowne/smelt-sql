@@ -36,6 +36,12 @@ safe to grow (the contract lattice will grow it).
 - Declared source lateness wiring into live scans (belongs to the contract
   lattice's frozen-horizon work).
 - New declaration kinds — this outcome hardens the existing ones.
+- Widening *which* maintenance cells consult a declared `referential_integrity`
+  closure (today only the source-enrichment `UpstreamMutation` route can; a
+  model-edge creation cell's closure is always derived with RI `None`). Making
+  the tripwire fire for every run that relies on the declaration is criterion 1;
+  giving more runs a reason to rely on it is a separate narrowing-widening
+  decision, tracked in `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 
 ## Phases
 
@@ -43,7 +49,7 @@ safe to grow (the contract lattice will grow it).
 |---|-------|--------|
 | 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
-| 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | pending |
+| 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | planned |
 | 4 | Runtime wiring: `probes:` in `Config`, cadence control, firing → named diagnostic + cell remedy marking | pending |
 | 5 | Conformance recipes: violated-fact scenarios caught by probes | pending |
 | 6 | Surface: explain rendering of probes + cost, docs-site update | pending |
@@ -71,6 +77,19 @@ safe to grow (the contract lattice will grow it).
   order by a processed-row ordinal (`ROW_NUMBER() OVER ()`), never by the event-time column
   itself, or every partition trivially sorts and no violation is detectable. See
   `phases/02-summary.md`.
+
+- 2026-08-10: Phase 3 planned. Two facts found while planning shaped it: (a)
+  `SkeletonSourceClosure::Closed` records no *route* for its row-preservation
+  conjunct, so a consumer cannot tell a `LEFT JOIN`-proven closure from a
+  declaration-licensed one — phase 3 adds `Closed { row_preservation }` so the
+  probe obligation is structural, not a comment; (b) the production Salsa
+  derivation (`smelt-db/src/queries/maintenance.rs`) always passes an *empty*
+  `SourceReferentialIntegrity` map, so `derive_maintenance_plan_with_referential_integrity`
+  exists but has no production caller — the plan plumbs it, otherwise the wiring
+  would be unreachable in a real run. No phase rows added or reordered; the
+  which-cells-consult-RI widening is recorded under "## Out of scope" instead,
+  since criterion 1 asks that every run *relying* on the declaration probe, not
+  that more runs rely on it.
 
 ## Blocked
 
