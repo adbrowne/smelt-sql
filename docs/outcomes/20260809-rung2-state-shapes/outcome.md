@@ -49,9 +49,10 @@ success criteria above.
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
-| 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
-| 7 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end; ledger grading audit | pending |
-| 8 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
+| 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | planned |
+| 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | pending |
+| 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | pending |
+| 9 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
 
 ## Decision log
 
@@ -190,6 +191,24 @@ success criteria above.
   columns couldn't resolve them (fixed by augmenting before compiling in both keyed executors).
   `maintenance_conformance`'s `assert_keyed_equivalence` needed a presented-columns-only SELECT
   helper since the physical table now carries hidden state columns the oracle doesn't produce.
+
+- 2026-08-09 (plan 6, reshape): old row 6 split into row 6 (once-write fallback/multi-candidate
+  spellings) and row 7 (`AVG`/`STDDEV_*`/`VAR_*` keyed folds). They widen two disjoint arms of
+  `classify_cumulative` (the `GroupByKey`/`COALESCE` arm vs. the `OtherAggregate`/`combiner_for`
+  arm) and have disjoint blast radii: once-write's state combiners (`OnceWrite` + `BoolOr`) are
+  idempotent and change nothing downstream, whereas `AVG`'s state is `Sum` — the first *additive*
+  state, which `WindowedKeyedRule::ledger_grade` reads off `cross_partition_combiner` alone and
+  would grade `Idempotent`, silently dropping the ledger refusal a reprocessed window needs. That
+  fix (plus `refuse()`'s monoid allowlist and `smelt-runtime/src/diagnostics.rs`'s `KeyedFold`
+  preview folds, both of which ignore `state` today) belongs with the family that makes it
+  reachable, not in a later "audit" row. Old rows 7/8 shift to 8/9; the ledger-grading audit
+  merges into row 7 as required work. No work left the outcome.
+- 2026-08-09 (plan 6): only the fallback-bearing and multi-candidate spellings become
+  state-bearing; the key-derived and bare `COALESCE(MAX(col))` spellings stay stateless with the
+  `COALESCE(target, delta)` combiner they have today. Rejected: routing all four spellings through
+  `decompose_once_write` for uniformity — it would rewrite the stored shape of every already-
+  admitted once-write model (and all 47 conformance recipes) to buy nothing the spec asks for,
+  since §"The column-family catalogue" states the bare spellings' combiner *is* the direct fold.
 
 ## Blocked
 
