@@ -29,7 +29,7 @@ use smelt_state::reconciliation::Region;
 
 use crate::gate::{
     classify_keyed, classify_mixed, drive_and_assert, insert_fact_row, insert_row_keyed,
-    stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
+    snapshot_table_rows, stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
 };
 
 /// Read back `SELECT d, id, val, attr FROM main.<model_name> ORDER BY id` —
@@ -218,6 +218,13 @@ async fn redelivered_window_refuses_for_additive_keyed() {
         .await
         .expect("first fold of the window must succeed");
 
+    let maintained_before = {
+        let backend = project.backend().await.expect("backend");
+        snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+            .await
+            .expect("snapshot before the refused redelivery")
+    };
+
     // Re-deliver the SAME window: never-fold-twice must refuse BEFORE the
     // action re-runs, never silently double-count.
     let rerun = project.run_quiet("keyed-redelivery-2", request).await;
@@ -229,6 +236,30 @@ async fn redelivered_window_refuses_for_additive_keyed() {
     assert!(
         message.contains("already reflected"),
         "refusal must name the never-fold-twice reason, got: {message}"
+    );
+    assert!(
+        message.contains("KeyedReprocessedWindow"),
+        "refusal must name the diagnostic code KeyedReprocessedWindow, got: {message}"
+    );
+    assert!(
+        message.contains("2024-01-01"),
+        "refusal must name the reprocessed window's bounds, got: {message}"
+    );
+    assert!(
+        message.contains("--full-refresh"),
+        "refusal must point at the --full-refresh remedy, got: {message}"
+    );
+
+    let maintained_after = {
+        let backend = project.backend().await.expect("backend");
+        snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+            .await
+            .expect("snapshot after the refused redelivery")
+    };
+    assert_eq!(
+        maintained_before, maintained_after,
+        "the refused redelivery must leave the maintained table's contents byte-identical — \
+         the refusal happens before any write"
     );
 }
 

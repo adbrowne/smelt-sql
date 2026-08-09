@@ -452,13 +452,15 @@ pub async fn run_windowed_keyed_maintenance(
                     Ok(()) => {}
                     Err(BackendError::AlreadyReflected { message }) => {
                         bail!(
-                            "windowed-keyed-maintenance driver refused model '{}': partition \
-                             {} from input '{}' is already reflected in the reconciliation \
-                             ledger (never-fold-twice — docs/specs/incremental_models.md \
-                             §Reprocessing). {}. Mitigations: drop the target table and re-run \
-                             for a full rebuild, or perform a manual cascade rebuild.",
+                            "KeyedReprocessedWindow: model '{}' refused — partition {} \
+                             (window {}..{}) from input '{}' is already reflected in the \
+                             reconciliation ledger (never-fold-twice — \
+                             docs/specs/incremental_models.md §Reprocessing). {}. Re-run with \
+                             `--full-refresh` to rebuild the target from scratch.",
                             model_name,
                             step.partition_value,
+                            step.range.start,
+                            step.range.end,
                             rule.ledger_input(),
                             message
                         );

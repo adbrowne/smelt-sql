@@ -1842,7 +1842,7 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
 
 /// Snapshot `main.<table>`'s full contents as sorted, comparable text rows —
 /// the zero-write redelivery step's before/after equality check.
-async fn snapshot_table_rows(
+pub(crate) async fn snapshot_table_rows(
     backend: &dyn Backend,
     table: &str,
 ) -> anyhow::Result<Vec<Vec<String>>> {

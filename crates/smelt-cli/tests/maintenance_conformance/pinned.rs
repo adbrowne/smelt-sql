@@ -55,7 +55,7 @@ use smelt_maintenance_testkit::verdict::{classify, Verdict};
 
 use crate::gate::{
     classify_keyed, classify_mixed, drive_and_assert, drive_keyed_and_assert, insert_fact_row,
-    stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
+    snapshot_table_rows, stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
 };
 
 fn day(offset: i64) -> NaiveDate {
@@ -443,6 +443,13 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         rt.block_on(drive_keyed_and_assert(&project, &recipe, &schedule))
             .expect("first fold must succeed");
 
+        let maintained_before = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+                .await
+                .expect("snapshot before the refused redelivery")
+        });
+
         let mut request = base_request("dev");
         request.start = Some("2024-01-01".to_string());
         request.end = Some("2024-01-02".to_string());
@@ -455,6 +462,30 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         assert!(
             message.contains("already reflected"),
             "refusal must name the never-fold-twice reason, got: {message}"
+        );
+        assert!(
+            message.contains("KeyedReprocessedWindow"),
+            "refusal must name the diagnostic code KeyedReprocessedWindow, got: {message}"
+        );
+        assert!(
+            message.contains("2024-01-01"),
+            "refusal must name the reprocessed window's bounds, got: {message}"
+        );
+        assert!(
+            message.contains("--full-refresh"),
+            "refusal must point at the --full-refresh remedy, got: {message}"
+        );
+
+        let maintained_after = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+                .await
+                .expect("snapshot after the refused redelivery")
+        });
+        assert_eq!(
+            maintained_before, maintained_after,
+            "the refused redelivery must leave the maintained table's contents byte-identical \
+             — the refusal happens before any write"
         );
     }
 }
