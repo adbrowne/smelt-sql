@@ -981,6 +981,198 @@ async fn keyed_fold_statements_come_from_the_emitter() {
     );
 }
 
+/// The `smelt explain` `KeyedFold` preview for a state-bearing model (`AVG`,
+/// `docs/outcomes/20260809-rung2-state-shapes` row 7) must carry the same
+/// state-column folds as the executed `MERGE` — both now go through the
+/// same single-owner `expand_aggregator_column_folds`
+/// (`smelt_logical::maintenance::emit`, row 7's "single-owner statement
+/// rule" move) and the same pre-compile `state_augmented_projection` step,
+/// so they can never diverge.
+#[tokio::test]
+async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    write_model(
+        project_dir,
+        "events",
+        "---\n\
+         materialization: table\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES \
+         (DATE '2024-01-01', 1, 10.0), \
+         (DATE '2024-01-02', 1, 20.0), \
+         (DATE '2024-01-02', 2, 30.0)) \
+         AS t(event_date, device_id, amount)",
+    );
+    write_model(
+        project_dir,
+        "device_avg_amount",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         ---\n\
+         SELECT device_id, AVG(amount) AS avg_amount \
+         FROM smelt.events GROUP BY device_id",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: keyed_avg_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    // One window covering both driving-source partitions: step 1
+    // (2024-01-01) hits the first-run CREATE arm; step 2 (2024-01-02) hits
+    // the MERGE arm — the one this test inspects.
+    let request = make_request("dev", "2024-01-01", "2024-01-03");
+    let outcome = execute_project(
+        "keyed-avg-statement-parity-run".to_string(),
+        request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project (keyed, state-bearing)");
+    assert!(
+        outcome.models.contains_key("device_avg_amount"),
+        "device_avg_amount must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    // `AVG`'s hidden state is the first *additive* state this mechanism
+    // admits (`docs/outcomes/20260809-rung2-state-shapes` row 7), so the
+    // cell now grades `Grade::Additive` and routes through the
+    // reconciliation-ledger path (`maintenance_driver::run_windowed_keyed_
+    // maintenance`'s ledger-interleaved arm) — its statements go through
+    // `Backend::execute_sql` directly, not `execute_statement_group`, so
+    // this test reads `recorded_sql`, not `recorded_groups` (unlike the
+    // `Idempotent`-graded `MIN`/`MAX` cells `keyed_fold_statements_come_
+    // from_the_emitter` above inspects).
+    let sql_log = backend.recorded_sql();
+    let executed_merge_sql = sql_log
+        .iter()
+        .find(|sql| sql.starts_with("MERGE INTO main.device_avg_amount"))
+        .cloned()
+        .unwrap_or_else(|| panic!("no executed MERGE statement found: {sql_log:?}"));
+    assert!(
+        executed_merge_sql
+            .contains("avg_amount__sum = target.avg_amount__sum + delta.avg_amount__sum")
+            && executed_merge_sql
+                .contains("avg_amount__count = target.avg_amount__count + delta.avg_amount__count"),
+        "expected the executed MERGE to fold the hidden sum/count state additively: \
+         {executed_merge_sql}"
+    );
+
+    // Now build the `smelt explain` `KeyedFold` preview for the same model
+    // and assert it carries the identical state-column fold expressions.
+    let sql_models =
+        smelt_core::ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone())
+            .discover_models()
+            .expect("discover_models");
+    let model = sql_models
+        .iter()
+        .find(|m| m.canonical_path() == "device_avg_amount")
+        .expect("device_avg_amount model discovered");
+    let metadata = model
+        .metadata
+        .as_deref()
+        .expect("device_avg_amount declares frontmatter");
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let sources = vec![smelt_logical::maintenance::SourceFacts {
+        name: "events".to_string(),
+        mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+        partition_col: Some("event_date".to_string()),
+        unique_key: vec![],
+        allow_full_scan: true,
+    }];
+    let plan_result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        &stripped_sql,
+        "device_avg_amount",
+        metadata,
+        &sources,
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+        &[],
+    )
+    .expect("device_avg_amount must derive a maintenance plan");
+    let cell = plan_result
+        .plan
+        .cells
+        .iter()
+        .find(|c| c.technique == smelt_logical::maintenance::Technique::KeyedFold)
+        .expect("device_avg_amount must admit a KeyedFold cell");
+
+    let registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+    let graph_locked = graph.lock().await;
+    let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph_locked, &[]);
+    drop(graph_locked);
+
+    let plan_cell_diagnostics = smelt_runtime::diagnostics::build_plan_cell_diagnostics(
+        cell,
+        model,
+        "main",
+        "dev",
+        &registry,
+        &resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &source_timeseries,
+    );
+    let preview = plan_cell_diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.technique == smelt_logical::maintenance::Technique::KeyedFold)
+        .expect("a KeyedFold preview must always be present");
+    let preview_sql = preview
+        .statements
+        .first()
+        .expect("the KeyedFold preview must render a statement")
+        .sql
+        .clone();
+
+    for fragment in [
+        "avg_amount__sum = target.avg_amount__sum + delta.avg_amount__sum",
+        "avg_amount__count = target.avg_amount__count + delta.avg_amount__count",
+        "avg_amount = (target.avg_amount__sum + delta.avg_amount__sum) / \
+         (target.avg_amount__count + delta.avg_amount__count)",
+    ] {
+        assert!(
+            preview_sql.contains(fragment) && executed_merge_sql.contains(fragment),
+            "preview and executed statement must carry the identical state-column fold \
+             `{fragment}` — preview: {preview_sql}\nexecuted: {executed_merge_sql}"
+        );
+    }
+}
+
 /// The slice-predicated keyed-fold family: a `refresh: keyed` model that
 /// also declares its own `timeseries:` block, admitted through key temporal
 /// locality's route 1 (key-embedded — `partition_column` is itself a

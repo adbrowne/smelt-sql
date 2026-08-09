@@ -4038,10 +4038,11 @@ pub fn build_source_timeseries_map(
 /// rewrites, so a producer-side rejection here must not derail an
 /// unrelated compile).
 ///
-/// Always empty today: `AggregatorColumn.state` is `None` at every current
-/// classification site (`docs/outcomes/20260809-rung2-state-shapes/
-/// outcome.md` rows 5-6 haven't widened admission onto it yet). The
-/// wiring is built now so it is correct the moment they do.
+/// Non-empty for the order-monotone overwrite family (`MAX_BY`/`MIN_BY`),
+/// the once-write family's fallback/multi-candidate spellings, and the
+/// decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`) — every family
+/// `docs/outcomes/20260809-rung2-state-shapes` has widened admission onto
+/// the decomposed-state mechanism for.
 fn build_state_bearing_models(
     models: &[smelt_core::ModelFile],
     source_timeseries: &smelt_planner::SourceTimeseriesMap,

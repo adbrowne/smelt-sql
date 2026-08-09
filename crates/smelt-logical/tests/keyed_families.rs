@@ -1143,3 +1143,167 @@ fn once_write_combiner_renders_coalesce() {
         "COALESCE(target.signup_referrer, delta.signup_referrer)"
     );
 }
+
+// ── The decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+// `docs/outcomes/20260809-rung2-state-shapes` row 7) ───────────────────────
+
+/// `AVG(x)` admits on hidden `(sum, count)` state — both `Sum` — with
+/// `CrossPartitionCombiner::Recomputed` on the presented column, mirroring
+/// `MAX_BY`'s companion-free admission shape.
+#[test]
+fn avg_column_admits_on_decomposed_sum_count_state() {
+    let sql = r#"SELECT
+    device_id,
+    AVG(amount) AS avg_amount
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let classification =
+        classify_cumulative(sql, &refs, &events_source_map(), false, &[]).expect("must classify");
+
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "avg_amount")
+        .expect("avg_amount column present");
+    assert_eq!(col.per_partition_agg, "AVG");
+    assert_eq!(
+        col.cross_partition_combiner,
+        CrossPartitionCombiner::Recomputed
+    );
+
+    let state = col.state.as_ref().expect("state must be present");
+    let state_names: Vec<&str> = state
+        .state_columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(state_names, vec!["avg_amount__sum", "avg_amount__count"]);
+    for state_col in &state.state_columns {
+        assert_eq!(state_col.combiner, CrossPartitionCombiner::Sum);
+    }
+    assert_eq!(
+        state.presentation_expr,
+        "avg_amount__sum / avg_amount__count"
+    );
+}
+
+/// `STDDEV_SAMP(x)` admits on hidden `(n, sx, sxx)` Welford-style state,
+/// presented via the family's closed form.
+#[test]
+fn stddev_samp_column_admits_on_welford_state() {
+    let sql = r#"SELECT
+    device_id,
+    STDDEV_SAMP(amount) AS amount_stddev
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let classification =
+        classify_cumulative(sql, &refs, &events_source_map(), false, &[]).expect("must classify");
+
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "amount_stddev")
+        .expect("amount_stddev column present");
+    assert_eq!(
+        col.cross_partition_combiner,
+        CrossPartitionCombiner::Recomputed
+    );
+
+    let state = col.state.as_ref().expect("state must be present");
+    let state_names: Vec<&str> = state
+        .state_columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(
+        state_names,
+        vec![
+            "amount_stddev__n",
+            "amount_stddev__sx",
+            "amount_stddev__sxx"
+        ]
+    );
+    assert!(state.presentation_expr.contains("SQRT"));
+    assert!(state.presentation_expr.contains("<= 1"));
+}
+
+/// `AVG(DISTINCT amount)` is holistic — the classifier refuses it just as
+/// `decompose_to_state` does — `KeyedUnknownCombiner`, not an admission.
+#[test]
+fn avg_distinct_refuses_as_holistic() {
+    let sql = r#"SELECT
+    device_id,
+    AVG(DISTINCT amount) AS avg_amount
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    assert!(
+        err.iter()
+            .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
+        "diagnostics: {err:?}"
+    );
+}
+
+/// `AVG(x) + 1` — a composite expression over the aggregate — still refuses;
+/// the decomposed-fold widening only ever admits a direct call.
+#[test]
+fn avg_composite_expression_refuses() {
+    let sql = r#"SELECT
+    device_id,
+    AVG(amount) + 1 AS avg_amount
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    assert!(
+        err.iter()
+            .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
+        "diagnostics: {err:?}"
+    );
+}
+
+/// The admission matrix's snapshot-reconcile ✗ column, decomposed-fold
+/// direction: `AVG` under zero clocked sources refuses
+/// `KeyedSnapshotSourceUnsupportedColumn` naming the "decomposed fold"
+/// family — the same additive-state reasoning as the direct additive fold
+/// family ([`additive_fold_refuses_snapshot_reconcile`]).
+#[test]
+fn avg_under_snapshot_reconcile_refuses() {
+    let sql = r#"SELECT
+    device_id,
+    AVG(amount) AS avg_amount
+FROM smelt.silver.lookup_table
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.lookup_table".to_string()];
+    let err = classify_cumulative(sql, &refs, &HashMap::new(), false, &[]).unwrap_err();
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { family, .. }
+                if family == "decomposed fold"
+        )),
+        "diagnostics: {err:?}"
+    );
+}
+
+/// A holistic aggregate with no encoded state shape (`MEDIAN`) stays
+/// refused — the decomposed-fold widening cannot admit anything the
+/// mechanism doesn't actually encode.
+#[test]
+fn median_still_refuses_as_unknown_combiner() {
+    let sql = r#"SELECT
+    device_id,
+    MEDIAN(amount) AS median_amount
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    assert!(
+        err.iter()
+            .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
+        "diagnostics: {err:?}"
+    );
+}

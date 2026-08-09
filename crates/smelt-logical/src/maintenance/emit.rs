@@ -1020,6 +1020,103 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
     }
 }
 
+// ── Decomposed-state column fold expansion (`docs/specs/
+// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
+// "Combiner over state") ─────────────────────────────────────────────────
+
+/// Expand one [`AggregatorColumn`](crate::rules::cumulative::AggregatorColumn)
+/// into its `(column, combine_expression)` fold pairs for the `MERGE`'s
+/// `SET` clause. Single-owner statement rule (`docs/specs/
+/// incremental_models.md` §"Statement emission (single owner)"): both the
+/// executed keyed-fold `MERGE` (`smelt-runtime::cumulative::
+/// build_cumulative_merge_sql`) and the `smelt explain` preview
+/// (`smelt-runtime::diagnostics`) call this so their fold shapes can never
+/// diverge (`docs/outcomes/20260809-rung2-state-shapes` row 7).
+///
+/// A stateless column (`state: None`, every family admitted before this
+/// mechanism existed) still produces exactly the one pair it always has. A
+/// state-bearing column expands into one pair per hidden state column (each
+/// folded by its own combiner over `target.<c>`/`delta.<c>`) plus the
+/// presented column, set to the presentation expression with every
+/// state-column reference substituted by that column's own *merged*
+/// expression — so the presented value is always recomputed fresh from the
+/// just-merged state, never folded directly.
+pub fn expand_aggregator_column_folds(
+    col: &crate::rules::cumulative::AggregatorColumn,
+) -> Vec<(String, String)> {
+    let Some(state) = &col.state else {
+        let target_col = format!("target.{}", col.output_name);
+        let delta_col = format!("delta.{}", col.output_name);
+        let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
+        return vec![(col.output_name.clone(), expr)];
+    };
+
+    let mut folds: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len() + 1);
+    let mut merged_by_name: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len());
+    for state_col in &state.state_columns {
+        let target_col = format!("target.{}", state_col.name);
+        let delta_col = format!("delta.{}", state_col.name);
+        let merged = state_col.combiner.render(&target_col, &delta_col);
+        merged_by_name.push((state_col.name.clone(), merged.clone()));
+        folds.push((state_col.name.clone(), merged));
+    }
+    // One simultaneous pass over the ORIGINAL presentation expression, not a
+    // chain of dependent substitutions — a state column's own merged
+    // expression can embed another state column's qualified name (the
+    // order-monotone `v` column's fold text names its sibling `o` column,
+    // e.g. `target.status__o`), and re-scanning already-substituted text for
+    // the next name would corrupt it (`docs/outcomes/
+    // 20260809-rung2-state-shapes` row 5).
+    let presentation_expr = substitute_identifiers(&state.presentation_expr, &merged_by_name);
+    folds.push((col.output_name.clone(), presentation_expr));
+    folds
+}
+
+/// Replace every whole-identifier occurrence of each `(name, replacement)`
+/// pair in `text`, in one simultaneous left-to-right pass over the
+/// ORIGINAL `text` — a match must not be preceded or followed by another
+/// identifier character (`[A-Za-z0-9_]`), so `avg_amount__sum` is not
+/// matched inside `avg_amount__sum_2`. A single pass (rather than N
+/// sequential single-name substitutions) matters: a replacement text can
+/// itself contain another pair's `name` as a substring (a state column's
+/// merged fold expression naming a sibling state column), and re-scanning
+/// already-substituted output for the next name would corrupt it. Used to
+/// rewrite a `DecomposedState` presentation expression's state-column
+/// references onto their merged fold expressions
+/// (`expand_aggregator_column_folds`) — plain string substitution over SQL
+/// identifiers, not general SQL rewriting.
+fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> String {
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut skip_until = 0usize;
+    for (i, ch) in text.char_indices() {
+        if i < skip_until {
+            continue;
+        }
+        let matched = replacements.iter().find(|(name, _)| {
+            text[i..].starts_with(name.as_str())
+                && (i == 0 || !is_ident_char(bytes[i - 1] as char))
+                && {
+                    let after = i + name.len();
+                    after >= bytes.len() || !is_ident_char(bytes[after] as char)
+                }
+        });
+        if let Some((name, replacement)) = matched {
+            result.push('(');
+            result.push_str(replacement);
+            result.push(')');
+            skip_until = i + name.len();
+            continue;
+        }
+        result.push(ch);
+    }
+    result
+}
+
 // ── Decomposed state (rung 2) select augmentation (`docs/specs/
 // incremental_models.md` §"Decomposed state (rung 2) in keyed models") ────
 

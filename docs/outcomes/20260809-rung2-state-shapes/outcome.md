@@ -50,7 +50,7 @@ success criteria above.
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
-| 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | planned |
+| 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | done |
 | 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | pending |
 | 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | pending |
 
@@ -242,6 +242,23 @@ success criteria above.
   through `merge_sql`'s trait signature) and collapsing `(cross_partition_combiner, state)` into a
   `ColumnFold` enum — the right shape, but ~40 construction sites would swamp this phase; noted
   for a later outcome.
+
+- 2026-08-09 (implement 7): `AVG`/`STDDEV_*`/`VAR_*` admit on hidden additive state
+  (`(sum, count)` / `(n, Σx, Σx²)`) via a new `CrossPartitionCombiner::Recomputed`
+  variant + `classify_decomposed_fold_column`. `has_monoid_state_shape` widens
+  `faithful_fold` by calling `decompose_to_state` with placeholder text rather than
+  duplicating the family list; `derive_fold_spec` mirrors the same arity/DISTINCT
+  check. `WindowedKeyedRule::refuse`/`ledger_grade` now check `col.state` first for
+  every column (not just the new family) — `MAX_BY`/once-write's existing state
+  combiners are already in the "recognised" allowlist, so their behavior is
+  unchanged (regression-tested). `expand_aggregator_column_folds` moved from
+  `smelt-runtime` into `smelt-logical::maintenance::emit` (single-owner rule) so the
+  `smelt explain` `KeyedFold` preview and the executed `MERGE` share the exact same
+  fold expansion — the preview also gained the missing pre-compile
+  `state_augmented_projection` step. Spec Known-Divergence bullet and docs-site
+  "Out of v1" `AVG` entry deleted (nothing residual, following the phase-5
+  precedent). 13 new tests, all gates green, `maintenance_conformance` stayed
+  47/47 unchanged (no new recipes yet — that's row 8's job).
 
 ## Blocked
 

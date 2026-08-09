@@ -27,8 +27,11 @@
 //!    enforces — both layers decompose the column to hidden `(v, o)` state
 //!    (`smelt_logical::analysis::decomposed_state::decompose_to_state`)
 //!    rather than requiring a companion projection, so this stage never
-//!    re-derives that proof itself. A decomposable non-monoid outside that
-//!    family (`AVG`) is still not admitted here.
+//!    re-derives that proof itself. The decomposed-fold family (`AVG`/
+//!    `STDDEV_*`/`VAR_*`) is admitted the same way, via
+//!    [`super::decomposed_state::has_monoid_state_shape`]: its hidden state
+//!    is a commutative monoid even though the presented value's own algebra
+//!    is not.
 //!
 //! Both conditions must hold for a fold technique to be admissible; either
 //! failing alone refuses, and each is reported independently — the spec's
@@ -43,6 +46,7 @@
 use serde::Serialize;
 use smelt_types::SqlFunction;
 
+use super::decomposed_state::has_monoid_state_shape;
 use super::discriminants::{combiner_discriminants, Monotone};
 use super::input_delta::{InputDeltaKind, MutationProfile};
 
@@ -132,18 +136,29 @@ pub fn faithful_fold(
     };
 
     // Condition (2): combiner algebra. The admitted set is `is_monoid`,
-    // widened to also admit the order-monotone overwrite family
-    // (`Monotone::Order` — `MAX_BY`/`MIN_BY`, `incremental_models.md`
-    // §"The column-family catalogue"): it is a semilattice fold, not a
-    // commutative monoid (`is_monoid` stays `false` for it,
-    // `discriminants.rs`), but its sub-multiset fold IS well-defined under
-    // the same sequential-application discipline this cell's caller
-    // already enforces (window-forward keyed steps apply in temporal
-    // order — §"The two run shapes"; overwrite columns additionally force
-    // that ordering themselves, §"Order-independence") — a decomposable
-    // non-monoid (`AVG`) is still not admitted by this proof.
+    // widened to also admit:
+    // - the order-monotone overwrite family (`Monotone::Order` — `MAX_BY`/
+    //   `MIN_BY`, `incremental_models.md` §"The column-family catalogue"):
+    //   it is a semilattice fold, not a commutative monoid (`is_monoid`
+    //   stays `false` for it, `discriminants.rs`), but its sub-multiset
+    //   fold IS well-defined under the same sequential-application
+    //   discipline this cell's caller already enforces (window-forward
+    //   keyed steps apply in temporal order — §"The two run shapes";
+    //   overwrite columns additionally force that ordering themselves,
+    //   §"Order-independence");
+    // - the decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+    //   `has_monoid_state_shape`, `docs/outcomes/20260809-rung2-state-shapes`
+    //   row 7): each decomposes into hidden state that IS a commutative
+    //   monoid (`(sum, count)`/`(n, Σx, Σx²)`, all-`Sum`), even though the
+    //   presented value's own algebra is not — a family-level algebraic
+    //   fact, not a `derive.rs` waiver (unlike once-write's contextual
+    //   `Coalesce` waiver, which widens condition (2) through its own
+    //   route).
     let discriminants = combiner_discriminants(combiner, distinct);
-    let submultiset_fold = if discriminants.is_monoid || discriminants.monotone == Monotone::Order {
+    let submultiset_fold = if discriminants.is_monoid
+        || discriminants.monotone == Monotone::Order
+        || has_monoid_state_shape(combiner, distinct)
+    {
         ConditionVerdict::Holds
     } else {
         ConditionVerdict::Fails {

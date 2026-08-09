@@ -33,12 +33,33 @@ use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
 };
 use smelt_planner::{
-    classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
-    CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
+    classify_cumulative, combiner_for, CrossPartitionCombiner, CumulativeClassification,
+    KeyedDiagnostic, SourceTimeseriesMap,
 };
 use smelt_state::reconciliation::Grade;
 use std::collections::HashMap;
 use tracing::info;
+
+/// The state-column combiner allowlist `WindowedKeyedRule::refuse`'s
+/// defense-in-depth pass verifies a decomposed-state column's own state
+/// columns against — every combiner shape a state column can carry today
+/// (`analysis::decomposed_state::decompose_to_state`/`decompose_once_write`,
+/// `docs/outcomes/20260809-rung2-state-shapes`).
+fn is_recognised_state_combiner(combiner: &CrossPartitionCombiner) -> bool {
+    matches!(
+        combiner,
+        CrossPartitionCombiner::Sum
+            | CrossPartitionCombiner::Min
+            | CrossPartitionCombiner::Max
+            | CrossPartitionCombiner::BoolAnd
+            | CrossPartitionCombiner::BoolOr
+            | CrossPartitionCombiner::BitAnd
+            | CrossPartitionCombiner::BitOr
+            | CrossPartitionCombiner::BitXor
+            | CrossPartitionCombiner::OrderMonotone { .. }
+            | CrossPartitionCombiner::OnceWrite
+    )
+}
 
 /// `keyed`'s [`WindowedKeyedRule`] impl: its classification already
 /// gated every aggregator column through `combiner_for` (the monoid-only
@@ -49,6 +70,32 @@ use tracing::info;
 impl WindowedKeyedRule for CumulativeClassification {
     fn refuse(&self) -> Option<String> {
         for col in &self.aggregator_columns {
+            // A state-bearing column's presented value has no monoid fold of
+            // its own — `MAX_BY`/`MIN_BY`'s `OrderMonotone`, once-write's
+            // fallback/multi-candidate state, and the decomposed-fold
+            // family's `Recomputed` all fold through their hidden state
+            // columns instead of `per_partition_agg`
+            // (`docs/outcomes/20260809-rung2-state-shapes` row 7). Check
+            // `col.state` first and re-verify each state column's own
+            // combiner against the same allowlist below, rather than
+            // consulting `combiner_for(per_partition_agg)` (`AVG`/
+            // `STDDEV_*`/`VAR_*` never appear in that allowlist — it is a
+            // fold over the *presented* value, which a state-bearing column
+            // never has).
+            if let Some(state) = &col.state {
+                for state_col in &state.state_columns {
+                    if !is_recognised_state_combiner(&state_col.combiner) {
+                        return Some(format!(
+                            "internal error: state column `{}` backing `{}` carries an \
+                             unrecognised combiner — the classifier only derives already- \
+                             recognised combiners into decomposed state",
+                            state_col.name, col.output_name
+                        ));
+                    }
+                }
+                continue;
+            }
+
             match &col.cross_partition_combiner {
                 // The order-monotone overwrite family (`MAX_BY`/`MIN_BY`) is
                 // not a monoid — `combiner_for`'s allowlist deliberately
@@ -75,6 +122,21 @@ impl WindowedKeyedRule for CumulativeClassification {
                 // so this defense-in-depth pass has nothing further to
                 // check (`docs/plans/20260809-keyed-frontier.md` Phase 4).
                 CrossPartitionCombiner::OnceWrite => {}
+                // Unreachable in a well-formed classification: every
+                // `Recomputed` column the classifier produces
+                // (`rules::cumulative::classify_decomposed_fold_column`)
+                // always carries `state: Some(..)`, caught by the branch
+                // above. Reaching this arm means a `Recomputed` column with
+                // no state slipped through classification — an internal
+                // invariant violation, not a model error.
+                CrossPartitionCombiner::Recomputed => {
+                    return Some(format!(
+                        "internal error: aggregator `{}` on column `{}` is `Recomputed` but \
+                         carries no decomposed state — a `Recomputed` presented column must \
+                         always be state-bearing",
+                        col.per_partition_agg, col.output_name
+                    ));
+                }
                 _ => {
                     if combiner_for(&col.per_partition_agg).is_none() {
                         return Some(format!(
@@ -124,10 +186,27 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
         let any_additive = self.aggregator_columns.iter().any(|col| {
-            matches!(
-                col.cross_partition_combiner,
-                CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-            )
+            // A state-bearing column's own `cross_partition_combiner`
+            // (`OrderMonotone`/`OnceWrite`/`Recomputed`) says nothing about
+            // whether its *state* folds additively — grade off each state
+            // column's own combiner instead. `AVG`/the variance family's
+            // state is entirely `Sum` (the first additive state this
+            // mechanism admits, `docs/outcomes/20260809-rung2-state-shapes`
+            // row 7); `MAX_BY`/`MIN_BY`'s `(v, o)` and once-write's
+            // `(value, written)` states are not, and stay `Idempotent`.
+            if let Some(state) = &col.state {
+                state.state_columns.iter().any(|s| {
+                    matches!(
+                        s.combiner,
+                        CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+                    )
+                })
+            } else {
+                matches!(
+                    col.cross_partition_combiner,
+                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+                )
+            }
         });
         if any_additive {
             Grade::Additive
@@ -558,7 +637,7 @@ pub fn build_cumulative_merge_sql(
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
         .iter()
-        .flat_map(expand_aggregator_column_folds)
+        .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
         .collect();
 
     let schema_table = format!("{schema}.{table}");
@@ -582,91 +661,6 @@ pub fn build_cumulative_merge_sql(
         ),
     };
     group.statements[0].sql.clone()
-}
-
-/// Expand one [`AggregatorColumn`] into its `(column, combine_expression)`
-/// fold pairs for the `MERGE`'s `SET` clause (`docs/specs/
-/// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
-/// "Combiner over state"). A stateless column (`state: None`, every family
-/// admitted before this mechanism existed) still produces exactly the one
-/// pair it always has. A state-bearing column expands into one pair per
-/// hidden state column (each folded by its own combiner over
-/// `target.<c>`/`delta.<c>`) plus the presented column, set to the
-/// presentation expression with every state-column reference substituted by
-/// that column's own *merged* expression — so the presented value is always
-/// recomputed fresh from the just-merged state, never folded directly.
-fn expand_aggregator_column_folds(col: &AggregatorColumn) -> Vec<(String, String)> {
-    let Some(state) = &col.state else {
-        let target_col = format!("target.{}", col.output_name);
-        let delta_col = format!("delta.{}", col.output_name);
-        let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
-        return vec![(col.output_name.clone(), expr)];
-    };
-
-    let mut folds: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len() + 1);
-    let mut merged_by_name: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len());
-    for state_col in &state.state_columns {
-        let target_col = format!("target.{}", state_col.name);
-        let delta_col = format!("delta.{}", state_col.name);
-        let merged = state_col.combiner.render(&target_col, &delta_col);
-        merged_by_name.push((state_col.name.clone(), merged.clone()));
-        folds.push((state_col.name.clone(), merged));
-    }
-    // One simultaneous pass over the ORIGINAL presentation expression, not a
-    // chain of dependent substitutions — a state column's own merged
-    // expression can embed another state column's qualified name (the
-    // order-monotone `v` column's fold text names its sibling `o` column,
-    // e.g. `target.status__o`), and re-scanning already-substituted text for
-    // the next name would corrupt it (`docs/outcomes/
-    // 20260809-rung2-state-shapes` row 5).
-    let presentation_expr = substitute_identifiers(&state.presentation_expr, &merged_by_name);
-    folds.push((col.output_name.clone(), presentation_expr));
-    folds
-}
-
-/// Replace every whole-identifier occurrence of each `(name, replacement)`
-/// pair in `text`, in one simultaneous left-to-right pass over the
-/// ORIGINAL `text` — a match must not be preceded or followed by another
-/// identifier character (`[A-Za-z0-9_]`), so `avg_amount__sum` is not
-/// matched inside `avg_amount__sum_2`. A single pass (rather than N
-/// sequential single-name substitutions) matters: a replacement text can
-/// itself contain another pair's `name` as a substring (a state column's
-/// merged fold expression naming a sibling state column), and re-scanning
-/// already-substituted output for the next name would corrupt it. Used to
-/// rewrite a `DecomposedState` presentation expression's state-column
-/// references onto their merged fold expressions
-/// (`expand_aggregator_column_folds`) — plain string substitution over SQL
-/// identifiers, not general SQL rewriting.
-fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> String {
-    fn is_ident_char(c: char) -> bool {
-        c.is_ascii_alphanumeric() || c == '_'
-    }
-
-    let bytes = text.as_bytes();
-    let mut result = String::with_capacity(text.len());
-    let mut skip_until = 0usize;
-    for (i, ch) in text.char_indices() {
-        if i < skip_until {
-            continue;
-        }
-        let matched = replacements.iter().find(|(name, _)| {
-            text[i..].starts_with(name.as_str())
-                && (i == 0 || !is_ident_char(bytes[i - 1] as char))
-                && {
-                    let after = i + name.len();
-                    after >= bytes.len() || !is_ident_char(bytes[after] as char)
-                }
-        });
-        if let Some((name, replacement)) = matched {
-            result.push('(');
-            result.push_str(replacement);
-            result.push(')');
-            skip_until = i + name.len();
-            continue;
-        }
-        result.push(ch);
-    }
-    result
 }
 
 /// Resolve this classification's [`WriteSuppression`] verdict
@@ -1243,6 +1237,186 @@ mod tests {
             },
         };
         assert!(classification.refuse().is_none());
+    }
+
+    /// An `AVG` column's presented `Recomputed` combiner carries `state:
+    /// Some(..)` whose state columns are both `Sum` — `ledger_grade` must
+    /// grade the cell `Additive` (`docs/outcomes/20260809-rung2-state-shapes`
+    /// row 7): the hidden state folds additively even though the presented
+    /// column's own combiner (`Recomputed`) says nothing about algebra.
+    #[test]
+    fn avg_model_is_ledger_graded_additive() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(
+            classification.ledger_grade(),
+            Grade::Additive,
+            "AVG's hidden (sum, count) state folds additively — the cell must keep a \
+             reconciliation ledger"
+        );
+    }
+
+    /// Regression: `MAX_BY`'s `(v, o)` state and once-write's `(value,
+    /// written)` state are NOT additive — neither combiner is `Sum`/`BitXor`
+    /// — so both must stay `Idempotent`, exactly as before state-awareness
+    /// was added to `ledger_grade`.
+    #[test]
+    fn max_by_and_once_write_state_stay_idempotent() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let max_by_classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "status".to_string(),
+                per_partition_agg: "MAX_BY".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone {
+                    ordering_column: "status__o".to_string(),
+                    prefer_greater: true,
+                },
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "status__v".to_string(),
+                            per_partition_expr: "ARG_MAX(status, updated_at)".to_string(),
+                            combiner: CrossPartitionCombiner::OrderMonotone {
+                                ordering_column: "status__o".to_string(),
+                                prefer_greater: true,
+                            },
+                        },
+                        StateColumn {
+                            name: "status__o".to_string(),
+                            per_partition_expr: "MAX(updated_at)".to_string(),
+                            combiner: CrossPartitionCombiner::Max,
+                        },
+                    ],
+                    presentation_expr: "status__v".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(max_by_classification.ledger_grade(), Grade::Idempotent);
+
+        let once_write_classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "first_referrer".to_string(),
+                per_partition_agg: "COALESCE".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "first_referrer__value".to_string(),
+                            per_partition_expr: "MAX(signup_referrer)".to_string(),
+                            combiner: CrossPartitionCombiner::OnceWrite,
+                        },
+                        StateColumn {
+                            name: "first_referrer__written".to_string(),
+                            per_partition_expr: "(MAX(signup_referrer)) IS NOT NULL".to_string(),
+                            combiner: CrossPartitionCombiner::BoolOr,
+                        },
+                    ],
+                    presentation_expr: "first_referrer__value".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(once_write_classification.ledger_grade(), Grade::Idempotent);
+    }
+
+    /// The defense-in-depth `refuse()` pass admits a state-bearing `AVG`
+    /// column (its state columns are recognised `Sum` combiners), and
+    /// separately catches the internal-invariant violation of a
+    /// `Recomputed` column carrying no state at all — a `Recomputed`
+    /// column must always be state-bearing by construction
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 7).
+    #[test]
+    fn refuse_accepts_state_bearing_avg_column() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let admitted = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert!(
+            admitted.refuse().is_none(),
+            "a state-bearing AVG column with recognised Sum state combiners must be admitted"
+        );
+
+        let internal_invariant_violation = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let reason = internal_invariant_violation.refuse();
+        assert!(
+            reason.is_some(),
+            "a Recomputed column with no state must be refused"
+        );
+        assert!(reason.unwrap().contains("internal error"));
     }
 
     #[test]

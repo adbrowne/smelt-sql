@@ -789,6 +789,66 @@ fn once_write_fallback_folds_state_and_recomputes_presented() {
     );
 }
 
+/// An `AVG` column driven from real SQL (`docs/outcomes/
+/// 20260809-rung2-state-shapes` row 7): the keyed merge folds `__sum`/
+/// `__count` pairwise (both `+`) and recomputes the presented column as
+/// `(target.__sum + delta.__sum) / (target.__count + delta.__count)`. Uses
+/// `expand_aggregator_column_folds` directly rather than hand-mirroring it —
+/// the function now lives in this crate (`docs/outcomes/
+/// 20260809-rung2-state-shapes` row 7's single-owner move), so the
+/// executed `MERGE` and this oracle share the exact same fold expansion.
+#[test]
+fn avg_keyed_merge_folds_state_and_recomputes_average() {
+    let sql = "SELECT device_id, AVG(amount) AS avg_amount \
+               FROM smelt.silver.events_parsed GROUP BY device_id";
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let mut source_timeseries: SourceTimeseriesMap = HashMap::new();
+    source_timeseries.insert(
+        "smelt.silver.events_parsed".to_string(),
+        TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        },
+    );
+    let classification =
+        classify_cumulative(sql, &refs, &source_timeseries, false, &[]).expect("must classify");
+
+    let folds: Vec<(String, String)> = classification
+        .aggregator_columns
+        .iter()
+        .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+        .collect();
+
+    let group = emit_keyed_fold(
+        "main.devices",
+        &classification.unique_key,
+        &folds,
+        "SELECT device_id, SUM(amount) AS avg_amount__sum, COUNT(amount) AS avg_amount__count \
+         FROM events GROUP BY 1",
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+    let sql = &group.statements[0].sql;
+    assert!(
+        sql.contains("avg_amount__sum = target.avg_amount__sum + delta.avg_amount__sum"),
+        "expected the sum state column to fold additively: {sql}"
+    );
+    assert!(
+        sql.contains("avg_amount__count = target.avg_amount__count + delta.avg_amount__count"),
+        "expected the count state column to fold additively: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "avg_amount = (target.avg_amount__sum + delta.avg_amount__sum) / \
+             (target.avg_amount__count + delta.avg_amount__count)"
+        ),
+        "expected the presented column recomputed from the merged sum/count state: {sql}"
+    );
+}
+
 /// `state_augmented_projection` appends `, <per_partition_expr> AS <state
 /// col>` for each state column, leaving the key/GROUP BY and the model's own
 /// presented select item unchanged.

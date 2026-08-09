@@ -2439,16 +2439,6 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   a change feed with delete events. Tombstones, opt-in hard delete, and the observer contract
   for the refused matrix cells are deferred
   (`docs/research/20260705-keyed-collapse-application.md` §5).
-- **Ladder rung 2 is specified but only partially wired into the keyed profile's admission.**
-  §"Decomposed state (rung 2) in keyed models" fixes the state shapes, physical layout, and
-  presentation projection; the state shapes are derived
-  (`crates/smelt-logical/src/analysis/decomposed_state.rs` encodes `AVG`, the variance/stddev
-  family, the order-monotone overwrite family's `(v, o)` shape, and the once-write family's
-  `(value, written)` shape), the state columns are materialised in the stored table and folded
-  through the keyed merge, and the order-monotone overwrite and once-write families' admission
-  both consume it (§"The column-family catalogue"). `AVG`/`STDDEV_*`/`VAR_*` folding at keyed
-  grain still refuses rather than consume the mechanism. Tracking:
-  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them.** Group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the
   rung-2 work above; rung 3 additionally depends on the change-feed consumption design — no

@@ -156,7 +156,10 @@ pub fn effective_scan_bounds(
 /// refuses the whole derivation (`None`), the same way an unrecognised
 /// combiner does — this keeps `smelt explain`/LSP diagnostics from
 /// reporting a `KeyedFold` admission the runtime then refuses with
-/// `KeyedUnknownCombiner` (`CLAUDE.md` §"Fail-loud discipline").
+/// `KeyedUnknownCombiner` (`CLAUDE.md` §"Fail-loud discipline"). The
+/// decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+/// `docs/outcomes/20260809-rung2-state-shapes` row 7) mirrors this exactly,
+/// with an exact-1-argument/no-`DISTINCT` shape check instead.
 ///
 /// `declared_functional_dependencies` is the model's own declared
 /// `functional_dependencies:` block, threaded straight into
@@ -212,6 +215,30 @@ pub fn derive_fold_spec(
                     // still refuses the whole derivation.
                     let args = func.arguments();
                     if args.len() != 2 {
+                        return None;
+                    }
+                }
+                // The decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+                // `docs/outcomes/20260809-rung2-state-shapes` row 7) mirrors
+                // the `ArgMax`/`ArgMin` precedent above: exact-1-argument, no
+                // `DISTINCT` — the same shape
+                // `rules::cumulative::classify_decomposed_fold_column` admits
+                // via `decompose_to_state`. Either violation refuses the
+                // whole derivation, the same way an unrecognised combiner
+                // does, so `smelt explain`/LSP never reports a `KeyedFold`
+                // admission the runtime classifier then refuses.
+                if matches!(
+                    combiner,
+                    SqlFunction::Avg
+                        | SqlFunction::Variance
+                        | SqlFunction::Stddev
+                        | SqlFunction::StddevPop
+                        | SqlFunction::StddevSamp
+                        | SqlFunction::VarPop
+                        | SqlFunction::VarSamp
+                ) {
+                    let args = func.arguments();
+                    if args.len() != 1 || smelt_logical::analysis::has_distinct_keyword(&func) {
                         return None;
                     }
                 }

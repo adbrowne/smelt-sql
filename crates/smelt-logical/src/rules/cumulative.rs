@@ -121,6 +121,20 @@ pub enum CrossPartitionCombiner {
     /// `analysis::functional_dependency::functional_dependency_verdict_over_vector`
     /// (`docs/plans/20260809-keyed-frontier.md` Phase 4).
     OnceWrite,
+    /// The decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+    /// `incremental_models.md` §"The column-family catalogue"): the
+    /// presented column has no target/delta fold of its own — it is always
+    /// recomputed as `π(merged state)` from the column's hidden state
+    /// columns (`analysis::decomposed_state::DecomposedState::
+    /// presentation_expr`), which `expand_aggregator_column_folds`
+    /// (`smelt-logical::maintenance::emit`) substitutes in directly rather
+    /// than calling `render` (`docs/outcomes/20260809-rung2-state-shapes`
+    /// row 7). `render` is unreachable by construction for a `Recomputed`
+    /// column: every such column carries `state: Some(..)`, and `refuse()`
+    /// (`smelt-runtime::cumulative::WindowedKeyedRule`) rejects a
+    /// `Recomputed` column with `state: None` before any statement is
+    /// built.
+    Recomputed,
 }
 
 impl CrossPartitionCombiner {
@@ -161,6 +175,11 @@ impl CrossPartitionCombiner {
             CrossPartitionCombiner::OnceWrite => {
                 format!("COALESCE({target_col}, {delta_col})")
             }
+            // Unreachable by construction — see the variant's doc comment.
+            // Returns the incumbent rather than panicking: a caller that
+            // somehow reaches this arm despite `refuse()`'s guard gets an
+            // inert fold, not a crash.
+            CrossPartitionCombiner::Recomputed => target_col.to_string(),
         }
     }
 }
@@ -1221,11 +1240,61 @@ pub fn classify_cumulative(
                             });
                         }
                     }
-                    (Some(name), None) => {
-                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
-                            projection: alias.clone(),
-                            offending: name,
+                    (Some(agg_upper), None) => {
+                        // The decomposed-fold family (`AVG`/`STDDEV_*`/
+                        // `VAR_*`, `docs/outcomes/20260809-rung2-state-shapes`
+                        // row 7): not in `combiner_for`'s monoid-over-the-
+                        // presented-value allowlist (there is no single
+                        // target/delta fold for the presented value), but
+                        // its algebra decomposes into hidden additive state
+                        // — attempt that before falling back to
+                        // `KeyedUnknownCombiner`. `decompose_to_state`
+                        // itself fails closed for every other holistic-or-
+                        // unknown-shape aggregate (`MEDIAN`,
+                        // `APPROX_COUNT_DISTINCT`, ...), so this widening
+                        // cannot admit anything the mechanism doesn't
+                        // actually encode.
+                        let decomposed_fold_fn = SqlFunction::from_name(&agg_upper).filter(|f| {
+                            matches!(
+                                f,
+                                SqlFunction::Avg
+                                    | SqlFunction::Variance
+                                    | SqlFunction::Stddev
+                                    | SqlFunction::StddevPop
+                                    | SqlFunction::StddevSamp
+                                    | SqlFunction::VarPop
+                                    | SqlFunction::VarSamp
+                            )
                         });
+                        match decomposed_fold_fn {
+                            Some(_) if is_snapshot_reconcile => {
+                                let (family, reason) = snapshot_refusal_reason(&agg_upper);
+                                diagnostics.push(
+                                    KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
+                                        projection: alias.clone(),
+                                        family: family.to_string(),
+                                        reason: reason.to_string(),
+                                    },
+                                );
+                            }
+                            Some(sql_fn) => {
+                                classify_decomposed_fold_column(
+                                    text,
+                                    alias,
+                                    expr,
+                                    sql_fn,
+                                    &agg_upper,
+                                    &mut aggregator_columns,
+                                    &mut diagnostics,
+                                );
+                            }
+                            None => {
+                                diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+                                    projection: alias.clone(),
+                                    offending: agg_upper,
+                                });
+                            }
+                        }
                     }
                     (None, _) => {
                         diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
@@ -1298,10 +1367,11 @@ pub fn classify_cumulative(
     }
 
     // Rule: no hidden decomposed-state column may collide with a user
-    // column of the same name. Unreachable today (every admitted family
-    // classifies with `state: None`) — wired in so a future admission
-    // widen (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6)
-    // inherits the check for free.
+    // column of the same name — reachable for every state-bearing family
+    // this classifier admits (the order-monotone overwrite family, the
+    // once-write family's fallback/multi-candidate spellings, and the
+    // decomposed-fold family, `docs/outcomes/20260809-rung2-state-shapes`
+    // rows 5-7).
     diagnostics.extend(diagnose_state_column_collisions(&aggregator_columns));
 
     if !diagnostics.is_empty() {
@@ -1400,6 +1470,65 @@ fn classify_order_monotone_column(
     }
 }
 
+/// Classify one `AVG`/`STDDEV_*`/`VAR_*` projection — the decomposed-fold
+/// family (`incremental_models.md` §"The column-family catalogue"). Mirrors
+/// [`classify_order_monotone_column`]'s shape: verify the projection is a
+/// *direct* call, then hand its argument(s) to
+/// `analysis::decomposed_state::decompose_to_state` and admit on `Ok` with
+/// `CrossPartitionCombiner::Recomputed` + the derived state, or refuse
+/// `KeyedUnknownCombiner` on `Err` (`docs/outcomes/20260809-rung2-state-shapes`
+/// row 7).
+fn classify_decomposed_fold_column(
+    text: &str,
+    alias: &str,
+    expr: &smelt_parser::Expr,
+    sql_fn: SqlFunction,
+    agg_upper: &str,
+    aggregator_columns: &mut Vec<AggregatorColumn>,
+    diagnostics: &mut Vec<KeyedDiagnostic>,
+) {
+    if !is_direct_function_call(text, agg_upper) {
+        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+            projection: alias.to_string(),
+            offending: format!("composite expression `{}`", text.trim()),
+        });
+        return;
+    }
+
+    let Some(fc) = expr.as_function_call() else {
+        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+            projection: alias.to_string(),
+            offending: text.trim().to_string(),
+        });
+        return;
+    };
+    let distinct = crate::analysis::has_distinct_keyword(&fc);
+    let args = fc.arguments();
+    let arg_texts: Vec<String> = args.iter().map(|a| a.text().trim().to_string()).collect();
+    let arg_refs: Vec<&str> = arg_texts.iter().map(String::as_str).collect();
+
+    match crate::analysis::decomposed_state::decompose_to_state(sql_fn, distinct, &arg_refs, alias)
+    {
+        Ok(state) => {
+            aggregator_columns.push(AggregatorColumn {
+                output_name: alias.to_string(),
+                per_partition_agg: agg_upper.to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: Some(state),
+            });
+        }
+        Err(refusal) => {
+            diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+                projection: alias.to_string(),
+                offending: format!(
+                    "{agg_upper}({}) could not be decomposed to hidden state: {refusal:?}",
+                    arg_texts.join(", ")
+                ),
+            });
+        }
+    }
+}
+
 /// The `(family name, refusal reason)` the admission matrix
 /// (`docs/specs/incremental_models.md` §"Admission matrix") names for a
 /// fold-family aggregator refused under the snapshot-reconcile run shape.
@@ -1413,6 +1542,12 @@ fn snapshot_refusal_reason(agg_upper: &str) -> (&'static str, &'static str) {
             "additive fold",
             "re-folding state double-counts — a mutable snapshot is not a replayable, \
              retraction-free event feed",
+        ),
+        "AVG" | "STDDEV" | "STDDEV_POP" | "STDDEV_SAMP" | "VARIANCE" | "VAR_POP" | "VAR_SAMP" => (
+            "decomposed fold",
+            "the hidden state (sum/count or n/Σx/Σx²) folds additively — re-folding a window \
+             already reflected double-counts it, the same reason the additive fold family \
+             refuses a mutable snapshot",
         ),
         _ => (
             "extremal/lattice fold",

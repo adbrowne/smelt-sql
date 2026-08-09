@@ -55,6 +55,7 @@ Each non-key projection must be a direct call to one of:
 | `MAX_BY(v, ord)` / `MIN_BY(v, ord)` | ordering value wins, incumbent on a tie | `CASE WHEN delta.ord > target.ord THEN delta.v ELSE target.v END` |
 | `COALESCE(...)` | first non-null wins | `COALESCE(target.c, delta.c)` |
 | `ANY_VALUE(...)` | incoming row wins | `delta.c` |
+| `AVG(...)`, `STDDEV_*(...)`, `VAR_*(...)` | pairwise fold over hidden state | recomputed from the folded state on every read |
 
 The first nine rows are the **fold families**: additive (`COUNT`, `SUM`, `BIT_XOR`) and extremal/lattice (`MIN`, `MAX`, the boolean combiners, `BIT_AND`/`BIT_OR`). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state. The two differ on re-running a window that was already merged: the extremal/lattice combiners are idempotent, so a repeat merge converges, while the additive ones do not — `COUNT`/`SUM` would double-count, and `BIT_XOR` is self-inverse, so a repeat merge would *cancel* that window's contribution (`x xor d xor d == x`). Either way the result would diverge from a full refresh, which is why an additive model keeps a ledger and refuses a reprocessed window (see [Reprocessing](#reprocessing)).
 
@@ -64,7 +65,9 @@ The first nine rows are the **fold families**: additive (`COUNT`, `SUM`, `BIT_XO
 
 `ANY_VALUE` is the **plain-overwrite family** — see [Run shapes](#run-shapes) below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.
 
-**Out of v1**: `AVG`, `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `COUNT(DISTINCT ...)`, `APPROX_COUNT_DISTINCT`. Composite expressions over aggregates (e.g. `SUM(x) + 1`) are also refused — split into separate projections and compute derived values downstream.
+`AVG`/`STDDEV_*`/`VAR_*` are the **decomposed-fold family**. Each decomposes into hidden state columns that fold additively — `AVG(x)` into `(sum, count)`, the variance/stddev functions into `(n, Σx, Σx²)` — invisible to consumers; the presented value is recomputed from the folded state on every read rather than merged directly. Because the hidden state is additive, a decomposed-fold model keeps a ledger and refuses a reprocessed window, the same as the additive fold families above. Admitted window-forward only; refused under snapshot-reconcile for the same observer-semantics reason as the other aggregate families.
+
+Composite expressions over aggregates (e.g. `SUM(x) + 1`) are refused for every family above — split into separate projections and compute derived values downstream. **Out of v1**: `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `COUNT(DISTINCT ...)`, `APPROX_COUNT_DISTINCT`.
 
 ## Once-write columns
 

@@ -173,3 +173,42 @@ fn verdict_reasons_preserve_admission_refusal_vocabulary() {
         "condition-(2) reason should name the recompute family as what remains, got: {reason}"
     );
 }
+
+/// `AVG` — not a monoid over its own presented value — still passes
+/// condition (2) via the decomposed-fold family's monoid state shape
+/// (`has_monoid_state_shape`, `docs/outcomes/20260809-rung2-state-shapes`
+/// row 7). Over an append-only, window-forward source both conditions hold.
+#[test]
+fn avg_passes_submultiset_fold_via_encoded_monoid_state() {
+    let verdict = faithful_fold(
+        SqlFunction::Avg,
+        false,
+        &MutationProfile::AppendOnly,
+        InputDeltaKind::WindowForward,
+    );
+    assert!(
+        matches!(verdict, FaithfulFold::Holds),
+        "AVG over an append-only source should hold both conditions via its decomposed \
+         monoid state, got {verdict:?}"
+    );
+}
+
+/// `MEDIAN` has no encoded state shape at all — the decomposed-fold
+/// widening must not accidentally admit it. Regression pin alongside the
+/// `AVG` widening above.
+#[test]
+fn median_still_fails_submultiset_fold() {
+    let verdict = faithful_fold(
+        SqlFunction::Median,
+        false,
+        &MutationProfile::AppendOnly,
+        InputDeltaKind::WindowForward,
+    );
+    let FaithfulFold::Fails {
+        submultiset_fold, ..
+    } = verdict
+    else {
+        panic!("MEDIAN must still fail condition (2), got Holds");
+    };
+    assert!(matches!(submultiset_fold, ConditionVerdict::Fails { .. }));
+}

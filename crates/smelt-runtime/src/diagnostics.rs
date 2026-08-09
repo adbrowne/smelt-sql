@@ -545,22 +545,43 @@ fn build_technique_statements(
             );
             let pushed = inject_source_filters(&stripped_sql, &bound_map, &time_range);
 
+            // State augmentation happens on this RAW, pre-compile SQL, not
+            // the compiled/cast-wrapped output — mirrors
+            // `smelt-runtime::cumulative::execute_cumulative_aggregate`'s
+            // ordering fix (`docs/outcomes/20260809-rung2-state-shapes` row
+            // 5): a state expression's `per_partition_expr` needs the
+            // model's own raw source columns, only in scope before the
+            // compiler's `_smelt_typed` cast wrapper.
+            let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> =
+                classification
+                    .aggregator_columns
+                    .iter()
+                    .filter_map(|c| c.state.as_ref())
+                    .flat_map(|s| s.state_columns.clone())
+                    .collect();
+            let pushed = smelt_logical::maintenance::emit::state_augmented_projection(
+                &pushed,
+                &state_columns,
+            )
+            .map_err(|_| {
+                "failed to append decomposed-state columns: SELECT could not be parsed".to_string()
+            })?;
+
             let compiled = registry
                 .get(target)
                 .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
                 .map_err(|e| format!("failed to compile model body: {e}"))?;
 
+            // Single-owner statement rule: the same fold-expansion emitter
+            // the executed `MERGE` uses
+            // (`smelt-runtime::cumulative::build_cumulative_merge_sql`), so
+            // this preview's fold shape can never diverge from what the
+            // real run executes (`docs/outcomes/20260809-rung2-state-shapes`
+            // row 7).
             let folds: Vec<(String, String)> = classification
                 .aggregator_columns
                 .iter()
-                .map(|col| {
-                    let target_col = format!("target.{}", col.output_name);
-                    let delta_col = format!("delta.{}", col.output_name);
-                    (
-                        col.output_name.clone(),
-                        col.cross_partition_combiner.render(&target_col, &delta_col),
-                    )
-                })
+                .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
                 .collect();
 
             Ok(emit_keyed_fold(

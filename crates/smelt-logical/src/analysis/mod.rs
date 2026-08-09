@@ -498,7 +498,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
 /// surrounding query — safe to compose under the walk.
 ///
 /// Check if a FunctionCall contains the DISTINCT keyword by examining its text.
-fn has_distinct_keyword(func: &smelt_parser::FunctionCall) -> bool {
+pub fn has_distinct_keyword(func: &smelt_parser::FunctionCall) -> bool {
     // Use the function's text representation and check for DISTINCT
     let text = func.text().to_uppercase();
     // Match COUNT(DISTINCT ...) pattern

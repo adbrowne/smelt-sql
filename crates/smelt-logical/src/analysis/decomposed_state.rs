@@ -321,6 +321,29 @@ pub fn decompose_once_write(
     build_decomposed_state(state_columns, presentation_text, same_row_columns)
 }
 
+/// Whether `function` (called with `distinct`) decomposes into a **fully
+/// monoid** state shape — every hidden state column folds as a commutative
+/// monoid (`Sum`) — the decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+/// `docs/outcomes/20260809-rung2-state-shapes` row 7,
+/// `docs/specs/model_properties.md` §"Faithful-fold conditions"). A pure
+/// family-level algebraic fact: rather than duplicating the family's member
+/// list, this calls [`decompose_to_state`] with placeholder argument/output
+/// text (the shape and each state column's combiner never depend on the
+/// actual argument text) and reads the derived combiners off the result —
+/// one source of truth for "which functions decompose to all-`Sum` state".
+/// `false` for the order-monotone overwrite family (`(v, o)` state is not
+/// all-`Sum`) and once-write (not reached through this entry point at all);
+/// both widen `faithful_fold`'s condition (2) through their own routes.
+pub fn has_monoid_state_shape(function: SqlFunction, distinct: bool) -> bool {
+    match decompose_to_state(function, distinct, &["x"], "x") {
+        Ok(state) => state
+            .state_columns
+            .iter()
+            .all(|c| c.combiner == CrossPartitionCombiner::Sum),
+        Err(_) => false,
+    }
+}
+
 /// Pure detector for `KeyedStateColumnCollision`: which of `state_columns`
 /// collide with a declared or projected user column in `user_columns`.
 /// Returns `(state column name, user column name)` pairs; empty when there
