@@ -21,6 +21,7 @@ smelt-runtime = { path = "../smelt-runtime" }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
 
 duckdb.workspace = true
+async-trait = "0.1"
 tokio.workspace = true
 tokio-util = { version = "0.7", features = ["rt"] }
 anyhow.workspace = true

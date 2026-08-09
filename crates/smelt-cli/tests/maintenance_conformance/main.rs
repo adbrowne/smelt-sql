@@ -20,3 +20,4 @@ mod harness_self_check;
 mod pinned;
 mod probes;
 mod registry;
+mod repair;

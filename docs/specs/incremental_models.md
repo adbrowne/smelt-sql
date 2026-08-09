@@ -2256,6 +2256,27 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   falling through to a plain write, but no caller today reaches that resolver for the
   `DeleteInsert` recompute, so the pin is presently unenforced for that case rather than refused.
   Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
+- **Affected-key discovery for the repair family under-approximates a full-group deletion from
+  a `mutable_snapshot` source.** The runtime affected-key read (`repair_affected_keys_select`)
+  derives the affected-key set by scanning the CURRENT physical source table within the run's
+  window; a key whose entire window contribution was deleted between runs (a `mutable_snapshot`
+  source keeps no tombstone or change history) no longer appears in that scan, so its stale
+  output row is never repaired — an under-approximation the admission obligation forbids
+  (§"The repair family" obligation 7: "an under-approximation is never admissible, because a
+  missed key would leave stale state for a group the retraction actually touched"). Discovered
+  by the conformance gate's repair-family recipe pool
+  (`crates/smelt-cli/tests/maintenance_conformance/repair.rs`). Tracked:
+  `docs/outcomes/20260809-repair-family/outcome.md`.
+- **The repair family's affected-key recompute ignores a decomposed combiner's hidden state.**
+  `repair_candidate_select` wraps the model's plain PRESENTED projection with no widening for a
+  decomposed combiner's hidden state (e.g. the order-monotone family's `(v, o)` pair, §"The
+  column-family catalogue"); the physical table the fold's own create path built carries the
+  extra hidden state columns, so a live `PerGroupRecompute` `INSERT` for such a combiner supplies
+  fewer columns than the table has and the run errors rather than repairing. Only a combiner
+  needing no hidden state (e.g. a plain `MAX`) repairs correctly today. Discovered by the
+  conformance gate's repair-family recipe pool
+  (`crates/smelt-cli/tests/maintenance_conformance/repair.rs`). Tracked:
+  `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key
   only at plan derivation, not at frontmatter validation; a bare `grain: key` model with neither

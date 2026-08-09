@@ -53,16 +53,11 @@ enum DivergenceStatus {
     /// (`model_properties.md`/`incremental_models.md` §Known Divergences).
     Documented,
     /// A confirmed production gap, deliberately not fixed by this plan
-    /// (this plan's "Deferred during implementation" section). Currently
-    /// unused — the sole entry that carried this status
-    /// (`known_bug_incremental_path_skips_schema_snapshot`) was closed and
-    /// deleted (`docs/plans/20260809-sensitivity-precision.md` Phase 6: the
-    /// deployed-schema snapshot the definition-change trigger reads is now
-    /// current on the incremental path too). Kept, not deleted, so the next
-    /// genuine production gap this suite finds has a status to reach for
-    /// (see `known_bug_technique_pin_inert`'s own prior close/reopen
-    /// history in this module's doc comment).
-    #[allow(dead_code)]
+    /// (this plan's "Deferred during implementation" section). Two prior
+    /// members of this status were closed this way (see this module's own
+    /// doc comment); the current member is
+    /// `known_bug_repair_affected_key_discovery_misses_full_group_deletion`
+    /// (`docs/outcomes/20260809-repair-family/outcome.md` phase 8).
     KnownBug,
 }
 
@@ -108,6 +103,34 @@ fn registry() -> Vec<DivergenceEntry> {
                 column cannot populate a Bounded scan window — NotDerivable, not an approximate \
                 fixed-day guess (model_properties.md interval-literal parsing note).",
             status: DivergenceStatus::Documented,
+        },
+        DivergenceEntry {
+            id: "known_bug_repair_affected_key_discovery_misses_full_group_deletion",
+            description: "repair_affected_keys_select scans the CURRENT physical source table \
+                within the run's window to find affected keys; a key whose entire window \
+                contribution was deleted between runs (a mutable_snapshot source keeps no \
+                tombstone/change history) no longer appears in that scan, so its stale output \
+                row is never repaired — an under-approximation incremental_models.md §\"The \
+                repair family\" obligation 7 forbids. Discovered by \
+                repair::repair_pool_upholds_equivalence_under_retraction \
+                (docs/outcomes/20260809-repair-family/outcome.md); the test's own delete step \
+                targets a key with a surviving row instead, to keep the standing gate honest \
+                about what it actually covers.",
+            status: DivergenceStatus::KnownBug,
+        },
+        DivergenceEntry {
+            id: "known_bug_repair_candidate_select_ignores_decomposed_state",
+            description: "repair_candidate_select wraps the model's plain PRESENTED projection \
+                with no knowledge of a decomposed combiner's hidden state (e.g. OrderMonotone's \
+                (v, o) pair); the physical table the fold's own create path built carries the \
+                extra __-marked state columns, so a live PerGroupRecompute INSERT for such a \
+                combiner supplies fewer columns than the table has and the run errors. \
+                Discovered by repair::repair_pool_upholds_equivalence_under_retraction \
+                (docs/outcomes/20260809-repair-family/outcome.md); that test drives only \
+                KeyedCombiner::Idempotent through the mutation loop and proves OrderMonotone's \
+                creation-run equivalence only, to keep the standing gate honest about what it \
+                actually covers.",
+            status: DivergenceStatus::KnownBug,
         },
     ]
 }
@@ -167,6 +190,24 @@ fn known_bug_still_reproduces(id: &str) -> bool {
             // site in the incremental branch.
             let src = include_str!("../../../smelt-runtime/src/execute.rs");
             src.matches("save_deployed_schema").count() == 1
+        }
+        "known_bug_repair_affected_key_discovery_misses_full_group_deletion" => {
+            // `repair_affected_keys_select` still derives its affected-key
+            // set by scanning the source table's CURRENT rows — the moment
+            // it instead consults a delete-aware log/tombstone for a
+            // `mutable_snapshot` source, this literal text changes and the
+            // gap is closed.
+            let src = include_str!("../../../smelt-runtime/src/maintenance_driver.rs");
+            src.contains("SELECT DISTINCT {key_list} FROM {source_table} WHERE {}")
+        }
+        "known_bug_repair_candidate_select_ignores_decomposed_state" => {
+            // `repair_candidate_select` still wraps `full_model_sql`
+            // verbatim (`__smelt_repair_candidate.*` over the model's own
+            // plain projection) — the moment it instead widens the select
+            // for a decomposed combiner's hidden state columns, this
+            // literal text changes and the gap is closed.
+            let src = include_str!("../../../smelt-runtime/src/maintenance_driver.rs");
+            src.contains("SELECT __smelt_repair_candidate.* FROM ({full_model_sql})")
         }
         other => panic!("known_bug_still_reproduces: unhandled id {other:?}"),
     }

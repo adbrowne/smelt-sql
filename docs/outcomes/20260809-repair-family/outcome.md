@@ -46,7 +46,7 @@ reconciliation runs and idempotent re-runs.
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
-| 8 | Conformance recipes for repair + diff-patch families | planned |
+| 8 | Conformance recipes for repair + diff-patch families | done |
 | 9 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
@@ -186,6 +186,19 @@ reconciliation runs and idempotent re-runs.
   silent full-refresh fallback cannot pass. Phase 7's unenforced-write-pin divergence stays where
   it is (not a success criterion); a real oracle divergence, if any surfaces, becomes a registry
   `KnownBug` entry rather than a weakened assertion.
+
+- 2026-08-10 (implement 8): landed the conformance recipes — `RepairRecipe`/
+  `RepairWriteMode` in `smelt-maintenance-testkit`, a promoted `RecordingBackend`
+  (needed because repair/diff-patch dispatch doesn't route through
+  `RunReporter::maintenance_statements` yet), and 5 new tests in
+  `maintenance_conformance/repair.rs`, all green. Discovered two genuine
+  production gaps (not test bugs), both registered as `KnownBug` + spec Known
+  Divergences: (1) `repair_affected_keys_select` under-approximates when a
+  key's entire window contribution is deleted from a `mutable_snapshot`
+  source between runs (violates obligation 7 — no follow-up phase scheduled
+  yet, flagged for the next planner); (2) `repair_candidate_select` ignores a
+  decomposed combiner's hidden state columns, so only `Idempotent`-shaped
+  combiners get full equivalence coverage under retraction today.
 
 ## Blocked
 

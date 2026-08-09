@@ -31,7 +31,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use smelt_backend::Backend;
+use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+use smelt_backend::{
+    Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect, StatementGroup,
+};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
@@ -101,6 +106,272 @@ impl RunReporter for SqlCapturingReporter {
             .entry(model.to_string())
             .or_default()
             .push(sql.to_string());
+    }
+}
+
+/// Wraps a real [`DuckDbBackend`], delegating every call, but recording the
+/// [`StatementGroup`] passed to `execute_statement_group` — the single point
+/// every emitted maintenance statement flows through on its way to the
+/// connection (`docs/specs/incremental_models.md` §"Statement emission
+/// (single owner)"). Promoted from
+/// `crates/smelt-runtime/tests/statement_parity.rs`'s own private
+/// `RecordingBackend` into this shared harness (`docs/outcomes/
+/// 20260809-repair-family` phase 8): the repair family's live dispatch
+/// (`Technique::PerGroupRecompute`/`RepairWrite::DiffPatch`) does not yet
+/// route through `RunReporter::maintenance_statements`
+/// ([`SqlCapturingReporter`] only ever observes the compiled model SELECT,
+/// never the executed maintenance DML), so a conformance case that needs to
+/// see the ACTUAL statements a run sent — not just the fact that it
+/// dispatched the right named strategy — needs this lower-level capture
+/// channel instead.
+pub struct RecordingBackend {
+    inner: DuckDbBackend,
+    groups: Mutex<Vec<StatementGroup>>,
+}
+
+impl RecordingBackend {
+    /// Every [`StatementGroup`] this backend executed, in call order.
+    pub fn recorded_groups(&self) -> Vec<StatementGroup> {
+        self.groups.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl Backend for RecordingBackend {
+    async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.inner.execute_sql(sql).await
+    }
+
+    async fn create_table_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.create_table_as(schema, name, sql).await
+    }
+
+    async fn create_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.create_view_as(schema, name, sql).await
+    }
+
+    async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.inner.drop_table_if_exists(schema, name).await
+    }
+
+    async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.inner.drop_view_if_exists(schema, name).await
+    }
+
+    async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
+        self.inner.get_row_count(schema, name).await
+    }
+
+    async fn get_preview(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<RecordBatch>, BackendError> {
+        self.inner.get_preview(schema, name, limit).await
+    }
+
+    async fn table_exists(&self, schema: &str, name: &str) -> Result<bool, BackendError> {
+        self.inner.table_exists(schema, name).await
+    }
+
+    async fn ensure_schema(&self, schema: &str) -> Result<(), BackendError> {
+        self.inner.ensure_schema(schema).await
+    }
+
+    fn dialect(&self) -> SqlDialect {
+        self.inner.dialect()
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .load_table(schema, name, arrow_schema, batches)
+            .await
+    }
+
+    async fn delete_partitions(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.inner.delete_partitions(schema, name, partition).await
+    }
+
+    async fn insert_into_from_query(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.inner.insert_into_from_query(schema, name, sql).await
+    }
+
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.inner
+            .insert_overwrite(schema, table, sql, partition)
+            .await
+    }
+
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        self.groups.lock().unwrap().push(group.clone());
+        self.inner.execute_statement_group(group).await
+    }
+}
+
+/// `BackendFactory` that opens a fresh [`RecordingBackend`] against
+/// `db_path`, stashing an `Arc` handle to it in `backend` (a slot the caller
+/// pre-allocates and reads back after the run) — the same
+/// callback-into-a-shared-slot shape `statement_parity.rs`'s own
+/// `RecordingBackendFactory` uses, needed because `BackendFactory::create`
+/// hands ownership of the constructed backend to `execute_project` itself.
+struct RecordingBackendFactory {
+    db_path: PathBuf,
+    backend: Arc<Mutex<Option<Arc<RecordingBackend>>>>,
+}
+
+impl BackendFactory for RecordingBackendFactory {
+    fn create<'a>(
+        &'a self,
+        _target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        let path = self.db_path.clone();
+        let schema = target_config.schema.clone();
+        let slot = Arc::clone(&self.backend);
+        Box::pin(async move {
+            let inner = DuckDbBackend::new(&path, &schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
+            let recording = Arc::new(RecordingBackend {
+                inner,
+                groups: Mutex::new(Vec::new()),
+            });
+            *slot.lock().unwrap() = Some(Arc::clone(&recording));
+            Ok(Box::new(RecordingBackendHandle(recording)) as Box<dyn Backend>)
+        })
+    }
+}
+
+/// Thin `Backend` forwarder so [`RecordingBackendFactory::create`] can hand
+/// `execute_project` an owned `Box<dyn Backend>` while the caller keeps its
+/// own `Arc<RecordingBackend>` handle alive in the shared slot — delegates
+/// every call straight through.
+struct RecordingBackendHandle(Arc<RecordingBackend>);
+
+#[async_trait]
+impl Backend for RecordingBackendHandle {
+    async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.0.execute_sql(sql).await
+    }
+    async fn create_table_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.create_table_as(schema, name, sql).await
+    }
+    async fn create_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.create_view_as(schema, name, sql).await
+    }
+    async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.0.drop_table_if_exists(schema, name).await
+    }
+    async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
+        self.0.drop_view_if_exists(schema, name).await
+    }
+    async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
+        self.0.get_row_count(schema, name).await
+    }
+    async fn get_preview(
+        &self,
+        schema: &str,
+        name: &str,
+        limit: usize,
+    ) -> Result<Vec<RecordBatch>, BackendError> {
+        self.0.get_preview(schema, name, limit).await
+    }
+    async fn table_exists(&self, schema: &str, name: &str) -> Result<bool, BackendError> {
+        self.0.table_exists(schema, name).await
+    }
+    async fn ensure_schema(&self, schema: &str) -> Result<(), BackendError> {
+        self.0.ensure_schema(schema).await
+    }
+    fn dialect(&self) -> SqlDialect {
+        self.0.dialect()
+    }
+    fn capabilities(&self) -> BackendCapabilities {
+        self.0.capabilities()
+    }
+    async fn load_table(
+        &self,
+        schema: &str,
+        name: &str,
+        arrow_schema: SchemaRef,
+        batches: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        self.0.load_table(schema, name, arrow_schema, batches).await
+    }
+    async fn delete_partitions(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.0.delete_partitions(schema, name, partition).await
+    }
+    async fn insert_into_from_query(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.0.insert_into_from_query(schema, name, sql).await
+    }
+    async fn insert_overwrite(
+        &self,
+        schema: &str,
+        table: &str,
+        sql: &str,
+        partition: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        self.0.insert_overwrite(schema, table, sql, partition).await
+    }
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        self.0.execute_statement_group(group).await
     }
 }
 
@@ -185,6 +456,43 @@ impl LinkCProject {
     /// materialized table contents, not the compiled SQL.
     pub async fn run_quiet(&self, run_id: &str, request: ExecuteRequest) -> Result<RunOutcome> {
         self.run(run_id, request, &NoOpReporter).await
+    }
+
+    /// [`Self::run`], but through a [`RecordingBackend`] instead of a plain
+    /// [`DuckDbBackendFactory`] — returns the [`RunOutcome`] plus an `Arc`
+    /// handle to the backend so the caller can inspect every executed
+    /// [`StatementGroup`] afterwards (`RecordingBackend::recorded_groups`).
+    /// The one channel that observes ACTUAL executed maintenance DML rather
+    /// than the compiled model SELECT [`SqlCapturingReporter`] captures.
+    pub async fn run_recording(
+        &self,
+        run_id: &str,
+        request: ExecuteRequest,
+    ) -> Result<(RunOutcome, Arc<RecordingBackend>)> {
+        let (db, graph) = self.build_db_and_graph();
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: self.db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        let outcome = execute_project(
+            run_id.to_string(),
+            request,
+            Arc::clone(&self.config),
+            graph,
+            db,
+            &self.project_dir,
+            &factory,
+            &NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await?;
+        let backend = backend_slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("RecordingBackendFactory must have populated the slot");
+        Ok((outcome, backend))
     }
 
     /// [`Self::run`] generalised over a [`ConformanceTarget`]

@@ -1693,6 +1693,118 @@ pub fn arb_enrichment_edge_schedule(total: usize) -> impl Strategy<Value = Enric
         .prop_map(|touched_indices| EnrichmentEdgeSchedule { touched_indices })
 }
 
+// =============================================================================
+// `RepairRecipe` (`docs/outcomes/20260809-repair-family/phases/08-plan.md`):
+// a keyed non-invertible fold over a mutable, CLOCKED source — the shape
+// `crates/smelt-runtime/tests/repair_lowering.rs`'s hand-written fixture
+// exercises (a `raw.orders`-shaped `(order_id, customer_id, amount,
+// order_date)` `mutation_profile: mutable_snapshot` source with a declared
+// `unique_key` and a `timeseries:` block, folded `MAX`/`MAX_BY` per
+// `customer_id` with an explicit Form B band on `order_date`) — generalized
+// into typed recipe data so the standing conformance gate can drive it
+// end-to-end rather than only the one hand-built fixture.
+// =============================================================================
+
+/// Which write the repair family's live `Technique::PerGroupRecompute` cell
+/// dispatches (`incremental_models.md` §"The repair family";
+/// `smelt_runtime::maintenance_driver::RepairWrite`): the family's own
+/// targeted `DELETE`+`INSERT`, or a `write: diff_patch` pin over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairWriteMode {
+    /// No pin — the repair family's own default write
+    /// (`execute_per_group_recompute`).
+    TargetedDeleteInsert,
+    /// `maintenance: cells: [{on: <source>, columns: [...], write:
+    /// diff_patch}]` — routes through `execute_diff_patch` instead
+    /// (`RepairWrite::DiffPatch`).
+    DiffPatch,
+}
+
+/// The declared Form B band width (`order_date BETWEEN <end> - INTERVAL
+/// '<band> days' AND <end>`) every [`RepairRecipe`] declares on its model's
+/// own `WHERE` clause — the literal that discharges the repair family's
+/// bounded-per-group-read obligation and fixes the derived `ScanClamp` at
+/// `before = <band> days` (mirrors `repair_lowering.rs`'s fixed 3-day band).
+/// Not drawn from a generator — the band width is a shape constant the
+/// classifier consults structurally, not a value under test.
+pub const REPAIR_BAND_DAYS: u64 = 3;
+
+/// The fixed literal upper-bound date the model's own `WHERE order_date
+/// BETWEEN ... AND TIMESTAMP '<anchor>'` band uses
+/// (`render::render_repair_model_body`). Per `repair_lowering.rs`'s own
+/// fixture, this literal is consulted ONLY by the static Form B band parse
+/// that derives the cell's `ScanClamp` — the live affected-key window at run
+/// time is always `[request.start − band, request.end)` over the RUN's own
+/// requested window, independent of this literal (`repair_lowering.rs`'s
+/// run 2 drives `--event-time-start 2025-01-16` against this same anchor and
+/// still resolves the correct affected-key band). Kept as one shared
+/// constant so every generated recipe's model band and oracle band literal
+/// agree without threading the value through every call site.
+pub const REPAIR_BAND_ANCHOR: &str = "2025-01-14";
+
+/// A `Strategy` drawing from the repair family's non-invertible-under-
+/// retraction [`KeyedCombiner`] members: `Idempotent` (`MAX`) and
+/// `OrderMonotone` (`MAX_BY`) — the two combiners a fold cannot safely
+/// reflect a retracted contribution through (`incremental_models.md` §"The
+/// repair family": "a non-invertible combiner … cannot undo a retracted
+/// contribution"). `Additive`/decomposed members are excluded: they are
+/// invertible (or decomposable into an invertible state), so the SAME
+/// mutable/clocked source posture that narrows this pool into
+/// `Technique::PerGroupRecompute` for `Idempotent`/`OrderMonotone` instead
+/// derives a different cell for them — out of this recipe's scope.
+pub fn arb_repair_combiner() -> impl Strategy<Value = KeyedCombiner> {
+    prop_oneof![
+        Just(KeyedCombiner::Idempotent),
+        Just(KeyedCombiner::OrderMonotone),
+    ]
+}
+
+/// A repair-family recipe: `SELECT customer_id, <combiner>(amount[, order_date]) AS <alias>
+/// FROM smelt.sources.<source_name> WHERE order_date BETWEEN <band> GROUP BY
+/// customer_id` over a `mutable_snapshot`, CLOCKED `(order_id, customer_id,
+/// amount, order_date)` source with a declared `unique_key: [order_id]` —
+/// the one source shape today's pool has that is BOTH mutable (so a fold
+/// cannot trust an unretracted delta) AND clocked (so the repair narrowing,
+/// not an `UpstreamMutation` cell, is what the maintenance-plan derivation
+/// assigns — `derive_model_maintenance_plan`'s own doc comment: "repair is
+/// only derived for a CLOCKED mutable source").
+#[derive(Debug, Clone)]
+pub struct RepairRecipe {
+    pub model_name: String,
+    pub source_name: String,
+    pub combiner: KeyedCombiner,
+    pub band_days: u64,
+    pub write_mode: RepairWriteMode,
+}
+
+impl RepairRecipe {
+    pub fn new(combiner: KeyedCombiner, write_mode: RepairWriteMode) -> Self {
+        let mode_suffix = match write_mode {
+            RepairWriteMode::TargetedDeleteInsert => "targeted",
+            RepairWriteMode::DiffPatch => "diff_patch",
+        };
+        Self {
+            model_name: format!("repair_{}_{mode_suffix}", combiner.kind_name()),
+            source_name: "repair_orders".to_string(),
+            combiner,
+            band_days: REPAIR_BAND_DAYS,
+            write_mode,
+        }
+    }
+
+    /// The model's declared `unique_key` — always the fold's own `GROUP BY`
+    /// key, `customer_id`.
+    pub fn unique_key(&self) -> Vec<String> {
+        vec!["customer_id".to_string()]
+    }
+
+    /// The combiner's own output alias (`agg_and_alias`'s second element) —
+    /// the column the `write: diff_patch` pin's `columns:` block names.
+    pub fn value_alias(&self) -> &'static str {
+        self.combiner.agg_and_alias().1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

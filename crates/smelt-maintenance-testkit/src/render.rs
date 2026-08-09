@@ -19,7 +19,8 @@ use std::path::Path;
 
 use crate::recipe::{
     BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedCombiner,
-    KeyedRecipe, ModelEdit, ModelRecipe, SourcePosture,
+    KeyedRecipe, ModelEdit, ModelRecipe, RepairRecipe, RepairWriteMode, SourcePosture,
+    REPAIR_BAND_ANCHOR,
 };
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
@@ -938,6 +939,119 @@ pub fn stage_composed_for_target(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// `RepairRecipe` rendering (`docs/outcomes/20260809-repair-family/phases/
+// 08-plan.md` task 2): the keyed non-invertible-fold-over-a-mutable-clocked-
+// source shape, mirroring `crates/smelt-runtime/tests/repair_lowering.rs`'s
+// hand-written fixture. Kept separate from `render_keyed_model_*` (a
+// `KeyedRecipe`'s driving source is always the generic `SourceRecipe`
+// `(d, id, val)`/`(id, attr)` shape; a repair recipe's driving source is the
+// fixed four-column `(order_id, customer_id, amount, order_date)` shape
+// `KeyedCombiner::projection_sql` was designed to be reusable over —
+// `combiner.projection_sql("amount", "order_date")` below is the exact same
+// call `render_keyed_model_body` makes with its own source's column names).
+// ---------------------------------------------------------------------
+
+/// The repair recipe's `SELECT` body: `SELECT customer_id, <combiner
+/// projection over (amount, order_date)> FROM smelt.sources.<source_name>
+/// WHERE order_date BETWEEN TIMESTAMP '<anchor>' - INTERVAL '<band> days'
+/// AND TIMESTAMP '<anchor>' GROUP BY customer_id` — the same Form B band
+/// shape `repair_lowering.rs`'s hand-written fixture uses
+/// ([`REPAIR_BAND_ANCHOR`]'s doc comment explains why the literal stays
+/// fixed regardless of which run window a schedule step later drives).
+pub fn render_repair_model_body(recipe: &RepairRecipe) -> String {
+    let src = format!("smelt.sources.{}", recipe.source_name);
+    let proj = recipe.combiner.projection_sql("amount", "order_date");
+    format!(
+        "SELECT customer_id, {proj} FROM {src} WHERE order_date BETWEEN TIMESTAMP \
+         '{REPAIR_BAND_ANCHOR}' - INTERVAL '{band} days' AND TIMESTAMP '{REPAIR_BAND_ANCHOR}' \
+         GROUP BY customer_id",
+        band = recipe.band_days,
+    )
+}
+
+/// The full repair model file: `materialization: table` + `refresh:
+/// incremental` + `grain: key` + `unique_key: customer_id` frontmatter
+/// (mirrors `repair_lowering.rs::REPAIR_FIXTURE_FILE`), plus a `maintenance:
+/// cells: [{on: <source>, columns: [<alias>], write: diff_patch}]` block
+/// when [`RepairRecipe::write_mode`] pins `RepairWriteMode::DiffPatch`
+/// (mirrors `REPAIR_FIXTURE_DIFF_PATCH_FILE`), followed by
+/// [`render_repair_model_body`].
+pub fn render_repair_model_file(recipe: &RepairRecipe) -> String {
+    let maintenance_block = match recipe.write_mode {
+        RepairWriteMode::TargetedDeleteInsert => String::new(),
+        RepairWriteMode::DiffPatch => format!(
+            "maintenance:\n  cells:\n  - on: {source}\n    columns: [{col}]\n    write: \
+             diff_patch\n",
+            source = recipe.source_name,
+            col = recipe.value_alias(),
+        ),
+    };
+    format!(
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\nunique_key: \
+         customer_id\n{maintenance_block}---\n{body}\n",
+        body = render_repair_model_body(recipe),
+    )
+}
+
+/// The repair recipe's driving-source YAML: `mutation_profile:
+/// mutable_snapshot`, a `timeseries:` block on `order_date` (CLOCKED, unlike
+/// [`crate::recipe::SourceRecipe::mutable_dimension`]'s unclocked shape),
+/// and a declared `unique_key: [order_id]` — mirrors
+/// `repair_lowering.rs::ORDERS_SOURCE_YML`. Fixed shape (does not vary by
+/// recipe), matching `stage`/`stage_keyed`'s convention of a bespoke YAML
+/// literal per fixed source shape.
+pub fn render_repair_source_yaml() -> String {
+    "description: generative-conformance repair-family mutable clocked source.\n\
+     mutation_profile:\n  kind: mutable_snapshot\n\
+     unique_key: [order_id]\n\
+     timeseries:\n  event_time_column: order_date\n  partition_column: order_date\n  \
+     granularity: day\n\
+     columns:\n  - name: order_id\n    type: INTEGER\n  - name: customer_id\n    type: \
+     INTEGER\n  - name: amount\n    type: DECIMAL(10,2)\n  - name: order_date\n    type: \
+     TIMESTAMP\n"
+        .to_string()
+}
+
+/// The repair recipe's oracle query over `source_table_ref` instead of
+/// `smelt.sources.<name>` — [`render_repair_model_body`] with the one
+/// substitution, "renders once, serves both" (design §4).
+pub fn render_repair_oracle_sql(recipe: &RepairRecipe, source_table_ref: &str) -> String {
+    render_repair_model_body(recipe).replace(
+        &format!("smelt.sources.{}", recipe.source_name),
+        source_table_ref,
+    )
+}
+
+/// Stage a [`RepairRecipe`] into a fresh project dir + DuckDB file: writes
+/// the model file, the driving source's YAML, `smelt.yml`, and creates the
+/// physical `(order_id, customer_id, amount, order_date)` source table — the
+/// repair-pool counterpart of [`stage_keyed`].
+pub fn stage_repair(
+    recipe: &RepairRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_repair_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source_name)),
+        render_repair_source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    create_source_table_via_backend(
+        db_path,
+        &recipe.source_name,
+        "order_id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), order_date TIMESTAMP",
+    )?;
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
 #[cfg(test)]
