@@ -45,7 +45,7 @@ reconciliation runs and idempotent re-runs.
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
-| 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | pending |
+| 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | planned |
 | 8 | Conformance recipes for repair + diff-patch families | pending |
 | 9 | Surface: `smelt explain` rendering, docs-site update | pending |
 
@@ -152,6 +152,18 @@ reconciliation runs and idempotent re-runs.
   `diff_patch` routing only (phase 7). Flagged for phase 8: no shipped example workspace reaches
   the repair family yet — the new DuckDB tests stage their own fixture; a real conformance recipe
   needs one too.
+
+- 2026-08-09 (plan 7): no reshape — phase 6 closed clean, phases 8/9 stand as written. Phase 7
+  decides: routing extends `resolve_live_per_group_recompute_cell` with a write *mode* rather
+  than adding a near-verbatim sibling resolver (a `diff_patch` write over a repair cell reads
+  the identical affected-key set, candidate select and key — only the write leg differs); only
+  `ChosenTechnique::DiffPatch { recompute: PerGroupRecompute }` is routable (the sole recompute
+  granted `DeleteLeg::Complete`), and a `diff_patch` pin over the region `DeleteInsert` default
+  fails loud by name rather than falling through to the default write. `emit_diff_patch`'s
+  `partition_col`/`region` pair collapses to one caller-composed `slice_predicate` — a keyed
+  aggregate output has no partition column, so a region predicate cannot express the only slice
+  the routable recompute produces; no shipped statement changes, since nothing routed to this
+  emitter before.
 
 ## Blocked
 
