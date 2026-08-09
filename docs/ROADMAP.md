@@ -93,6 +93,19 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Keyed Frontier — column-family union + snapshot-reconcile executor~~ ✅ (August 9, 2026)
+
+5-phase plan ([plan](plans/20260809-keyed-frontier.md)) widening the keyed classifier past the direct-monoid families and building the second keyed run shape. Every family arrived with its admission-matrix conformance recipes including the refusal directions.
+
+- **Order-monotone overwrite** (`MAX_BY`/`MIN_BY`) classified and rendered with incumbent-wins ties, admitted window-forward, refused under snapshot-reconcile. Requires an explicit companion `MAX(<ord>)`/`MIN(<ord>)` projection, with `MAX_BY(x, x)` admitted as the degenerate self-companion.
+- **`KeyedReprocessedWindow`** — the ledger's reprocessing refusal is now a named diagnostic carrying the window bounds and the full-refresh remedy, not an unnamed `bail!`.
+- **Snapshot-reconcile run shape** — a keyed model over zero clocked sources derives the shape instead of refusing: plain-overwrite columns admit (incoming row wins), fold families refuse per the matrix, retained-departed-keys is the default, and event-time flags are rejected loudly.
+- **Once-write** (`COALESCE`) with an FD-backed provenance proof, the first production consumer of the functional-dependency declaration. The admitted surface is deliberately narrow: `COALESCE(MAX(col))` under a declared FD naming the *source* column, and `COALESCE(<unique_key col>, …)` key-derived. Fallback-bearing (`COALESCE(MAX(col), -1)`) and multi-candidate (`COALESCE(MAX(a), MAX(b))`) spellings refuse — each diverges from full refresh, and admitting them needs decomposed state. Fan-out joins and set-op barriers are structural disproofs no declaration can widen past.
+
+`BIT_XOR` was found to be graded idempotent, so a redelivered window cancelled its own contribution instead of refusing — fixed to ledger-keeping. The generative conformance pool could not have caught it (`KeyedCombiner` renders additive as `SUM` only), so it is guarded by a pinned hazard case; widening the pool is recorded as deferred work.
+
+Residues are itemized in `docs/specs/incremental_models.md` §Known Divergences — notably that a window-forward keyed run with missing or half-supplied event-time flags full-refreshes where the spec mandates refusal, `KeyedRetractableContribution` is unimplemented, and the ledger fold is transactional on DuckDB only. Ladder rungs 2–4 and the `smelt.latest`/`once`/`current` pattern functions need a spec pass first.
+
 ### ~~`smelt bakeoff` CLI~~ ✅ (July 20, 2026)
 
 The maintenance-plan programme's cost-model override ladder (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) now drives both live runs and offline measurement: [`docs/plans/20260719-prod-w7-bakeoff.md`](plans/20260719-prod-w7-bakeoff.md). `smelt-runtime`'s maintenance driver resolves `cells[].technique`/`prefer` through the same ladder `smelt explain` reports (frontmatter pins are honoured at execution, not just parsed); `ExecuteRequest.technique_overrides` gives an in-process forcing seam that never bypasses admission. `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep] [--pin]` measures every admissible technique for a cell over `--runs` replayed windows of real data, each technique landing in its own scratch schema (`smelt_bakeoff_<model>_<technique>`, dropped unless `--keep`) and cross-checked against its siblings with `EXCEPT ALL`; `--pin` emits the winning `cells[]` entry as ready-to-paste YAML, never writing the model's `.sql` file. See [`docs-site/docs/reference/cli.md`](../docs-site/docs/reference/cli.md#smelt-bakeoff) and [`docs/specs/incremental_models.md`](specs/incremental_models.md#cli).
