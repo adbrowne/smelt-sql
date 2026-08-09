@@ -33,8 +33,8 @@ use std::collections::BTreeSet;
 
 use super::derive::{project_source_link, LocalityInputs, SourceLink};
 use super::{
-    Corner, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts,
-    Technique, Trigger,
+    Corner, MutationProfile, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp,
+    SourceFacts, Technique, Trigger,
 };
 use crate::analysis::affected_keys::{
     derive_affected_keys, AffectedKeyContext, AffectedKeys, DeltaShape,
@@ -170,9 +170,50 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
     }
 }
 
+/// Which affected-key discovery read a source's [`MutationProfile`] needs
+/// (`docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): the ordinary clamped current-source
+/// scan for every posture with no native deletion, or the group-grain
+/// fingerprint-sidecar diff for a [`MutationProfile::MutableSnapshot`]
+/// source (the only posture where a wholly-deleted group leaves no row for a
+/// scan to witness). Pure and single-owner: both the runtime resolver
+/// ([`crate::maintenance::repair`]'s own doc comment on
+/// `resolve_live_per_group_recompute_cell` in `smelt-runtime`) and `smelt
+/// explain`'s reporting call this predicate rather than re-deriving the
+/// same `facts.mutation == MutationProfile::MutableSnapshot` comparison
+/// independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairDiscoveryPosture {
+    /// The append-only widened-scan `SELECT DISTINCT`.
+    ClampedScan,
+    /// The group-grain sidecar diff.
+    SidecarDiff,
+}
+
+/// Derive [`RepairDiscoveryPosture`] from a source's declared
+/// [`MutationProfile`].
+pub fn discovery_posture(mutation: MutationProfile) -> RepairDiscoveryPosture {
+    match mutation {
+        MutationProfile::MutableSnapshot => RepairDiscoveryPosture::SidecarDiff,
+        MutationProfile::AppendOnly => RepairDiscoveryPosture::ClampedScan,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_posture_is_sidecar_only_for_mutable_snapshot() {
+        assert_eq!(
+            discovery_posture(MutationProfile::MutableSnapshot),
+            RepairDiscoveryPosture::SidecarDiff
+        );
+        assert_eq!(
+            discovery_posture(MutationProfile::AppendOnly),
+            RepairDiscoveryPosture::ClampedScan
+        );
+    }
 
     #[test]
     fn delta_shape_for_a_mutable_source_carries_its_referenced_columns() {

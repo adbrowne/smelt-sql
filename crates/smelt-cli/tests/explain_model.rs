@@ -84,6 +84,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &edges,
             cells_cfg,
             defaults_cfg,
+            &source_infos,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -918,6 +919,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         &[],
         None,
+        &[],
     )
     .expect("build_maintenance_plan_report");
 
@@ -1034,6 +1036,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         &[],
         None,
+        &[],
     )
     .expect("build_maintenance_plan_report");
 
@@ -1216,6 +1219,7 @@ mod write_variant_explain_surface {
             &[],
             cells_cfg,
             defaults_cfg,
+            &[],
         )
     }
 

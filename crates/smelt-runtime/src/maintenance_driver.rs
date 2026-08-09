@@ -40,9 +40,10 @@ use smelt_logical::maintenance::emit::{
     MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
+use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{
-    MaintenancePlan, MutationProfile, PartitionLocal, PlanCell, RowIdentity, ScanClamp,
-    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, ScanClamp, SkeletonSourceClosure,
+    SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -1392,7 +1393,7 @@ pub enum RepairWrite {
 /// How a live `Technique::PerGroupRecompute` cell discovers its affected-key
 /// relation (P9, `docs/specs/incremental_models.md` §"The repair family" —
 /// "Obligation 7 over a `mutable_snapshot` source"): the append-only clamped
-/// rescan, or — for a [`MutationProfile::MutableSnapshot`] source with no
+/// rescan, or — for a [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source with no
 /// native change feed — the group-grain fingerprint sidecar diff, the only
 /// route that can witness a group whose entire window contribution departed
 /// the source (a vanished group leaves no row for a clamped scan to select,
@@ -1550,7 +1551,7 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
 /// re-derives admission.
 ///
 /// `dialect` gates [`RepairDiscovery::SidecarDiff`]: a
-/// [`MutationProfile::MutableSnapshot`] source routes to the group-grain
+/// [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source routes to the group-grain
 /// sidecar diff, which is DuckDB-only (matching the per-row sidecar's own
 /// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
 /// fails loud here, before any backend call, rather than silently falling
@@ -1725,24 +1726,25 @@ pub fn resolve_live_per_group_recompute_cell(
                 // tombstone/change history needs the group-grain sidecar
                 // diff to witness a wholly-deleted group; every other
                 // posture keeps the ordinary clamped current-source scan.
-                let discovery = if facts.mutation == MutationProfile::MutableSnapshot {
-                    if dialect != SqlDialect::DuckDB {
-                        return Err(BackendError::unsupported(
-                            dialect.name(),
-                            "group-grain fingerprint-sidecar affected-key discovery for a \
+                let discovery =
+                    if discovery_posture(facts.mutation) == RepairDiscoveryPosture::SidecarDiff {
+                        if dialect != SqlDialect::DuckDB {
+                            return Err(BackendError::unsupported(
+                                dialect.name(),
+                                "group-grain fingerprint-sidecar affected-key discovery for a \
                              mutable_snapshot repair source (P9)",
-                        )
-                        .into());
-                    }
-                    let digest_columns: Vec<String> =
-                        match cell.fingerprint_projections.get(&facts.name) {
-                            Some(FingerprintProjection::Columns(cols)) => {
-                                cols.iter().cloned().collect()
-                            }
-                            _ => Vec::new(),
-                        };
-                    if digest_columns.is_empty() {
-                        bail!(
+                            )
+                            .into());
+                        }
+                        let digest_columns: Vec<String> =
+                            match cell.fingerprint_projections.get(&facts.name) {
+                                Some(FingerprintProjection::Columns(cols)) => {
+                                    cols.iter().cloned().collect()
+                                }
+                                _ => Vec::new(),
+                            };
+                        if digest_columns.is_empty() {
+                            bail!(
                             "MaintenanceRepairDigestColumnsMissing: a Technique::PerGroupRecompute \
                              cell for group '{}' resolved a MutableSnapshot delta posture on \
                              source '{}' with no P4 fingerprint projection columns — the \
@@ -1750,11 +1752,11 @@ pub fn resolve_live_per_group_recompute_cell(
                             cell.group,
                             facts.name,
                         );
-                    }
-                    RepairDiscovery::SidecarDiff { digest_columns }
-                } else {
-                    RepairDiscovery::ClampedScan
-                };
+                        }
+                        RepairDiscovery::SidecarDiff { digest_columns }
+                    } else {
+                        RepairDiscovery::ClampedScan
+                    };
                 return Ok(Some((
                     facts.name.clone(),
                     cell.clone(),

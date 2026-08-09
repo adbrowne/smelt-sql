@@ -49,7 +49,7 @@ reconciliation runs and idempotent re-runs.
 | 8 | Conformance recipes for repair + diff-patch families | done |
 | 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | done |
 | 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | done |
-| 11 | Surface: `smelt explain` rendering, docs-site update | planned |
+| 11 | Surface: `smelt explain` rendering, docs-site update | done |
 
 ## Decision log
 
@@ -270,6 +270,16 @@ reconciliation runs and idempotent re-runs.
   technique-scoped (`PerGroupRecompute` only), so every non-repair cell's rendering stays
   byte-identical; the `diff_patch` delete-leg verdict comes from the real
   `choice::resolve_cell_choice`, not a display-only re-derivation.
+
+- 2026-08-10 (implement 11): landed the surface work — `RepairDiscoveryPosture` +
+  `discovery_posture` in `smelt-logical::maintenance::repair` (single-owner predicate, now called
+  by both `maintenance_driver.rs`'s runtime resolver and `smelt explain`), a repair stanza in
+  `build_maintenance_plan_report` for `Technique::PerGroupRecompute` cells only (key slice, read
+  bound, affected-key discovery mechanism, and — via the real `choice::resolve_cell_choice` — the
+  `write: diff_patch` mechanism and delete-leg verdict), the spec sentence on the `smelt explain`
+  CLI bullet, and the docs-site guide section + `--technique` name-list corrections
+  (`column_scoped_merge`/`per_group_recompute` were missing from both reference pages). All 6
+  planned tests pass; standing gates green. This was the outcome's last phase row.
 
 ## Blocked
 

@@ -444,6 +444,7 @@ async fn explain_maintenance_plan(
         &edges,
         cells_cfg,
         defaults_cfg,
+        &source_infos,
     )
     .with_context(|| {
         format!(

@@ -3,9 +3,13 @@ use anyhow::Result;
 use serde::Serialize;
 use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
+use smelt_core::sources::SourceInfo;
 use smelt_core::{Granularity, Materialization, ModelOriginKind, PartitionGrainConfig};
+use smelt_logical::maintenance::choice::{resolve_cell_choice, ChosenTechnique};
+use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
-use smelt_logical::maintenance::{PlanCell, Technique};
+use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
+use smelt_logical::maintenance::{lookup_write_pattern, PlanCell, Technique};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
 use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
@@ -176,6 +180,19 @@ fn write_relation_contract(out: &mut String, indent: &str, contract: &RelationCo
     }
 }
 
+/// Find `bare_name`'s [`SourceInfo`] among `source_infos` — same bare-name
+/// convention `smelt_runtime::execute::build_maint_source_facts` uses
+/// (strip a leading `sources` address segment).
+fn find_source_info<'a>(source_infos: &'a [SourceInfo], bare_name: &str) -> Option<&'a SourceInfo> {
+    source_infos.iter().find(|info| {
+        let bare = match info.address_segments.split_first() {
+            Some((first, rest)) if first == "sources" => rest.join("."),
+            _ => info.address_segments.join("."),
+        };
+        bare == bare_name
+    })
+}
+
 /// Build the plain-text `smelt explain <model>` maintenance-plan report
 /// (`incremental_models.md` §Surface "CLI": "prints the plan (cells, clamps,
 /// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
@@ -195,6 +212,13 @@ fn write_relation_contract(out: &mut String, indent: &str, contract: &RelationCo
 /// the write-variant row below. `defaults_cfg` is the model's own
 /// `maintenance.defaults` block (the broad end of the same ladder,
 /// `smelt_logical::maintenance::choice::effective_override`).
+/// `source_infos` is the project's discovered source declarations
+/// (`smelt_core::discover_source_infos`) — consulted only to build a repair
+/// cell's (`Technique::PerGroupRecompute`) trigger source's `SourceFacts`
+/// via the single-owner `smelt_db::queries::maintenance::source_facts`, for
+/// the repair stanza's affected-key discovery mechanism line; every other
+/// section of this report reads neither this parameter nor a source's
+/// mutation profile.
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
@@ -202,6 +226,7 @@ pub fn build_maintenance_plan_report(
     edges: &[InboundEdgeContract],
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
     defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
+    source_infos: &[SourceInfo],
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -312,11 +337,12 @@ pub fn build_maintenance_plan_report(
                     admissible.join(", ")
                 }
             );
-            match smelt_db::queries::maintenance::matching_write_pin(
+            let write_pin_name = smelt_db::queries::maintenance::matching_write_pin(
                 cell,
                 &result.column_groups,
                 cells_cfg,
-            ) {
+            );
+            match &write_pin_name {
                 Some(pin) => {
                     let _ = writeln!(out, "      write pin: {pin}");
                 }
@@ -497,6 +523,125 @@ pub fn build_maintenance_plan_report(
                          has no prior stored state on this column group to diff against; the \
                          conditional variant is admitted but not preferred here)"
                     );
+                }
+            }
+
+            // Repair stanza (`docs/specs/incremental_models.md` §"The repair
+            // family"): technique-scoped to `Technique::PerGroupRecompute`
+            // only, so every non-repair cell's rendering above is
+            // byte-identical to before this stanza existed.
+            if cell.technique == Technique::PerGroupRecompute {
+                match &cell.row_identity.identity {
+                    smelt_logical::maintenance::RowIdentity::Key(cols) => {
+                        let _ = writeln!(
+                            out,
+                            "      repair key slice: {} (sound over-approximation)",
+                            cols.join(", ")
+                        );
+                    }
+                    smelt_logical::maintenance::RowIdentity::WholeRow => {
+                        let _ = writeln!(out, "      repair key slice: (not derived)");
+                    }
+                }
+                let trigger_source = match &cell.trigger {
+                    smelt_logical::maintenance::Trigger::NewData { source }
+                    | smelt_logical::maintenance::Trigger::UpstreamMutation { source } => {
+                        Some(source.clone())
+                    }
+                    smelt_logical::maintenance::Trigger::Backfill
+                    | smelt_logical::maintenance::Trigger::ColumnAdded { .. } => None,
+                };
+                match trigger_source
+                    .as_deref()
+                    .and_then(|src| cell.scans.iter().find(|c| c.source == src))
+                    .or_else(|| cell.scans.first())
+                {
+                    Some(scan) => {
+                        let _ = writeln!(
+                            out,
+                            "      repair read bound: source={} column={} before={:?} after={:?}",
+                            scan.source, scan.column, scan.before, scan.after
+                        );
+                    }
+                    None => {
+                        let _ = writeln!(out, "      repair read bound: (not derived)");
+                    }
+                }
+                match trigger_source
+                    .as_deref()
+                    .and_then(|src| find_source_info(source_infos, src))
+                {
+                    Some(info) => {
+                        let src_facts = smelt_db::queries::maintenance::source_facts(
+                            trigger_source.as_deref().unwrap_or_default(),
+                            Some(info),
+                            false,
+                        );
+                        let mechanism = match discovery_posture(src_facts.mutation) {
+                            RepairDiscoveryPosture::ClampedScan => "clamped current-source scan",
+                            RepairDiscoveryPosture::SidecarDiff => {
+                                "group-grain fingerprint-sidecar diff (mutable_snapshot, \
+                                 obligation 7)"
+                            }
+                        };
+                        let _ = writeln!(out, "      affected-key discovery: {mechanism}");
+                    }
+                    None => {
+                        let _ = writeln!(out, "      affected-key discovery: (not derived)");
+                    }
+                }
+
+                // `write: diff_patch` resolution: the real
+                // `choice::resolve_cell_choice`, never a display-only
+                // re-derivation. Only prints a line when the write pin
+                // actually resolves this cell to `ChosenTechnique::DiffPatch`
+                // — a cell with no pin, or a pin resolving to something else,
+                // prints nothing further.
+                let repair_trigger_address = match &cell.trigger {
+                    smelt_logical::maintenance::Trigger::NewData { source }
+                    | smelt_logical::maintenance::Trigger::UpstreamMutation { source } => {
+                        Some(source.clone())
+                    }
+                    smelt_logical::maintenance::Trigger::Backfill => Some("backfill".to_string()),
+                    smelt_logical::maintenance::Trigger::ColumnAdded { .. } => None,
+                };
+                let repair_group_columns: Vec<String> = result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == cell.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default();
+                let repair_overrides = repair_trigger_address
+                    .as_deref()
+                    .map(|addr| {
+                        smelt_logical::maintenance::choice::effective_override(
+                            defaults_cfg,
+                            cells_cfg,
+                            addr,
+                            &repair_group_columns,
+                        )
+                    })
+                    .unwrap_or_default();
+                let write_pattern = write_pin_name.as_deref().and_then(lookup_write_pattern);
+                let chosen = resolve_cell_choice(
+                    Some(cell),
+                    &cell.trigger,
+                    &repair_overrides,
+                    write_pattern,
+                    false,
+                )
+                .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                if let ChosenTechnique::DiffPatch {
+                    recompute: Technique::PerGroupRecompute,
+                    delete_leg,
+                } = chosen
+                {
+                    let _ = writeln!(out, "      write mechanism: diff_patch");
+                    let delete_leg_line = match delete_leg {
+                        DeleteLeg::Complete => "complete".to_string(),
+                        DeleteLeg::Omitted { why } => format!("omitted ({why})"),
+                    };
+                    let _ = writeln!(out, "      diff_patch delete leg: {delete_leg_line}");
                 }
             }
         }

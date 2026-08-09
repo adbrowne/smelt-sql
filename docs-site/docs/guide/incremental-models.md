@@ -842,6 +842,60 @@ Chain a few of these stages together and the payoff compounds: a stable upstream
 
 Recording and projection are both static facts about the derived plan — `smelt explain` never opens a backend connection, so it reports what a cell's technique *would* record and how its route *would* project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is `smelt run --since-upstream`'s job, not `explain`'s.
 
+## Repairing only the affected groups
+
+A non-invertible combiner (`MAX`, `MAX_BY`, and similar overwrite-family folds) can't undo a retracted contribution — when its input changes underneath it, the plan normally refuses to fold at all and falls back to a full refresh. The repair family narrows that refusal for the common case where the change is a **retraction or mutation over a mutable dimension**: if the affected output keys are provably finite, smelt recomputes only those groups from their bounded input slice instead of rebuilding the whole table.
+
+```sql
+---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: customer_id
+---
+SELECT customer_id, MAX(order_total) AS max_order
+FROM smelt.sources.orders
+WHERE order_date BETWEEN TIMESTAMP '2026-01-01' - INTERVAL '3 days' AND TIMESTAMP '2026-01-01'
+GROUP BY customer_id
+```
+
+If `orders` is declared `mutation_profile: mutable_snapshot` (a table whose rows can be updated or deleted in place), a correction to an existing order — or its deletion — narrows to a per-group recompute over just the affected `customer_id`s, rather than refusing outright.
+
+`smelt explain <model>` prints the repair cell's own stanza — the affected-key slice (labelled a sound over-approximation: it may include more keys than were truly touched, never fewer), the bounded per-group read slice, and how the affected keys were discovered:
+
+```
+  - group {max_order} on trigger NewData { source: "orders" }
+      corner:    ColumnMerge
+      technique: PerGroupRecompute
+      ...
+      repair key slice: customer_id (sound over-approximation)
+      repair read bound: source=orders column=order_date before=... after=...
+      affected-key discovery: group-grain fingerprint-sidecar diff (mutable_snapshot, obligation 7)
+```
+
+For an append-only source (no native deletion), the discovery mechanism is the ordinary clamped current-source scan instead of the sidecar diff — a `mutable_snapshot` source needs the sidecar because a key whose entire window contribution was deleted leaves no row for a scan to witness.
+
+### Pinning `write: diff_patch`
+
+By default a repair cell writes its recomputed groups with a targeted `DELETE`+`INSERT`. Pinning `write: diff_patch` instead computes the candidate slice, diffs it against stored state, and writes only the difference:
+
+```yaml
+maintenance:
+  cells:
+  - on: orders
+    columns: [max_order]
+    write: diff_patch
+```
+
+`smelt explain` reports the resolved write mechanism and its delete-leg verdict alongside the repair stanza:
+
+```
+      write mechanism: diff_patch
+      diff_patch delete leg: complete
+```
+
+A `PerGroupRecompute` cell's own key-temporal-locality premise (the same bounded slice that discharges the repair family's admission) is what makes the delete leg **complete** — the diff can safely delete a stored key absent from the recomputed slice, because that slice provably contains every row that could contribute to any key in it.
+
 ## Schema evolution
 
 When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See [Schema Evolution](schema-evolution.md) for full details on:
