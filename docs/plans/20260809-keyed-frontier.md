@@ -44,7 +44,7 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
 | 2     | done     | 534d9cde | 2026-08-09 |
 | 3     | done     | e437a65f | 2026-08-09 |
 | 4     | done     | 63703979 | 2026-08-09 |
-| 5     | pending  |        |      |
+| 5     | done     | fac91d0c | 2026-08-09 |
 
 ---
 
@@ -182,6 +182,13 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
   both diverge from full refresh. Admitting either needs the reduction's raw
   nullable value held apart from the projected output, i.e. decomposed state
   (ladder rung 2), which this plan defers pending a spec pass.
+- **Phase 5 — widen the generative keyed pool.** `KeyedCombiner` renders
+  additive as `SUM` and idempotent as `MAX`, so no seed can produce `BIT_XOR`
+  — which is why the ledger-grading bug (`6fcf416a`) shipped and is covered by
+  a hand-staged pinned hazard case rather than the standing gate. The pool also
+  cannot stage NULL payloads (`GenRow::val` is a non-nullable `i64`), so the
+  once-write NULL direction is likewise a targeted test. Widening both would
+  move these guards back onto the generative gate.
 - **Phase 4 — a general non-key NOT-NULL prover.** `analysis/not_null.rs` proves
   not-null only for partition/driving-clock columns, which is why the fallback
   form is refused outright rather than admitted on a nullability proof.
