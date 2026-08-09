@@ -92,18 +92,28 @@ fn inputs_with(source: SourceFacts) -> (ModelInputs<'static>, Trigger) {
     (inputs, trigger)
 }
 
+/// The payments source declares no `unique_key`, so the repair narrowing's
+/// own affected-key discovery also fails closed (an unkeyed retraction) and
+/// pushes an additive `Refusal::RepairKeysNotDiscoverable` alongside the
+/// pre-existing `NoAdmissibleTechnique` — this helper reads the latter,
+/// which is this test's actual subject.
 fn refusal_why(plan: &smelt_logical::maintenance::MaintenancePlan) -> String {
     assert!(
         plan.cells.is_empty(),
         "expected no admitted cell, got {:?}",
         plan.cells
     );
+    let no_admissible: Vec<_> = plan
+        .refusals
+        .iter()
+        .filter(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. }))
+        .collect();
     assert!(
-        matches!(&plan.refusals[..], [Refusal::NoAdmissibleTechnique { .. }]),
+        matches!(&no_admissible[..], [Refusal::NoAdmissibleTechnique { .. }]),
         "expected exactly one NoAdmissibleTechnique refusal, got {:?}",
         plan.refusals
     );
-    let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+    let Refusal::NoAdmissibleTechnique { why, .. } = no_admissible[0] else {
         unreachable!()
     };
     why.clone()

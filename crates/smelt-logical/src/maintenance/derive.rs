@@ -35,6 +35,7 @@ use crate::analysis::source_bounds::{
 };
 use crate::analysis::walk::model_property_vector;
 use crate::analysis::{item_alias, item_expr, select_stmt_items, SelectItemKind};
+use crate::maintenance::repair;
 use crate::maintenance::skeleton::skeleton_roles;
 
 /// Derive the region row identity (P2, `model_properties.md` §"Region row
@@ -1073,15 +1074,61 @@ fn derive_new_data(
                 ..
             } = faithful_fold(representative, false, &posture, discovery)
             {
-                plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                    trigger: format!("{trigger:?}"),
-                    why: format!(
-                        "fold over '{source}' fails the faithful-fold source-posture \
-                         condition: {reason} (whether or not any of the fold's combiners \
-                         ({:?}) are themselves monoids)",
-                        fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
-                    ),
-                });
+                // Repair narrowing (`incremental_models.md` §"The repair
+                // family"): the faithful-fold's source-posture obligation is
+                // exactly the retraction case the repair family exists for —
+                // before refusing outright, attempt the per-group recompute
+                // technique. Repair only ever converts a refusal into a
+                // cell; it never replaces an already-admitted fold, so this
+                // branch (already established: the posture obligation
+                // failed) is the only site it can fire from. When repair
+                // admission also fails, the pre-existing
+                // `NoAdmissibleTechnique` refusal is still pushed, and the
+                // repair refusal is pushed alongside it naming the failing
+                // obligation — additive, not a replacement.
+                let delta = repair::delta_shape_for_source(inputs.sql, facts);
+                match repair::admit_per_group_recompute(
+                    inputs.sql,
+                    unique_key,
+                    facts,
+                    inputs.output_partition_col(),
+                    loc,
+                    &delta,
+                ) {
+                    Ok(admitted) => {
+                        plan.cells.push(repair::derive_repair_cell(
+                            &admitted,
+                            trigger,
+                            format!(
+                                "{{{}}}",
+                                fold.add_columns
+                                    .iter()
+                                    .map(|(name, _)| name.clone())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        ));
+                    }
+                    Err(refusal) => {
+                        plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                            trigger: format!("{trigger:?}"),
+                            why: format!(
+                                "fold over '{source}' fails the faithful-fold source-posture \
+                                 condition: {reason} (whether or not any of the fold's combiners \
+                                 ({:?}) are themselves monoids)",
+                                fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
+                            ),
+                        });
+                        plan.refusals.push(match refusal {
+                            repair::RepairRefusal::KeysNotDiscoverable { source, why } => {
+                                Refusal::RepairKeysNotDiscoverable { source, why }
+                            }
+                            repair::RepairRefusal::SliceUnbounded { source, why } => {
+                                Refusal::RepairSliceUnbounded { source, why }
+                            }
+                        });
+                    }
+                }
                 return;
             }
 

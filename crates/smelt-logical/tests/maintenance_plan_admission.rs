@@ -115,12 +115,27 @@ fn retractions_into_noninvertible_fail_faithful_fold() {
              got {:?}",
             plan.cells
         );
+        // The repair narrowing also attempts a per-group recompute over the
+        // posture failure; `payments` declares no `unique_key`, so its own
+        // affected-key discovery fails closed too, pushing an additive
+        // `RepairKeysNotDiscoverable` refusal alongside the pre-existing one
+        // (`incremental_models.md` §"The repair family" — fail-closed
+        // refusal is additive, never a replacement).
+        let no_admissible: Vec<_> = plan
+            .refusals
+            .iter()
+            .filter(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. }))
+            .collect();
         assert!(
-            matches!(&plan.refusals[..], [Refusal::NoAdmissibleTechnique { .. }]),
+            matches!(&no_admissible[..], [Refusal::NoAdmissibleTechnique { .. }]),
             "{combiner:?}: expected exactly one NoAdmissibleTechnique refusal, got {:?}",
             plan.refusals
         );
-        let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+        assert!(plan
+            .refusals
+            .iter()
+            .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
+        let Refusal::NoAdmissibleTechnique { why, .. } = no_admissible[0] else {
             unreachable!()
         };
         assert!(
@@ -147,10 +162,17 @@ fn retractions_also_refuse_an_invertible_monoid() {
     let (inputs, trigger) = inputs(SqlFunction::Sum, MutationProfile::MutableSnapshot);
     let plan = derive_maintenance_plan(&inputs, &[trigger]);
     assert!(plan.cells.is_empty());
-    assert!(matches!(
-        &plan.refusals[..],
-        [Refusal::NoAdmissibleTechnique { .. }]
-    ));
+    // Additive repair refusal, same rationale as the test above: `payments`
+    // declares no `unique_key`, so the repair narrowing's own affected-key
+    // discovery fails closed too.
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. })));
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 }
 
 fn multi_column_inputs(

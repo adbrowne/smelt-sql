@@ -207,11 +207,21 @@ fn ex14_change_feed_sum_recompute_only() {
         "no fold cell should be admitted over a change-feed (retracting) source: {:?}",
         fold_plan.cells
     );
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
+    // The repair narrowing also attempts a per-group recompute over the
+    // posture failure; `ledger_cdc` declares no `unique_key`, so affected-key
+    // discovery fails closed too, pushing an additive `RepairKeysNotDiscoverable`
+    // refusal alongside the pre-existing one (`incremental_models.md`
+    // §"The repair family" — fail-closed refusal is additive, never a
+    // replacement).
+    assert_eq!(fold_plan.refusals.len(), 2, "{:?}", fold_plan.refusals);
+    assert!(fold_plan.refusals.iter().any(|r| matches!(
+        r,
         Refusal::NoAdmissibleTechnique { why, .. } if why.contains("faithful-fold source-posture")
-    ));
+    )));
+    assert!(fold_plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 
     // The recompute family (Backfill) is unaffected — a keyed-grain backfill
     // is a whole-table rebuild, always admissible.
@@ -316,11 +326,18 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         }],
     );
     assert!(fold_plan.cells.is_empty());
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
+    // Additive repair refusal, same rationale as EX-14 above: `status_cdc`
+    // declares no `unique_key`, so the repair narrowing's own affected-key
+    // discovery fails closed too.
+    assert_eq!(fold_plan.refusals.len(), 2, "{:?}", fold_plan.refusals);
+    assert!(fold_plan.refusals.iter().any(|r| matches!(
+        r,
         Refusal::NoAdmissibleTechnique { why, .. } if why.contains("faithful-fold source-posture")
-    ));
+    )));
+    assert!(fold_plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 
     let backfill_plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     assert!(backfill_plan.refusals.is_empty());

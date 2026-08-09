@@ -2246,11 +2246,16 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **The repair family and `diff_patch` are specified ahead of derivation and emission.**
-  Per-group recompute (§"The repair family"), affected-key discovery
-  (`model_properties.md` §"Affected-key discovery"), and the `diff_patch` write pattern
-  (§"Per-cell write addressing") have no deriving proof, technique, or emitter yet — every
-  retraction and reprocessing refusal still falls straight to full refresh. Tracked:
+- **The repair family and `diff_patch` derive but do not yet execute.** Per-group recompute
+  (§"The repair family") and affected-key discovery (`model_properties.md` §"Affected-key
+  discovery") are derived by the plan: a keyed fold over a mutable/retraction source that fails
+  the faithful-fold source-posture obligation now derives a `PerGroupRecompute` cell instead of
+  refusing outright, and refuses by named repair obligation
+  (`MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`) when it cannot; the
+  `diff_patch` write pattern (§"Per-cell write addressing") likewise admits and threads the
+  slice-completeness premise for a `PerGroupRecompute` recompute's delete leg. What is still
+  missing is runtime lowering — no admitted repair cell or `diff_patch` write executes a statement
+  yet — and the executed-vs-emitted `statement_parity` leg for both. Tracked:
   `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key

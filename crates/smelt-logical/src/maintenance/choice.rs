@@ -52,12 +52,13 @@ pub enum ChosenTechnique {
     /// purity".
     ///
     /// **Known simplification (this phase's own scope boundary):**
-    /// `resolve_cell_choice` does not yet have a slice-completeness proof to
-    /// thread through — that wiring is routing/lowering's job (a later
-    /// phase), not this admission layer's. Until then this variant is only
-    /// ever produced with `delete_leg: DeleteLeg::Omitted { .. }`; the real
-    /// `Complete` verdict is [`diff_patch::admit_diff_patch`]'s to compute
-    /// once a caller can supply the completeness proof.
+    /// `resolve_cell_choice` threads exactly one slice-completeness premise
+    /// through today — `Technique::PerGroupRecompute`'s own bounded-slice
+    /// admission (the repair family's key-temporal-locality proof) — so this
+    /// variant carries `delete_leg: DeleteLeg::Complete` only over that
+    /// recompute technique; every other recompute (region `DeleteInsert`)
+    /// still carries `DeleteLeg::Omitted { .. }` until that technique's own
+    /// completeness proof is threaded through here too.
     DiffPatch {
         recompute: Technique,
         delete_leg: diff_patch::DeleteLeg,
@@ -350,15 +351,33 @@ pub fn resolve_cell_choice(
                     let recompute = admitted_technique
                         .copied()
                         .unwrap_or(Technique::DeleteInsert);
+                    // Slice-completeness premise (`incremental_models.md`
+                    // §"`diff_patch` — compute, diff, write only the
+                    // difference"): a `PerGroupRecompute` recompute already
+                    // discharged the repair family's own key-temporal-
+                    // locality premise at admission
+                    // (`repair::admit_per_group_recompute`'s bounded
+                    // per-group slice), which is exactly diff_patch's own
+                    // completeness argument for that slice — so the delete
+                    // leg is sound. Every other recompute (region
+                    // `DeleteInsert`) has no such premise threaded through
+                    // this admission layer yet, so its delete leg stays
+                    // omitted with a stated reason rather than silently
+                    // assumed complete.
+                    let delete_leg = if recompute == Technique::PerGroupRecompute {
+                        diff_patch::DeleteLeg::Complete
+                    } else {
+                        diff_patch::DeleteLeg::Omitted {
+                            why: "slice-completeness proof is not yet threaded through \
+                                  resolve_cell_choice for this recompute technique — only \
+                                  PerGroupRecompute's own key-temporal-locality premise \
+                                  (already proven at admission) discharges it here"
+                                .to_string(),
+                        }
+                    };
                     Ok(ChosenTechnique::DiffPatch {
                         recompute,
-                        delete_leg: diff_patch::DeleteLeg::Omitted {
-                            why: "slice-completeness proof is not yet threaded through \
-                                  resolve_cell_choice — the real DeleteLeg verdict is computed \
-                                  by admit_diff_patch once routing/lowering wires it (a later \
-                                  phase's scope), rather than fabricating Complete here"
-                                .to_string(),
-                        },
+                        delete_leg,
                     })
                 }
             }
@@ -1559,6 +1578,54 @@ mod tests {
         )
         .expect_err("diff_patch pin over a non-recompute-family cell must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+    }
+
+    #[test]
+    fn diff_patch_over_a_per_group_recompute_admits_the_delete_leg() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+        let plan = admitted_plan("users", Technique::PerGroupRecompute, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a per-group-recompute cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { delete_leg, .. } => {
+                assert_eq!(delete_leg, diff_patch::DeleteLeg::Complete);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_patch_over_a_delete_insert_recompute_still_omits_the_delete_leg() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+        let plan = admitted_plan("users", Technique::DeleteInsert, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a delete-insert cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { delete_leg, .. } => {
+                assert!(matches!(delete_leg, diff_patch::DeleteLeg::Omitted { .. }));
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
     }
 
     fn cell_cfg(

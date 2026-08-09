@@ -43,7 +43,7 @@ reconciliation runs and idempotent re-runs.
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
-| 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | planned |
+| 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
 | 6 | Runtime lowering: repair + `diff_patch` cells execute, executed-vs-emitted `statement_parity` legs | pending |
 | 7 | Conformance recipes for repair + diff-patch families | pending |
 | 8 | Surface: `smelt explain` rendering, docs-site update | pending |
@@ -115,6 +115,17 @@ reconciliation runs and idempotent re-runs.
   own SQL (a `MutableSnapshot` delta is a whole-row snapshot diff) rather than plumbed as a new
   world fact. The combiner-algebra leg (holistic combiner over an append-only source) is not
   narrowed — it is not a success criterion.
+
+- 2026-08-09 (implement 5): landed the narrowing — `derive_new_data`'s faithful-fold
+  source-posture failure branch now attempts `repair::admit_per_group_recompute` before refusing,
+  pushing a `PerGroupRecompute` cell on success or the additive `Refusal::RepairKeysNotDiscoverable`
+  / `RepairSliceUnbounded` alongside the pre-existing `NoAdmissibleTechnique` on failure.
+  `derive_repair_cell` now takes the real `Trigger`; added `repair::delta_shape_for_source`
+  (reuses `fingerprint_projection`'s leaf classifier, fails closed to empty columns on
+  `Projection::FullRow`). `resolve_cell_choice`'s `DiffPatch` arm now grants `DeleteLeg::Complete`
+  when the underlying recompute is `PerGroupRecompute` (its own key-temporal-locality premise),
+  `Omitted` otherwise. Five pre-existing tests needed their refusal-count assertions widened
+  (additive refusal, not a replacement) — no golden/conformance fallout otherwise.
 
 ## Blocked
 

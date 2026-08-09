@@ -16,7 +16,9 @@ use smelt_logical::maintenance::derive::LocalityInputs;
 use smelt_logical::maintenance::repair::{
     admit_per_group_recompute, derive_repair_cell, RepairRefusal,
 };
-use smelt_logical::maintenance::{Corner, MutationProfile, RowIdentity, SourceFacts, Technique};
+use smelt_logical::maintenance::{
+    Corner, MutationProfile, RowIdentity, SourceFacts, Technique, Trigger,
+};
 
 fn orders_source() -> SourceFacts {
     SourceFacts {
@@ -104,7 +106,13 @@ fn repair_cell_lands_in_column_merge_corner() {
         &delta,
     )
     .expect("expected admission");
-    let cell = derive_repair_cell(&admitted, "orders", "{max_amount}".to_string());
+    let cell = derive_repair_cell(
+        &admitted,
+        Trigger::UpstreamMutation {
+            source: "orders".to_string(),
+        },
+        "{max_amount}".to_string(),
+    );
     assert_eq!(cell.corner, Corner::ColumnMerge);
     assert_eq!(cell.technique, Technique::PerGroupRecompute);
     assert_eq!(

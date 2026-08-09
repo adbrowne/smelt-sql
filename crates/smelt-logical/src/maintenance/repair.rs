@@ -26,6 +26,8 @@
 //! — that wiring, and the runtime lowering that executes an admitted cell,
 //! is a later phase's scope).
 
+use std::collections::BTreeSet;
+
 use super::derive::{project_source_link, LocalityInputs, SourceLink};
 use super::{
     Corner, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts,
@@ -34,6 +36,7 @@ use super::{
 use crate::analysis::affected_keys::{
     derive_affected_keys, AffectedKeyContext, AffectedKeys, DeltaShape,
 };
+use crate::analysis::fingerprint::{fingerprint_projection, Projection};
 
 /// The admitted per-group repair verdict: the group key to recompute over
 /// and the bounded per-group read slice.
@@ -114,18 +117,42 @@ pub fn admit_per_group_recompute(
     })
 }
 
+/// Derive the [`DeltaShape`] a `MutationProfile::MutableSnapshot` source's
+/// delta carries: it is a whole-row snapshot diff, so — absent a physical
+/// schema at this layer — the delta is taken to carry every column of
+/// `facts` the model's own SQL actually reads, resolved via the same
+/// walk-backed [`fingerprint_projection`] leaf classifier
+/// [`crate::analysis::affected_keys`] already reuses (no new raw-text scan).
+/// A fail-closed [`Projection::FullRow`] verdict (the model's
+/// reference to `facts` could not be resolved to a concrete column set)
+/// yields an empty column set — the delta then carries no columns a repair
+/// obligation can find present, which fails the affected-key proof closed
+/// rather than guessing a wider set. `keyed` mirrors whether `facts`
+/// declares a `unique_key` at all.
+pub fn delta_shape_for_source(sql: &str, facts: &SourceFacts) -> DeltaShape {
+    let columns = match fingerprint_projection(sql, &facts.name) {
+        Projection::Columns(cols) => cols,
+        Projection::FullRow { .. } => BTreeSet::new(),
+    };
+    DeltaShape {
+        source: facts.name.clone(),
+        columns,
+        keyed: !facts.unique_key.is_empty(),
+    }
+}
+
 /// Build the `ColumnMerge`/`PerGroupRecompute` [`PlanCell`] for an admitted
 /// repair verdict. `group` is the display name of the column group this
 /// cell maintains (mirrors every other `derive_*` cell-builder's own
 /// `group.name()` convention — the caller supplies it rather than this
 /// function re-deriving column-group membership, which is not this
-/// function's scope).
-pub fn derive_repair_cell(admitted: &AdmittedRepair, source: &str, group: String) -> PlanCell {
+/// function's scope). `trigger` is the trigger actually being derived
+/// (`derive_new_data`'s key-grain posture leg passes its own `NewData`
+/// trigger rather than this function hard-coding `UpstreamMutation`).
+pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: String) -> PlanCell {
     PlanCell {
         group,
-        trigger: Trigger::UpstreamMutation {
-            source: source.to_string(),
-        },
+        trigger,
         corner: Corner::ColumnMerge,
         technique: Technique::PerGroupRecompute,
         partition_local: PartitionLocal::Yes,
@@ -137,5 +164,47 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, source: &str, group: String
         },
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delta_shape_for_a_mutable_source_carries_its_referenced_columns() {
+        let sql = "SELECT customer_id, MAX(amount) AS max_amount FROM smelt.sources.orders \
+                    GROUP BY customer_id";
+        let facts = SourceFacts {
+            name: "orders".to_string(),
+            mutation: super::super::MutationProfile::MutableSnapshot,
+            partition_col: Some("order_date".to_string()),
+            unique_key: vec!["order_id".to_string()],
+            allow_full_scan: false,
+        };
+        let delta = delta_shape_for_source(sql, &facts);
+        assert_eq!(delta.source, "orders");
+        assert!(delta.keyed);
+        assert_eq!(
+            delta.columns,
+            ["customer_id".to_string(), "amount".to_string()]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    #[test]
+    fn delta_shape_fails_closed_to_no_columns_on_full_row_projection() {
+        let sql = "SELECT * FROM smelt.sources.orders";
+        let facts = SourceFacts {
+            name: "orders".to_string(),
+            mutation: super::super::MutationProfile::MutableSnapshot,
+            partition_col: Some("order_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        };
+        let delta = delta_shape_for_source(sql, &facts);
+        assert!(!delta.keyed);
+        assert!(delta.columns.is_empty());
     }
 }

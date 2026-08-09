@@ -423,10 +423,19 @@ fn ex24_mutable_source_fails_the_faithful_fold_condition() {
     let (inputs, trigger) = ex24_inputs(SqlFunction::Sum, MutationProfile::MutableSnapshot);
     let plan = derive_maintenance_plan(&inputs, &[trigger]);
     assert!(plan.cells.is_empty());
-    assert!(matches!(
-        &plan.refusals[..],
-        [Refusal::NoAdmissibleTechnique { .. }]
-    ));
+    // `payments` declares no `unique_key`, so the repair narrowing's own
+    // affected-key discovery fails closed too, pushing an additive
+    // `RepairKeysNotDiscoverable` refusal alongside the pre-existing one
+    // (`incremental_models.md` §"The repair family" — fail-closed refusal is
+    // additive, never a replacement).
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. })));
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 }
 
 #[test]
