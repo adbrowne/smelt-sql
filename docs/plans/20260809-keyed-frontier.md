@@ -42,7 +42,7 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
 |-------|----------|--------|------|
 | 1     | done     | 030b5cd2 | 2026-08-09 |
 | 2     | done     | 534d9cde | 2026-08-09 |
-| 3     | pending  |        |      |
+| 3     | done     | e437a65f | 2026-08-09 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 
