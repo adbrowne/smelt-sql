@@ -100,25 +100,35 @@ impl WindowedKeyedRule for CumulativeClassification {
     }
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
-    /// combiner is `Sum` — an additive fold double-counts on a repeat merge
-    /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
-    /// "Storage is graded by algebra"). The remaining catalogued combiners
-    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`, the
-    /// order-monotone overwrite family `OrderMonotone`, and the once-write
-    /// family `OnceWrite`) grade `Idempotent`: re-merging the SAME
-    /// already-reflected delta twice leaves the incumbent-wins comparison
-    /// unchanged (`delta.ord > target.ord` is false the second time, since
-    /// after the first merge `target.ord == delta.ord`; and
-    /// `COALESCE(target.c, delta.c)` is a no-op once `target.c` is set) —
-    /// a re-run converges, it does not
-    /// double-count. Mixing an additive column with idempotent ones in the
-    /// same cell still grades the whole cell `Additive` — conservative
-    /// (never unsafe), per `WindowedKeyedRule::ledger_grade`'s doc comment.
+    /// combiner belongs to the **additive fold** family — `Sum` or `BitXor`
+    /// (`docs/specs/incremental_models.md` §"The column-family catalogue")
+    /// — since re-merging an already-reflected delta does not converge for
+    /// either (`docs/specs/incremental_models.md` §"The reconciliation
+    /// ledger" — "Storage is graded by algebra"). `Sum` double-counts
+    /// (`x + d + d`); `BitXor` is self-inverse and *cancels* the window's
+    /// contribution (`x XOR d XOR d == x`) — a different corruption, the
+    /// same non-idempotence, so both must keep a ledger and refuse a
+    /// reprocessed window rather than silently write wrong state.
+    ///
+    /// The remaining catalogued combiners (`Min`/`Max`/`BoolAnd`/`BoolOr`/
+    /// `BitAnd`/`BitOr`, the order-monotone overwrite family
+    /// `OrderMonotone`, and the once-write family `OnceWrite`) grade
+    /// `Idempotent`: re-merging the SAME already-reflected delta twice
+    /// leaves the state unchanged — the lattice combiners are idempotent
+    /// (`GREATEST(x, d) == GREATEST(GREATEST(x, d), d)`), the incumbent-wins
+    /// comparison is false the second time (after the first merge
+    /// `target.ord == delta.ord`), and `COALESCE(target.c, delta.c)` is a
+    /// no-op once `target.c` is set — a re-run converges. Mixing an additive
+    /// column with idempotent ones in the same cell still grades the whole
+    /// cell `Additive` — conservative (never unsafe), per
+    /// `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
-        let any_additive = self
-            .aggregator_columns
-            .iter()
-            .any(|col| matches!(col.cross_partition_combiner, CrossPartitionCombiner::Sum));
+        let any_additive = self.aggregator_columns.iter().any(|col| {
+            matches!(
+                col.cross_partition_combiner,
+                CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+            )
+        });
         if any_additive {
             Grade::Additive
         } else {
@@ -285,7 +295,8 @@ pub async fn execute_cumulative_aggregate(
     // 2. Refuse reprocessing (MP12): the windowed-keyed-maintenance driver
     //    (step 3 below) grades this classification's cell via
     //    `WindowedKeyedRule::ledger_grade` above. For an `Additive`-graded
-    //    cell — at least one `SUM`-family aggregator column — every step's
+    //    cell — at least one additive-fold aggregator column (`SUM`/`COUNT`
+    //    or the self-inverse `BIT_XOR`) — every step's
     //    create-or-merge action is folded through the warehouse-resident
     //    reconciliation ledger (`docs/specs/incremental_models.md` §"The
     //    reconciliation ledger"), transactionally with the write
@@ -990,6 +1001,61 @@ mod tests {
             "a MIN-folded group over a proven key must admit suppression, not refuse: \
              {suppression:?}"
         );
+    }
+
+    /// `BIT_XOR` is an **additive fold** (`docs/specs/incremental_models.md`
+    /// §"The column-family catalogue") — a commutative *group*, not an
+    /// idempotent lattice. Re-merging an already-reflected delta computes
+    /// `x XOR d XOR d == x`, which CANCELS that window's contribution rather
+    /// than converging, so the cell must keep a ledger (`Grade::Additive`)
+    /// and refuse the reprocessed window rather than silently corrupting
+    /// state (§"The transactional merge ledger").
+    #[test]
+    fn bit_xor_only_model_is_ledger_graded_additive() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "xor_bits".to_string(),
+                per_partition_agg: "BIT_XOR".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::BitXor,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(
+            classification.ledger_grade(),
+            Grade::Additive,
+            "BIT_XOR is self-inverse: re-merging an already-reflected delta cancels it, so the \
+             cell must keep a reconciliation ledger"
+        );
+    }
+
+    /// The genuinely idempotent lattice combiners still skip the ledger —
+    /// the fix above must not widen ledger keeping to every keyed model.
+    #[test]
+    fn lattice_only_model_stays_ledger_free() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "max_val".to_string(),
+                    per_partition_agg: "MAX".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Max,
+                },
+                AggregatorColumn {
+                    output_name: "and_bits".to_string(),
+                    per_partition_agg: "BIT_AND".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::BitAnd,
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(classification.ledger_grade(), Grade::Idempotent);
     }
 
     /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner

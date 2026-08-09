@@ -86,8 +86,14 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
 
     match function {
         // Commutative monoids that are also groups (invertible: a
-        // contribution can be un-seen via an inverse combine).
-        Sum | Count => Discriminants {
+        // contribution can be un-seen via an inverse combine). `BIT_XOR`
+        // belongs here, not with the idempotent bit/bool lattice combiners
+        // below: XOR is its own inverse (`x XOR d XOR d == x`), which makes
+        // it a group and — critically — NOT idempotent. It is the additive
+        // fold family (`docs/specs/incremental_models.md` §"The
+        // column-family catalogue"), and every consumer that grades
+        // re-foldability off these facts must treat it as such.
+        Sum | Count | BitXor => Discriminants {
             is_monoid: true,
             needs_inverse: false,
             decomposable: false,
@@ -102,7 +108,7 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
             decomposable: false,
             monotone: Monotone::Value,
         },
-        BoolAnd | BoolOr | BitAnd | BitOr | BitXor => Discriminants {
+        BoolAnd | BoolOr | BitAnd | BitOr => Discriminants {
             is_monoid: true,
             needs_inverse: true,
             decomposable: false,
@@ -140,9 +146,13 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
 mod tests {
     use super::*;
 
+    /// `BIT_XOR` is a group (self-inverse), so it is graded with `SUM`/
+    /// `COUNT`, never with the idempotent bit/bool lattice combiners — the
+    /// additive fold family (`docs/specs/incremental_models.md` §"The
+    /// column-family catalogue").
     #[test]
-    fn sum_and_count_are_invertible_monoids() {
-        for f in [SqlFunction::Sum, SqlFunction::Count] {
+    fn sum_count_and_bit_xor_are_invertible_monoids() {
+        for f in [SqlFunction::Sum, SqlFunction::Count, SqlFunction::BitXor] {
             let d = combiner_discriminants(f, false);
             assert!(d.is_monoid, "{f:?} should be a monoid");
             assert!(!d.needs_inverse, "{f:?} should be invertible (a group)");
