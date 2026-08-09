@@ -57,6 +57,18 @@ impl Discriminants {
             monotone: Monotone::None,
         }
     }
+
+    /// Whether these are exactly the fail-closed holistic-or-unknown facts:
+    /// no monoid, not decomposable, no monotonicity claimed. Used by
+    /// `decomposed_state::decompose_to_state` as its entry gate — narrower
+    /// than `!decomposable` alone, so an order-monotone combiner
+    /// (`ArgMax`/`ArgMin`, `decomposable == false` but `monotone ==
+    /// Monotone::Order`) still reaches the state-shape match
+    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models").
+    pub fn is_holistic_or_unknown(&self) -> bool {
+        *self == Self::holistic_or_unknown()
+    }
 }
 
 /// Classify the algebraic discriminants of an aggregate combiner.

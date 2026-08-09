@@ -284,4 +284,45 @@ mod tests {
         let verdict = presentation_map_purity(&expr, &["running_sum".to_string()]);
         assert_eq!(verdict, Purity::Pure);
     }
+
+    #[test]
+    fn variance_closed_form_is_pure() {
+        // The rung-2 variance/stddev presentation map: a CASE guard over a
+        // division and a SQRT wrap, all reading only the state row's own
+        // `(n, sx, sxx)` columns.
+        let expr = parse_expr(
+            "CASE WHEN stat_amount__n <= 1 THEN NULL ELSE SQRT(((stat_amount__n * stat_amount__sxx) - (stat_amount__sx * stat_amount__sx)) / (stat_amount__n * (stat_amount__n - 1))) END",
+        );
+        let verdict = presentation_map_purity(
+            &expr,
+            &[
+                "stat_amount__n".to_string(),
+                "stat_amount__sx".to_string(),
+                "stat_amount__sxx".to_string(),
+            ],
+        );
+        assert_eq!(verdict, Purity::Pure);
+    }
+
+    #[test]
+    fn bare_state_column_is_pure() {
+        // The `MAX_BY`/`MIN_BY` presentation map: the bare `v` state column,
+        // no further computation.
+        let expr = parse_expr("latest_v__v");
+        let verdict = presentation_map_purity(
+            &expr,
+            &["latest_v__v".to_string(), "latest_v__o".to_string()],
+        );
+        assert_eq!(verdict, Purity::Pure);
+    }
+
+    #[test]
+    fn coalesce_over_state_columns_is_pure() {
+        // The once-write multi-candidate presentation map applies the
+        // preference order via CASE; a fallback-bearing variant may also
+        // reach a COALESCE-shaped scalar expression over state columns.
+        let expr = parse_expr("COALESCE(target__value, 0)");
+        let verdict = presentation_map_purity(&expr, &["target__value".to_string()]);
+        assert_eq!(verdict, Purity::Pure);
+    }
 }

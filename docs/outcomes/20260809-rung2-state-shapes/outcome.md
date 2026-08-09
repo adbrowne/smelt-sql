@@ -45,7 +45,7 @@ success criteria above.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
-| 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | planned |
+| 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
 | 3 | Storage + emitters: state columns in the stored table, keyed fold over state, presentation projection, `KeyedStateColumnCollision` diagnostic wiring | pending |
 | 4 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
 | 5 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
@@ -85,6 +85,12 @@ success criteria above.
   `KeyedStateColumnCollision` splits: the pure detector lands in phase 2 alongside the shapes it
   checks, the diagnostic wiring in phase 3 where the plan first carries state columns (row text
   sharpened). No work left the outcome.
+- 2026-08-09 (implement 2): `decompose_to_state` now derives variance/stddev `(n, sx, sxx)`,
+  `ARG_MAX`/`ARG_MIN` `(v, o)`, and once-write `(value, written)` (via a new
+  `decompose_once_write` entry point) state shapes, gated on `Discriminants::is_holistic_or_unknown()`
+  per the plan-2 decision. `presentation.rs`'s existing walk needed no new arms — CASE/binary-op/
+  scalar-function coverage already accepted the new `π` shapes. All 14 new/updated
+  `decomposed_state` tests and 3 new `presentation` tests pass; full `verify-phase.sh` green.
 
 ## Blocked
 
