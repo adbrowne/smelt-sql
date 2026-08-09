@@ -2968,6 +2968,10 @@
 <td>Driving source</td>
 <td>the single <code>timeseries:</code>-tagged source in the FROM clause</td>
 </tr>
+<tr>
+<td>Run shape</td>
+<td>whether that clocked source exists — one means window-forward, none means snapshot-reconcile (see <a href="#run-shapes">Run shapes</a>)</td>
+</tr>
 </tbody>
 </table>
 <p>There is no way to override these — they are read from the SQL on every run.</p>
@@ -3044,7 +3048,7 @@
 </tr>
 </tbody>
 </table>
-<p>The first nine rows are the <strong>fold families</strong> — additive (<code>COUNT</code>/<code>SUM</code>) and extremal/lattice (<code>MIN</code>, <code>MAX</code>, the boolean and bitwise combiners). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state.</p>
+<p>The first nine rows are the <strong>fold families</strong>: additive (<code>COUNT</code>, <code>SUM</code>, <code>BIT_XOR</code>) and extremal/lattice (<code>MIN</code>, <code>MAX</code>, the boolean combiners, <code>BIT_AND</code>/<code>BIT_OR</code>). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state. The two differ on re-running a window that was already merged: the extremal/lattice combiners are idempotent, so a repeat merge converges, while the additive ones do not — <code>COUNT</code>/<code>SUM</code> would double-count, and <code>BIT_XOR</code> is self-inverse, so a repeat merge would <em>cancel</em> that window's contribution (<code>x xor d xor d == x</code>). Either way the result would diverge from a full refresh, which is why an additive model keeps a ledger and refuses a reprocessed window (see <a href="#reprocessing">Reprocessing</a>).</p>
 <p><code>MAX_BY</code>/<code>MIN_BY</code> is the <strong>order-monotone overwrite family</strong>. The ordering expression must also be projected in the same SELECT as its own running <code>MAX(ord)</code>/<code>MIN(ord)</code> column (or the value expression must <em>be</em> the ordering expression, as in <code>MAX_BY(x, x)</code>) — the merge compares the stored ordering value against the incoming one, so it has to be a column of the table. Without that companion projection the column is refused (<code>KeyedUnknownCombiner</code>, naming the missing projection). Ties keep the incumbent.</p>
 <p><code>COALESCE</code> is the <strong>once-write family</strong> — see <a href="#once-write-columns">Once-write columns</a> below; it is admitted only when its provenance can be proven.</p>
 <p><code>ANY_VALUE</code> is the <strong>plain-overwrite family</strong> — see <a href="#run-shapes">Run shapes</a> below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.</p>
@@ -3108,7 +3112,7 @@
 <p class="admonition-title">Granularity restriction</p>
 <p>The driving source must declare <code>granularity: day</code> or <code>granularity: week</code>. Any other granularity — <code>hour</code>, <code>month</code>, <code>quarter</code>, or <code>year</code> — is rejected at runtime with the error <code>windowed-keyed-maintenance driver supports day and week granularity; got &lt;Granularity&gt;</code>.</p>
 </div>
-<p>Running a window-forward model without a run window (<code>smelt run</code> without <code>--event-time-start</code>/<code>--event-time-end</code>) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.</p>
+<p>A window-forward model expects both <code>--event-time-start</code> and <code>--event-time-end</code>; they address the <em>driving source's</em> partition column. Running it without them (or with only one) is not an incremental run at all — it currently falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source. Supply both flags whenever you mean to maintain the table rather than rebuild it.</p>
 <p><strong>Snapshot-reconcile</strong> models never take <code>--event-time-start</code>/<code>--event-time-end</code> — supplying either is rejected fail-loud, naming the run shape. Every run re-scans the source whole: the first run creates the target table from the SELECT; every subsequent run <code>MERGE</code>s the whole-source scan into the existing target — matched keys are overwritten (incoming row wins), unmatched keys inserted, and a key present in the target but <strong>absent</strong> from the incoming scan is <strong>retained unchanged</strong> (there is no <code>DELETE</code>; removing a stored row entirely needs an explicit mechanism, out of scope today). No reconciliation ledger is kept — each run is a self-contained reconciliation.</p>
 <h2 id="end-state-equivalence">End-state equivalence<a class="headerlink" href="#end-state-equivalence" title="Permanent link">&para;</a></h2>
 <p>For any set of source partitions <code>S = {D₁, …, Dₙ}</code> and any admitted ordering π over <code>S</code>:</p>
@@ -3165,11 +3169,24 @@
 <td><code>KeyedOnceWriteUnproven</code></td>
 <td>A <code>COALESCE</code> once-write column has no <a href="#once-write-columns">provenance proof</a>, or carries a fallback argument after its <code>MAX</code>/<code>MIN</code> reduction — names the column and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model; for the fallback case, drop it and apply the default downstream</td>
 </tr>
+<tr>
+<td><code>KeyedSqlNotParseable</code></td>
+<td>The model SELECT could not be parsed into the shape the classifier reads</td>
+</tr>
+<tr>
+<td><code>KeyedReprocessedWindow</code></td>
+<td>A run window covers a window this model already merged, and the model is not re-run tolerant (it has an additive column) — see <a href="#reprocessing">Reprocessing</a></td>
+</tr>
+<tr>
+<td><code>KeyedRecurrenceBoundViolated</code></td>
+<td>Runtime, declared-<code>key_recurrence</code> route only: a merged delta row matched a stored key outside the run's derived slice, violating the source's declared bound. The run's transaction rolls back</td>
+</tr>
 </tbody>
 </table>
 <p>There is no <code>safety_overrides:</code> block for <code>grain: key</code> models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.</p>
 <h2 id="reprocessing">Reprocessing<a class="headerlink" href="#reprocessing" title="Permanent link">&para;</a></h2>
-<p>Reprocessing an already-merged window is refused when detected. If a past window's source data changes after the window has already been merged, the key-grain table is stale until the operator runs with <code>--full-refresh</code> (truncate and rebuild). Re-merging additive columns over an already-merged delta would double-count under a second pass; the rule refuses to silently double-count.</p>
+<p>Reprocessing an already-merged window is refused when detected, with the error <code>KeyedReprocessedWindow</code> naming the model, the partition, the window bounds, and the <code>--full-refresh</code> remedy. A model carrying an additive (<code>COUNT</code>/<code>SUM</code>/<code>BIT_XOR</code>) column is not re-run tolerant: each merged window is recorded in a small per-model reconciliation-ledger table, written in the same backend transaction as the merge itself, and a run whose window is already recorded is refused rather than folded a second time. A model whose columns are all idempotent (<code>MIN</code>/<code>MAX</code>, <code>MAX_BY</code>/<code>MIN_BY</code>, once-write) needs no ledger — re-merging a window converges to the same state — so none is created for it and no window is refused.</p>
+<p>If a past window's source data changes after the window has already been merged, the key-grain table is stale until the operator runs with <code>--full-refresh</code> (truncate and rebuild). Snapshot-reconcile models keep no ledger at all: each run is a self-contained reconciliation, so there is nothing to reprocess.</p>
 <h2 id="output-shape">Output shape<a class="headerlink" href="#output-shape" title="Permanent link">&para;</a></h2>
 <p>A <code>grain: key</code> model's output has:</p>
 <ul>
