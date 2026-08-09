@@ -3,8 +3,10 @@
 # Outcome loop — headless driver for outcome-driven work (docs/outcome_loop.md).
 #
 # Parallel to autonomy-loop.sh, but the unit of work alternates between two
-# step types chosen from the active outcome's phase table
-# (`.claude/active-outcome` -> docs/outcomes/<name>/outcome.md):
+# step types chosen from the active outcome's phase table. The active outcome
+# is the first entry in `.claude/outcome-backlog` (ordered outcome
+# directories, one per line) whose outcome.md **Status:** is neither `done`
+# nor `blocked`:
 #
 #   first non-done/non-blocked row is `pending`  -> PLAN step   (MODEL_PLAN, default opus)
 #   first non-done/non-blocked row is `planned`  -> IMPLEMENT step (MODEL_IMPL, default sonnet)
@@ -63,11 +65,20 @@ S_OUTCOME_BLOCKED="<<OUTCOME_BLOCKED>>"
 cd "${REPO_ROOT}"
 
 outcome_dir() {
-  # .claude/active-outcome holds one line: the outcome directory path.
-  local d
-  d="$(grep -v '^\s*#' "${SCRIPT_DIR}/../active-outcome" 2>/dev/null | grep -m1 .)" || return 1
-  d="${d#outcome: }"
-  [ -f "${d}/outcome.md" ] && printf '%s' "${d}"
+  # .claude/outcome-backlog holds ordered outcome directories, one per
+  # non-comment line. Return the first whose outcome.md **Status:** is
+  # neither `done` nor `blocked`.
+  local d status
+  while IFS= read -r d; do
+    [ -z "${d}" ] && continue
+    [ -f "${d}/outcome.md" ] || continue
+    status="$(grep -m1 '^\*\*Status:\*\*' "${d}/outcome.md" | sed -E 's/^\*\*Status:\*\*[[:space:]]*//')"
+    case "${status}" in
+      done|blocked) continue ;;
+      *) printf '%s' "${d}"; return 0 ;;
+    esac
+  done < <(grep -v '^\s*#' "${SCRIPT_DIR}/../outcome-backlog" 2>/dev/null)
+  return 1
 }
 
 # Echo "<step> <phase#> <title>" for the first workable phase row, where
@@ -88,7 +99,13 @@ next_step() {
 
 echo "===== Outcome loop starting ====="
 echo "Repo:            ${REPO_ROOT}"
-ACTIVE="$(outcome_dir)" || { echo "ERROR: .claude/active-outcome does not name a directory containing outcome.md"; exit 1; }
+ACTIVE="$(outcome_dir)" || {
+  echo "===== no workable outcome in .claude/outcome-backlog (all done/blocked, or backlog empty/missing) ====="
+  if grep -lF '**Status:** blocked' $(grep -v '^\s*#' "${SCRIPT_DIR}/../outcome-backlog" 2>/dev/null | sed 's#$#/outcome.md#') >/dev/null 2>&1; then
+    exit 2
+  fi
+  exit 0
+}
 echo "Outcome:         ${ACTIVE}"
 echo "Logs:            ${LOG_DIR}"
 echo "Max iterations:  ${MAX_ITERATIONS}"
@@ -150,8 +167,13 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
     break
   fi
 
-  # Dispatch: which step, which model, which prompt.
-  ACTIVE="$(outcome_dir)" || { exit_reason="active_outcome_missing"; break; }
+  # Dispatch: which step, which model, which prompt. Backlog exhaustion
+  # (every entry done/blocked) is a clean terminal state, not an error.
+  ACTIVE="$(outcome_dir)" || {
+    echo "===== no workable outcome left in .claude/outcome-backlog — all done/blocked ====="
+    exit_reason="backlog_exhausted"
+    break
+  }
   step_info="$(next_step "${ACTIVE}")"
   if [ -n "${step_info}" ]; then
     step="${step_info%% *}"
@@ -229,13 +251,12 @@ ${hint}" 2>&1 | tee "${log}"
   fi
 
   if printf '%s' "${final_result}" | grep -qF "${S_OUTCOME_COMPLETE}"; then
-    echo "===== ${S_OUTCOME_COMPLETE} — outcome achieved ====="
-    exit_reason="outcome_complete"
-    break
+    echo "===== ${S_OUTCOME_COMPLETE} — outcome achieved; advancing to next backlog entry ====="
+    continue
   elif printf '%s' "${final_result}" | grep -qF "${S_OUTCOME_BLOCKED}"; then
-    echo "===== ${S_OUTCOME_BLOCKED} — needs a human ====="
-    exit_reason="outcome_blocked"
-    break
+    echo "===== ${S_OUTCOME_BLOCKED} — needs a human; advancing to next backlog entry ====="
+    blocked_count=$((blocked_count + 1))
+    continue
   elif printf '%s' "${final_result}" | grep -qF "${S_PHASE_BLOCKED}"; then
     blocked_count=$((blocked_count + 1))
     echo "===== ${S_PHASE_BLOCKED} — recorded; continuing to next row ====="
@@ -261,9 +282,11 @@ echo
 echo "===== Outcome loop exited: ${exit_reason} after ${iteration} iteration(s); blocked rows this run: ${blocked_count} ====="
 
 case "${exit_reason}" in
-  outcome_complete) exit 0 ;;
-  outcome_blocked)  exit 2 ;;
-  stopped_by_flag)  exit 3 ;;
-  session_limit)    exit 4 ;;
-  *)                exit 1 ;;
+  backlog_exhausted)
+    [ "${blocked_count}" -gt 0 ] && exit 2
+    exit 0
+    ;;
+  stopped_by_flag)    exit 3 ;;
+  session_limit)      exit 4 ;;
+  *)                  exit 1 ;;
 esac
