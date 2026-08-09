@@ -1,7 +1,7 @@
 # Outcome: The repair family — per-group recompute and diff-then-patch
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §3 T-A/T-B, §6 step 2
 **Spec anchors:** `docs/specs/incremental_models.md` (technique families, write-pattern registry), `docs/research/20260724-ivm-pattern-gap-catalogue.md` §A1/§C1
 
@@ -280,6 +280,24 @@ reconciliation runs and idempotent re-runs.
   CLI bullet, and the docs-site guide section + `--technique` name-list corrections
   (`column_scoped_merge`/`per_group_recompute` were missing from both reference pages). All 6
   planned tests pass; standing gates green. This was the outcome's last phase row.
+
+- 2026-08-10 (plan 12, terminal): all 11 rows `done`; success criteria judged met against the phase
+  summaries and marked complete. Evidence — (1) retraction over a non-invertible keyed combiner now
+  derives a `PerGroupRecompute` cell instead of refusing (phase 5's narrowing of `derive_new_data`'s
+  faithful-fold source-posture branch); (2) admission is proof-gated by `derive_affected_keys`
+  (phase 2, fail-closed) + the reused scan-clamp bound, with `Refusal::RepairKeysNotDiscoverable` /
+  `RepairSliceUnbounded` refusing by name (phases 3/5); (3) `diff_patch` is a registered write
+  mechanism (`WriteSelection::DiffPatch` / `ChosenTechnique::DiffPatch`) with the single pure
+  emitter `emit_diff_patch`, routed in phase 7 — `cargo test -p smelt-runtime --test
+  statement_parity` 21 passed, structural no-authoring leg included; (4) `maintenance_conformance`
+  covers retraction → per-group repair and reconcile-via-diff-patch against the full-refresh oracle
+  (phase 8's `repair.rs`, 59 passed), with the two gaps it discovered *closed* rather than
+  registered — delete-aware group-grain sidecar discovery (phase 9) and decomposed-combiner hidden
+  state columns (phase 10, its `KnownBug` entry deleted); (5) `smelt explain` renders a
+  technique-scoped repair stanza with key slice, read bound, discovery posture and the `diff_patch`
+  delete-leg verdict (phase 11); (6) `verify-phase.sh` green plus `walk_coverage` 4 passed — no new
+  whole-text scans. Remaining out-of-scope residue is unchanged and recorded in phases 7 and 9
+  summaries (unenforced region-`DeleteInsert` write pin; three sidecar hardening items).
 
 ## Blocked
 
