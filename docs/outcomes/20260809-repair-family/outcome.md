@@ -47,7 +47,9 @@ reconciliation runs and idempotent re-runs.
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
 | 8 | Conformance recipes for repair + diff-patch families | done |
-| 9 | Surface: `smelt explain` rendering, docs-site update | pending |
+| 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | planned |
+| 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | pending |
+| 11 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
 
@@ -199,6 +201,23 @@ reconciliation runs and idempotent re-runs.
   yet, flagged for the next planner); (2) `repair_candidate_select` ignores a
   decomposed combiner's hidden state columns, so only `Idempotent`-shaped
   combiners get full equivalence coverage under retraction today.
+
+- 2026-08-10 (plan 9): reshape — phase 8's two discovered production gaps each get a phase ahead of
+  surface work, because both are success-criteria work and the rule forbids deferring it out: new
+  phase 9 closes the affected-key under-approximation (criteria 1/2/4 — a repair that misses a
+  retracted key breaks the very promise criterion 1 names), new phase 10 closes the
+  decomposed-combiner hidden-state gap (criterion 4 — only `Idempotent` combiners get equivalence
+  coverage under retraction today), surface moves to 11. Phase 9 decides: the delete-aware
+  mechanism is the **existing fingerprint sidecar** (`sources.md` §"The fingerprint sidecar")
+  re-partitioned at *group* grain — one row per output group key holding an order-insensitive
+  digest of that group's contributing rows — so a group that vanishes from the source still has a
+  sidecar comparandum and shows up on the diff's `FULL OUTER JOIN`. Not a second lineage
+  mechanism, not a tombstone log. Two consequences accepted: the discovery read is a **full**
+  source scan (a clamped rescan compared against full stored digests would flag every out-of-clamp
+  group, i.e. degrade to whole-table repair every run — the spec already licenses a snapshot
+  source degrading to a full read), and the affected-key relation becomes a single canonical
+  `delta_key` column joined by key *expression* rather than by columns, uniformly on both paths,
+  because a deleted group's typed column values are unrecoverable by construction.
 
 ## Blocked
 
