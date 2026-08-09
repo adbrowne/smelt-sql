@@ -52,7 +52,7 @@ success criteria above.
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
 | 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | done |
 | 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | done |
-| 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | pending |
+| 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | planned |
 
 ## Decision log
 
@@ -293,6 +293,22 @@ success criteria above.
   the working form is the bare `smelt.<model>` shorthand `dag.rs` already uses (the parser's own
   diagnostic named it). `cargo test -p smelt-cli --test maintenance_conformance` now reports
   53 tests (was 47). No work left the outcome; row 9 (surface cleanup) is what remains.
+
+- 2026-08-09 (plan 9): no reshape — row 9 is the last row. Audited the residual obligation text
+  rows 5/7 were meant to remove: nothing stale survives (the "no companion projection is required"
+  sentences in spec §"The column-family catalogue" and docs-site's cumulative-aggregate page are
+  the *corrected* statements, and the surviving once-write Known Divergence describes a real
+  residual limitation — the missing not-null route around the fallback — not a rung-2 gap). Row 9
+  is therefore all `smelt explain` rendering plus the surface text that describes it.
+- 2026-08-09 (plan 9): the state section must appear in the DEFAULT plan report, not only under
+  `--show-sql`, so it cannot be sourced from `build_model_diagnostics` (which the plain path
+  returns before building). The input is built in the Salsa wrapper `smelt_db::maintenance_plan_report`,
+  which already holds the SQL, refs and resolved `SourceInfo`s, by calling `classify_cumulative` —
+  the single owner of which spellings are state-bearing — and summarizing its
+  `AggregatorColumn::state` through a new pure `smelt-logical` helper. Rejected: deriving state
+  columns inside `derive_model_maintenance_plan` (`SourceFacts` carries no `TimeseriesConfig`, so
+  the classifier's inputs are not reconstructible there) and computing them in `smelt-cli`
+  (analysis in the CLI, and a second answer to "which columns are state-bearing").
 
 ## Blocked
 
