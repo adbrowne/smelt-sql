@@ -123,6 +123,21 @@ jobs:
           cargo run -p smelt-cli --no-default-features --features duckdb --quiet -- test --project-dir examples/timeseries
           cargo run -p smelt-cli --no-default-features --features duckdb --quiet -- test --project-dir examples/ephemeral_demo
 
+      - name: Regenerate Maintenance Atlas + smoke test
+        # Regression gate for the atlas pipeline (crates/smelt-maintenance-testkit/examples/stage_atlas.rs
+        # + scripts/atlas/*): rebuilds it from the example workspaces and testkit
+        # recipe specimens and smoke-runs its app.js against the fresh data. This
+        # is a correctness gate, not a publish step — the HTML is uploaded as a
+        # build artifact for inspection, never wired into docs-site.
+        run: bash scripts/atlas/generate.sh
+
+      - name: Upload Maintenance Atlas artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: maintenance-atlas
+          path: target/atlas/atlas.html
+          retention-days: 14
+
   fuzz-build:
     name: Fuzz Targets Build Check
     runs-on: ubuntu-latest
