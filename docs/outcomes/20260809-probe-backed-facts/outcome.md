@@ -41,7 +41,7 @@ safe to grow (the contract lattice will grow it).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | planned |
+| 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | pending |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | pending |
 | 4 | Runtime wiring: cadence control, firing → named diagnostic + cell remedy marking | pending |
@@ -53,6 +53,7 @@ safe to grow (the contract lattice will grow it).
 <!-- Dated one-liners appended by plan/implement steps. -->
 
 - 2026-08-10: Outcome activated. Phase table kept as scaffolded (no prior summary to reshape from). Phase 1 plans the probe registry as a spec-parsed standing gate (`crates/smelt-logical/tests/probe_obligation.rs`) so later phases flip Status cells from `not-yet` to `built` under test, rather than the table drifting from the emitters.
+- 2026-08-10: Phase 1 done. §"Probe obligation" lands in `model_properties.md` with an 8-row registry (2 built/built-unwired, 5 not-yet, 2 exempt); `sources.md`/`diagnostics.md`/`smelt_yml.md` cross-reference it. `diagnostics.md`'s unified table also picked up `SourceMutationProfileViolated`/`SourceUniqueKeyViolated`, previously defined only in `sources.md`'s own local table — a pre-existing gap the registry's citations exposed. `probes:` (`smelt_yml.md`) is spec-only; no `Config` field yet. See `phases/01-summary.md`.
 
 ## Blocked
 

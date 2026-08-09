@@ -29,6 +29,7 @@ owners: [andrew]
 | `unstable_schema` | bool | no | `false` | Gate for unstable feature surfaces. When `true`, the gated keys listed in §"`unstable_schema:` gated keys" parse without warnings. |
 | `vars` | map of `<name>` → YAML scalar | no | `{}` | Compile-time variable declarations read by `smelt.config.var('<name>')`. The value shape is a flat map of name → scalar (string/number/bool/null); the lookup, YAML-scalar coercion, and per-target overlay semantics are owned by `meta_language.md` §"Compile-time variables". |
 | `state` | object | no | `{ mode: stateless }` | Project state posture. Carries `mode:` (`stateless` \| `intervals` \| `environments`); the posture lattice, reuse semantics, and environment addressing are owned by `virtual_environments.md` §"`state.mode` — the opt-in posture". |
+| `probes` | object | no | `{ cadence: per_run }` | Project-level cadence policy for every declared-fact probe (`model_properties.md` §"Probe obligation"). Carries `cadence:` (`per_run` \| `periodic` \| `off`) and, when `periodic`, `periodic.every_n_runs`. |
 
 ### Environment interpolation
 
@@ -107,7 +108,8 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
    A user-supplied value for either key is applied verbatim and is **never** overridden — explicit configuration always wins. `threads` is left at DuckDB's default.
 
-10. **Environment interpolation runs once, after parse, before validation.** `${VAR}` references in any string field are resolved against the process environment as a single pass over the deserialised config, before `default_materialization`, `unstable_schema`, or any other validation rule inspects the value. A key holding an unresolved `${VAR}` never reaches validation — resolution either substitutes a value or the load fails. `$$` is unescaped to a literal `$` in the same pass, whether or not the surrounding string also contains a real `${VAR}` reference.
+10. **`probes:` governs declared-fact probe cadence.** `cadence: per_run` (the default) dispatches every `built` probe (`model_properties.md` §"Probe obligation") on every consuming run; `periodic` with `every_n_runs: <n>` dispatches once every `n` runs; `off` skips dispatch entirely. An `off` cadence is recorded on the run's own state so `smelt explain` can report a declaration as unverified this run rather than silently presenting it as checked. Per-declaration cadence override is out of scope today — one project-wide policy governs every probe (§Known Divergences).
+11. **Environment interpolation runs once, after parse, before validation.** `${VAR}` references in any string field are resolved against the process environment as a single pass over the deserialised config, before `default_materialization`, `unstable_schema`, or any other validation rule inspects the value. A key holding an unresolved `${VAR}` never reaches validation — resolution either substitutes a value or the load fails. `$$` is unescaped to a literal `$` in the same pass, whether or not the surrounding string also contains a real `${VAR}` reference.
 
 ## Design
 
@@ -138,6 +140,8 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
 ## Known Divergences / Open Questions
 
+- **`probes:` is specified and unimplemented.** `Config` has no `probes` field yet; an authored `probes:` block parses today only as an unknown top-level key (§"Unknown keys" — a warning, not an error). It reaches the `per_run` default described in Semantics §10 only once the probe registry (`model_properties.md` §"Probe obligation") is wired into a live run. Tracked by `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
+- **Per-declaration probe cadence override is open.** `probes:` sets one project-wide cadence; overriding cadence per declaration (e.g. a cheap functional-dependency probe every run, an expensive bounded-domain probe periodic) is not specified today. Tracked by `docs/outcomes/20260809-probe-backed-facts/outcome.md`.
 - **Fuzzy typo hints.** Unknown top-level keys (including typos of known keys) are warned by name. A future "did you mean …" hint that fuzzy-matches the offending key against the known-key set is open; not implemented today.
 - **Per-key reference drift.** The user-facing reference (`docs-site/docs/reference/smelt-yml.md`) currently documents some fields this spec does not yet cover (`schema_evolution`, `columns`). The reference is ahead of the spec on those keys; when the corresponding feature specs land they will absorb those fields.
 - **Multi-target precedence with frontmatter `target:`.** The model-level `target:` frontmatter overrides `smelt.yml::models.<name>.target`, which overrides the CLI `--target`. The frontmatter form is a relatively recent addition; whether it should also be allowed to declare a target *not* defined in `smelt.yml::targets` is open (today: hard error before any work begins).
@@ -164,3 +168,4 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
   - `cli.md` — `--target` resolves against `targets`; `--project-dir` is the workspace root.
   - `meta_language.md` — semantics of the `vars:` block consumed by `smelt.config.var('<name>')`.
   - `virtual_environments.md` — semantics of the `state:` block (`mode:` posture).
+  - `model_properties.md` — the probe-obligation rule and registry `probes:` cadence governs.
