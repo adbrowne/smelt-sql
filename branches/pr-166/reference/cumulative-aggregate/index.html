@@ -2419,6 +2419,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#once-write-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Once-write columns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#run-shapes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2800,6 +2811,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#once-write-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Once-write columns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#run-shapes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3006,20 +3028,69 @@
 <td><code>xor(target.c, delta.c)</code></td>
 </tr>
 <tr>
+<td><code>MAX_BY(v, ord)</code> / <code>MIN_BY(v, ord)</code></td>
+<td>ordering value wins, incumbent on a tie</td>
+<td><code>CASE WHEN delta.ord &gt; target.ord THEN delta.v ELSE target.v END</code></td>
+</tr>
+<tr>
+<td><code>COALESCE(...)</code></td>
+<td>first non-null wins</td>
+<td><code>COALESCE(target.c, delta.c)</code></td>
+</tr>
+<tr>
 <td><code>ANY_VALUE(...)</code></td>
 <td>incoming row wins</td>
 <td><code>delta.c</code></td>
 </tr>
 </tbody>
 </table>
+<p>The first nine rows are the <strong>fold families</strong> — additive (<code>COUNT</code>/<code>SUM</code>) and extremal/lattice (<code>MIN</code>, <code>MAX</code>, the boolean and bitwise combiners). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state.</p>
+<p><code>MAX_BY</code>/<code>MIN_BY</code> is the <strong>order-monotone overwrite family</strong>. The ordering expression must also be projected in the same SELECT as its own running <code>MAX(ord)</code>/<code>MIN(ord)</code> column (or the value expression must <em>be</em> the ordering expression, as in <code>MAX_BY(x, x)</code>) — the merge compares the stored ordering value against the incoming one, so it has to be a column of the table. Without that companion projection the column is refused (<code>KeyedUnknownCombiner</code>, naming the missing projection). Ties keep the incumbent.</p>
+<p><code>COALESCE</code> is the <strong>once-write family</strong> — see <a href="#once-write-columns">Once-write columns</a> below; it is admitted only when its provenance can be proven.</p>
 <p><code>ANY_VALUE</code> is the <strong>plain-overwrite family</strong> — see <a href="#run-shapes">Run shapes</a> below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.</p>
-<p>Each allowed aggregator is commutative and associative — that's the property that lets the rule merge windows in any order and still produce the same final state.</p>
 <p><strong>Out of v1</strong>: <code>AVG</code>, <code>STRING_AGG</code>, <code>LIST_AGG</code>, <code>FIRST</code>, <code>LAST</code>, <code>COUNT(DISTINCT ...)</code>, <code>APPROX_COUNT_DISTINCT</code>. Composite expressions over aggregates (e.g. <code>SUM(x) + 1</code>) are also refused — split into separate projections and compute derived values downstream.</p>
+<h2 id="once-write-columns">Once-write columns<a class="headerlink" href="#once-write-columns" title="Permanent link">&para;</a></h2>
+<p>A once-write column keeps the <strong>first non-null value ever written</strong> for a key: the merge is <code>COALESCE(target.c, delta.c)</code>, so once a key's value is set no later window can change it. That is only equivalent to a full refresh when the value is genuinely a per-key constant — otherwise "first written" depends on which window happened to arrive first, and the run is no longer reorder-independent. The rule therefore demands a <strong>provenance proof</strong> before admitting the column, and refuses <code>KeyedOnceWriteUnproven</code> when it cannot get one.</p>
+<p>Two shapes are admitted:</p>
+<p><strong>Key-derived</strong> — the coalesced value is a bare reference to one of the model's own <code>GROUP BY</code> key columns. It is a per-key constant by construction, so no declaration is needed:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;n/a&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_seen_device</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
+</code></pre></div>
+<p><strong>Declared functional dependency</strong> — the coalesced value is a single-column <code>MAX(col)</code> or <code>MIN(col)</code> <strong>with no fallback argument</strong>, and the model declares that the grouping key determines <code>col</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">---</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="k">key</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="n">functional_dependencies</span><span class="p">:</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">  </span><span class="o">-</span><span class="w"> </span><span class="k">key</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">device_id</span><span class="p">]</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="n">determines</span><span class="p">:</span><span class="w"> </span><span class="n">signup_referrer</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="c1">---</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="k">SELECT</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="k">COALESCE</span><span class="p">(</span><span class="k">MAX</span><span class="p">(</span><span class="n">signup_referrer</span><span class="p">))</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_referrer</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
+</code></pre></div>
+<p>The declaration is a world fact about the <strong>source data</strong>, not about the output: <code>determines</code> must name the source payload column inside the <code>MAX(...)</code>/<code>MIN(...)</code>, and <code>key</code> must name the columns the model actually groups on — not a projection's output alias. A declaration naming the output alias, or naming a column the model does not group by, proves nothing and does not admit. A <code>key</code> that is a <em>subset</em> of the grouping columns is a stronger statement and is accepted.</p>
+<p>A declaration only widens the undecidable case; it never overrides a structural disproof. The column is still refused when the model's body contains a row-multiplying join, or an undiscriminated <code>UNION ALL</code> (a dependency holding in each branch need not hold in the union).</p>
+<p><strong>No fallback after the reduction.</strong> <code>COALESCE(MAX(col), 'unknown')</code> is refused, declaration or not. The merge is "first non-null wins", so the delta must be NULL exactly when the key has no value yet. A fallback makes it total: a window in which every row for a key has <code>col IS NULL</code> writes <code>'unknown'</code> into the target, and no later window can ever displace it — while a full refresh would return the real value that later window carried. The declaration says <code>col</code> is a per-key <em>constant</em>; it does not say <code>col</code> is never NULL, and this family is literally "first <strong>non-null</strong>", so NULLs within a key are expected. Drop the fallback and apply the default downstream instead:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- downstream model, or a reader-side projection</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="k">COALESCE</span><span class="p">(</span><span class="n">first_referrer</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;unknown&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_referrer</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">gold</span><span class="p">.</span><span class="n">device_first_touch</span>
+</code></pre></div>
+<p>The key-derived shape above keeps its fallback: a key column is never NULL within its own group, so <code>COALESCE(device_id, 'n/a')</code> cannot mask a value a later window would supply.</p>
+<p>A second candidate value (<code>COALESCE(MAX(a), MAX(b))</code>) is also refused. It preserves NULLs, but the cross-window merge does not preserve your preference for <code>a</code> over <code>b</code>: a window carrying only <code>b</code> writes <code>b</code>'s value and locks it in ahead of an <code>a</code> that arrives later.</p>
+<p>Anything else — a coalesced expression that is neither of the two shapes, a bare non-key column, a multi-argument or non-<code>MAX</code>/<code>MIN</code> inner aggregate — is refused. The three fixes named by the diagnostic are: make the value key-derived, declare the functional dependency, or remodel the column out into its own model.</p>
+<p>A <code>COALESCE(...)</code> used as a null-safe composite <code>GROUP BY</code> key (<code>GROUP BY COALESCE(device_id, 'n/a')</code>) is a key column, not a once-write column, and needs no proof.</p>
+<p>Once-write columns are admitted <strong>window-forward only</strong>; under snapshot-reconcile they are refused (<code>KeyedSnapshotSourceUnsupportedColumn</code>) — "first observed over history" is not a statement about the current snapshot.</p>
 <h2 id="run-shapes">Run shapes<a class="headerlink" href="#run-shapes" title="Permanent link">&para;</a></h2>
 <p>The run shape is derived from the FROM clause, never declared:</p>
 <ul>
-<li><strong>Window-forward</strong> — exactly one <code>timeseries:</code>-tagged source in the FROM clause (the driving source). Folds (<code>SUM</code>, <code>MIN</code>, <code>MAX</code>, …) and the order-monotone overwrite family (<code>MAX_BY</code>/<code>MIN_BY</code>) are admitted here; <code>ANY_VALUE</code> is refused.</li>
-<li><strong>Snapshot-reconcile</strong> — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. <code>ANY_VALUE</code> (plain overwrite, incoming row wins) is admitted here; folds and <code>MAX_BY</code>/<code>MIN_BY</code> are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal/order-monotone).</li>
+<li><strong>Window-forward</strong> — exactly one <code>timeseries:</code>-tagged source in the FROM clause (the driving source). Folds (<code>SUM</code>, <code>MIN</code>, <code>MAX</code>, …), the order-monotone overwrite family (<code>MAX_BY</code>/<code>MIN_BY</code>), and the once-write family (<code>COALESCE</code>, given its provenance proof) are admitted here; <code>ANY_VALUE</code> is refused.</li>
+<li><strong>Snapshot-reconcile</strong> — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. <code>ANY_VALUE</code> (plain overwrite, incoming row wins) is admitted here; folds, <code>MAX_BY</code>/<code>MIN_BY</code>, and <code>COALESCE</code> once-write columns are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal, order-monotone, once-write).</li>
 <li>Two or more clocked sources refuses (<code>KeyedMultipleDrivingSources</code>).</li>
 </ul>
 <h2 id="execution">Execution<a class="headerlink" href="#execution" title="Permanent link">&para;</a></h2>
@@ -3041,10 +3112,10 @@
 <p><strong>Snapshot-reconcile</strong> models never take <code>--event-time-start</code>/<code>--event-time-end</code> — supplying either is rejected fail-loud, naming the run shape. Every run re-scans the source whole: the first run creates the target table from the SELECT; every subsequent run <code>MERGE</code>s the whole-source scan into the existing target — matched keys are overwritten (incoming row wins), unmatched keys inserted, and a key present in the target but <strong>absent</strong> from the incoming scan is <strong>retained unchanged</strong> (there is no <code>DELETE</code>; removing a stored row entirely needs an explicit mechanism, out of scope today). No reconciliation ledger is kept — each run is a self-contained reconciliation.</p>
 <h2 id="end-state-equivalence">End-state equivalence<a class="headerlink" href="#end-state-equivalence" title="Permanent link">&para;</a></h2>
 <p>For any set of source partitions <code>S = {D₁, …, Dₙ}</code> and any admitted ordering π over <code>S</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>key_grain_run(model, π(S))
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  == full_refresh(model, source.where(partition ∈ S))
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>key_grain_run(model, π(S))
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>  == full_refresh(model, source.where(partition ∈ S))
 </code></pre></div>
-<p>Reordering merges across source partitions does not change the final state (for the additive and extremal/lattice combiners covered above). This is the load-bearing contract <code>grain: key</code> upholds — and the reason the allowlist is restricted to commutative-associative aggregators.</p>
+<p>Reordering merges across source partitions does not change the final state: for the additive and extremal/lattice folds because their combiners are commutative and associative, for <code>MAX_BY</code>/<code>MIN_BY</code> up to ordering-value ties, and for once-write columns because the proof makes the value a per-key constant, so "first written" cannot depend on arrival order. This is the load-bearing contract <code>grain: key</code> upholds — and the reason each column family is admitted only on terms that preserve it.</p>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -3088,7 +3159,11 @@
 </tr>
 <tr>
 <td><code>KeyedSnapshotSourceUnsupportedColumn</code></td>
-<td>A fold-family column (additive, extremal/lattice, or order-monotone overwrite) is used under the snapshot-reconcile run shape — re-fold this family with <code>--event-time-start</code>/<code>--event-time-end</code> over a <code>timeseries:</code>-tagged source instead, or express the column as <code>ANY_VALUE(...)</code></td>
+<td>A fold-family, order-monotone-overwrite, or once-write column is used under the snapshot-reconcile run shape — re-fold this family with <code>--event-time-start</code>/<code>--event-time-end</code> over a <code>timeseries:</code>-tagged source instead, or express the column as <code>ANY_VALUE(...)</code></td>
+</tr>
+<tr>
+<td><code>KeyedOnceWriteUnproven</code></td>
+<td>A <code>COALESCE</code> once-write column has no <a href="#once-write-columns">provenance proof</a>, or carries a fallback argument after its <code>MAX</code>/<code>MIN</code> reduction — names the column and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model; for the fallback case, drop it and apply the default downstream</td>
 </tr>
 </tbody>
 </table>
