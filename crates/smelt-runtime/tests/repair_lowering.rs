@@ -11,10 +11,15 @@
 use std::collections::HashSet;
 
 use smelt_logical::analysis::source_bounds::Seconds;
+use smelt_logical::maintenance::choice::ChosenTechnique;
+use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::Region;
-use smelt_logical::maintenance::{MutationProfile, RowIdentity, ScanClamp, SourceFacts, Technique};
+use smelt_logical::maintenance::{
+    MutationProfile, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts, Technique,
+};
 use smelt_runtime::maintenance_driver::{
     repair_affected_keys_select, repair_candidate_select, resolve_live_per_group_recompute_cell,
+    resolve_repair_write,
 };
 
 /// The keyed fixture this file's unit legs share: `MAX` (a non-invertible
@@ -82,7 +87,7 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
     let (metadata, sql) = metadata_and_sql(&text);
     let (sources, explicitly_mutable) = mutable_orders();
 
-    let (source, cell, key, slice) = resolve_live_per_group_recompute_cell(
+    let (source, cell, key, slice, write) = resolve_live_per_group_recompute_cell(
         &sql,
         "customer_max_amount",
         &metadata,
@@ -106,6 +111,177 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
     assert_eq!(slice.source, "raw.orders");
     assert_eq!(slice.column, "order_date");
     assert_eq!(slice.before, Seconds::days(1));
+    assert_eq!(
+        write,
+        smelt_runtime::maintenance_driver::RepairWrite::TargetedDeleteInsert,
+        "no write pin, so the resolver must return the repair family's own targeted write"
+    );
+}
+
+// ── 1b ───────────────────────────────────────────────────────────────────
+#[test]
+fn diff_patch_pin_over_a_repair_cell_resolves_a_diff_patch_write() {
+    let text = format!(
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: customer_id\n\
+         maintenance:\n\
+         \x20\x20cells:\n\
+         \x20\x20- on: raw.orders\n\
+         \x20\x20\x20\x20columns: [max_amount]\n\
+         \x20\x20\x20\x20write: diff_patch\n\
+         ---\n{REPAIR_MODEL_SQL}\n"
+    );
+    let (metadata, sql) = metadata_and_sql(&text);
+    let (sources, explicitly_mutable) = mutable_orders();
+
+    let (_source, _cell, _key, _slice, write) = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+    )
+    .expect("resolver must not error")
+    .expect("a live per-group-recompute cell must resolve for raw.orders");
+
+    match write {
+        smelt_runtime::maintenance_driver::RepairWrite::DiffPatch {
+            compared_columns,
+            delete_leg,
+        } => {
+            assert!(
+                !compared_columns.is_empty(),
+                "diff_patch must resolve a non-empty compared-column set"
+            );
+            assert_eq!(
+                delete_leg,
+                smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
+                "PerGroupRecompute's own bounded-slice admission discharges diff_patch's \
+                 completeness premise"
+            );
+        }
+        other => panic!("expected RepairWrite::DiffPatch, got {other:?}"),
+    }
+}
+
+// ── 1c ───────────────────────────────────────────────────────────────────
+/// `write: diff_patch` over the append-only model resolves no live repair
+/// cell at all — the fold cell serves this trigger, and
+/// `resolve_live_per_group_recompute_cell` only ever considers
+/// `Technique::PerGroupRecompute` cells, so a pin that cannot apply to a
+/// repair cell is simply not this resolver's concern (a `ChoiceRefusal` for
+/// an unaddressable pin, if any, is the pre-execution diagnostic gate's job,
+/// not this runtime resolver's).
+#[test]
+fn resolve_live_per_group_recompute_cell_ignores_a_pin_with_no_repair_cell_to_address() {
+    let text = format!(
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: customer_id\n\
+         maintenance:\n\
+         \x20\x20cells:\n\
+         \x20\x20- on: raw.orders\n\
+         \x20\x20\x20\x20columns: [max_amount]\n\
+         \x20\x20\x20\x20write: diff_patch\n\
+         ---\n{APPEND_ONLY_MODEL_SQL}\n"
+    );
+    let (metadata, sql) = metadata_and_sql(&text);
+    let sources = vec![orders_source(MutationProfile::AppendOnly)];
+
+    let resolved = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &HashSet::new(),
+        &[],
+    )
+    .expect("resolver must not error");
+    assert!(
+        resolved.is_none(),
+        "an append-only model's trigger must never resolve a live repair cell, got {resolved:?}"
+    );
+}
+
+// ── 1d ───────────────────────────────────────────────────────────────────
+/// [`resolve_repair_write`]'s decision table, unit-tested directly (split
+/// out of `resolve_live_per_group_recompute_cell`'s loop precisely so this
+/// is reachable without a full plan derivation): a `diff_patch` pin whose
+/// underlying recompute is NOT `PerGroupRecompute` — the region `DeleteInsert`
+/// default — fails loud by name rather than falling through to the default
+/// write; every other resolvable-but-not-this-cell `ChosenTechnique` (a
+/// `technique: recompute` pin, or this cell simply not being the one that
+/// admitted) returns `Ok(None)`, never an error.
+#[test]
+fn resolve_repair_write_decision_table() {
+    let identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["customer_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let group_columns = vec!["max_amount".to_string()];
+
+    let write = resolve_repair_write(
+        &ChosenTechnique::Admitted(Technique::PerGroupRecompute),
+        &group_columns,
+        &[],
+        &identity,
+        "{max_amount}",
+    )
+    .expect("must not error")
+    .expect("must resolve a write");
+    assert_eq!(
+        write,
+        smelt_runtime::maintenance_driver::RepairWrite::TargetedDeleteInsert
+    );
+
+    let err = resolve_repair_write(
+        &ChosenTechnique::DiffPatch {
+            recompute: Technique::DeleteInsert,
+            delete_leg: DeleteLeg::Omitted {
+                why: "not proven complete".to_string(),
+            },
+        },
+        &group_columns,
+        &[],
+        &identity,
+        "{max_amount}",
+    )
+    .expect_err("a diff_patch pin over the region DeleteInsert default must fail loud");
+    assert!(
+        err.to_string().contains("MaintenanceDiffPatchUnroutable"),
+        "{err}"
+    );
+
+    assert!(
+        resolve_repair_write(
+            &ChosenTechnique::RegionRecompute,
+            &group_columns,
+            &[],
+            &identity,
+            "{max_amount}",
+        )
+        .expect("must not error")
+        .is_none(),
+        "a technique: recompute pin is simply not this live cell — never an error"
+    );
+    assert!(
+        resolve_repair_write(
+            &ChosenTechnique::Admitted(Technique::ColumnScopedMerge),
+            &group_columns,
+            &[],
+            &identity,
+            "{max_amount}",
+        )
+        .expect("must not error")
+        .is_none(),
+        "an admitted technique other than PerGroupRecompute is not this live cell either"
+    );
 }
 
 // ── 2 ────────────────────────────────────────────────────────────────────
@@ -220,6 +396,22 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         candidate.contains("EXISTS") && candidate.contains("SELECT customer_id, 1 AS v"),
         "the candidate is the model's own full SQL semi-joined to the affected keys: {candidate}"
     );
+
+    // The `diff_patch` slice restriction is the SAME affected-key read,
+    // wrapped as an EXISTS predicate, table-qualified on every key column —
+    // never a partition region (a keyed aggregate output has none).
+    let slice_predicate = smelt_runtime::maintenance_driver::repair_slice_predicate(
+        "main.customer_max_amount",
+        &key,
+        &clamped,
+    );
+    assert_eq!(
+        slice_predicate,
+        format!(
+            "EXISTS (SELECT 1 FROM ({clamped}) AS __smelt_repair_keys WHERE \
+             main.customer_max_amount.customer_id = __smelt_repair_keys.customer_id)"
+        )
+    );
 }
 
 // ── DuckDB-backed legs (5, 6) ────────────────────────────────────────────
@@ -270,6 +462,21 @@ pub const REPAIR_FIXTURE_FILE: &str = "---\n\
      unique_key: customer_id\n\
      ---\n";
 
+/// Same fixture, pinned to `write: diff_patch` — routes through
+/// [`smelt_runtime::maintenance_driver::execute_diff_patch`] instead of the
+/// repair family's own targeted delete+insert.
+pub const REPAIR_FIXTURE_DIFF_PATCH_FILE: &str = "---\n\
+     materialization: table\n\
+     refresh: incremental\n\
+     grain: key\n\
+     unique_key: customer_id\n\
+     maintenance:\n\
+     \x20\x20cells:\n\
+     \x20\x20- on: raw.orders\n\
+     \x20\x20\x20\x20columns: [max_amount]\n\
+     \x20\x20\x20\x20write: diff_patch\n\
+     ---\n";
+
 /// The full-refresh oracle for [`REPAIR_FIXTURE_SQL`], against the physical
 /// source table.
 pub const REPAIR_FIXTURE_ORACLE: &str = "SELECT customer_id, MAX(amount) AS max_amount \
@@ -295,6 +502,13 @@ pub fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {
 /// Stage `examples/timeseries` into `project_dir`, adding the mutable
 /// `raw.orders` source and the keyed repair model.
 pub fn stage_repair_project(project_dir: &std::path::Path) {
+    stage_repair_project_with_file(project_dir, REPAIR_FIXTURE_FILE);
+}
+
+/// Same staging, with the caller's own model frontmatter (e.g.
+/// [`REPAIR_FIXTURE_DIFF_PATCH_FILE`]) — the write-pin variant reuses every
+/// other leg of the fixture (source, seed data, oracle) verbatim.
+pub fn stage_repair_project_with_file(project_dir: &std::path::Path, model_file: &str) {
     let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/timeseries")
         .canonicalize()
@@ -307,7 +521,7 @@ pub fn stage_repair_project(project_dir: &std::path::Path) {
     .expect("write orders source yml");
     std::fs::write(
         project_dir.join("models/customer_max_amount.sql"),
-        format!("{REPAIR_FIXTURE_FILE}{REPAIR_FIXTURE_SQL}\n"),
+        format!("{model_file}{REPAIR_FIXTURE_SQL}\n"),
     )
     .expect("write repair model fixture");
 }
@@ -435,8 +649,16 @@ async fn run_repair_fixture(
     project_dir: &std::path::Path,
     db_path: &std::path::Path,
 ) -> smelt_runtime::types::RunOutcome {
+    run_repair_fixture_with_file(project_dir, db_path, REPAIR_FIXTURE_FILE).await
+}
+
+async fn run_repair_fixture_with_file(
+    project_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    model_file: &str,
+) -> smelt_runtime::types::RunOutcome {
     use std::sync::Arc;
-    stage_repair_project(project_dir);
+    stage_repair_project_with_file(project_dir, model_file);
     let config = Arc::new(smelt_core::config::Config::load(project_dir).expect("load smelt.yml"));
 
     {
@@ -572,6 +794,59 @@ async fn per_group_recompute_matches_full_refresh_after_retraction() {
         )
         .await,
         "the incremental state after the repair must equal a full refresh over the same inputs"
+    );
+}
+
+// ── 7 ────────────────────────────────────────────────────────────────────
+/// A `write: diff_patch` pin over the same repair fixture: run 2 dispatches
+/// `execute_diff_patch` instead of the repair family's own targeted
+/// delete+insert, and the resulting state still equals a full refresh over
+/// the same inputs — the write leg differs, the equivalence invariant does
+/// not.
+#[tokio::test]
+async fn diff_patch_execution_sends_the_emitted_group() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("run.duckdb");
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    drop(backend);
+
+    let outcome =
+        run_repair_fixture_with_file(&project_dir, &db_path, REPAIR_FIXTURE_DIFF_PATCH_FILE).await;
+    let record = outcome
+        .models
+        .get("customer_max_amount")
+        .expect("customer_max_amount ran");
+    assert_eq!(
+        record.strategy, "diff_patch",
+        "the diff_patch pin must dispatch the diff-patch write, not the repair family's own \
+         targeted delete+insert"
+    );
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    let repaired = scalar_text(
+        &backend,
+        "SELECT max_amount FROM main.customer_max_amount WHERE customer_id = 1",
+    )
+    .await;
+    assert_eq!(
+        repaired, "50.00",
+        "the affected group must be recomputed whole via the diff-patch update leg"
+    );
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT customer_id, max_amount FROM main.customer_max_amount",
+            REPAIR_FIXTURE_ORACLE,
+        )
+        .await,
+        "the incremental state after a diff_patch repair must equal a full refresh over the \
+         same inputs"
     );
 }
 

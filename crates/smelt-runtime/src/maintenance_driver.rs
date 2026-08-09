@@ -1367,10 +1367,101 @@ pub async fn execute_staged_membership_recompute(
     })
 }
 
+/// Which write leg a live `Technique::PerGroupRecompute` cell resolves to —
+/// the repair family's own targeted `DELETE`+`INSERT`
+/// ([`execute_per_group_recompute`]), or a `write: diff_patch` pin over that
+/// same cell ([`execute_diff_patch`]). Both read the identical affected-key
+/// set, candidate select and key — only the write leg differs
+/// (`docs/outcomes/20260809-repair-family/phases/07-plan.md`), so this is a
+/// mode carried alongside the resolved cell rather than a second resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairWrite {
+    /// `ChosenTechnique::Admitted(Technique::PerGroupRecompute)` — the
+    /// repair family's own targeted delete+insert.
+    TargetedDeleteInsert,
+    /// `ChosenTechnique::DiffPatch { recompute: Technique::PerGroupRecompute,
+    /// .. }`, admitted via [`smelt_logical::maintenance::diff_patch::
+    /// admit_diff_patch`].
+    DiffPatch {
+        compared_columns: Vec<String>,
+        delete_leg: smelt_logical::maintenance::diff_patch::DeleteLeg,
+    },
+}
+
 /// A live repair cell as [`resolve_live_per_group_recompute_cell`] returns
 /// it: the trigger's source name, the cell itself, its proven
-/// `RowIdentity::Key` and the cell's own derived bounded read slice.
-pub type LiveRepairCell = (String, PlanCell, Vec<String>, ScanClamp);
+/// `RowIdentity::Key`, the cell's own derived bounded read slice, and the
+/// resolved write leg ([`RepairWrite`]).
+pub type LiveRepairCell = (String, PlanCell, Vec<String>, ScanClamp, RepairWrite);
+
+/// Resolve a `Technique::PerGroupRecompute` cell's already-chosen
+/// [`ChosenTechnique`] (`resolve_cell_choice`'s output — the override ladder
+/// has already run) into the [`RepairWrite`] this lowering executes, or
+/// `Ok(None)` when `chosen` is not this cell's live technique at all
+/// (`RegionRecompute`, or `Admitted` of a technique other than
+/// `PerGroupRecompute` — never reachable in practice since
+/// [`resolve_live_per_group_recompute_cell`] only ever calls this with a
+/// cell whose own `technique` is `PerGroupRecompute`, but a defensive arm
+/// nonetheless).
+///
+/// Pure and independently unit-testable — split out of
+/// `resolve_live_per_group_recompute_cell`'s loop body so the fail-loud
+/// `DiffPatch { recompute: <not PerGroupRecompute> }` arm ("a `diff_patch`
+/// pin over the region `DeleteInsert` default fails loud by name rather
+/// than falling through to the default write",
+/// `docs/outcomes/20260809-repair-family/phases/07-plan.md`) is exercisable
+/// without needing a full plan derivation to reach it.
+pub fn resolve_repair_write(
+    chosen: &ChosenTechnique,
+    group_columns: &[String],
+    comparability: &[smelt_logical::analysis::walk::ColumnComparability],
+    row_identity: &smelt_logical::maintenance::RowIdentityVerdict,
+    group_label: &str,
+) -> Result<Option<RepairWrite>> {
+    match chosen {
+        ChosenTechnique::Admitted(Technique::PerGroupRecompute) => {
+            Ok(Some(RepairWrite::TargetedDeleteInsert))
+        }
+        ChosenTechnique::DiffPatch {
+            recompute: Technique::PerGroupRecompute,
+            delete_leg,
+        } => {
+            let slice_complete = match delete_leg {
+                smelt_logical::maintenance::diff_patch::DeleteLeg::Complete => Ok(()),
+                smelt_logical::maintenance::diff_patch::DeleteLeg::Omitted { why } => {
+                    Err(why.clone())
+                }
+            };
+            let admitted = smelt_logical::maintenance::diff_patch::admit_diff_patch(
+                group_columns,
+                comparability,
+                row_identity,
+                slice_complete,
+            )
+            .map_err(|refusal| {
+                anyhow::anyhow!(
+                    "MaintenanceDiffPatchRefused: a `write: diff_patch` pin over a \
+                     Technique::PerGroupRecompute cell for group '{group_label}' could not be \
+                     admitted: {refusal:?}"
+                )
+            })?;
+            Ok(Some(RepairWrite::DiffPatch {
+                compared_columns: admitted.compared_columns,
+                delete_leg: admitted.delete_leg,
+            }))
+        }
+        ChosenTechnique::DiffPatch { recompute, .. } => {
+            bail!(
+                "MaintenanceDiffPatchUnroutable: a `write: diff_patch` pin over group \
+                 '{group_label}' resolved over technique {recompute:?} — only \
+                 Technique::PerGroupRecompute has a diff_patch lowering today; the region \
+                 DeleteInsert default fails loud rather than silently falling through to the \
+                 default write",
+            );
+        }
+        ChosenTechnique::RegionRecompute | ChosenTechnique::Admitted(_) => Ok(None),
+    }
+}
 
 /// The proven group key of a `Technique::PerGroupRecompute` cell — the
 /// repair family's fail-loud identity check
@@ -1548,14 +1639,30 @@ pub fn resolve_live_per_group_recompute_cell(
                     false,
                 )
                 .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-                // A `technique: recompute` pin (→ `RegionRecompute`) or a
-                // `write: diff_patch` pin (→ `ChosenTechnique::DiffPatch`)
-                // is simply not THIS live cell: skip the source and let the
+                // A `technique: recompute` pin (→ `RegionRecompute`) is
+                // simply not THIS live cell: skip the source and let the
                 // caller's own default apply, exactly as the sibling
-                // resolvers do for a choice they have no lowering for.
-                if chosen != ChosenTechnique::Admitted(Technique::PerGroupRecompute) {
+                // resolvers do for a choice they have no lowering for. A
+                // `write: diff_patch` pin routes here too, but only when its
+                // underlying recompute is `PerGroupRecompute` — the sole
+                // recompute `resolve_cell_choice` ever grants
+                // `DeleteLeg::Complete` (the region `DeleteInsert` default
+                // has no lowering and fails loud by name rather than
+                // silently falling through to the default write);
+                // [`resolve_repair_write`] carries the full decision table.
+                let comparability = model_property_vector(sql, &JoinContext::new())
+                    .map(|v| v.comparability)
+                    .unwrap_or_default();
+                let Some(write) = resolve_repair_write(
+                    &chosen,
+                    group_columns,
+                    &comparability,
+                    &cell.row_identity,
+                    &cell.group,
+                )?
+                else {
                     continue;
-                }
+                };
                 // The cell's own derived slice — obligation 4's bounded
                 // per-group read footprint, matched to the trigger's own
                 // source (never another source's clamp).
@@ -1573,7 +1680,13 @@ pub fn resolve_live_per_group_recompute_cell(
                         facts.name,
                     );
                 };
-                return Ok(Some((facts.name.clone(), cell.clone(), key, slice.clone())));
+                return Ok(Some((
+                    facts.name.clone(),
+                    cell.clone(),
+                    key,
+                    slice.clone(),
+                    write,
+                )));
             }
         }
     }
@@ -1684,6 +1797,72 @@ pub async fn execute_per_group_recompute(
 /// the live run does without guessing.
 pub fn repair_staged_relation(table: &str) -> String {
     format!("__smelt_repair_{table}")
+}
+
+/// The staged temp relation name a `diff_patch` write over a repair cell
+/// uses for `table` — a distinct prefix from [`repair_staged_relation`] so a
+/// parity test can name each group's own relation without ambiguity.
+pub fn diff_patch_staged_relation(table: &str) -> String {
+    format!("__smelt_diff_patch_{table}")
+}
+
+/// The `diff_patch` slice restriction for a repair cell: the candidate's own
+/// slice is the affected-key set, not a partition region
+/// ([`emit_diff_patch`]'s doc comment) — an `EXISTS` over the clamped
+/// affected-keys read, `table`-qualified on every key column so it composes
+/// unambiguously into both the update-leg and delete-leg `DELETE`s
+/// `emit_diff_patch` builds.
+pub fn repair_slice_predicate(table: &str, key: &[String], affected_keys_select: &str) -> String {
+    let join = key
+        .iter()
+        .map(|k| format!("{table}.{k} = __smelt_repair_keys.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE {join})")
+}
+
+/// Execute a `write: diff_patch` pin over a live `Technique::PerGroupRecompute`
+/// cell ([`resolve_live_per_group_recompute_cell`]) via [`emit_diff_patch`] —
+/// same emitter → `retry_backend_call` → [`Backend::execute_statement_group`]
+/// shape [`execute_per_group_recompute`] uses, so the executed text is
+/// exactly the single owner's output (`docs/specs/incremental_models.md`
+/// §"Statement emission (single owner)").
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_diff_patch(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    slice_predicate: &str,
+    delete_leg: &smelt_logical::maintenance::diff_patch::DeleteLeg,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = diff_patch_staged_relation(table);
+    let group = smelt_logical::maintenance::emit::emit_diff_patch(
+        &full_table,
+        &staged_relation,
+        key,
+        candidate_select,
+        compared_columns,
+        slice_predicate,
+        delete_leg,
+        dialect,
+    );
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| anyhow::anyhow!("diff_patch write failed for '{full_table}': {e}"))?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an

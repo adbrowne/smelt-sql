@@ -87,7 +87,7 @@ pub fn widened_scan_predicate(clamp: &ScanClamp, region: &Region) -> String {
 }
 
 impl Region {
-    fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
+    pub fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
         let col = match qualifier {
             Some(q) => format!("{q}.{column}"),
             None => column.to_string(),
@@ -914,22 +914,31 @@ pub fn emit_per_group_recompute(
 ///    whole table).
 /// 3. **Update leg** (always emitted): `DELETE FROM <table> USING
 ///    <staged_relation> WHERE <key join> AND (<IS DISTINCT FROM over
-///    compared_columns>) AND <region predicate>` — remove exactly the
+///    compared_columns>) AND <slice_predicate>` — remove exactly the
 ///    stored rows, within the slice, whose staged candidate differs from
 ///    what is stored. The slice restriction is load-bearing: without it a
 ///    stored row outside the slice could spuriously match the key join
 ///    against a staged row that does not actually correspond to it.
 /// 4. **Delete leg** (only when `delete_leg` is [`DeleteLeg::Complete`] —
-///    omitted entirely otherwise): `DELETE FROM <table> WHERE <region
-///    predicate> AND NOT EXISTS (<staged_relation> row for this key)` —
-///    remove stored rows, WITHIN THE SLICE, absent from the candidate. The
-///    outer region restriction is load-bearing here too, and for a
-///    different reason than step 3's: `diff_patch`'s candidate is only ever
-///    a slice of the table, never the full current state (unlike
+///    omitted entirely otherwise): `DELETE FROM <table> WHERE
+///    <slice_predicate> AND NOT EXISTS (<staged_relation> row for this
+///    key)` — remove stored rows, WITHIN THE SLICE, absent from the
+///    candidate. The outer slice restriction is load-bearing here too, and
+///    for a different reason than step 3's: `diff_patch`'s candidate is only
+///    ever a slice of the table, never the full current state (unlike
 ///    [`emit_staged_candidate_conditional_recompute`]'s full-recompute
 ///    candidate) — a stored row's absence from the candidate says nothing
 ///    about whether it departed when that row lies OUTSIDE the slice in the
 ///    first place, so this delete must never reach past the slice boundary.
+///
+/// `slice_predicate` is a single caller-composed predicate (already
+/// `<table>`-qualified on every column it names), not a `(partition_col,
+/// Region)` pair: a keyed aggregate output routed through the repair family
+/// has no partition column at all, only an affected-key-set membership test
+/// — exactly the slice the routable recompute produces — so the pattern
+/// cannot be tied to a partition axis (per this module's "callers resolve
+/// strings, emitters assemble" contract). A region-partitioned caller passes
+/// `region.predicate(Some(table), col)` verbatim.
 /// 5. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
 ///    EXISTS (target row still present for this key)` — insert candidate
 ///    rows the target does not yet have. No additional slice restriction is
@@ -951,8 +960,7 @@ pub fn emit_diff_patch(
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
-    partition_col: &str,
-    region: &Region,
+    slice_predicate: &str,
     delete_leg: &DeleteLeg,
     _dialect: MaintenanceDialect,
 ) -> StatementGroup {
@@ -993,8 +1001,7 @@ pub fn emit_diff_patch(
     let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
     let delete_changed = format!(
         "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
-         ({suppression}) AND {}",
-        region.predicate(Some(table), partition_col)
+         ({suppression}) AND {slice_predicate}"
     );
     let insert = format!(
         "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
@@ -1010,9 +1017,8 @@ pub fn emit_diff_patch(
 
     if let DeleteLeg::Complete = delete_leg {
         let delete_departed = format!(
-            "DELETE FROM {table} WHERE {} AND NOT EXISTS (SELECT 1 FROM {staged_relation} AS s \
-             WHERE {key_join_table_s_departed})",
-            region.predicate(None, partition_col)
+            "DELETE FROM {table} WHERE {slice_predicate} AND NOT EXISTS (SELECT 1 FROM \
+             {staged_relation} AS s WHERE {key_join_table_s_departed})"
         );
         statements.push(MaintenanceStatement::new(delete_departed));
     }

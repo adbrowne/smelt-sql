@@ -45,7 +45,7 @@ reconciliation runs and idempotent re-runs.
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
-| 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | planned |
+| 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
 | 8 | Conformance recipes for repair + diff-patch families | pending |
 | 9 | Surface: `smelt explain` rendering, docs-site update | pending |
 
@@ -164,6 +164,17 @@ reconciliation runs and idempotent re-runs.
   aggregate output has no partition column, so a region predicate cannot express the only slice
   the routable recompute produces; no shipped statement changes, since nothing routed to this
   emitter before.
+
+- 2026-08-10 (implement 7): landed the routing — `resolve_repair_write` (new, pure) is the
+  decision table from `ChosenTechnique` to a `RepairWrite`, split out of
+  `resolve_live_per_group_recompute_cell`'s loop so it is independently unit-testable;
+  `emit_diff_patch`'s `(partition_col, Region)` pair collapsed to one caller-composed
+  `slice_predicate: &str`. Discovered: `resolve_cell_choice`'s `DiffPatch { recompute: <not
+  PerGroupRecompute> }` bail arm is real fail-loud code but unreachable via any production call
+  path today (this resolver only ever calls `resolve_cell_choice` with a cell whose own technique
+  is already `PerGroupRecompute`) — kept as defensive code, spec's Known Divergences entry
+  reworded to say the region-`DeleteInsert` case is *unenforced*, not refused, until a future
+  phase threads a write-pin check into a resolver that can actually reach it.
 
 ## Blocked
 

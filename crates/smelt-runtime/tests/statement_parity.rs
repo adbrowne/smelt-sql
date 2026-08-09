@@ -44,9 +44,10 @@ use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    emit_keyed_fold_suppressed, emit_per_group_recompute, emit_recurrence_bound_probe,
-    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region, TargetSlicePredicate,
+    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_diff_patch,
+    emit_keyed_fold, emit_keyed_fold_suppressed, emit_per_group_recompute,
+    emit_recurrence_bound_probe, emit_staged_candidate_conditional_recompute, MaintenanceDialect,
+    Region, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
@@ -2295,6 +2296,256 @@ mutation_profile:
         )
         .await,
         "the repair actually executed must reproduce a full refresh"
+    );
+}
+
+#[tokio::test]
+async fn diff_patch_statements_come_from_the_emitter() {
+    const ORDERS_SOURCE_YML: &str = r#"description: Mutable order snapshot
+columns:
+- name: order_id
+  type: INTEGER
+- name: customer_id
+  type: INTEGER
+- name: amount
+  type: DECIMAL(10,2)
+- name: order_date
+  type: TIMESTAMP
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+unique_key: [order_id]
+mutation_profile:
+  kind: mutable_snapshot
+"#;
+    const MODEL_SQL: &str = "SELECT customer_id, MAX(amount) AS max_amount \
+         FROM smelt.sources.raw.orders \
+         WHERE order_date BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3 days' AND TIMESTAMP \
+         '2025-01-14' \
+         GROUP BY customer_id";
+    const MODEL_FILE: &str = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: customer_id\n\
+         maintenance:\n\
+         \x20\x20cells:\n\
+         \x20\x20- on: raw.orders\n\
+         \x20\x20\x20\x20columns: [max_amount]\n\
+         \x20\x20\x20\x20write: diff_patch\n\
+         ---\n";
+
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir_recursive(&source_dir, &project_dir);
+    std::fs::write(
+        project_dir.join("models/sources/raw/orders.yml"),
+        ORDERS_SOURCE_YML,
+    )
+    .expect("write orders source yml");
+    std::fs::write(
+        project_dir.join("models/customer_max_amount.sql"),
+        format!("{MODEL_FILE}{MODEL_SQL}\n"),
+    )
+    .expect("write diff_patch model fixture");
+
+    let db_path = tmp.path().join("run.duckdb");
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_orders (order_id INTEGER, customer_id INTEGER, \
+                 amount DECIMAL(10,2), order_date TIMESTAMP)",
+            )
+            .await
+            .expect("create orders source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_orders VALUES \
+                 (1, 1, 100.00, TIMESTAMP '2025-01-13 10:00:00'), \
+                 (2, 1, 50.00, TIMESTAMP '2025-01-13 11:00:00'), \
+                 (3, 2, 70.00, TIMESTAMP '2025-01-11 10:00:00')",
+            )
+            .await
+            .expect("seed orders");
+    }
+
+    // Run 1: creation — nothing to repair yet, the fold's create path runs.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        execute_project(
+            "diff-patch-parity-run-1".to_string(),
+            select_request("dev", "customer_max_amount", "2025-01-11", "2025-01-14"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &RecordingBackendFactory {
+                db_path: db_path.clone(),
+                backend: Arc::new(Mutex::new(None)),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // The retraction `MAX` cannot undo: customer 1's top contribution is
+    // corrected downward in place.
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("UPDATE main.sources_raw_orders SET amount = 10.00 WHERE order_id = 1")
+            .await
+            .expect("retract");
+    }
+
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "diff-patch-parity-run-2".to_string(),
+        select_request("dev", "customer_max_amount", "2025-01-16", "2025-01-17"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("second run (diff_patch) must succeed");
+
+    let record = outcome
+        .models
+        .get("customer_max_amount")
+        .expect("customer_max_amount ran");
+    assert_eq!(
+        record.strategy, "diff_patch",
+        "the write: diff_patch pin must dispatch the diff-patch write, not the repair family's \
+         own targeted delete+insert"
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let diff_patch_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| {
+            g.statements
+                .first()
+                .is_some_and(|s| s.sql.starts_with("CREATE TEMP TABLE __smelt_diff_patch_"))
+        })
+        .collect();
+    assert_eq!(
+        diff_patch_groups.len(),
+        1,
+        "exactly one diff_patch group must have executed: {groups:?}"
+    );
+    let group = diff_patch_groups[0];
+    assert!(group.transactional, "the diff_patch group is transactional");
+    // Update leg + delete leg (PerGroupRecompute's own bounded-slice
+    // admission discharges diff_patch's completeness premise, so the delete
+    // leg is included) + create/insert-candidates/insert/drop = 6.
+    assert_eq!(group.statements.len(), 6);
+    assert!(
+        group
+            .statements
+            .iter()
+            .any(|s| s.sql.starts_with("DELETE") && s.sql.contains("NOT EXISTS")),
+        "the delete leg must be present: {group:?}"
+    );
+
+    // Recover the caller-composed `candidate_select` from the recorded
+    // `INSERT INTO {staged} {select}` (statement index 1).
+    let staged_relation = "__smelt_diff_patch_customer_max_amount";
+    let candidate_prefix = format!("INSERT INTO {staged_relation} ");
+    let insert_sql = &group.statements[1].sql;
+    assert!(
+        insert_sql.starts_with(&candidate_prefix),
+        "unexpected staged INSERT statement: {insert_sql}"
+    );
+    let candidate_select = &insert_sql[candidate_prefix.len()..];
+
+    // The batch's own affected-key read, rebuilt from the same pure builder
+    // the run uses over the cell's derived clamp (`before = 3 days`, the
+    // model's own Form B band) and this run's `[start, end)` region.
+    let key = vec!["customer_id".to_string()];
+    let clamp = smelt_logical::maintenance::ScanClamp {
+        source: "raw.orders".to_string(),
+        column: "order_date".to_string(),
+        before: smelt_logical::analysis::source_bounds::Seconds::days(3),
+        after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+    };
+    let region = Region {
+        start: "TIMESTAMP '2025-01-16'".to_string(),
+        end: "TIMESTAMP '2025-01-17'".to_string(),
+    };
+    let affected_keys_select = smelt_runtime::maintenance_driver::repair_affected_keys_select(
+        "main.sources_raw_orders",
+        &key,
+        Some(&clamp),
+        &region,
+    );
+    assert!(
+        candidate_select.contains(&affected_keys_select),
+        "the executed candidate must semi-join the clamped affected-key read:\n  \
+         candidate: {candidate_select}\n  affected: {affected_keys_select}"
+    );
+
+    let slice_predicate = smelt_runtime::maintenance_driver::repair_slice_predicate(
+        "customer_max_amount",
+        &key,
+        &affected_keys_select,
+    );
+    let expected = emit_diff_patch(
+        "main.customer_max_amount",
+        staged_relation,
+        &key,
+        candidate_select,
+        &["max_amount".to_string()],
+        &slice_predicate,
+        &smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed diff_patch group must be byte-identical to a direct emitter call over the \
+         same inputs"
+    );
+
+    // Result-equivalence: the diff_patch write actually executed must leave
+    // the target multiset-equal to a full refresh over the same inputs.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT customer_id, max_amount FROM main.customer_max_amount",
+            "SELECT customer_id, MAX(amount) AS max_amount FROM main.sources_raw_orders WHERE \
+             order_date BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3 days' AND TIMESTAMP \
+             '2025-01-14' GROUP BY customer_id"
+        )
+        .await,
+        "the diff_patch write actually executed must reproduce a full refresh"
     );
 }
 

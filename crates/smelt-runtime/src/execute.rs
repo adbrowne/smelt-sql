@@ -1729,6 +1729,7 @@ pub async fn execute_project(
             )?;
 
             let mut used_per_group_recompute = false;
+            let mut used_diff_patch = false;
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
                     if classification.is_snapshot_reconcile() {
@@ -1760,7 +1761,7 @@ pub async fn execute_project(
                         .as_ref()
                         .filter(|_| table_exists_before_run)
                     {
-                        Some((source, _cell, key, slice)) => {
+                        Some((source, _cell, key, slice, write)) => {
                             // A cell that resolved live but whose emitter
                             // inputs cannot be built errors by name — never
                             // a silent fall-through to the fold.
@@ -1821,17 +1822,45 @@ pub async fn execute_project(
                                     key,
                                     &affected_keys_select,
                                 );
-                            used_per_group_recompute = true;
-                            crate::maintenance_driver::execute_per_group_recompute(
-                                backend,
-                                schema,
-                                &db_table_name,
-                                key,
-                                &affected_keys_select,
-                                &candidate_select,
-                                &retry_policy,
-                            )
-                            .await
+                            match write {
+                                crate::maintenance_driver::RepairWrite::TargetedDeleteInsert => {
+                                    used_per_group_recompute = true;
+                                    crate::maintenance_driver::execute_per_group_recompute(
+                                        backend,
+                                        schema,
+                                        &db_table_name,
+                                        key,
+                                        &affected_keys_select,
+                                        &candidate_select,
+                                        &retry_policy,
+                                    )
+                                    .await
+                                }
+                                crate::maintenance_driver::RepairWrite::DiffPatch {
+                                    compared_columns,
+                                    delete_leg,
+                                } => {
+                                    let slice_predicate =
+                                        crate::maintenance_driver::repair_slice_predicate(
+                                            &db_table_name,
+                                            key,
+                                            &affected_keys_select,
+                                        );
+                                    used_diff_patch = true;
+                                    crate::maintenance_driver::execute_diff_patch(
+                                        backend,
+                                        schema,
+                                        &db_table_name,
+                                        key,
+                                        &candidate_select,
+                                        compared_columns,
+                                        &slice_predicate,
+                                        delete_leg,
+                                        &retry_policy,
+                                    )
+                                    .await
+                                }
+                            }
                         }
                         None => {
                             crate::cumulative::execute_cumulative_aggregate(
@@ -2103,6 +2132,8 @@ pub async fn execute_project(
             total_rows_overall += total_rows;
             let keyed_strategy_label = if used_in_place_update {
                 "in_place_update".to_string()
+            } else if used_diff_patch {
+                "diff_patch".to_string()
             } else if used_per_group_recompute {
                 "per_group_recompute".to_string()
             } else if used_column_scoped_merge {

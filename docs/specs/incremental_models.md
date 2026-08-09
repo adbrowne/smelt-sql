@@ -826,7 +826,9 @@ argument rests on (§"The repair family") — and is not admitted without it; la
 the pattern degrades explicitly to insert+update, stated as a reduced-capability admission rather
 than a silently dropped delete leg. `diff_patch` is graded **Idempotent** — a second run against
 unchanged input diffs to empty — which is what makes it the reconciliation and drift-repair
-write (§"The transactional merge ledger").
+write (§"The transactional merge ledger"). The slice a `diff_patch` write restricts to is the
+*candidate's own* slice — the affected-key set for a per-group recompute (§"The repair family"),
+a partition region for a windowed one — so the pattern is not tied to a partition axis.
 
 Backends **execute** registered patterns; they never **author** maintenance-statement text
 (§"Statement emission (single owner)").
@@ -2246,11 +2248,13 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **The `diff_patch` write pattern derives but does not yet execute.** `diff_patch` (§"Per-cell
-  write addressing") admits and threads the slice-completeness premise for a `PerGroupRecompute`
-  recompute's delete leg, but no `diff_patch` write is routed to its emitter at runtime — a cell
-  whose `write:` pin resolves to it falls through to the caller's default technique, and the
-  executed-vs-emitted `statement_parity` leg for the pattern is therefore not yet possible.
+- **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
+  resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")
+  executes via its emitter, with the executed-vs-emitted `statement_parity` leg proven for that
+  case. A `diff_patch` pin whose underlying recompute is the region `DeleteInsert` default has no
+  runtime lowering yet — the runtime resolver that would route it fails loud by name rather than
+  falling through to a plain write, but no caller today reaches that resolver for the
+  `DeleteInsert` recompute, so the pin is presently unenforced for that case rather than refused.
   Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key

@@ -142,9 +142,13 @@ fn test_region() -> Region {
     }
 }
 
+fn test_slice_predicate() -> String {
+    test_region().predicate(Some("main.customers"), "event_date")
+}
+
 #[test]
 fn emit_diff_patch_stages_then_patches() {
-    let region = test_region();
+    let slice_predicate = test_slice_predicate();
     let candidate_select = "SELECT customer_id, tier FROM main.stg_customers WHERE event_date \
                              >= '2026-01-01' AND event_date < '2026-01-02'";
     let group = emit_diff_patch(
@@ -153,8 +157,7 @@ fn emit_diff_patch_stages_then_patches() {
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
-        "event_date",
-        &region,
+        &slice_predicate,
         &DeleteLeg::Complete,
         MaintenanceDialect::DuckDb,
     );
@@ -198,8 +201,11 @@ fn emit_diff_patch_stages_then_patches() {
 }
 
 #[test]
-fn emit_diff_patch_comparison_is_null_safe() {
-    let region = test_region();
+fn emit_diff_patch_restricts_both_delete_legs_to_the_caller_slice_predicate() {
+    let slice_predicate = "EXISTS (SELECT 1 FROM (SELECT DISTINCT customer_id FROM \
+                            main.stg_orders) AS __smelt_repair_keys WHERE \
+                            main.customers.customer_id = __smelt_repair_keys.customer_id)"
+        .to_string();
     let candidate_select = "SELECT customer_id, tier FROM main.stg_customers";
     let group = emit_diff_patch(
         "main.customers",
@@ -207,8 +213,34 @@ fn emit_diff_patch_comparison_is_null_safe() {
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
-        "event_date",
-        &region,
+        &slice_predicate,
+        &DeleteLeg::Complete,
+        MaintenanceDialect::DuckDb,
+    );
+
+    let update_leg_delete = &group.statements[2].sql;
+    let delete_leg_delete = &group.statements[3].sql;
+    assert!(
+        update_leg_delete.contains(&slice_predicate),
+        "update-leg delete must carry the caller's slice predicate verbatim: {update_leg_delete}"
+    );
+    assert!(
+        delete_leg_delete.contains(&slice_predicate),
+        "delete-leg delete must carry the caller's slice predicate verbatim: {delete_leg_delete}"
+    );
+}
+
+#[test]
+fn emit_diff_patch_comparison_is_null_safe() {
+    let slice_predicate = test_slice_predicate();
+    let candidate_select = "SELECT customer_id, tier FROM main.stg_customers";
+    let group = emit_diff_patch(
+        "main.customers",
+        "__smelt_staged",
+        &["customer_id".to_string()],
+        candidate_select,
+        &["tier".to_string()],
+        &slice_predicate,
         &DeleteLeg::Complete,
         MaintenanceDialect::DuckDb,
     );
@@ -225,7 +257,7 @@ fn emit_diff_patch_comparison_is_null_safe() {
 
 #[test]
 fn emit_diff_patch_omits_delete_leg_when_incomplete() {
-    let region = test_region();
+    let slice_predicate = test_slice_predicate();
     let candidate_select = "SELECT customer_id, tier FROM main.stg_customers";
 
     let complete_group = emit_diff_patch(
@@ -234,8 +266,7 @@ fn emit_diff_patch_omits_delete_leg_when_incomplete() {
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
-        "event_date",
-        &region,
+        &slice_predicate,
         &DeleteLeg::Complete,
         MaintenanceDialect::DuckDb,
     );
@@ -253,8 +284,7 @@ fn emit_diff_patch_omits_delete_leg_when_incomplete() {
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
-        "event_date",
-        &region,
+        &slice_predicate,
         &DeleteLeg::Omitted {
             why: "not proven complete".to_string(),
         },
@@ -281,7 +311,7 @@ fn emit_diff_patch_omits_delete_leg_when_incomplete() {
 
 #[test]
 fn emit_diff_patch_rejects_empty_key() {
-    let region = test_region();
+    let slice_predicate = test_slice_predicate();
     let result = std::panic::catch_unwind(|| {
         emit_diff_patch(
             "main.customers",
@@ -289,8 +319,7 @@ fn emit_diff_patch_rejects_empty_key() {
             &[],
             "SELECT customer_id, tier FROM main.stg_customers",
             &["tier".to_string()],
-            "event_date",
-            &region,
+            &slice_predicate,
             &DeleteLeg::Complete,
             MaintenanceDialect::DuckDb,
         )
