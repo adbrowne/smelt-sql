@@ -44,9 +44,10 @@ reconciliation runs and idempotent re-runs.
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
-| 6 | Runtime lowering: repair + `diff_patch` cells execute, executed-vs-emitted `statement_parity` legs | pending |
-| 7 | Conformance recipes for repair + diff-patch families | pending |
-| 8 | Surface: `smelt explain` rendering, docs-site update | pending |
+| 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | planned |
+| 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | pending |
+| 8 | Conformance recipes for repair + diff-patch families | pending |
+| 9 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
 
@@ -126,6 +127,18 @@ reconciliation runs and idempotent re-runs.
   when the underlying recompute is `PerGroupRecompute` (its own key-temporal-locality premise),
   `Omitted` otherwise. Five pre-existing tests needed their refusal-count assertions widened
   (additive refusal, not a replacement) — no golden/conformance fallout otherwise.
+
+- 2026-08-09 (plan 6): one reshape — the old phase 6 split in two, the same way phase 5 did and for
+  the same reason: it carried two independent families' runtime lowering (a repair cell that
+  derives itself, and a `diff_patch` write pin that only ever arrives via `resolve_cell_choice`'s
+  `ChosenTechnique::DiffPatch`), each with its own `statement_parity` leg and its own execute.rs
+  routing site. New phase 6 is the repair family only; new phase 7 owns `diff_patch` routing;
+  conformance and surface shift to 8 and 9. Nothing left the outcome — criterion 3 stays split
+  across phases 4/7. Phase 6 decides: `candidate_select` is the model's own FULL recompiled SQL
+  semi-joined to the affected keys (the shape `execute_staged_membership_recompute` already uses
+  for a group-complete recompute), and the cell's `ScanClamp` is pushed into the *affected-keys*
+  read (a predicate on the source, where the clamp is actually defined) rather than onto the
+  output wrapper, where the partition column need not appear.
 
 ## Blocked
 
