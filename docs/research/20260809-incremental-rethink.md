@@ -132,7 +132,7 @@ Order of work (each step independently shippable, each dissolving named warts):
 5. **Contract lattice v1 (frozen horizon + deferral first)** — the two relaxations with the clearest oracles.
 6. **Spec redraft** around typed deltas / contract lattice / cells-and-verbs; fold both ledgers into the frontier concept; delete the accretions.
 
-Open questions to settle before step 4:
+Open questions — **all three settled 2026-08-09**; the rulings live in the decision logs of `docs/outcomes/20260809-output-delta-typing` (per-column-group typing, vector edges), `docs/outcomes/20260809-contract-lattice-v1` (oracle single-owned in `smelt-logical` as declaration + oracle transform + probe emitter), and `docs/outcomes/20260809-incremental-spec-redraft` (externalisation is post-redraft, gated on an internal kind consumer). Original framing kept below:
 
 - **Is the delta type per model or per column group?** Sensitivity analysis says groups differ; per-group typing is more precise but makes edge types vectors. Leaning per-group (it matches the plan matrix), accepting vector edges.
 - **Where does the equivalence oracle live under the lattice?** Each relaxation redefines the oracle for its cells; the generative conformance gate must parameterise over lattice points or it silently tests only the default. This is a gate-design question as much as a spec question.
