@@ -1122,7 +1122,7 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
-| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given, except in combination with `--show-sql` (below). |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption). With `MODEL_NAME`, emits the per-model maintenance-plan report as JSON — with or without `--show-sql`, same schema either way. |
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
 | `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |

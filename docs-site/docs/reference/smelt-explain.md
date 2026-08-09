@@ -11,7 +11,7 @@ smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>]
 | Flag | Description |
 |---|---|
 | `MODEL_NAME` | Optional. Name of a single model to print the maintenance-plan report for instead of the whole-project graph. |
-| `--json` | Output as JSON instead of human-readable text. Ignored when `MODEL_NAME` is given, except in combination with `--show-sql`. |
+| `--json` | Output as JSON instead of human-readable text. With `MODEL_NAME`, emits the per-model maintenance-plan report as JSON — with or without `--show-sql`, and with the same schema either way. |
 | `--select` | Select models to include (repeatable). Ignored when `MODEL_NAME` is given. |
 | `--project-dir` | Path to the smelt project root. Defaults to the current directory. |
 | `--show-sql` | With `MODEL_NAME`, also print the maintenance statements each cell executes. Never connects to a backend. |
