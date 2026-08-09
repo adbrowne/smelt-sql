@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-07-23
+last_reviewed: 2026-08-09
 owners: [andrew]
 ---
 
@@ -303,11 +303,18 @@ The classifier assigns each non-key projection to exactly one **column family**.
 |---|---|---|---|---|---|---|---|
 | **additive fold** | `COUNT(...)`, `SUM(...)`, `BIT_XOR(...)` | `+` / `xor` | no | yes | yes | window-forward only | ledger-enforced re-run refusal (§"The transactional merge ledger") |
 | **extremal / lattice fold** | `MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR` | `LEAST`/`GREATEST`/`AND`/`OR`/`&`/`\|` | yes | yes | no | window-forward only | — |
-| **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering (§"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | — |
+| **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering (§"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | the ordering value projected as its own running `MAX`/`MIN` column (below) |
 | **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)` | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency over a NULL-preserving reduction |
 | **plain overwrite** | `ANY_VALUE(...)` | incoming row wins | yes | n/a — one row per key per scan | no | **snapshot-reconcile only** | — |
 
 Any other aggregate, any non-aggregate non-key expression, and any composite expression over aggregates (`SUM(x) + 1`) is rejected (`KeyedUnknownCombiner`). Add columns for the underlying aggregates and derive downstream.
+
+The order-monotone overwrite family carries one structural requirement: the ordering expression
+must itself be projected as its own running `MAX(<ordering>)` (for `MAX_BY`) or
+`MIN(<ordering>)` (for `MIN_BY`) column in the same `SELECT`, since the cross-window combiner
+compares the *stored* ordering value against the delta's. A `MAX_BY(x, x)` is its own companion.
+Absent the companion projection the column refuses `KeyedUnknownCombiner` naming it, rather than
+smelt deriving a hidden ordering column the model never declared (§Known Divergences).
 
 The once-write family admits exactly two spellings, and no others:
 
@@ -382,6 +389,7 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column has no once-write provenance proof, or breaks the family's NULL-preservation obligation by carrying a fallback argument after its reduction; names the column and the three fixes (key-derived form, declared functional dependency, remodelling), and for the fallback case names dropping it and applying the default downstream. |
 | `KeyedRetractableContribution` | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen. Steers to `refresh: materialized_view` or DAG composition. Never fires on the join spelling alone (§"Enrichment joins"). |
 | `KeyedSnapshotSourceUnsupportedColumn` | A column family inadmissible under snapshot-reconcile appears in a model with no clocked driving source; names the column, the family, and why the current-snapshot oracle cannot hold (§"Admission matrix"). |
+| `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source to reconcile against either (two or more unclocked candidates in the FROM clause) — neither run shape can be derived (§"The two run shapes"). |
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window; points at `--full-refresh` (§"Reprocessing"). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality"). |
 
@@ -2256,18 +2264,31 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The key grain
 
-- **The classifier covers the direct-monoid families, the order-monotone overwrite family, the
-  plain-overwrite family, and the once-write family** (additive fold, extremal/lattice fold,
-  `MAX_BY`/`MIN_BY`, `ANY_VALUE`, `COALESCE`) across both derived run shapes (window-forward and
-  snapshot-reconcile). The once-write family's admitted shapes are narrow: a `COALESCE` whose
-  first argument is a bare `unique_key` column (key-derived, no declaration needed, fallbacks
-  permitted), or a sole-argument single-column `MAX(…)`/`MIN(…)` reduction backed by a declared
-  functional dependency over that **source** column; any other coalesced expression — including
-  the same reduction carrying a fallback, which would break the family's NULL-preservation
-  obligation — refuses `KeyedOnceWriteUnproven`. Widening
-  the proof to an arbitrary key-derived expression (rather than a bare key reference), or to a
-  per-column join trace in place of the whole-scope fan-out/set-operation facts the admission
-  reads today, is unbuilt. Decision record:
+- **A window-forward keyed run with no event-time window silently full-refreshes instead of
+  refusing.** §Surface CLI requires both `--event-time-start` and `--event-time-end` for a
+  window-forward keyed model; the runtime's no-window arm
+  (`crates/smelt-runtime/src/execute.rs`, the keyed branch's fallback case) instead drops the
+  target and recreates it from the whole-source SELECT. The end state is the full-refresh
+  oracle, so nothing is silently *wrong*, but a run the spec says must refuse instead rebuilds
+  the table — including the case where only one of the two flags is supplied. No test asserts
+  the refusal, and the user documentation currently describes the fallback rather than the
+  required-flags rule.
+- **The once-write family admits only two narrow spellings.** A `COALESCE` whose first argument
+  is a **bare** `unique_key` column (key-derived, no declaration needed, fallbacks permitted), or
+  a sole-argument single-column `MAX(…)`/`MIN(…)` reduction backed by a declared functional
+  dependency naming that **source** column; every other coalesced expression refuses
+  `KeyedOnceWriteUnproven`. Two of those refusals are shapes waiting on machinery rather than
+  model errors: the fallback-bearing reduction (`COALESCE(MAX(col), <literal>)`) and the
+  multi-candidate form (`COALESCE(MAX(a), MAX(b))`) would each need the reduction's raw nullable
+  value held apart from the projected output — decomposed state, ladder rung 2 (below) — before
+  they could be admitted without breaking the family's NULL-preservation obligation. There is no
+  nullability route around the fallback refusal either: the NOT-NULL derivation
+  (`crates/smelt-logical/src/analysis/not_null.rs`) proves not-null only for a partition /
+  driving-clock-derived column, so no general non-key NOT-NULL prover exists to establish that a
+  fallback can never fire. Widening the key-derived route to an arbitrary key-derived
+  *expression* (rather than a bare key reference), or replacing the whole-scope
+  fan-out/set-operation facts the admission reads today with a per-column join trace, is
+  likewise unbuilt. Decision record:
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The order-monotone overwrite family's ordering value has no decomposed-state storage** — the
@@ -2275,23 +2296,65 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   `MAX`/`MIN` column in the same `SELECT` (the merge compares `target`/`delta` off that column);
   a `MAX_BY`/`MIN_BY` column whose ordering expression is not independently tracked this way
   refuses `KeyedUnknownCombiner` naming the missing companion projection, rather than deriving a
-  hidden shadow column. A hidden-state route is ladder-rung-2 territory (decomposed state) and
-  needs its own spec pass. Tracking: `docs/plans/20260809-keyed-frontier.md`.
+  hidden shadow column (the degenerate `MAX_BY(x, x)` — value expression identical to the
+  ordering expression — is its own companion and needs no second projection). A hidden-state
+  route is ladder-rung-2 territory (decomposed state) and needs its own spec pass. Tracking:
+  `docs/plans/20260809-keyed-frontier.md`.
+- **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional merge ledger"
+  gives every window-forward model a ledger, refusal-bearing for additive folds and
+  detection/bookkeeping-bearing for the idempotent families; the runtime only ever creates the
+  ledger table for an additive-graded model (`Grade::Additive`), so a fully idempotent model has
+  no record of which windows it merged — reprocessing detection and `--auto` bookkeeping have no
+  substrate there. Nothing is unsound (re-merging those families converges), but the `--auto`
+  staleness path cannot consult a ledger that was never written.
 - **Snapshot-reconcile admits at most one source of any posture in the FROM clause** when zero
   are clocked — a join of two or more unclocked candidates refuses
   `KeyedSnapshotPostureUnsupported` rather than picking one. Widening this to a proven
   multi-source snapshot scan is unbuilt.
-- **Snapshot-reconcile key deletion is out of scope** — a key present in the target but absent
-  from the incoming scan is retained unchanged (§"The two run shapes"); an explicit mechanism to
-  delete a departed key is not yet built.
+- **`KeyedRetractableContribution` has no implementation.** The code is specified (§Surface
+  Diagnostics, §"Enrichment joins") but no classifier, diagnostic variant, or test produces it,
+  so a retractable enrichment contribution is not refused on those grounds today.
+- **`safety_overrides:` on a key-addressed model is not a hard error.** §Surface "Key-grain
+  declaration" makes it one; frontmatter validation only checks the double-declaration case and
+  never conditions on the derived grain, so the block parses on a keyed model and is ignored.
+- **The reconciliation ledger's fold is transactional on DuckDB only.** §"The transactional
+  merge ledger" requires the ledger write to share the merge's backend transaction; the default
+  `Backend::fold_ledger_delta` is an explicitly best-effort check-then-act across separate
+  statements, and only the DuckDB backend overrides it with a real transaction (the same
+  DuckDB-only substrate the ledger DDL divergence above names).
+- **`smelt explain` prints neither the per-column guarantee ledger (§Surface CLI) nor the
+  derivable forward reach (§"No write-eligibility clamp")** — the cell/addressing/clamp/locality
+  and edge sections are the whole of the rendered plan today.
+- **Key temporal locality route 2 admits only a declared functional dependency.** §"Key temporal
+  locality" gives route 2 a key-derived-expression sub-route alongside the declared FD; the
+  locality derivation deliberately never consults the derivation's no-declaration branch, so a
+  provably key-derived partition projection still refuses without the declaration.
+- **The derived execution postures are internal, and one of the three is not derived at all.**
+  Re-run tolerance reaches a run only as the reconciliation ledger's grade (`Grade::Idempotent`
+  for every idempotent family, `Grade::Additive` for a model carrying an additive-fold column),
+  and order-independence is not derived as a named verdict anywhere: every window-forward run
+  applies its windows sequentially in temporal order regardless of family, which is safe but
+  forgoes the parallel / out-of-order application §"Derived execution postures" admits. Neither
+  the derived run shape nor any of the three postures is printed by `smelt explain`, which
+  §"Derived execution postures" states as their surface.
+- **The generative conformance pool cannot stage NULL payloads.** The generated row type's
+  payload field (`GenRow::val`, `crates/smelt-maintenance-testkit/src/schedule_gen.rs`) is a
+  non-nullable `i64` threaded through the schedule generators, the oracle materializer, the feed
+  replay, and the Spark twin's readers, so the once-write family's NULL direction — a key whose
+  first window carries only a NULL payload and whose real value arrives later — is covered by a
+  targeted case in `crates/smelt-cli/tests/maintenance_conformance/gate.rs` rather than by the
+  generated pool that proves every other keyed family.
 - **Locality open questions**: whether a derived recurrence bound can license slice pruning
   under snapshot-reconcile (v1: window-forward only); relaxing the granularity-equality
   precondition (a daily driver with weekly output partitions); slice-scoped deletion
   (`NOT MATCHED BY SOURCE` over a provably complete slice) — interacts with the key-deletion
   question below.
-- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped**, as is
-  the built-in-vs-template-file decision; the canonical once-write spelling is fixed alongside
-  them. Tracked in the keyed-collapse plan.
+- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped.** Each
+  family is reachable only through its hand-written SQL spelling (`MAX_BY`/`MIN_BY`,
+  `COALESCE`, `ANY_VALUE`), which is what the pattern functions would expand to. Whether they
+  ship as built-ins or as a shipped template file of `smelt.define`s is an open decision, and
+  the canonical once-write spelling is fixed alongside it. Tracked:
+  `docs/plans/20260705-keyed-collapse.md`.
 - **Driver granularity is `day`/`week` only** — inherited by every consumer of the shared
   driver; widening is driver work.
 - **`--auto` staleness fidelity for all-invertible models is conservative in v1**; "exactly the
@@ -2300,13 +2363,19 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   needs an explicit input/state distinction design.
 - **Run-pinning alignment is deferred**: `NOW()`/`CURRENT_*` are rejected outright in keyed
   models rather than compile-time-pinned as the partition grain does.
-- **Key deletion is unresolved beyond retention.** Snapshot-reconcile retains departed keys;
-  window-forward has no delete signal short of a change feed with delete events. Tombstones,
-  opt-in hard delete, and the observer contract for the refused matrix cells are deferred
+- **Key deletion is unresolved beyond retention.** Snapshot-reconcile retains a key present in
+  the target but absent from the incoming scan, unchanged and forever (§"The two run shapes"),
+  and no explicit mechanism deletes a departed key; window-forward has no delete signal short of
+  a change feed with delete events. Tombstones, opt-in hard delete, and the observer contract
+  for the refused matrix cells are deferred
   (`docs/research/20260705-keyed-collapse-application.md` §5).
-- **Ladder rungs 2–4 are specified ahead of this profile's use of them**; wiring decomposed
-  state, group-rung retraction, and the bounded-domain multiset into keyed columns is future
-  composition work.
+- **Ladder rungs 2–4 are specified ahead of this profile's use of them.** Wiring decomposed
+  state (rung 2), group-rung retraction (rung 3), and the bounded-domain multiset (rung 4) into
+  keyed columns needs its own spec pass before implementation, and rung 3 additionally depends
+  on the change-feed consumption design — no live fold machinery consumes a change feed's delta
+  shape today. Rung 2 is what the two refused once-write spellings above and a hidden
+  ordering-value shadow column both wait on. Deferred by
+  `docs/plans/20260809-keyed-frontier.md` §Scope.
 
 ## Future Extensions
 
@@ -2498,6 +2567,6 @@ its own spec diff and plan.
 
 - **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy`); `crates/smelt-logical/src/rules/cumulative.rs` (the built classifier seed — combiner lookup, GROUP-BY key derivation, driving-source resolution); `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver, `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution); `crates/smelt-backend/src/lib.rs` (`merge_into`), impls in `crates/smelt-backend-duckdb`/`-spark`.
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`); the keyed end-state-equivalence harness; `smelt-backend-duckdb` `merge_into` tests.
-- **User docs**: `docs-site/docs/guide/materializations.md` (to be replaced by a keyed-models guide with per-pattern recipes); `docs-site/docs/guide/incremental-models.md` §"The composed shape (key + time)" documents the composed (key-addressed *and* time-partitioned) form and its three locality routes; `docs-site/docs/examples/web-analytics/deduplication.md` is the worked tutorial — a redelivery-prone feed deduplicated by a keyed extremal fold under a declared recurrence bound, contrasted against the partition-grain `QUALIFY`-window workaround the preceding tutorial page builds.
-- **Plans (history)**: `docs/plans/20260523-cumulative-aggregate.md` (the built seed); `docs/plans/20260704-model-updates.md` (the mode-vertical master this spec re-cuts as a composition); `docs/plans/20260705-keyed-collapse.md` (the keyed-collapse sub-plan); `docs/plans/20260707-maintenance-plan-impl.md` (lands the target frontmatter surface and diagnostics).
+- **User docs**: `docs-site/docs/reference/cumulative-aggregate.md` (the key-grain reference page — column families, the once-write proof, the two run shapes, the diagnostic codes); `docs-site/docs/guide/materializations.md` (author-facing walkthrough); `docs-site/docs/guide/incremental-models.md` §"The composed shape (key + time)" documents the composed (key-addressed *and* time-partitioned) form and its three locality routes; `docs-site/docs/examples/web-analytics/deduplication.md` is the worked tutorial — a redelivery-prone feed deduplicated by a keyed extremal fold under a declared recurrence bound, contrasted against the partition-grain `QUALIFY`-window workaround the preceding tutorial page builds.
+- **Plans (history)**: `docs/plans/20260523-cumulative-aggregate.md` (the built seed); `docs/plans/20260704-model-updates.md` (the mode-vertical master this spec re-cuts as a composition); `docs/plans/20260705-keyed-collapse.md` (the keyed-collapse sub-plan); `docs/plans/20260707-maintenance-plan-impl.md` (lands the target frontmatter surface and diagnostics); `docs/plans/20260809-keyed-frontier.md` (the column-family union, the named ledger reprocessing refusal, and the snapshot-reconcile run shape).
 - **Research**: `docs/research/20260705-keyed-time-superset.md` (key temporal locality, the time-partitioned output, per-input scope maps); `docs/research/20260705-model-refresh-review.md`; `docs/research/20260705-unified-keyed-refresh.md`; `docs/research/20260705-keyed-collapse-application.md` (the decision record this spec encodes); `docs/research/20260704-monotone-join-maintenance.md` (the monotone-vs-retractable boundary); `docs/research/20260703-model-updates.md`; `docs/research/20260705-refresh-as-maintenance-plan/` (the shape-profile demotion and per-cell admission this spec composes).

@@ -1442,7 +1442,7 @@ async fn once_write_pool_upholds_end_state_equivalence() {
 /// literal fallback (`COALESCE(MAX(val), -1)`), the first window would have
 /// written `-1` into the target and locked it in forever — the divergence
 /// the classifier's NULL-preservation obligation refuses
-/// (`incremental_models.md` §"Once-write columns").
+/// (`incremental_models.md` §"The column-family catalogue").
 ///
 /// Written as a targeted (non-generative) case rather than widened into the
 /// generated pool: `GenRow::val` is a non-nullable `i64` threaded through

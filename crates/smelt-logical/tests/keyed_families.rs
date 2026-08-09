@@ -206,6 +206,64 @@ GROUP BY device_id"#;
     );
 }
 
+/// A refusal must never suggest a spelling that itself refuses. The
+/// once-write family's admitted reduction (`COALESCE(MAX(<col>))`) requires a
+/// bare column reference as the `MAX` argument
+/// (`docs/specs/incremental_models.md` §"The column-family catalogue"), so a
+/// composite projection like `a || b` must NOT be offered that spelling —
+/// only the `MAX_BY`/`ANY_VALUE` fixes, which do accept an expression.
+#[test]
+fn composite_projection_refusal_does_not_suggest_a_refusing_once_write_spelling() {
+    let sql = r#"SELECT
+    device_id,
+    status || reason AS combined
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    let offending = err
+        .iter()
+        .find_map(|d| match d {
+            KeyedDiagnostic::KeyedUnknownCombiner { offending, .. } => Some(offending.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected KeyedUnknownCombiner, got {err:?}"));
+    assert!(
+        !offending.contains("COALESCE"),
+        "a composite projection must not be offered the once-write spelling, which \
+         `classify_once_write` route 2 would itself refuse: {offending}"
+    );
+    assert!(
+        offending.contains("MAX_BY") && offending.contains("ANY_VALUE"),
+        "the remaining overwrite-family suggestions must still be offered: {offending}"
+    );
+}
+
+/// A **bare** non-key column reference keeps the once-write suggestion — its
+/// `COALESCE(MAX(<col>))` spelling is exactly what route 2 admits under a
+/// declared functional dependency.
+#[test]
+fn bare_column_refusal_still_suggests_the_once_write_spelling() {
+    let sql = r#"SELECT
+    device_id,
+    status
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    let offending = err
+        .iter()
+        .find_map(|d| match d {
+            KeyedDiagnostic::KeyedUnknownCombiner { offending, .. } => Some(offending.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected KeyedUnknownCombiner, got {err:?}"));
+    assert!(
+        offending.contains("COALESCE(MAX(status))"),
+        "a bare column reference must still name the once-write reduction: {offending}"
+    );
+}
+
 /// Zero clocked driving sources derives the snapshot-reconcile run shape
 /// (Phase 3, `docs/plans/20260809-keyed-frontier.md`) instead of refusing
 /// the whole model: a plain `ANY_VALUE(...)` projection (the plain-overwrite

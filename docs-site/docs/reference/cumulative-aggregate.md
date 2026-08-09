@@ -33,6 +33,7 @@ There is no additional configuration block — the SQL is the entire specificati
 | Per-column aggregator | each non-key projection's outer function |
 | Cross-window combiner | a fixed lookup off the per-partition aggregator |
 | Driving source | the single `timeseries:`-tagged source in the FROM clause |
+| Run shape | whether that clocked source exists — one means window-forward, none means snapshot-reconcile (see [Run shapes](#run-shapes)) |
 
 There is no way to override these — they are read from the SQL on every run.
 
@@ -55,7 +56,7 @@ Each non-key projection must be a direct call to one of:
 | `COALESCE(...)` | first non-null wins | `COALESCE(target.c, delta.c)` |
 | `ANY_VALUE(...)` | incoming row wins | `delta.c` |
 
-The first nine rows are the **fold families** — additive (`COUNT`/`SUM`) and extremal/lattice (`MIN`, `MAX`, the boolean and bitwise combiners). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state.
+The first nine rows are the **fold families**: additive (`COUNT`, `SUM`, `BIT_XOR`) and extremal/lattice (`MIN`, `MAX`, the boolean combiners, `BIT_AND`/`BIT_OR`). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state. The two differ on re-running a window that was already merged: the extremal/lattice combiners are idempotent, so a repeat merge converges, while the additive ones do not — `COUNT`/`SUM` would double-count, and `BIT_XOR` is self-inverse, so a repeat merge would *cancel* that window's contribution (`x xor d xor d == x`). Either way the result would diverge from a full refresh, which is why an additive model keeps a ledger and refuses a reprocessed window (see [Reprocessing](#reprocessing)).
 
 `MAX_BY`/`MIN_BY` is the **order-monotone overwrite family**. The ordering expression must also be projected in the same SELECT as its own running `MAX(ord)`/`MIN(ord)` column (or the value expression must *be* the ordering expression, as in `MAX_BY(x, x)`) — the merge compares the stored ordering value against the incoming one, so it has to be a column of the table. Without that companion projection the column is refused (`KeyedUnknownCombiner`, naming the missing projection). Ties keep the incumbent.
 
@@ -142,7 +143,7 @@ The run shape is derived from the FROM clause, never declared:
 !!! warning "Granularity restriction"
     The driving source must declare `granularity: day` or `granularity: week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `windowed-keyed-maintenance driver supports day and week granularity; got <Granularity>`.
 
-Running a window-forward model without a run window (`smelt run` without `--event-time-start`/`--event-time-end`) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.
+A window-forward model expects both `--event-time-start` and `--event-time-end`; they address the *driving source's* partition column. Running it without them (or with only one) is not an incremental run at all — it currently falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source. Supply both flags whenever you mean to maintain the table rather than rebuild it.
 
 **Snapshot-reconcile** models never take `--event-time-start`/`--event-time-end` — supplying either is rejected fail-loud, naming the run shape. Every run re-scans the source whole: the first run creates the target table from the SELECT; every subsequent run `MERGE`s the whole-source scan into the existing target — matched keys are overwritten (incoming row wins), unmatched keys inserted, and a key present in the target but **absent** from the incoming scan is **retained unchanged** (there is no `DELETE`; removing a stored row entirely needs an explicit mechanism, out of scope today). No reconciliation ledger is kept — each run is a self-contained reconciliation.
 
@@ -171,12 +172,17 @@ Reordering merges across source partitions does not change the final state: for 
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source, none clocked) |
 | `KeyedSnapshotSourceUnsupportedColumn` | A fold-family, order-monotone-overwrite, or once-write column is used under the snapshot-reconcile run shape — re-fold this family with `--event-time-start`/`--event-time-end` over a `timeseries:`-tagged source instead, or express the column as `ANY_VALUE(...)` |
 | `KeyedOnceWriteUnproven` | A `COALESCE` once-write column has no [provenance proof](#once-write-columns), or carries a fallback argument after its `MAX`/`MIN` reduction — names the column and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model; for the fallback case, drop it and apply the default downstream |
+| `KeyedSqlNotParseable` | The model SELECT could not be parsed into the shape the classifier reads |
+| `KeyedReprocessedWindow` | A run window covers a window this model already merged, and the model is not re-run tolerant (it has an additive column) — see [Reprocessing](#reprocessing) |
+| `KeyedRecurrenceBoundViolated` | Runtime, declared-`key_recurrence` route only: a merged delta row matched a stored key outside the run's derived slice, violating the source's declared bound. The run's transaction rolls back |
 
 There is no `safety_overrides:` block for `grain: key` models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.
 
 ## Reprocessing
 
-Reprocessing an already-merged window is refused when detected. If a past window's source data changes after the window has already been merged, the key-grain table is stale until the operator runs with `--full-refresh` (truncate and rebuild). Re-merging additive columns over an already-merged delta would double-count under a second pass; the rule refuses to silently double-count.
+Reprocessing an already-merged window is refused when detected, with the error `KeyedReprocessedWindow` naming the model, the partition, the window bounds, and the `--full-refresh` remedy. A model carrying an additive (`COUNT`/`SUM`/`BIT_XOR`) column is not re-run tolerant: each merged window is recorded in a small per-model reconciliation-ledger table, written in the same backend transaction as the merge itself, and a run whose window is already recorded is refused rather than folded a second time. A model whose columns are all idempotent (`MIN`/`MAX`, `MAX_BY`/`MIN_BY`, once-write) needs no ledger — re-merging a window converges to the same state — so none is created for it and no window is refused.
+
+If a past window's source data changes after the window has already been merged, the key-grain table is stale until the operator runs with `--full-refresh` (truncate and rebuild). Snapshot-reconcile models keep no ledger at all: each run is a self-contained reconciliation, so there is nothing to reprocess.
 
 ## Output shape
 

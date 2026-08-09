@@ -1,4 +1,4 @@
-//! Classifier for the `refresh: keyed` mode.
+//! Classifier for the `refresh: incremental` + `grain: key` shape.
 //!
 //! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec.
 //! This module classifies the direct-monoid families (additive fold,
@@ -549,7 +549,7 @@ impl std::fmt::Display for KeyedDiagnostic {
         match self {
             KeyedDiagnostic::KeyedRequiresGroupBy => write!(
                 f,
-                "KeyedRequiresGroupBy: refresh: keyed SELECT must have a GROUP BY \
+                "KeyedRequiresGroupBy: a `grain: key` SELECT must have a GROUP BY \
                  clause — the GROUP BY columns are the unique key"
             ),
             KeyedDiagnostic::KeyedUnknownCombiner {
@@ -557,10 +557,14 @@ impl std::fmt::Display for KeyedDiagnostic {
                 offending,
             } => write!(
                 f,
-                "KeyedUnknownCombiner: projection `{}` uses `{}`, which is not in the \
-                 keyed aggregator allowlist (COUNT, SUM, MIN, MAX, BOOL_AND, BOOL_OR, \
-                 BIT_AND, BIT_OR, BIT_XOR). Composite expressions over aggregates are not \
-                 allowed — split into separate projections.",
+                "KeyedUnknownCombiner: projection `{}` uses `{}`, which is not a catalogued \
+                 column-family aggregator: the fold families (COUNT, SUM, MIN, MAX, \
+                 BOOL_AND, BOOL_OR, BIT_AND, BIT_OR, BIT_XOR), the order-monotone overwrite \
+                 family (MAX_BY/MIN_BY over an ordering column, window-forward), the \
+                 once-write family (COALESCE, given its provenance proof), or the \
+                 plain-overwrite family (ANY_VALUE, snapshot-reconcile only). Composite \
+                 expressions over aggregates are not allowed — split into separate \
+                 projections.",
                 projection, offending
             ),
             KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { partition_column } => {
@@ -568,20 +572,20 @@ impl std::fmt::Display for KeyedDiagnostic {
                     f,
                     "KeyedGroupByContainsPartitionColumn: the GROUP BY contains the driving \
                      source's partition_column `{}`, which produces a per-partition output shape, \
-                     not the keyed one — switch to `refresh: batched` + `timeseries:` instead, or \
-                     declare `timeseries:` on this model to stay keyed",
+                     not the keyed one — switch to `grain: partition` + `timeseries:` instead, or \
+                     declare `timeseries:` on this model to stay `grain: key`",
                     partition_column
                 )
             }
             KeyedDiagnostic::KeyedForbidsWindowFunctions => write!(
                 f,
                 "KeyedForbidsWindowFunctions: window functions (OVER (...)) are not allowed \
-                 in refresh: keyed SELECTs — the keyed state is the window"
+                 in a `grain: key` SELECT — the keyed state is the window"
             ),
             KeyedDiagnostic::KeyedForbidsNondeterministic { offending } => write!(
                 f,
                 "KeyedForbidsNondeterministic: non-deterministic function `{}` is not \
-                 allowed in refresh: keyed SELECTs — cross-window combine requires \
+                 allowed in a `grain: key` SELECT — cross-window combine requires \
                  deterministic per-window output",
                 offending
             ),
@@ -932,18 +936,38 @@ pub fn classify_cumulative(
                 // catalogue").
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
+                    // The once-write suggestion names the family's only
+                    // admitted reduction spelling — a bare
+                    // `COALESCE({expr}, <default>)` over a non-key
+                    // expression is refused by `classify_once_write` on the
+                    // family's NULL-preservation obligation, so suggesting
+                    // it would send the author into a second refusal
+                    // (`docs/specs/incremental_models.md` §"The
+                    // column-family catalogue"). For the same reason it is
+                    // offered ONLY for a bare column reference:
+                    // `classify_once_write`'s FD-backed route requires the
+                    // `MAX(...)` argument to be a single bare column, so
+                    // `COALESCE(MAX(a || b))` over a composite projection
+                    // would itself refuse `KeyedOnceWriteUnproven`. The
+                    // `MAX_BY`/`ANY_VALUE` spellings take an arbitrary
+                    // expression and stay offered either way.
+                    let projection_text = text.trim();
+                    let once_write_fix = if expr.as_column_ref().is_some() {
+                        format!(
+                            ", or `COALESCE(MAX({projection_text}))` — no fallback argument — \
+                             under a declared functional dependency for the once-write family"
+                        )
+                    } else {
+                        String::new()
+                    };
                     diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                         projection: alias.clone(),
                         offending: format!(
-                            "composite expression `{}` — wrap it as `MAX_BY({}, <ordering>)` \
-                             for the order-monotone overwrite family (window-forward), \
-                             `ANY_VALUE({})` for the plain-overwrite family \
-                             (snapshot-reconcile only), or `COALESCE({}, <default>)` for the \
-                             once-write family",
-                            text.trim(),
-                            text.trim(),
-                            text.trim(),
-                            text.trim()
+                            "composite expression `{projection_text}` — wrap it as \
+                             `MAX_BY({projection_text}, <ordering>)` for the order-monotone \
+                             overwrite family (window-forward), or `ANY_VALUE({projection_text})` \
+                             for the plain-overwrite family (snapshot-reconcile only)\
+                             {once_write_fix}"
                         ),
                     });
                 }
@@ -1165,7 +1189,7 @@ pub fn classify_cumulative(
 /// overwrite family (`incremental_models.md` §"The column-family
 /// catalogue").
 ///
-/// **Storage decision (Phase 1).** The cross-window combiner needs the
+/// **Storage decision.** The cross-window combiner needs the
 /// *stored* ordering value to compare a new delta's ordering against — but
 /// this classifier has no decomposed/hidden-state mechanism (that is
 /// rung-2 ladder territory, out of scope here). The only honest option
