@@ -55,9 +55,12 @@ pub struct AggregatorColumn {
     /// folding its own presented value directly (`docs/specs/
     /// incremental_models.md` §"Decomposed state (rung 2) in keyed
     /// models"). `Some` for the order-monotone overwrite family
-    /// (`MAX_BY`/`MIN_BY`, row 5); `None` for every other column family —
-    /// admission has not yet widened onto the mechanism for them
-    /// (`docs/outcomes/20260809-rung2-state-shapes` row 6).
+    /// (`MAX_BY`/`MIN_BY`) and the once-write family's fallback-bearing or
+    /// multi-candidate spellings; `None` for the once-write family's
+    /// key-derived and bare-reduction spellings (never need state) and for
+    /// every other column family — admission has not yet widened onto the
+    /// mechanism for them (`docs/outcomes/20260809-rung2-state-shapes`
+    /// row 7).
     pub state: Option<crate::analysis::decomposed_state::DecomposedState>,
 }
 
@@ -175,10 +178,16 @@ pub enum OnceWriteAdmission {
     NotOnceWrite,
     /// Admitted: the coalesced value is a key-derived expression (a bare
     /// reference to one of the model's own `unique_key` columns), or a
-    /// declared functional dependency over the coalesced value's SOURCE
-    /// column (not positively disproven by a fan-out join or a set-operation
-    /// barrier) proves it a per-key constant.
-    Admitted,
+    /// declared functional dependency over every candidate's SOURCE column
+    /// (not positively disproven by a fan-out join or a set-operation
+    /// barrier) proves each a per-key constant. `state` is the decomposed
+    /// `(value, written)` state (one pair per candidate) this column folds
+    /// through, `None` for the two spellings that stay stateless — the
+    /// key-derived route and a single bare reduction with no fallback
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 6).
+    Admitted {
+        state: Option<crate::analysis::decomposed_state::DecomposedState>,
+    },
     /// A `COALESCE`-shaped once-write projection with no once-write
     /// provenance proof. `column` names the coalesced value's source column;
     /// `reason` names why.
@@ -187,38 +196,33 @@ pub enum OnceWriteAdmission {
 
 /// Classify one projection as the once-write family (`incremental_models.md`
 /// §"The column-family catalogue" row "once-write"): a direct
-/// `COALESCE(<candidate>, <fallback>...)` call, where `<candidate>` is
+/// `COALESCE(<candidate>+, <fallback>?)` call, where `<candidate>` is
 /// either
 ///
 /// 1. a bare reference to one of `unique_key`'s own columns — a per-key
 ///    constant by construction (the key never changes across merges), no
-///    declaration or proof needed; or
-/// 2. a direct `MAX(<col>)`/`MIN(<col>)` reduction of a single non-key
-///    column, and the `COALESCE` carries NO further argument — a fallback
-///    would make the projection TOTAL, and a total projection breaks the
-///    equivalence invariant for this family: a window whose rows all carry
-///    a NULL payload for a key writes the fallback, and the
-///    `COALESCE(target, delta)` merge then locks it in, so the real value a
-///    later window delivers can never displace it while a full refresh
-///    would return it. The declared FD asserts "per-key constant", never
-///    "never NULL", and the family is literally "first NON-NULL", so
-///    intra-key NULLs are anticipated. A second *candidate* argument
-///    (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving yet still refused:
-///    the temporal merge does not preserve the arguments' preference order
-///    across windows. Only route 1 keeps its fallback — a `unique_key`
-///    column is non-null within its own group by construction, so its
-///    fallback can never mask a later observation.
+///    declaration or proof needed, and its fallback (if any) is applied
+///    unconditionally — a `unique_key` column is non-null within its own
+///    group by construction, so its fallback can never mask a later
+///    observation; or
+/// 2. the leading maximal run of direct `MAX(<col>)`/`MIN(<col>)`
+///    reductions of a single non-key column each, optionally followed by
+///    exactly one further trailing argument (the *fallback*). Any other
+///    shape after the leading run — a second candidate after the fallback,
+///    more than one trailing non-candidate argument — refuses `Unproven`.
 ///
-///    The reduction is admitted only when a declared functional dependency names
-///    that INNER SOURCE column (`<col>`, the payload whose provenance is
-///    actually in question) as its `determines`, over a `key` the model's
-///    own `unique_key` covers. The declaration must never be matched
-///    against the projection's output alias: `unique_key → <alias>` holds
-///    by construction for ANY aggregate over the model's own `GROUP BY`
-///    key, so an alias-matched declaration would assert nothing and the
-///    proof would be vacuous. The world-fact the once-write equivalence
-///    needs is `key → <col>` on the source payload — the same `determines`
-///    column `analysis::functional_dependency` documents.
+///    Each candidate is admitted only when a declared functional dependency
+///    names that INNER SOURCE column (`<col>`, the payload whose provenance
+///    is actually in question) as its `determines`, over a `key` the
+///    model's own `unique_key` covers. The declaration must never be
+///    matched against the projection's output alias: `unique_key → <alias>`
+///    holds by construction for ANY aggregate over the model's own
+///    `GROUP BY` key, so an alias-matched declaration would assert nothing
+///    and the proof would be vacuous. The world-fact the once-write
+///    equivalence needs is `key → <col>` on the source payload — the same
+///    `determines` column `analysis::functional_dependency` documents. The
+///    first candidate whose provenance cannot be proven refuses the whole
+///    column, naming that candidate.
 ///
 ///    A declared `key` that is a SUBSET of `unique_key` is accepted: a
 ///    smaller key is a strictly stronger statement that implies the
@@ -236,15 +240,31 @@ pub enum OnceWriteAdmission {
 ///    key, extremal folds included), never invariance *across merges* —
 ///    exactly the pitfall `maintenance::locality`'s route 2 documents on
 ///    its own once-write route. Its two STRUCTURAL disproofs, however, do
-///    apply verbatim and are both enforced here (`model_properties.md`
-///    §Constraints "Declared escape hatches may only widen"):
-///    `vector.has_fan_out_join` (the walk's whole-scope fan-out fact, a
-///    conservative stand-in for "is the determines column sourced from a
-///    proven-fan-out join" — coarser than a per-column join trace, but
-///    never optimistic: any fan-out anywhere in scope refuses) and
-///    `vector.has_set_op_barrier` (SC-6: an FD holding in each branch of an
-///    undiscriminated `UNION ALL` need not hold in the union). A
+///    apply verbatim and are both enforced here, for every candidate
+///    (`model_properties.md` §Constraints "Declared escape hatches may
+///    only widen"): `vector.has_fan_out_join` (the walk's whole-scope
+///    fan-out fact, a conservative stand-in for "is the determines column
+///    sourced from a proven-fan-out join" — coarser than a per-column join
+///    trace, but never optimistic: any fan-out anywhere in scope refuses)
+///    and `vector.has_set_op_barrier` (SC-6: an FD holding in each branch
+///    of an undiscriminated `UNION ALL` need not hold in the union). A
 ///    declaration widens only past neither of them.
+///
+///    Once every candidate is proven, a bare single reduction with no
+///    fallback (`COALESCE(MAX(col))`) stays the direct `COALESCE(target,
+///    delta)` fold it always was ([`OnceWriteAdmission::Admitted`] with
+///    `state: None`) — nothing about it changed shape. A fallback-bearing
+///    or multi-candidate spelling instead decomposes to hidden `(value,
+///    written)` state per candidate
+///    (`crate::analysis::decomposed_state::decompose_once_write`): the
+///    state's `value` column stays the bare (possibly-NULL) reduction, so
+///    it is never fallback-tainted and a later window's real value can
+///    still displace it, and the fallback (or the next candidate) is
+///    applied fresh in the presentation expression on every read instead
+///    of being folded into the merge. The fallback must itself be
+///    presentable from the stored row alone — a literal or a `unique_key`
+///    column passes the presentation-map purity proof (F7); anything else
+///    refuses `Unproven` naming the fallback.
 ///
 /// Any other shape (a bare non-key column with no reducing aggregate, a
 /// multi-argument aggregate, a non-MAX/MIN aggregate, …) is
@@ -261,6 +281,11 @@ pub enum OnceWriteAdmission {
 /// could not be classified for the walk (an unrelated parse shape the outer
 /// classifier will separately refuse); the FD-backed route then fails closed
 /// to [`OnceWriteAdmission::Unproven`] rather than guessing.
+///
+/// `output_name` names the column for the hidden state shape (the
+/// projection's own `AS` alias) — only consulted when a decomposed state is
+/// actually derived.
+#[allow(clippy::too_many_arguments)]
 pub fn classify_once_write(
     text: &str,
     expr: &smelt_parser::Expr,
@@ -268,6 +293,7 @@ pub fn classify_once_write(
     group_by_exprs: &[String],
     declared_fds: &[FunctionalDependency],
     vector: Option<&PropertyVector>,
+    output_name: &str,
 ) -> OnceWriteAdmission {
     if !is_direct_function_call(text, "COALESCE") {
         return OnceWriteAdmission::NotOnceWrite;
@@ -290,7 +316,7 @@ pub fn classify_once_write(
     if let Some(col_ref) = first.as_column_ref() {
         let name = col_ref.name().to_string();
         if unique_key.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
-            return OnceWriteAdmission::Admitted;
+            return OnceWriteAdmission::Admitted { state: None };
         }
         return OnceWriteAdmission::Unproven {
             column: name,
@@ -300,140 +326,165 @@ pub fn classify_once_write(
         };
     }
 
-    // Route 2: FD-backed. A direct MAX(<col>)/MIN(<col>) reduction, proven
-    // (or declared) a per-key constant.
-    if let Some(inner_fc) = first.as_function_call() {
+    // Route 2: FD-backed. The leading maximal run of direct
+    // MAX(<col>)/MIN(<col>) reductions of a single column each are the
+    // candidates; at most one further trailing argument is the fallback.
+    let mut candidates: Vec<(&smelt_parser::Expr, String)> = Vec::new();
+    for arg in &args {
+        let Some(inner_fc) = arg.as_function_call() else {
+            break;
+        };
         let inner_name = inner_fc.name().unwrap_or_default().to_ascii_uppercase();
-        if inner_name == "MAX" || inner_name == "MIN" {
-            let inner_args = inner_fc.arguments();
-            if let Some(inner_ref) = inner_args
-                .first()
-                .filter(|_| inner_args.len() == 1)
-                .and_then(|a| a.as_column_ref())
-            {
-                // The `determines` column is the coalesced value's SOURCE
-                // payload column — never the projection's output alias
-                // (see this function's doc comment: `unique_key -> alias`
-                // is true by construction and proves nothing).
-                let column = inner_ref.name().to_string();
-                let Some(vector) = vector else {
-                    return OnceWriteAdmission::Unproven {
-                        column,
-                        reason: "the model SQL could not be classified for the once-write \
-                                 provenance proof"
-                            .to_string(),
-                    };
+        if inner_name != "MAX" && inner_name != "MIN" {
+            break;
+        }
+        let inner_args = inner_fc.arguments();
+        let Some(inner_ref) = inner_args
+            .first()
+            .filter(|_| inner_args.len() == 1)
+            .and_then(|a| a.as_column_ref())
+        else {
+            break;
+        };
+        candidates.push((arg, inner_ref.name().to_string()));
+    }
+
+    if candidates.is_empty() {
+        return OnceWriteAdmission::Unproven {
+            column: text.trim().to_string(),
+            reason: "the coalesced value is neither a key-derived expression nor a direct \
+                     MAX(...)/MIN(...) reduction of a single column"
+                .to_string(),
+        };
+    }
+
+    let remaining = args.len() - candidates.len();
+    if remaining > 1 {
+        return OnceWriteAdmission::Unproven {
+            column: candidates[0].1.clone(),
+            reason: "the coalesced value carries more than one trailing argument after its \
+                     candidate MAX(...)/MIN(...) reductions — only a single fallback (a \
+                     literal or a unique_key column) is permitted after them"
+                .to_string(),
+        };
+    }
+    let fallback_expr = (remaining == 1).then(|| &args[candidates.len()]);
+
+    for (_, column) in &candidates {
+        // The `determines` column is the coalesced value's SOURCE payload
+        // column — never the projection's output alias (see this
+        // function's doc comment: `unique_key -> alias` is true by
+        // construction and proves nothing).
+        let Some(vector) = vector else {
+            return OnceWriteAdmission::Unproven {
+                column: column.clone(),
+                reason: "the model SQL could not be classified for the once-write \
+                         provenance proof"
+                    .to_string(),
+            };
+        };
+        // The declared key must name the model's actual GROUP BY SOURCE
+        // columns, never the projections' output aliases: `SELECT user_id
+        // AS device_id ... GROUP BY user_id` groups on `user_id`, so a
+        // declaration `key: [device_id]` asserts a dependency on a
+        // different column and proves nothing. Where the alias and the
+        // source coincide (the common `SELECT device_id ... GROUP BY
+        // device_id` shape) the source set contains that name anyway. A
+        // GROUP BY expression that is not a (possibly qualified) plain
+        // identifier contributes only its raw text, which no column-name
+        // declaration can match — failing closed rather than guessing.
+        let source_key_set = group_by_source_columns(group_by_exprs);
+        let declared = declared_fds.iter().any(|fd| {
+            let declared_key: std::collections::BTreeSet<String> =
+                fd.key.iter().map(|k| k.to_ascii_lowercase()).collect();
+            fd.determines.eq_ignore_ascii_case(column)
+                && !declared_key.is_empty()
+                // A subset key is a STRONGER statement that implies the
+                // unique_key dependency — accepted, mirroring
+                // `functional_dependency_verdict_over_vector`'s own
+                // `has_subset_key` treatment.
+                && declared_key.is_subset(&source_key_set)
+        });
+        // A conservative, whole-scope stand-in for "the determines column
+        // is sourced from a join F6 proves fans out" — see this function's
+        // own doc comment for why the grain-composed helper's shortcut is
+        // unsound here.
+        let determines_fan_out = if vector.has_fan_out_join {
+            Some(crate::analysis::join_shape::Cardinality::OneToMany)
+        } else {
+            None
+        };
+        let verdict = functional_dependency_verdict(determines_fan_out, declared);
+        if let FunctionalDependencyVerdict::Refused(reason) = verdict {
+            return OnceWriteAdmission::Unproven {
+                column: column.clone(),
+                reason,
+            };
+        }
+        // The second structural disproof a declaration may not widen past
+        // (`model_properties.md` SC-6), enforced here exactly as
+        // `functional_dependency_verdict_over_vector` enforces it.
+        if vector.has_set_op_barrier {
+            return OnceWriteAdmission::Unproven {
+                column: column.clone(),
+                reason: "the coalesced column crosses a UNION ALL / set operation whose \
+                         branches are not proven key-disjoint (no literal discriminator \
+                         covering the declared key); an FD holding in each branch does \
+                         not hold in the union, so a declared functional dependency \
+                         cannot be assumed to survive it"
+                    .to_string(),
+            };
+        }
+        match verdict {
+            FunctionalDependencyVerdict::Constant => {}
+            FunctionalDependencyVerdict::Refused(reason) => {
+                return OnceWriteAdmission::Unproven {
+                    column: column.clone(),
+                    reason,
                 };
-                // The declared key must name the model's actual GROUP BY
-                // SOURCE columns, never the projections' output aliases:
-                // `SELECT user_id AS device_id ... GROUP BY user_id` groups
-                // on `user_id`, so a declaration `key: [device_id]` asserts a
-                // dependency on a different column and proves nothing. Where
-                // the alias and the source coincide (the common
-                // `SELECT device_id ... GROUP BY device_id` shape) the source
-                // set contains that name anyway. A GROUP BY expression that
-                // is not a (possibly qualified) plain identifier contributes
-                // only its raw text, which no column-name declaration can
-                // match — failing closed rather than guessing.
-                let source_key_set = group_by_source_columns(group_by_exprs);
-                let declared = declared_fds.iter().any(|fd| {
-                    let declared_key: std::collections::BTreeSet<String> =
-                        fd.key.iter().map(|k| k.to_ascii_lowercase()).collect();
-                    fd.determines.eq_ignore_ascii_case(&column)
-                        && !declared_key.is_empty()
-                        // A subset key is a STRONGER statement that implies
-                        // the unique_key dependency — accepted, mirroring
-                        // `functional_dependency_verdict_over_vector`'s own
-                        // `has_subset_key` treatment.
-                        && declared_key.is_subset(&source_key_set)
-                });
-                // A conservative, whole-scope stand-in for "the determines
-                // column is sourced from a join F6 proves fans out" — see
-                // this function's own doc comment for why the grain-composed
-                // helper's shortcut is unsound here.
-                let determines_fan_out = if vector.has_fan_out_join {
-                    Some(crate::analysis::join_shape::Cardinality::OneToMany)
-                } else {
-                    None
-                };
-                let verdict = functional_dependency_verdict(determines_fan_out, declared);
-                if let FunctionalDependencyVerdict::Refused(reason) = verdict {
-                    return OnceWriteAdmission::Unproven { column, reason };
-                }
-                // The second structural disproof a declaration may not widen
-                // past (`model_properties.md` SC-6), enforced here exactly as
-                // `functional_dependency_verdict_over_vector` enforces it.
-                if vector.has_set_op_barrier {
-                    return OnceWriteAdmission::Unproven {
-                        column,
-                        reason: "the coalesced column crosses a UNION ALL / set operation whose \
-                                 branches are not proven key-disjoint (no literal discriminator \
-                                 covering the declared key); an FD holding in each branch does \
-                                 not hold in the union, so a declared functional dependency \
-                                 cannot be assumed to survive it"
-                            .to_string(),
-                    };
-                }
-                return match verdict {
-                    FunctionalDependencyVerdict::Constant => {
-                        // NULL preservation. The merge arm is
-                        // `COALESCE(target, delta)`, so the maintained value
-                        // is "the first NON-NULL value any window produced".
-                        // That equals the full refresh only while the
-                        // projection itself is NULL-preserving: a fallback
-                        // makes the delta TOTAL, so a window in which every
-                        // row for a key carries a NULL payload writes the
-                        // fallback, and the target — now non-null — can
-                        // never be displaced by the real value a later
-                        // window delivers, while a full refresh returns it.
-                        // The declared FD asserts "per-key constant", never
-                        // "never NULL", and this family is literally "first
-                        // NON-NULL", so intra-key NULLs are anticipated
-                        // (`incremental_models.md` §"The equivalence
-                        // invariant"). A second CANDIDATE argument
-                        // (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving
-                        // but still refused: the merge does not preserve the
-                        // arguments' PREFERENCE order across windows — a
-                        // window with `a IS NULL` and `b` present writes
-                        // `b`, which a later window carrying `a` can never
-                        // displace, while a full refresh prefers `a`.
-                        if args.len() > 1 {
-                            OnceWriteAdmission::Unproven {
-                                column,
-                                reason: "the COALESCE carries a fallback argument, which makes \
-                                         the projection total: a window whose rows all carry a \
-                                         NULL payload for a key writes the fallback into the \
-                                         target, and the first-non-null merge then locks that \
-                                         value in — no later window can deliver the real value, \
-                                         while a full refresh would return it. Drop the fallback \
-                                         (`COALESCE(MAX(...))`) and apply the default downstream, \
-                                         in a reader-side projection"
-                                    .to_string(),
-                            }
-                        } else {
-                            OnceWriteAdmission::Admitted
-                        }
-                    }
-                    FunctionalDependencyVerdict::Refused(reason) => {
-                        OnceWriteAdmission::Unproven { column, reason }
-                    }
-                    FunctionalDependencyVerdict::NotProven => OnceWriteAdmission::Unproven {
-                        column,
-                        reason: "no declared functional dependency names this source column as \
-                                 its `determines` over a key the model's unique_key covers, and \
-                                 it is not a key-derived expression"
-                            .to_string(),
-                    },
+            }
+            FunctionalDependencyVerdict::NotProven => {
+                return OnceWriteAdmission::Unproven {
+                    column: column.clone(),
+                    reason: "no declared functional dependency names this source column as \
+                             its `determines` over a key the model's unique_key covers, and \
+                             it is not a key-derived expression"
+                        .to_string(),
                 };
             }
         }
     }
 
-    OnceWriteAdmission::Unproven {
-        column: text.trim().to_string(),
-        reason: "the coalesced value is neither a key-derived expression nor a direct \
-                 MAX(...)/MIN(...) reduction of a single column"
-            .to_string(),
+    // Every candidate proven a per-key constant. A bare single reduction
+    // with no fallback is the direct `COALESCE(target, delta)` fold it
+    // always was — nothing about it needs hidden state.
+    if candidates.len() == 1 && fallback_expr.is_none() {
+        return OnceWriteAdmission::Admitted { state: None };
+    }
+
+    let state_candidates: Vec<crate::analysis::decomposed_state::OnceWriteCandidate> = candidates
+        .iter()
+        .map(
+            |(candidate_expr, _)| crate::analysis::decomposed_state::OnceWriteCandidate {
+                reduction_expr: candidate_expr.text().trim().to_string(),
+            },
+        )
+        .collect();
+    let fallback_text = fallback_expr.map(|e| e.text().trim().to_string());
+    match crate::analysis::decomposed_state::decompose_once_write(
+        &state_candidates,
+        fallback_text.as_deref(),
+        unique_key,
+        output_name,
+    ) {
+        Ok(state) => OnceWriteAdmission::Admitted { state: Some(state) },
+        Err(refusal) => OnceWriteAdmission::Unproven {
+            column: fallback_text.unwrap_or_else(|| candidates[0].1.clone()),
+            reason: format!(
+                "the fallback/candidate presentation could not be decomposed to hidden \
+                 state: {refusal:?}"
+            ),
+        },
     }
 }
 
@@ -962,8 +1013,9 @@ pub fn classify_cumulative(
                     &analysis.group_by_exprs,
                     declared_functional_dependencies,
                     property_vector.as_ref(),
+                    alias,
                 ) {
-                    OnceWriteAdmission::Admitted => {
+                    OnceWriteAdmission::Admitted { state } => {
                         if is_snapshot_reconcile {
                             diagnostics.push(
                                 KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
@@ -983,7 +1035,7 @@ pub fn classify_cumulative(
                                 output_name: alias.clone(),
                                 per_partition_agg: "COALESCE".to_string(),
                                 cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
-                                state: None,
+                                state,
                             });
                         }
                         continue;
@@ -1011,25 +1063,21 @@ pub fn classify_cumulative(
                 // catalogue").
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
-                    // The once-write suggestion names the family's only
-                    // admitted reduction spelling — a bare
-                    // `COALESCE({expr}, <default>)` over a non-key
-                    // expression is refused by `classify_once_write` on the
-                    // family's NULL-preservation obligation, so suggesting
-                    // it would send the author into a second refusal
-                    // (`docs/specs/incremental_models.md` §"The
-                    // column-family catalogue"). For the same reason it is
-                    // offered ONLY for a bare column reference:
-                    // `classify_once_write`'s FD-backed route requires the
-                    // `MAX(...)` argument to be a single bare column, so
-                    // `COALESCE(MAX(a || b))` over a composite projection
-                    // would itself refuse `KeyedOnceWriteUnproven`. The
-                    // `MAX_BY`/`ANY_VALUE` spellings take an arbitrary
-                    // expression and stay offered either way.
+                    // The once-write suggestion names the family's reduction
+                    // spelling — offered ONLY for a bare column reference:
+                    // `classify_once_write`'s FD-backed route requires each
+                    // candidate's `MAX(...)`/`MIN(...)` argument to be a
+                    // single bare column, so `COALESCE(MAX(a || b))` over a
+                    // composite projection would itself refuse
+                    // `KeyedOnceWriteUnproven` (`docs/specs/
+                    // incremental_models.md` §"The column-family
+                    // catalogue"). The `MAX_BY`/`ANY_VALUE` spellings take
+                    // an arbitrary expression and stay offered either way.
                     let projection_text = text.trim();
                     let once_write_fix = if expr.as_column_ref().is_some() {
                         format!(
-                            ", or `COALESCE(MAX({projection_text}))` — no fallback argument — \
+                            ", or `COALESCE(MAX({projection_text}))` — an optional trailing \
+                             fallback (a literal or a unique_key column) is admitted too — \
                              under a declared functional dependency for the once-write family"
                         )
                     } else {

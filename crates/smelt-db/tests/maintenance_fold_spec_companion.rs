@@ -183,14 +183,13 @@ fn once_write_with_declared_fd_is_admitted_into_fold_spec() {
     );
 }
 
-/// Plan/runtime agreement on the NULL-preservation obligation: a fallback
-/// argument (`COALESCE(MAX(col), <literal>)`) makes the projection total,
-/// which breaks the once-write equivalence invariant (a NULL-payload window
-/// writes the literal, and the first-non-null merge locks it in). The plan
-/// layer must refuse it exactly as the runtime classifier does, declared FD
-/// or not.
+/// Plan/runtime agreement: a fallback argument (`COALESCE(MAX(col),
+/// <literal>)`) admits onto decomposed `(value, written)` state
+/// (`docs/outcomes/20260809-rung2-state-shapes` row 6) — the plan layer
+/// admits it exactly as the runtime classifier does, via the same shared
+/// `classify_once_write` helper.
 #[test]
-fn once_write_with_a_literal_fallback_is_not_admitted_into_fold_spec() {
+fn once_write_with_a_literal_fallback_is_admitted_into_fold_spec() {
     use smelt_core::config::FunctionalDependency;
 
     let sql = "SELECT device_id, COALESCE(MAX(signup_referrer), 'unknown') AS first_referrer \
@@ -199,11 +198,39 @@ fn once_write_with_a_literal_fallback_is_not_admitted_into_fold_spec() {
         key: vec!["device_id".to_string()],
         determines: "signup_referrer".to_string(),
     }];
-    assert!(
-        derive_fold_spec(sql, &fds).is_none(),
-        "a literal fallback makes the once-write projection total — the plan layer must refuse \
-         it, matching the runtime classifier's KeyedOnceWriteUnproven"
-    );
+    let spec = derive_fold_spec(sql, &fds)
+        .expect("a fallback-bearing once-write column must be admitted onto decomposed state");
+    assert!(spec
+        .add_columns
+        .iter()
+        .any(|(alias, f)| alias == "first_referrer" && *f == SqlFunction::Coalesce));
+}
+
+/// Multi-candidate spellings (`COALESCE(MAX(a), MAX(b))`) also admit — the
+/// plan layer and runtime classifier stay in lockstep since both delegate
+/// to `classify_once_write`.
+#[test]
+fn once_write_multi_candidate_is_admitted_into_fold_spec() {
+    use smelt_core::config::FunctionalDependency;
+
+    let sql = "SELECT device_id, COALESCE(MAX(signup_referrer), MAX(fallback_referrer)) \
+               AS first_referrer FROM smelt.sources.events GROUP BY device_id";
+    let fds = vec![
+        FunctionalDependency {
+            key: vec!["device_id".to_string()],
+            determines: "signup_referrer".to_string(),
+        },
+        FunctionalDependency {
+            key: vec!["device_id".to_string()],
+            determines: "fallback_referrer".to_string(),
+        },
+    ];
+    let spec = derive_fold_spec(sql, &fds)
+        .expect("a multi-candidate once-write column must be admitted onto decomposed state");
+    assert!(spec
+        .add_columns
+        .iter()
+        .any(|(alias, f)| alias == "first_referrer" && *f == SqlFunction::Coalesce));
 }
 
 /// The mirror negative case: with NO declared functional dependency, the

@@ -82,7 +82,7 @@ FROM smelt.silver.events_parsed
 GROUP BY device_id
 ```
 
-**Declared functional dependency** — the coalesced value is a single-column `MAX(col)` or `MIN(col)` **with no fallback argument**, and the model declares that the grouping key determines `col`:
+**Declared functional dependency** — the coalesced value is a single-column `MAX(col)` or `MIN(col)`, optionally followed by more `MAX`/`MIN` candidates and then a single fallback argument, and the model declares that the grouping key determines each candidate's column:
 
 ```sql
 ---
@@ -104,19 +104,13 @@ The declaration is a world fact about the **source data**, not about the output:
 
 A declaration only widens the undecidable case; it never overrides a structural disproof. The column is still refused when the model's body contains a row-multiplying join, or an undiscriminated `UNION ALL` (a dependency holding in each branch need not hold in the union).
 
-**No fallback after the reduction.** `COALESCE(MAX(col), 'unknown')` is refused, declaration or not. The merge is "first non-null wins", so the delta must be NULL exactly when the key has no value yet. A fallback makes it total: a window in which every row for a key has `col IS NULL` writes `'unknown'` into the target, and no later window can ever displace it — while a full refresh would return the real value that later window carried. The declaration says `col` is a per-key *constant*; it does not say `col` is never NULL, and this family is literally "first **non-null**", so NULLs within a key are expected. Drop the fallback and apply the default downstream instead:
+**The fallback is kept out of stored state.** `COALESCE(MAX(col), 'unknown')` admits: the merge never applies `COALESCE(target, delta)` to the fallback-tainted value directly. Instead the column folds through hidden decomposed state — the raw reduction and a `written` flag — and the fallback is applied fresh in a presentation expression on every read (`CASE WHEN written THEN value ELSE 'unknown' END`). Because the state's `value` column only ever holds the raw (possibly-NULL) reduction, a window whose rows all carry a NULL payload for a key never locks the fallback in: the real value a later window delivers still displaces it. Each candidate still needs its own provenance proof; the fallback itself must be a literal or a reference to one of the model's own `GROUP BY` key columns (anything else cannot be recomputed purely from the stored row on every read, and is refused).
 
-```sql
--- downstream model, or a reader-side projection
-SELECT device_id, COALESCE(first_referrer, 'unknown') AS first_referrer
-FROM smelt.gold.device_first_touch
-```
+Multiple candidates are also admitted, applied in the order written: `COALESCE(MAX(a), MAX(b), 'unknown')` keeps a `(value, written)` state pair per candidate and prefers `a` over `b` over the fallback on every read, so the cross-window merge no longer needs to preserve a preference order itself — each candidate's own state is independently first-non-null. Every candidate still needs its own declared functional dependency (or must itself be key-derived); the first candidate whose provenance cannot be proven refuses the whole column, naming that candidate.
 
-The key-derived shape above keeps its fallback: a key column is never NULL within its own group, so `COALESCE(device_id, 'n/a')` cannot mask a value a later window would supply.
+The key-derived shape above keeps its fallback unconditionally: a key column is never NULL within its own group, so `COALESCE(device_id, 'n/a')` cannot mask a value a later window would supply, and needs no decomposed state.
 
-A second candidate value (`COALESCE(MAX(a), MAX(b))`) is also refused. It preserves NULLs, but the cross-window merge does not preserve your preference for `a` over `b`: a window carrying only `b` writes `b`'s value and locks it in ahead of an `a` that arrives later.
-
-Anything else — a coalesced expression that is neither of the two shapes, a bare non-key column, a multi-argument or non-`MAX`/`MIN` inner aggregate — is refused. The three fixes named by the diagnostic are: make the value key-derived, declare the functional dependency, or remodel the column out into its own model.
+Anything else — a coalesced expression that is neither of the two shapes, a bare non-key column, a candidate that is a multi-argument or non-`MAX`/`MIN` inner aggregate, or more than one argument following the last candidate — is refused. The three fixes named by the diagnostic are: make the value key-derived, declare the functional dependency, or remodel the column out into its own model.
 
 A `COALESCE(...)` used as a null-safe composite `GROUP BY` key (`GROUP BY COALESCE(device_id, 'n/a')`) is a key column, not a once-write column, and needs no proof.
 
@@ -171,7 +165,7 @@ Reordering merges across source partitions does not change the final state: for 
 | `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block but none of the three [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) routes admits it |
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source, none clocked) |
 | `KeyedSnapshotSourceUnsupportedColumn` | A fold-family, order-monotone-overwrite, or once-write column is used under the snapshot-reconcile run shape — re-fold this family with `--event-time-start`/`--event-time-end` over a `timeseries:`-tagged source instead, or express the column as `ANY_VALUE(...)` |
-| `KeyedOnceWriteUnproven` | A `COALESCE` once-write column has no [provenance proof](#once-write-columns), or carries a fallback argument after its `MAX`/`MIN` reduction — names the column and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model; for the fallback case, drop it and apply the default downstream |
+| `KeyedOnceWriteUnproven` | A `COALESCE` once-write column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no [provenance proof](#once-write-columns) for one or more of its candidate columns, or its fallback is not a literal or a `GROUP BY` key reference — names the unproven candidate (or the fallback) and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model |
 | `KeyedSqlNotParseable` | The model SELECT could not be parsed into the shape the classifier reads |
 | `KeyedReprocessedWindow` | A run window covers a window this model already merged, and the model is not re-run tolerant (it has an additive column) — see [Reprocessing](#reprocessing) |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-`key_recurrence` route only: a merged delta row matched a stored key outside the run's derived slice, violating the source's declared bound. The run's transaction rolls back |

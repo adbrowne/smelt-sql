@@ -817,16 +817,14 @@ GROUP BY device_id"#;
     );
 }
 
-/// A literal fallback (`COALESCE(MAX(val), -1)`) makes the projection
-/// TOTAL, which breaks the equivalence invariant: a window in which every
-/// row for a key carries `val IS NULL` writes the literal into the target,
-/// and `COALESCE(target, delta)` then locks that default in forever — a
-/// later window delivering a real value can never displace it, while a full
-/// refresh would return the real value. The declared FD asserts "per-key
-/// constant", never "never NULL", and this family is literally "first
-/// NON-NULL", so intra-key NULLs are anticipated. Refuse.
+/// A literal fallback (`COALESCE(MAX(val), 'unknown')`) admits onto hidden
+/// `(value, written)` state: the state's `value` column stays the bare
+/// (possibly-NULL) reduction, so a later window's real value can still
+/// displace it, and the fallback is applied fresh in the presentation
+/// expression on every read instead of being locked in by the merge
+/// (`docs/outcomes/20260809-rung2-state-shapes` row 6).
 #[test]
-fn once_write_with_literal_fallback_refuses_despite_declared_fd() {
+fn once_write_with_fallback_admits_with_decomposed_state() {
     let sql = r#"SELECT
     device_id,
     COALESCE(MAX(signup_referrer), 'unknown') AS first_referrer
@@ -837,33 +835,49 @@ GROUP BY device_id"#;
         key: vec!["device_id".to_string()],
         determines: "signup_referrer".to_string(),
     }];
-    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &fds).unwrap_err();
-    let diag = err
+    let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &fds)
+        .expect("a fallback-bearing once-write column admits onto decomposed state");
+    let col = classification
+        .aggregator_columns
         .iter()
-        .find(|d| matches!(d, KeyedDiagnostic::KeyedOnceWriteUnproven { .. }))
-        .unwrap_or_else(|| panic!("expected KeyedOnceWriteUnproven: {err:?}"));
-    let KeyedDiagnostic::KeyedOnceWriteUnproven { column, reason, .. } = diag else {
-        unreachable!()
-    };
-    assert_eq!(column, "signup_referrer");
-    assert!(
-        reason.contains("fallback") && reason.contains("NULL"),
-        "the reason must name the NULL-masking fallback: {reason}"
+        .find(|c| c.output_name == "first_referrer")
+        .expect("first_referrer column present");
+    assert_eq!(
+        col.cross_partition_combiner,
+        CrossPartitionCombiner::OnceWrite
     );
-    assert!(
-        diag.to_string().contains("downstream"),
-        "the refusal must name dropping the fallback / applying the default downstream: {diag}"
+    let state = col
+        .state
+        .as_ref()
+        .expect("fallback-bearing column must carry state");
+    assert_eq!(
+        state.state_columns,
+        vec![
+            StateColumn {
+                name: "first_referrer__value".to_string(),
+                per_partition_expr: "MAX(signup_referrer)".to_string(),
+                combiner: CrossPartitionCombiner::OnceWrite,
+            },
+            StateColumn {
+                name: "first_referrer__written".to_string(),
+                per_partition_expr: "(MAX(signup_referrer)) IS NOT NULL".to_string(),
+                combiner: CrossPartitionCombiner::BoolOr,
+            },
+        ]
+    );
+    assert_eq!(
+        state.presentation_expr,
+        "CASE WHEN first_referrer__written THEN first_referrer__value ELSE 'unknown' END"
     );
 }
 
-/// The same NULL-masking hazard through a second candidate rather than a
-/// literal: `COALESCE(MAX(a), MAX(b))` is NULL-preserving, but the merge
-/// `COALESCE(target, delta)` does not preserve the argument PREFERENCE
-/// order across windows — a window where `a IS NULL` but `b` is present
-/// writes `b`'s value, which a later window carrying `a` can never
-/// displace, while a full refresh prefers `a`. Refuse.
+/// A second candidate (`COALESCE(MAX(a), MAX(b))`) now admits: decomposed
+/// state gives each candidate its own `(value, written)` pair, so the
+/// presentation `CASE` expression preserves the argument PREFERENCE order
+/// on every read instead of relying on the cross-window merge to preserve
+/// it (`docs/outcomes/20260809-rung2-state-shapes` row 6).
 #[test]
-fn once_write_with_a_second_candidate_argument_refuses() {
+fn once_write_multi_candidate_admits_one_state_pair_per_candidate() {
     let sql = r#"SELECT
     device_id,
     COALESCE(MAX(signup_referrer), MAX(fallback_referrer)) AS first_referrer
@@ -880,11 +894,192 @@ GROUP BY device_id"#;
             determines: "fallback_referrer".to_string(),
         },
     ];
+    let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &fds)
+        .expect("a multi-candidate once-write column admits onto decomposed state");
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "first_referrer")
+        .expect("first_referrer column present");
+    let state = col
+        .state
+        .as_ref()
+        .expect("multi-candidate column must carry state");
+    assert_eq!(state.state_columns.len(), 4);
+    assert_eq!(
+        state.state_columns,
+        vec![
+            StateColumn {
+                name: "first_referrer__value_1".to_string(),
+                per_partition_expr: "MAX(signup_referrer)".to_string(),
+                combiner: CrossPartitionCombiner::OnceWrite,
+            },
+            StateColumn {
+                name: "first_referrer__written_1".to_string(),
+                per_partition_expr: "(MAX(signup_referrer)) IS NOT NULL".to_string(),
+                combiner: CrossPartitionCombiner::BoolOr,
+            },
+            StateColumn {
+                name: "first_referrer__value_2".to_string(),
+                per_partition_expr: "MAX(fallback_referrer)".to_string(),
+                combiner: CrossPartitionCombiner::OnceWrite,
+            },
+            StateColumn {
+                name: "first_referrer__written_2".to_string(),
+                per_partition_expr: "(MAX(fallback_referrer)) IS NOT NULL".to_string(),
+                combiner: CrossPartitionCombiner::BoolOr,
+            },
+        ]
+    );
+    assert_eq!(
+        state.presentation_expr,
+        "CASE WHEN first_referrer__written_1 THEN first_referrer__value_1 \
+         WHEN first_referrer__written_2 THEN first_referrer__value_2 END"
+    );
+}
+
+/// Candidates then a trailing literal fallback: `COALESCE(MAX(a), MAX(b),
+/// 'unknown')` admits with three state pairs' worth of presentation order —
+/// two candidates then the fallback.
+#[test]
+fn once_write_multi_candidate_with_fallback_admits() {
+    let sql = r#"SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer), MAX(fallback_referrer), 'unknown') AS first_referrer
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let fds = vec![
+        FunctionalDependency {
+            key: vec!["device_id".to_string()],
+            determines: "signup_referrer".to_string(),
+        },
+        FunctionalDependency {
+            key: vec!["device_id".to_string()],
+            determines: "fallback_referrer".to_string(),
+        },
+    ];
+    let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &fds)
+        .expect("candidates followed by a literal fallback must admit");
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "first_referrer")
+        .expect("first_referrer column present");
+    let state = col.state.as_ref().expect("column must carry state");
+    assert_eq!(state.state_columns.len(), 4);
+    assert_eq!(
+        state.presentation_expr,
+        "CASE WHEN first_referrer__written_1 THEN first_referrer__value_1 \
+         WHEN first_referrer__written_2 THEN first_referrer__value_2 ELSE 'unknown' END"
+    );
+}
+
+/// The first candidate proven, the second not: refuses naming the second
+/// candidate's source column, not the first.
+#[test]
+fn once_write_multi_candidate_unproven_second_candidate_refuses() {
+    let sql = r#"SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer), MAX(fallback_referrer)) AS first_referrer
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let fds = vec![FunctionalDependency {
+        key: vec!["device_id".to_string()],
+        determines: "signup_referrer".to_string(),
+    }];
     let err = classify_cumulative(sql, &refs, &events_source_map(), false, &fds).unwrap_err();
     assert!(
         err.iter().any(|d| matches!(
             d,
-            KeyedDiagnostic::KeyedOnceWriteUnproven { column, .. } if column == "signup_referrer"
+            KeyedDiagnostic::KeyedOnceWriteUnproven { column, .. } if column == "fallback_referrer"
+        )),
+        "expected the refusal to name the second, unproven candidate: {err:?}"
+    );
+}
+
+/// A fallback that reaches outside the row (neither a literal nor a
+/// `unique_key` column) fails the presentation-map purity proof and
+/// refuses — it does not admit.
+#[test]
+fn once_write_fallback_referencing_a_non_key_column_refuses() {
+    let sql = r#"SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer), other_col) AS first_referrer
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let fds = vec![FunctionalDependency {
+        key: vec!["device_id".to_string()],
+        determines: "signup_referrer".to_string(),
+    }];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &fds).unwrap_err();
+    assert!(
+        err.iter()
+            .any(|d| matches!(d, KeyedDiagnostic::KeyedOnceWriteUnproven { .. })),
+        "expected KeyedOnceWriteUnproven for an unpresentable fallback: {err:?}"
+    );
+}
+
+/// Regression: the two spellings that stay stateless — a bare reduction
+/// with no fallback, and the key-derived spelling — still admit with
+/// `state: None`; nothing about their shape changed.
+#[test]
+fn once_write_bare_reduction_stays_stateless() {
+    let sql = r#"SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer)) AS first_referrer,
+    COALESCE(device_id, 'n/a') AS first_seen_device
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let fds = vec![FunctionalDependency {
+        key: vec!["device_id".to_string()],
+        determines: "signup_referrer".to_string(),
+    }];
+    let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &fds)
+        .expect("both spellings must still admit");
+    let bare = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "first_referrer")
+        .expect("first_referrer column present");
+    assert!(bare.state.is_none(), "bare reduction must stay stateless");
+    let key_derived = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "first_seen_device")
+        .expect("first_seen_device column present");
+    assert!(
+        key_derived.state.is_none(),
+        "key-derived spelling must stay stateless"
+    );
+}
+
+/// A model that also projects the once-write column's own hidden state
+/// column name raises `KeyedStateColumnCollision` (the same pure detector
+/// `MAX_BY`/`MIN_BY` already reach — `docs/outcomes/20260809-rung2-state-shapes`
+/// row 6 gives it its second reachable family).
+#[test]
+fn once_write_state_column_collides_with_user_projection() {
+    let sql = r#"SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer), 'unknown') AS first_referrer,
+    MAX(other_col) AS first_referrer__value
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let fds = vec![FunctionalDependency {
+        key: vec!["device_id".to_string()],
+        determines: "signup_referrer".to_string(),
+    }];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &fds).unwrap_err();
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedStateColumnCollision { state_column, user_column }
+                if state_column == "first_referrer__value" && user_column == "first_referrer__value"
         )),
         "diagnostics: {err:?}"
     );

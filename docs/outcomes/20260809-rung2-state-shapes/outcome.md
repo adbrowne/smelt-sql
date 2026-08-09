@@ -49,7 +49,7 @@ success criteria above.
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
-| 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | planned |
+| 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
 | 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | pending |
 | 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | pending |
 | 9 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
@@ -209,6 +209,17 @@ success criteria above.
   `decompose_once_write` for uniformity — it would rewrite the stored shape of every already-
   admitted once-write model (and all 47 conformance recipes) to buy nothing the spec asks for,
   since §"The column-family catalogue" states the bare spellings' combiner *is* the direct fold.
+
+- 2026-08-09 (implement 6): once-write's fallback-bearing and multi-candidate spellings admit
+  onto hidden `(value, written)` state per candidate — `classify_once_write` parses the leading
+  run of `MAX(...)`/`MIN(...)` candidates plus one trailing fallback, proves each independently
+  (first failure names that candidate), and calls `decompose_once_write` when a fallback or a
+  second candidate is present; the bare-reduction and key-derived spellings stay stateless.
+  `OnceWriteAdmission::Admitted` gained a `state` payload; `classify_once_write` gained an
+  `output_name` parameter to name the derived columns. No new bugs surfaced — once-write's state
+  columns never cross-reference each other, so both phase-5 traps (fold-substitution corruption,
+  pre-cast state augmentation) were re-verified clean rather than hit again. `KeyedStateColumnCollision`
+  reaches its second family for free (the detector is already generic over `aggregator_columns`).
 
 ## Blocked
 

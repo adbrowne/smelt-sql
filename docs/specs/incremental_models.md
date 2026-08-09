@@ -2356,18 +2356,17 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   the table — including the case where only one of the two flags is supplied. No test asserts
   the refusal, and the user documentation currently describes the fallback rather than the
   required-flags rule.
-- **The once-write classifier still implements only the two narrow spellings.**
-  §"The column-family catalogue" now admits the fallback-bearing and multi-candidate spellings
-  through decomposed `(value, written)` state (§"Decomposed state (rung 2) in keyed models"), but
-  the implementation still refuses both `KeyedOnceWriteUnproven`: the classifier has not yet been
-  wired to the decomposed-state mechanism for this family. There is also no nullability route
-  around the fallback case yet — the NOT-NULL derivation
+- **The once-write classifier has no nullability route around the fallback case.** The
+  fallback-bearing and multi-candidate spellings admit onto decomposed `(value, written)` state
+  (§"Decomposed state (rung 2) in keyed models"), but the only route to that state is the
+  FD-backed proof; the NOT-NULL derivation
   (`crates/smelt-logical/src/analysis/not_null.rs`) proves not-null only for a partition /
-  driving-clock-derived column, so establishing that a fallback can never fire needs the state
-  route, not a static proof. Widening the key-derived route to an arbitrary key-derived
-  *expression* (rather than a bare key reference), or replacing the whole-scope
-  fan-out/set-operation facts the admission reads today with a per-column join trace, is
-  separately unbuilt. Decision record:
+  driving-clock-derived column, so establishing that a fallback can never fire needs a declared
+  functional dependency, not a static not-null proof. The key-derived route still requires a bare
+  reference to a `unique_key` column, not an arbitrary key-derived *expression*. The admission
+  also reads whole-scope fan-out/set-operation facts rather than a per-column join trace, so any
+  fan-out or undiscriminated set operation anywhere in the model's scope refuses every candidate,
+  not only the one actually reached through it. Decision record:
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
@@ -2444,12 +2443,12 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   §"Decomposed state (rung 2) in keyed models" fixes the state shapes, physical layout, and
   presentation projection; the state shapes are derived
   (`crates/smelt-logical/src/analysis/decomposed_state.rs` encodes `AVG`, the variance/stddev
-  family, and the order-monotone overwrite family's `(v, o)` shape), the state columns are
-  materialised in the stored table and folded through the keyed merge, and the order-monotone
-  overwrite family's admission consumes it (§"The column-family catalogue"). The once-write
-  family's fallback-bearing and multi-candidate spellings, and `AVG`/`STDDEV_*`/`VAR_*` folding
-  at keyed grain, still refuse rather than consume the mechanism — the two once-write entries
-  above. Tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
+  family, the order-monotone overwrite family's `(v, o)` shape, and the once-write family's
+  `(value, written)` shape), the state columns are materialised in the stored table and folded
+  through the keyed merge, and the order-monotone overwrite and once-write families' admission
+  both consume it (§"The column-family catalogue"). `AVG`/`STDDEV_*`/`VAR_*` folding at keyed
+  grain still refuses rather than consume the mechanism. Tracking:
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them.** Group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the
   rung-2 work above; rung 3 additionally depends on the change-feed consumption design — no

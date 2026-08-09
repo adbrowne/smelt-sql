@@ -229,8 +229,9 @@ pub fn derive_fold_spec(
                     &group_by_exprs,
                     declared_functional_dependencies,
                     vector.as_ref(),
+                    alias,
                 ) {
-                    OnceWriteAdmission::Admitted => {
+                    OnceWriteAdmission::Admitted { .. } => {
                         add_columns.push((alias.clone(), SqlFunction::Coalesce));
                     }
                     // A once-write column whose provenance proof does not hold

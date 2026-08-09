@@ -697,6 +697,98 @@ fn keyed_merge_folds_max_by_through_hidden_ordering_state() {
     );
 }
 
+/// A fallback-bearing once-write column driven from real SQL
+/// (`docs/outcomes/20260809-rung2-state-shapes` row 6): the keyed merge
+/// folds `__value` with `COALESCE(target, delta)`, `__written` with `OR`,
+/// and recomputes the presented column from the merged state — the
+/// fallback is applied fresh in the recomputed presentation, never merged.
+#[test]
+fn once_write_fallback_folds_state_and_recomputes_presented() {
+    use smelt_core::config::FunctionalDependency;
+
+    let sql = "SELECT device_id, COALESCE(MAX(signup_referrer), 'unknown') AS first_referrer \
+               FROM smelt.silver.events_parsed GROUP BY device_id";
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let mut source_timeseries: SourceTimeseriesMap = HashMap::new();
+    source_timeseries.insert(
+        "smelt.silver.events_parsed".to_string(),
+        TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        },
+    );
+    let fds = vec![FunctionalDependency {
+        key: vec!["device_id".to_string()],
+        determines: "signup_referrer".to_string(),
+    }];
+    let classification =
+        classify_cumulative(sql, &refs, &source_timeseries, false, &fds).expect("must classify");
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "first_referrer")
+        .expect("first_referrer column present");
+    let state = col.state.as_ref().expect("state must be present");
+    assert_eq!(
+        state.presentation_expr,
+        "CASE WHEN first_referrer__written THEN first_referrer__value ELSE 'unknown' END"
+    );
+
+    // Mirror `smelt-runtime::cumulative::expand_aggregator_column_folds`'s
+    // fold expansion by hand — this crate does not depend on smelt-runtime.
+    let mut folds: Vec<(String, String)> = Vec::new();
+    let mut merged_by_name: std::collections::HashMap<String, String> = HashMap::new();
+    for state_col in &state.state_columns {
+        let target_col = format!("target.{}", state_col.name);
+        let delta_col = format!("delta.{}", state_col.name);
+        let merged = state_col.combiner.render(&target_col, &delta_col);
+        merged_by_name.insert(state_col.name.clone(), merged.clone());
+        folds.push((state_col.name.clone(), merged));
+    }
+    let mut presented_expr = state.presentation_expr.clone();
+    for (name, merged) in &merged_by_name {
+        presented_expr = presented_expr.replace(name, &format!("({merged})"));
+    }
+    folds.push((col.output_name.clone(), presented_expr));
+
+    let group = emit_keyed_fold(
+        "main.devices",
+        &classification.unique_key,
+        &folds,
+        "SELECT device_id, MAX(signup_referrer) AS first_referrer__value, \
+         (MAX(signup_referrer)) IS NOT NULL AS first_referrer__written FROM events GROUP BY 1",
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+    let sql = &group.statements[0].sql;
+    assert!(
+        sql.contains(
+            "first_referrer__value = COALESCE(target.first_referrer__value, \
+             delta.first_referrer__value)"
+        ),
+        "expected the value state column to fold first-non-null: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "first_referrer__written = target.first_referrer__written OR \
+             delta.first_referrer__written"
+        ),
+        "expected the written state column to fold by OR: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "first_referrer = CASE WHEN (target.first_referrer__written OR \
+             delta.first_referrer__written) THEN (COALESCE(target.first_referrer__value, \
+             delta.first_referrer__value)) ELSE 'unknown' END"
+        ),
+        "expected the presented column recomputed from the merged state with the fallback \
+         applied fresh: {sql}"
+    );
+}
+
 /// `state_augmented_projection` appends `, <per_partition_expr> AS <state
 /// col>` for each state column, leaving the key/GROUP BY and the model's own
 /// presented select item unchanged.
