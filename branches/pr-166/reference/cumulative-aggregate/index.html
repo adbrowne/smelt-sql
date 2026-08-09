@@ -2419,6 +2419,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run shapes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#execution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2789,6 +2800,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-shapes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run shapes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#execution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2983,12 +3005,25 @@
 <td><code>xor()</code></td>
 <td><code>xor(target.c, delta.c)</code></td>
 </tr>
+<tr>
+<td><code>ANY_VALUE(...)</code></td>
+<td>incoming row wins</td>
+<td><code>delta.c</code></td>
+</tr>
 </tbody>
 </table>
+<p><code>ANY_VALUE</code> is the <strong>plain-overwrite family</strong> — see <a href="#run-shapes">Run shapes</a> below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.</p>
 <p>Each allowed aggregator is commutative and associative — that's the property that lets the rule merge windows in any order and still produce the same final state.</p>
 <p><strong>Out of v1</strong>: <code>AVG</code>, <code>STRING_AGG</code>, <code>LIST_AGG</code>, <code>FIRST</code>, <code>LAST</code>, <code>COUNT(DISTINCT ...)</code>, <code>APPROX_COUNT_DISTINCT</code>. Composite expressions over aggregates (e.g. <code>SUM(x) + 1</code>) are also refused — split into separate projections and compute derived values downstream.</p>
+<h2 id="run-shapes">Run shapes<a class="headerlink" href="#run-shapes" title="Permanent link">&para;</a></h2>
+<p>The run shape is derived from the FROM clause, never declared:</p>
+<ul>
+<li><strong>Window-forward</strong> — exactly one <code>timeseries:</code>-tagged source in the FROM clause (the driving source). Folds (<code>SUM</code>, <code>MIN</code>, <code>MAX</code>, …) and the order-monotone overwrite family (<code>MAX_BY</code>/<code>MIN_BY</code>) are admitted here; <code>ANY_VALUE</code> is refused.</li>
+<li><strong>Snapshot-reconcile</strong> — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. <code>ANY_VALUE</code> (plain overwrite, incoming row wins) is admitted here; folds and <code>MAX_BY</code>/<code>MIN_BY</code> are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal/order-monotone).</li>
+<li>Two or more clocked sources refuses (<code>KeyedMultipleDrivingSources</code>).</li>
+</ul>
 <h2 id="execution">Execution<a class="headerlink" href="#execution" title="Permanent link">&para;</a></h2>
-<p>For a run window <code>[run_start, run_end)</code>:</p>
+<p><strong>Window-forward</strong>, for a run window <code>[run_start, run_end)</code>:</p>
 <ol>
 <li>Classify the model SQL and derive the unique key, per-column combiners, and driving source.</li>
 <li>Step over the driving source's partitions in temporal order. For each partition <code>D</code>:<ul>
@@ -3002,7 +3037,8 @@
 <p class="admonition-title">Granularity restriction</p>
 <p>The driving source must declare <code>granularity: day</code> or <code>granularity: week</code>. Any other granularity — <code>hour</code>, <code>month</code>, <code>quarter</code>, or <code>year</code> — is rejected at runtime with the error <code>windowed-keyed-maintenance driver supports day and week granularity; got &lt;Granularity&gt;</code>.</p>
 </div>
-<p>Running without a run window (<code>smelt run</code> without <code>--event-time-start</code>/<code>--event-time-end</code>) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.</p>
+<p>Running a window-forward model without a run window (<code>smelt run</code> without <code>--event-time-start</code>/<code>--event-time-end</code>) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.</p>
+<p><strong>Snapshot-reconcile</strong> models never take <code>--event-time-start</code>/<code>--event-time-end</code> — supplying either is rejected fail-loud, naming the run shape. Every run re-scans the source whole: the first run creates the target table from the SELECT; every subsequent run <code>MERGE</code>s the whole-source scan into the existing target — matched keys are overwritten (incoming row wins), unmatched keys inserted, and a key present in the target but <strong>absent</strong> from the incoming scan is <strong>retained unchanged</strong> (there is no <code>DELETE</code>; removing a stored row entirely needs an explicit mechanism, out of scope today). No reconciliation ledger is kept — each run is a self-contained reconciliation.</p>
 <h2 id="end-state-equivalence">End-state equivalence<a class="headerlink" href="#end-state-equivalence" title="Permanent link">&para;</a></h2>
 <p>For any set of source partitions <code>S = {D₁, …, Dₙ}</code> and any admitted ordering π over <code>S</code>:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>key_grain_run(model, π(S))
@@ -3048,7 +3084,11 @@
 </tr>
 <tr>
 <td><code>KeyedSnapshotPostureUnsupported</code></td>
-<td>Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error</td>
+<td>No clocked driving source, and no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source, none clocked)</td>
+</tr>
+<tr>
+<td><code>KeyedSnapshotSourceUnsupportedColumn</code></td>
+<td>A fold-family column (additive, extremal/lattice, or order-monotone overwrite) is used under the snapshot-reconcile run shape — re-fold this family with <code>--event-time-start</code>/<code>--event-time-end</code> over a <code>timeseries:</code>-tagged source instead, or express the column as <code>ANY_VALUE(...)</code></td>
 </tr>
 </tbody>
 </table>
