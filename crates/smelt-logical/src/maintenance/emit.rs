@@ -1419,6 +1419,15 @@ pub struct AppendOnlyBaselinePartition {
     /// partition, over the same `digest_columns` the caller passes to
     /// [`emit_append_only_posture_probe`].
     pub recorded_fingerprint: String,
+    /// Whether this partition's fingerprint leg is checked this run. A
+    /// whole-partition fingerprint changes on a *legitimate* append, so the
+    /// caller gates this to `false` for the still-open partition (the
+    /// recorded maximum `partition_value`) and `true` for every partition
+    /// strictly below it (`docs/outcomes/20260809-probe-backed-facts/
+    /// outcome.md` phase 6: "the frontier gate"). The count leg is never
+    /// gated — a count decrease always violates append-only posture
+    /// regardless of this flag.
+    pub check_fingerprint: bool,
 }
 
 /// The append-only posture probe (`docs/specs/model_properties.md` §"Probe
@@ -1445,7 +1454,10 @@ pub struct AppendOnlyBaselinePartition {
 /// `source_table` is already fully qualified (`schema.table`); `baseline`
 /// is rendered as a `VALUES` list, one row per recorded partition — a
 /// partition with no baseline row is not compared (nothing recorded yet to
-/// disprove).
+/// disprove). Each baseline row's `check_fingerprint` gates whether that
+/// partition's fingerprint leg participates this run — the count leg is
+/// never gated (`AppendOnlyBaselinePartition::check_fingerprint`'s doc
+/// comment).
 ///
 /// # Panics
 /// Panics if `digest_columns` or `baseline` is empty — nothing to
@@ -1467,6 +1479,64 @@ pub fn emit_append_only_posture_probe(
         "emit_append_only_posture_probe requires a non-empty recorded baseline for {source_table}"
     );
     let cast_type = probe_dialect_string_type(dialect);
+    let snapshot =
+        emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
+    let baseline_values = baseline
+        .iter()
+        .map(|b| {
+            let value = b.partition_value.replace('\'', "''");
+            let fingerprint = b.recorded_fingerprint.replace('\'', "''");
+            let check_fingerprint = if b.check_fingerprint { "TRUE" } else { "FALSE" };
+            format!(
+                "('{value}', {}, '{fingerprint}', {check_fingerprint})",
+                b.recorded_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let violations_select = format!(
+        "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
+         FROM ({}) AS __current \
+         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, \
+               recorded_fingerprint, check_fingerprint) \
+         ON __current.partition_value = __baseline.partition_value \
+         WHERE __current.current_count < __baseline.recorded_count \
+         OR (__baseline.check_fingerprint AND __current.current_fingerprint IS DISTINCT FROM \
+             __baseline.recorded_fingerprint)",
+        snapshot.sql
+    );
+    let sql = wrap_violation_probe("__append_only_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The per-partition CURRENT-state `SELECT` [`emit_append_only_posture_probe`]
+/// compares its recorded baseline against: `partition_value`,
+/// `current_count`, and `current_fingerprint` for every partition presently
+/// in `source_table`. Extracted as its own emitter so the runtime can
+/// execute it standalone to refresh the recorded baseline after a held
+/// probe (`docs/outcomes/20260809-probe-backed-facts/outcome.md` phase 6) —
+/// the recorded and compared fingerprints are then the literally same SQL
+/// construction, never two independent renderings that could drift.
+///
+/// `source_table` is already fully qualified (`schema.table`). The
+/// fingerprint construction is identical to
+/// [`emit_append_only_posture_probe`]'s own (see that function's doc
+/// comment).
+///
+/// # Panics
+/// Panics if `digest_columns` is empty — nothing to fingerprint is not a
+/// degenerate probe.
+pub fn emit_append_only_baseline_snapshot(
+    source_table: &str,
+    partition_column: &str,
+    digest_columns: &[String],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_append_only_baseline_snapshot requires a non-empty digest column set for {source_table}"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
     let row_hash = row_fingerprint_expr(digest_columns, dialect);
     let agg_fingerprint = match dialect {
         MaintenanceDialect::DuckDb => {
@@ -1476,29 +1546,12 @@ pub fn emit_append_only_posture_probe(
             format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
         }
     };
-    let baseline_values = baseline
-        .iter()
-        .map(|b| {
-            let value = b.partition_value.replace('\'', "''");
-            let fingerprint = b.recorded_fingerprint.replace('\'', "''");
-            format!("('{value}', {}, '{fingerprint}')", b.recorded_count)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    let violations_select = format!(
-        "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
-         FROM (\
-            SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
-                   COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
-            FROM {source_table} \
-            GROUP BY {partition_column}\
-         ) AS __current \
-         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, recorded_fingerprint) \
-         ON __current.partition_value = __baseline.partition_value \
-         WHERE __current.current_count < __baseline.recorded_count \
-         OR __current.current_fingerprint IS DISTINCT FROM __baseline.recorded_fingerprint"
+    let sql = format!(
+        "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
+         COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
+         FROM {source_table} \
+         GROUP BY {partition_column}"
     );
-    let sql = wrap_violation_probe("__append_only_violations", &violations_select, dialect);
     MaintenanceStatement::new(sql)
 }
 

@@ -44,10 +44,10 @@ use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_diff_patch,
-    emit_keyed_fold, emit_keyed_fold_suppressed, emit_per_group_recompute,
-    emit_recurrence_bound_probe, emit_staged_candidate_conditional_recompute, MaintenanceDialect,
-    Region, TargetSlicePredicate,
+    emit_append_only_posture_probe, emit_column_scoped_merge, emit_create_table_as,
+    emit_delete_insert, emit_diff_patch, emit_keyed_fold, emit_keyed_fold_suppressed,
+    emit_per_group_recompute, emit_recurrence_bound_probe,
+    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
@@ -3877,5 +3877,180 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
             .map(|h| format!("  {}:{}: {}", h.file.display(), h.line_no, h.text))
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// The append-only posture probe's dispatch site
+/// (`smelt_runtime::source_probes::dispatch_and_record_append_only_postures`)
+/// must execute SQL byte-identical to a direct
+/// `emit_append_only_posture_probe`/`emit_append_only_baseline_snapshot`
+/// call over the same inputs (`docs/outcomes/20260809-probe-backed-facts/
+/// outcome.md` phase 6). This drives `dispatch_and_record_append_only_
+/// postures` directly against a [`RecordingBackend`] rather than the full
+/// `execute_project` pipeline — the same rationale
+/// `recurrence_bound_probe_and_checked_merge_come_from_the_emitters` gives:
+/// this driver is the single point every append-only posture probe and
+/// baseline-refresh statement flows through, so calling it directly still
+/// proves *executed* SQL matches the emitter's output, without needing a
+/// full staged workspace to reach this one call site twice (once via a
+/// full-refresh model, once via an incremental batch).
+#[tokio::test]
+async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS raw;\n\
+             CREATE TABLE raw.events (event_date DATE, payload TEXT);\n\
+             INSERT INTO raw.events VALUES (DATE '2026-01-01', 'a'), (DATE '2026-01-02', 'b');",
+        )
+        .expect("stage raw.events");
+    }
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open backend");
+    let backend = RecordingBackend::new(inner);
+
+    let parse = smelt_parser::parse("SELECT * FROM smelt.sources.raw.events");
+    let refs = smelt_parser::ast::File::cast(parse.syntax())
+        .map(|f| smelt_core::extract_refs(&f))
+        .unwrap_or_default();
+    let model_path = std::path::PathBuf::from("models/m.sql");
+    let model = smelt_core::ModelFile {
+        name: "m".to_string(),
+        path: model_path.clone(),
+        content: "SELECT * FROM smelt.sources.raw.events".to_string(),
+        refs,
+        parse_errors: Vec::new(),
+        metadata: None,
+        kind: smelt_core::ModelKind::Sql,
+        model_id: smelt_core::ModelId::from_path(model_path),
+        address_segments: vec!["m".to_string()],
+    };
+    let source = smelt_core::sources::SourceInfo {
+        path: std::path::PathBuf::from("/tmp/fake.yml"),
+        address_segments: vec![
+            "sources".to_string(),
+            "raw".to_string(),
+            "events".to_string(),
+        ],
+        columns: vec![smelt_core::sources::SourceColumn {
+            name: "payload".to_string(),
+            data_type: smelt_types::DataType::Text,
+            nullable: true,
+            description: None,
+        }],
+        description: None,
+        name_override: Some(smelt_core::sources::SourceNameOverride::Literal(
+            "raw.events".to_string(),
+        )),
+        tags: vec![],
+        timeseries: Some(smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_date_ts".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        }),
+        mutation_profile: Some(smelt_core::sources::SourceMutationProfile::from_kind(
+            smelt_core::sources::MutationProfile::AppendOnly,
+        )),
+        source_lateness: None,
+        watermark: None,
+        unique_key: None,
+        retention: None,
+        referential_integrity: None,
+    };
+
+    let mut baselines = smelt_state::source_postures::SourcePostureStore::default();
+    baselines.record(
+        "raw.events",
+        vec![
+            smelt_state::source_postures::SourcePosturePartition {
+                partition_value: "2026-01-01".to_string(),
+                recorded_count: 1,
+                recorded_fingerprint: "not-the-real-fingerprint".to_string(),
+            },
+            smelt_state::source_postures::SourcePosturePartition {
+                partition_value: "2026-01-02".to_string(),
+                recorded_count: 1,
+                recorded_fingerprint: "irrelevant-for-the-open-partition".to_string(),
+            },
+        ],
+    );
+
+    let probes = smelt_runtime::source_probes::append_only_posture_probes(
+        "m",
+        "m creation",
+        &model,
+        &[source],
+        &baselines,
+        "dev",
+        "raw",
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(probes.len(), 1);
+
+    // Direct emitter calls over the exact same inputs the probe builder used.
+    let expected_probe_sql = emit_append_only_posture_probe(
+        "raw.events",
+        "event_date",
+        &["payload".to_string()],
+        &[
+            smelt_logical::maintenance::emit::AppendOnlyBaselinePartition {
+                partition_value: "2026-01-01".to_string(),
+                recorded_count: 1,
+                recorded_fingerprint: "not-the-real-fingerprint".to_string(),
+                check_fingerprint: true,
+            },
+            smelt_logical::maintenance::emit::AppendOnlyBaselinePartition {
+                partition_value: "2026-01-02".to_string(),
+                recorded_count: 1,
+                recorded_fingerprint: "irrelevant-for-the-open-partition".to_string(),
+                check_fingerprint: false,
+            },
+        ],
+        MaintenanceDialect::DuckDb,
+    )
+    .sql;
+    let (probe_sql, snapshot_sql) = match &probes[0].action {
+        smelt_runtime::source_probes::SourcePostureAction::Verify { sql, snapshot_sql } => {
+            (sql.clone(), snapshot_sql.clone())
+        }
+        smelt_runtime::source_probes::SourcePostureAction::Establish { .. } => {
+            panic!("a recorded baseline must build a Verify action, not Establish")
+        }
+    };
+    assert_eq!(probe_sql, expected_probe_sql);
+
+    let expected_snapshot_sql =
+        smelt_logical::maintenance::emit::emit_append_only_baseline_snapshot(
+            "raw.events",
+            "event_date",
+            &["payload".to_string()],
+            MaintenanceDialect::DuckDb,
+        )
+        .sql;
+    assert_eq!(snapshot_sql, expected_snapshot_sql);
+
+    // The probe fires (the recorded fingerprint for the closed partition
+    // is deliberately wrong) — dispatch fails loud before any snapshot
+    // executes, and the ONLY SQL actually run is the probe statement,
+    // byte-identical to the direct emitter call.
+    let err = smelt_runtime::source_probes::dispatch_and_record_append_only_postures(
+        &backend,
+        &smelt_runtime::probes::ProbePolicy::per_run(),
+        &probes,
+    )
+    .await
+    .expect_err("the mismatched closed-partition fingerprint must fail loud");
+    assert!(err.to_string().contains("SourceMutationProfileViolated"));
+
+    let executed = backend.recorded_sql();
+    assert_eq!(
+        executed,
+        vec![expected_probe_sql.clone()],
+        "the dispatch site must execute exactly the emitted probe SQL, nothing more"
     );
 }

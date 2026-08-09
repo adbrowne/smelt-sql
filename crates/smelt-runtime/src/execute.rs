@@ -2759,6 +2759,55 @@ pub async fn execute_project(
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+                    // Live dispatch of the source append-only posture probe
+                    // (`docs/specs/model_properties.md` §"Probe obligation",
+                    // row `mutation_profile.kind: append_only`) before this
+                    // batch's write — same pre-write obligation as the
+                    // model-scoped probes above, but scoped to the model's
+                    // consumed sources' recorded per-partition baselines
+                    // rather than this run's own compiled SQL. A held probe
+                    // refreshes the recorded baseline; a violation fails the
+                    // run before the write.
+                    {
+                        let _io_guard = state_io_lock.lock().await;
+                        let source_postures = file_store
+                            .load_source_postures()
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let source_probes = crate::source_probes::append_only_posture_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            &plan.model_file,
+                            source_infos,
+                            &source_postures,
+                            model_target,
+                            schema,
+                            smelt_backend::maintenance_dialect(backend.dialect()),
+                        );
+                        if !source_probes.is_empty() {
+                            let (refreshed, _records) =
+                                crate::source_probes::dispatch_and_record_append_only_postures(
+                                    backend,
+                                    &probe_policy_for_model(config, prior_runs, &plan.name),
+                                    &source_probes,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            if !refreshed.is_empty() {
+                                let mut source_postures = source_postures;
+                                for r in refreshed {
+                                    source_postures.record(&r.source_address, r.partitions);
+                                }
+                                let _ = file_store.save_source_postures(&source_postures);
+                            }
+                        }
+                    }
+
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
                     // (`docs/specs/model_transforms.md` §Constraints — "Write window
@@ -3206,6 +3255,45 @@ pub async fn execute_project(
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                // Live dispatch of the source append-only posture probe
+                // (`docs/specs/model_properties.md` §"Probe obligation", row
+                // `mutation_profile.kind: append_only`) before the
+                // full-refresh write — same pre-write obligation as the
+                // incremental-batch site above.
+                {
+                    let _io_guard = state_io_lock.lock().await;
+                    let source_postures = file_store
+                        .load_source_postures()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let source_probes = crate::source_probes::append_only_posture_probes(
+                        &plan.name,
+                        &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                        &plan.model_file,
+                        source_infos,
+                        &source_postures,
+                        model_target,
+                        schema,
+                        smelt_backend::maintenance_dialect(backend.dialect()),
+                    );
+                    if !source_probes.is_empty() {
+                        let (refreshed, _records) =
+                            crate::source_probes::dispatch_and_record_append_only_postures(
+                                backend,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &source_probes,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        if !refreshed.is_empty() {
+                            let mut source_postures = source_postures;
+                            for r in refreshed {
+                                source_postures.record(&r.source_address, r.partitions);
+                            }
+                            let _ = file_store.save_source_postures(&source_postures);
+                        }
+                    }
+                }
 
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,

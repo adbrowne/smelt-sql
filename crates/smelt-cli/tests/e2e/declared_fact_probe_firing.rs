@@ -308,3 +308,178 @@ fn probes_off_lets_the_violating_run_write() {
         "the violating batch's 4 distinct-country rows must have been written"
     );
 }
+
+// ── Tests 12/13: full-refresh model, source append-only posture probe ──
+
+fn stage_append_only_workspace(tmp: &TempDir, name: &str, probes_off: bool) -> PathBuf {
+    let root = tmp.path().join(name);
+    let probes_block = if probes_off {
+        "probes:\n  cadence: off\n"
+    } else {
+        ""
+    };
+    write_file(
+        &root.join("smelt.yml"),
+        &format!(
+            r#"name: {name}
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+default_materialization: table
+{probes_block}"#
+        ),
+    );
+    write_file(
+        &root.join("models/sources/raw/clicks.yml"),
+        r#"description: Raw append-only clickstream rows; pre-loaded by the integration test
+name: raw.clicks
+mutation_profile:
+  kind: append_only
+timeseries:
+  event_time_column: click_ts
+  partition_column: click_date
+  granularity: day
+columns:
+  - name: click_ts
+    type: TIMESTAMP
+  - name: click_date
+    type: DATE
+  - name: payload
+    type: VARCHAR
+"#,
+    );
+    write_file(
+        &root.join("models/clicks_summary.sql"),
+        r#"---
+materialization: table
+---
+SELECT click_date, payload FROM smelt.sources.raw.clicks
+"#,
+    );
+    root
+}
+
+/// Two partitions so one (`2026-01-01`) is closed by the time
+/// `2026-01-02` is the recorded maximum — the frontier gate
+/// (`docs/specs/model_properties.md` §"Probe obligation") only
+/// fingerprint-checks the closed one.
+fn seed_clicks(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch("CREATE SCHEMA IF NOT EXISTS raw;")
+        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE raw.clicks (click_ts TIMESTAMP, click_date DATE, payload VARCHAR); \
+         INSERT INTO raw.clicks VALUES \
+           (TIMESTAMP '2026-01-01 00:00:00', DATE '2026-01-01', 'a'), \
+           (TIMESTAMP '2026-01-02 00:00:00', DATE '2026-01-02', 'b');",
+    )
+    .unwrap();
+}
+
+/// Mutates the CLOSED partition's content in place — same row count, changed
+/// payload — the exact posture violation the append-only probe exists to
+/// catch.
+fn mutate_closed_partition(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "UPDATE raw.clicks SET payload = 'mutated' WHERE click_date = DATE '2026-01-01';",
+    )
+    .unwrap();
+}
+
+fn read_clicks_summary(db_path: &Path) -> Vec<(String, String)> {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    let mut stmt = conn
+        .prepare(
+            "SELECT CAST(click_date AS VARCHAR), payload FROM main.clicks_summary \
+             ORDER BY click_date, payload",
+        )
+        .unwrap();
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}
+
+#[test]
+fn append_only_source_mutated_between_runs_fails_the_second_run() {
+    let tmp = TempDir::new().unwrap();
+    let ws = stage_append_only_workspace(&tmp, "append_only_probe", false);
+    let db_path = ws.join("target/dev.duckdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    seed_clicks(&db_path);
+
+    // First run: no recorded baseline yet, so no probe fires — the run
+    // succeeds and records the baseline for next time.
+    let first = run_build(&ws, &db_path);
+    assert!(
+        first.status.success(),
+        "the first run must succeed and record the baseline; got:\n{}",
+        combined_output(&first)
+    );
+    let after_first = read_clicks_summary(&db_path);
+    assert_eq!(after_first.len(), 2, "the first run must write both rows");
+
+    // Mutate the closed partition's content in place between runs.
+    mutate_closed_partition(&db_path);
+
+    // Second run: the recorded baseline's fingerprint for the closed
+    // partition no longer matches — the probe must fire before any write.
+    let second = run_build(&ws, &db_path);
+    let combined = combined_output(&second);
+    assert!(
+        !second.status.success(),
+        "a mutated closed partition must fail the second run; got:\n{combined}"
+    );
+    assert!(
+        combined.contains("SourceMutationProfileViolated"),
+        "expected the named diagnostic; got:\n{combined}"
+    );
+
+    // The model table's own content is unchanged from the first run's
+    // write — the probe fired before the second run's write reached it.
+    // (The source table itself was mutated directly by the test, so
+    // re-reading it would show the mutation; what must NOT have changed is
+    // the model's own materialized output.)
+    let after_second = read_clicks_summary(&db_path);
+    assert_eq!(
+        after_first, after_second,
+        "the model table must be unchanged after a refused second run"
+    );
+}
+
+#[test]
+fn probes_cadence_off_lets_the_mutating_run_write() {
+    let tmp = TempDir::new().unwrap();
+    let ws = stage_append_only_workspace(&tmp, "append_only_probe_off", true);
+    let db_path = ws.join("target/dev.duckdb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    seed_clicks(&db_path);
+
+    let first = run_build(&ws, &db_path);
+    assert!(
+        first.status.success(),
+        "the first run must succeed; got:\n{}",
+        combined_output(&first)
+    );
+
+    mutate_closed_partition(&db_path);
+
+    let second = run_build(&ws, &db_path);
+    assert!(
+        second.status.success(),
+        "probes: {{cadence: off}} must let the mutating run write; got:\n{}",
+        combined_output(&second)
+    );
+
+    let rows = read_clicks_summary(&db_path);
+    assert!(
+        rows.iter().any(|(_, payload)| payload == "mutated"),
+        "the mutated payload must have been written through: {rows:?}"
+    );
+}

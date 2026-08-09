@@ -1132,6 +1132,7 @@ fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
         partition_value: "2026-01-01".to_string(),
         recorded_count: 100,
         recorded_fingerprint: "abc123".to_string(),
+        check_fingerprint: true,
     }];
     let stmt = emit_append_only_posture_probe(
         "main.raw_events",
@@ -1141,14 +1142,17 @@ fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
         MaintenanceDialect::DuckDb,
     );
     assert!(
-        stmt.sql.contains("VALUES ('2026-01-01', 100, 'abc123')"),
+        stmt.sql
+            .contains("VALUES ('2026-01-01', 100, 'abc123', TRUE)"),
         "expected the baseline VALUES list in: {}",
         stmt.sql
     );
     assert!(
-        stmt.sql
-            .contains("WHERE __current.current_count < __baseline.recorded_count OR \
-                        __current.current_fingerprint IS DISTINCT FROM __baseline.recorded_fingerprint"),
+        stmt.sql.contains(
+            "WHERE __current.current_count < __baseline.recorded_count OR \
+                        (__baseline.check_fingerprint AND __current.current_fingerprint IS \
+                        DISTINCT FROM __baseline.recorded_fingerprint)"
+        ),
         "expected the shrunk-or-changed predicate in: {}",
         stmt.sql
     );
@@ -1170,6 +1174,7 @@ fn every_probe_emitter_returns_violation_count_and_sample_keys() {
         partition_value: "p1".to_string(),
         recorded_count: 1,
         recorded_fingerprint: "fp".to_string(),
+        check_fingerprint: true,
     }];
     for dialect in [MaintenanceDialect::DuckDb, MaintenanceDialect::Spark] {
         let statements = [
@@ -1264,6 +1269,7 @@ fn append_only_posture_probe_panics_on_empty_digest_columns() {
         partition_value: "p1".to_string(),
         recorded_count: 1,
         recorded_fingerprint: "fp".to_string(),
+        check_fingerprint: true,
     }];
     emit_append_only_posture_probe("main.t", "d", &[], &baseline, MaintenanceDialect::DuckDb);
 }

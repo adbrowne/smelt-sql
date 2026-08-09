@@ -176,6 +176,12 @@ fn monotonicity_probe_returns_nonzero_with_samples_on_violating_data() {
 /// `STRING_AGG`-of-sorted-row-hashes aggregate) — the test's own baseline
 /// setup, deliberately independent of the emitter's private helpers, so the
 /// oracle doesn't just compare the emitter against itself.
+///
+/// `check_fingerprint` is applied with the same frontier gate the
+/// production `SourcePostureStore::closed_baseline` applies (`docs/
+/// outcomes/20260809-probe-backed-facts/outcome.md` phase 6): every
+/// partition but the recorded maximum `partition_value` (string
+/// comparison) is fingerprint-checked.
 fn current_partition_state(
     conn: &Connection,
     table: &str,
@@ -198,16 +204,27 @@ fn current_partition_state(
          GROUP BY {partition_column}"
     );
     let mut stmt = conn.prepare(&sql).expect("prepare baseline query");
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(AppendOnlyBaselinePartition {
-                partition_value: row.get(0)?,
-                recorded_count: row.get(1)?,
-                recorded_fingerprint: row.get(2)?,
-            })
+    let rows: Vec<(String, i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .expect("query baseline rows")
+        .map(|r| r.expect("baseline row"))
+        .collect();
+    let max_partition_value = rows
+        .iter()
+        .map(|(v, _, _)| v.clone())
+        .max()
+        .unwrap_or_default();
+    rows.into_iter()
+        .map(|(partition_value, recorded_count, recorded_fingerprint)| {
+            let check_fingerprint = partition_value != max_partition_value;
+            AppendOnlyBaselinePartition {
+                partition_value,
+                recorded_count,
+                recorded_fingerprint,
+                check_fingerprint,
+            }
         })
-        .expect("query baseline rows");
-    rows.map(|r| r.expect("baseline row")).collect()
+        .collect()
 }
 
 #[test]
@@ -266,6 +283,142 @@ fn append_only_posture_probe_returns_nonzero_with_samples_on_violating_data() {
     assert!(
         sample.contains("2026-01-01"),
         "expected offending partition `2026-01-01` in: {sample}"
+    );
+}
+
+/// The frontier gate (`AppendOnlyBaselinePartition::check_fingerprint`): a
+/// legitimate append into the still-open (max) partition changes that
+/// partition's whole-partition fingerprint, but must not fire — only its
+/// count leg is checked, and the count only grew.
+#[test]
+fn append_into_open_partition_does_not_violate() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE raw_events (event_date DATE, payload TEXT);
+         INSERT INTO raw_events VALUES
+           (DATE '2026-01-01', 'a'), (DATE '2026-01-02', 'b');",
+    )
+    .expect("stage");
+
+    let baseline = current_partition_state(&conn, "raw_events", "event_date", "payload");
+    let max_row = baseline
+        .iter()
+        .find(|b| b.partition_value == "2026-01-02")
+        .expect("2026-01-02 is the max partition");
+    assert!(
+        !max_row.check_fingerprint,
+        "the max partition must not be fingerprint-checked"
+    );
+
+    // A legitimate append into the still-open max partition.
+    conn.execute_batch("INSERT INTO raw_events VALUES (DATE '2026-01-02', 'c');")
+        .expect("append");
+
+    let stmt = emit_append_only_posture_probe(
+        "raw_events",
+        "event_date",
+        &["payload".to_string()],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
+    let (violation_count, sample_keys) = probe_result(&conn, &stmt.sql);
+    assert_eq!(
+        violation_count, 0,
+        "an append into the open partition must hold"
+    );
+    assert_eq!(sample_keys, None);
+}
+
+/// An in-place update of a CLOSED partition (not the recorded maximum)
+/// leaves the row count unchanged but changes the fingerprint — the
+/// frontier gate admits this partition's fingerprint leg, so it must fire.
+#[test]
+fn in_place_update_of_closed_partition_violates() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE raw_events (event_date DATE, payload TEXT);
+         INSERT INTO raw_events VALUES
+           (DATE '2026-01-01', 'a'), (DATE '2026-01-02', 'b');",
+    )
+    .expect("stage");
+
+    let baseline = current_partition_state(&conn, "raw_events", "event_date", "payload");
+    let closed_row = baseline
+        .iter()
+        .find(|b| b.partition_value == "2026-01-01")
+        .expect("2026-01-01 is a closed partition");
+    assert!(
+        closed_row.check_fingerprint,
+        "a closed partition must be fingerprint-checked"
+    );
+
+    // Mutate the closed partition's content in place — same row count.
+    conn.execute_batch(
+        "UPDATE raw_events SET payload = 'mutated' WHERE event_date = DATE '2026-01-01';",
+    )
+    .expect("mutate closed partition");
+
+    let stmt = emit_append_only_posture_probe(
+        "raw_events",
+        "event_date",
+        &["payload".to_string()],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
+    let (violation_count, sample_keys) = probe_result(&conn, &stmt.sql);
+    assert_eq!(violation_count, 1);
+    let sample = sample_keys.expect("expected sample keys for a violation");
+    assert!(
+        sample.contains("2026-01-01"),
+        "expected offending partition `2026-01-01` in: {sample}"
+    );
+}
+
+/// The count leg is never gated by `check_fingerprint`: a row deleted from
+/// the open (max, fingerprint-unchecked) partition still violates via the
+/// count leg.
+#[test]
+fn count_decrease_violates_even_when_fingerprint_unchecked() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE raw_events (event_date DATE, payload TEXT);
+         INSERT INTO raw_events VALUES
+           (DATE '2026-01-01', 'a'), (DATE '2026-01-02', 'b'), (DATE '2026-01-02', 'c');",
+    )
+    .expect("stage");
+
+    let baseline = current_partition_state(&conn, "raw_events", "event_date", "payload");
+    let max_row = baseline
+        .iter()
+        .find(|b| b.partition_value == "2026-01-02")
+        .expect("2026-01-02 is the max partition");
+    assert!(
+        !max_row.check_fingerprint,
+        "the max partition must not be fingerprint-checked"
+    );
+
+    // Delete a row from the open, fingerprint-unchecked partition.
+    conn.execute_batch(
+        "DELETE FROM raw_events WHERE event_date = DATE '2026-01-02' AND payload = 'c';",
+    )
+    .expect("delete from open partition");
+
+    let stmt = emit_append_only_posture_probe(
+        "raw_events",
+        "event_date",
+        &["payload".to_string()],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
+    let (violation_count, sample_keys) = probe_result(&conn, &stmt.sql);
+    assert_eq!(
+        violation_count, 1,
+        "a count decrease must violate even though the fingerprint leg is unchecked"
+    );
+    let sample = sample_keys.expect("expected sample keys for a violation");
+    assert!(
+        sample.contains("2026-01-02"),
+        "expected offending partition `2026-01-02` in: {sample}"
     );
 }
 

@@ -36,6 +36,7 @@ pub mod reporter;
 pub mod safety;
 pub mod schema_evolution;
 pub mod select;
+pub mod source_probes;
 pub mod transformer;
 pub mod types;
 pub mod windowing;

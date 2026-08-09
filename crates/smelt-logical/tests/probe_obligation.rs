@@ -185,11 +185,11 @@ fn probe_registry_built_rows_name_a_real_emitter() {
 /// probes phase 2 added emitters for
 /// (`docs/outcomes/20260809-probe-backed-facts/phases/02-plan.md` test 10):
 /// each must name its exact expected emitter, not merely some `emit_*`
-/// symbol. Phase 5 wired the three model-scoped probes into live dispatch
-/// (`built`); the source append-only posture probe still has no live
-/// dispatch site (`built (unwired)`, phase 6).
+/// symbol. All four are now dispatched live (`built`) — the source
+/// append-only posture probe's dispatch site was the last one wired; no
+/// `built (unwired)` registry row remains.
 #[test]
-fn built_and_unwired_rows_name_a_real_emitter() {
+fn all_four_declared_fact_probe_rows_are_built() {
     let model_properties = read("docs/specs/model_properties.md");
     let section = probe_obligation_section(&model_properties);
     let rows = registry_rows(section);
@@ -207,11 +207,7 @@ fn built_and_unwired_rows_name_a_real_emitter() {
             "built",
         ),
         ("bounded_domain:", "emit_bounded_domain_probe", "built"),
-        (
-            "append_only",
-            "emit_append_only_posture_probe",
-            "built (unwired)",
-        ),
+        ("append_only", "emit_append_only_posture_probe", "built"),
     ];
 
     for (decl, emitter, expected_status) in expected {
@@ -236,6 +232,13 @@ fn built_and_unwired_rows_name_a_real_emitter() {
              declaration `{decl}`"
         );
     }
+
+    assert!(
+        rows.iter()
+            .all(|row| row.last().map(String::as_str) != Some("built (unwired)")),
+        "no `built (unwired)` registry row should remain now that the append-only posture \
+         probe has a live dispatch site"
+    );
 }
 
 /// Pins the `referential_integrity` row's Status transition `built

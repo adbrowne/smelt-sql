@@ -3,6 +3,7 @@ use crate::landed_deltas::LandedDeltaStore;
 use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
+use crate::source_postures::SourcePostureStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -156,6 +157,10 @@ impl FileStore {
 
     fn landed_deltas_path(&self) -> PathBuf {
         self.target_dir.join("landed_deltas.json")
+    }
+
+    fn source_postures_path(&self) -> PathBuf {
+        self.target_dir.join("source_postures.json")
     }
 
     fn snapshots_path(&self) -> PathBuf {
@@ -495,6 +500,34 @@ impl FileStore {
         let path = self.landed_deltas_path();
         write_json_atomic(&path, store)
             .with_context(|| format!("Failed to write landed-delta store: {:?}", path))
+    }
+
+    // --- Source posture store ---
+
+    /// Load the per-source append-only posture baseline store from disk
+    /// (`docs/specs/model_properties.md` §"Probe obligation", row
+    /// `mutation_profile.kind: append_only`). Returns default if the file
+    /// doesn't exist — a source with no entry has never had its posture
+    /// verified, so builds no probe.
+    pub fn load_source_postures(&self) -> Result<SourcePostureStore> {
+        self.check_version()?;
+        let path = self.source_postures_path();
+        if !path.exists() {
+            return Ok(SourcePostureStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read source-posture store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse source-posture store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-source append-only posture baseline store to disk.
+    pub fn save_source_postures(&self, store: &SourcePostureStore) -> Result<()> {
+        self.init()?;
+        let path = self.source_postures_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write source-posture store: {:?}", path))
     }
 
     // --- Snapshot / Environment Store ---

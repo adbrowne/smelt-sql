@@ -275,8 +275,22 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
 /// `ConformanceTarget`-parametrized `render_smelt_yml`).
 pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String {
     let (name, block) = render_target_block(target, db_path);
+    // `probes: {cadence: off}` — this harness exists to prove maintenance-
+    // technique equivalence (`docs/specs/incremental_models.md` §"The
+    // equivalence invariant"), a property checked independently by the
+    // S-restricted oracle after every run step; it is not exercising
+    // declared-fact probe firing, which has its own dedicated coverage
+    // (`crates/smelt-runtime/tests/{model_probes,source_probes}.rs`,
+    // `crates/smelt-cli/tests/e2e/declared_fact_probe_firing.rs`). Left on,
+    // the source append-only posture probe
+    // (`docs/specs/model_properties.md` §"Probe obligation") spuriously
+    // fires on this pool's generated `AppendLateRow` schedules — a
+    // legitimate late append into an already-closed partition, which the
+    // probe cannot yet distinguish from an in-place mutation (the declared
+    // `mutation_profile.lateness` limitation recorded in that section's
+    // §Known Divergences).
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\n",
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nprobes:\n  cadence: off\n",
     )
 }
 

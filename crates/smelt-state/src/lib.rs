@@ -7,6 +7,7 @@ pub mod landed_deltas;
 pub mod reconciliation;
 pub mod schema_tracking;
 pub mod snapshot_store;
+pub mod source_postures;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

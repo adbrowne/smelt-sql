@@ -52,7 +52,7 @@ safe to grow (the contract lattice will grow it).
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
-| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | planned |
+| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
 | 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
 
@@ -170,6 +170,29 @@ safe to grow (the contract lattice will grow it).
   construction; (c) a cadence-skipped run does NOT refresh the baseline, so the next dispatched
   run still compares against the last verified point. Declared `mutation_profile.lateness` is not
   consulted (outcome §Out of scope) — recorded as a known divergence rather than absorbed.
+
+- 2026-08-10: Phase 6 done. `source_postures.json` (`smelt-state::source_postures`) records a
+  per-source, per-partition baseline; `SourcePostureStore::closed_baseline` applies the frontier
+  gate (string-max partition value). `emit_append_only_posture_probe` gained
+  `AppendOnlyBaselinePartition.check_fingerprint` (a 4th `VALUES` column, `OR (check_fingerprint
+  AND …)` predicate); `emit_append_only_baseline_snapshot` is the extracted shared per-partition
+  current-state `SELECT`, reused by both the probe and the runtime's baseline refresh so recorded
+  and compared fingerprints are the same construction by definition. `smelt-runtime::source_probes`
+  (`append_only_posture_probes` + `dispatch_and_record_append_only_postures`) wires both the
+  full-refresh and incremental-batch pre-write sites in `execute.rs`, mirroring
+  `smelt-runtime::model_probes`'s shape. One design point the plan left open: an eligible source
+  with **no** recorded baseline yet builds a `SourcePostureAction::Establish` (not a `Verify`) —
+  nothing to compare against, so its first observation is unconditionally recorded as the baseline
+  under the same cadence gate a verification would use, rather than silently never establishing one.
+  This surfaced only once real DuckDB coverage existed and drove a mid-implementation redesign
+  (`DeclaredSourceProbe.action: SourcePostureAction` replacing a flat probe-SQL field). The
+  standing `maintenance_conformance` generative gate's `AppendLateRow` schedules legitimately
+  append into an already-closed partition — exactly the undispatched `mutation_profile.lateness`
+  gap this phase's spec edit documents — so `smelt-maintenance-testkit::render::render_smelt_yml`
+  now declares `probes: {cadence: off}`: that harness proves maintenance-technique equivalence,
+  a property already checked independently by its S-restricted oracle, not probe-firing behaviour
+  (which has its own dedicated coverage in `smelt-runtime`/`smelt-cli` tests). See
+  `phases/06-summary.md`.
 
 ## Blocked
 
