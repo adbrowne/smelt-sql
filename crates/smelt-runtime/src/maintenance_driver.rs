@@ -236,6 +236,7 @@ pub async fn run_windowed_keyed_maintenance(
     suppression: &WriteSuppression,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
         bail!(
@@ -352,54 +353,36 @@ pub async fn run_windowed_keyed_maintenance(
                     smelt_backend::maintenance_dialect(backend.dialect()),
                 ) {
                     Some(probe_sql) => {
-                        let batches = backend.execute_sql(&probe_sql).await.map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to execute recurrence-bound probe for model '{}':\n  \
-                                 SQL: {}\n  Error: {}",
-                                model_name,
-                                probe_sql,
-                                e
-                            )
-                        })?;
-                        let rows = crate::check_runner::batches_to_rows(&batches);
-                        let violation_count: u64 = rows
-                            .first()
-                            .and_then(|r| r.get("violation_count"))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "recurrence-bound probe for model '{}' returned no \
-                                     `violation_count` row — refusing to trust an unchecked \
-                                     result for a declared key-recurrence bound",
-                                    model_name
-                                )
-                            })?
-                            .parse::<u64>()
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "recurrence-bound probe for model '{}' returned an \
-                                     unparseable `violation_count`: {}",
+                        let ctx = crate::probes::ProbeContext {
+                            probe_code: "KeyedRecurrenceBoundViolated".to_string(),
+                            fact: "key_recurrence".to_string(),
+                            model: model_name.to_string(),
+                            cell: format!("{schema}.{table} keyed merge"),
+                            remedy: "correct or widen the declared key-recurrence bound `r`, or \
+                                     backfill the affected key"
+                                .to_string(),
+                        };
+                        match crate::probes::dispatch_probe(backend, probe_policy, &ctx, &probe_sql)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?
+                        {
+                            crate::probes::ProbeVerdict::Skipped(_)
+                            | crate::probes::ProbeVerdict::Held => {}
+                            crate::probes::ProbeVerdict::Violated { count, sample_keys } => {
+                                bail!(
+                                    "KeyedRecurrenceBoundViolated: model '{}' declared a \
+                                     key-recurrence bound that {} delta row(s) violate at \
+                                     partition {} — matched (or would duplicate) a stored key \
+                                     outside the recurrence-bound slice. Sample keys: {}. The run \
+                                     is refused before any write (`docs/specs/\
+                                     incremental_models.md` §\"Key temporal locality\", route 3).{}",
                                     model_name,
-                                    e
-                                )
-                            })?;
-                        if violation_count > 0 {
-                            let sample_keys = rows
-                                .first()
-                                .and_then(|r| r.get("sample_keys"))
-                                .cloned()
-                                .unwrap_or_default();
-                            bail!(
-                                "KeyedRecurrenceBoundViolated: model '{}' declared a \
-                                 key-recurrence bound that {} delta row(s) violate at \
-                                 partition {} — matched (or would duplicate) a stored key \
-                                 outside the recurrence-bound slice. Sample keys: {}. The run \
-                                 is refused before any write (`docs/specs/\
-                                 incremental_models.md` §\"Key temporal locality\", route 3).",
-                                model_name,
-                                violation_count,
-                                step.partition_value,
-                                sample_keys
-                            );
+                                    count,
+                                    step.partition_value,
+                                    sample_keys,
+                                    crate::probes::probe_violation_suffix(&ctx)
+                                );
+                            }
                         }
                     }
                     None => {
@@ -2933,6 +2916,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     window_end: &str,
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
@@ -2957,52 +2941,77 @@ pub async fn execute_delete_insert_with_delta_restriction(
             row_preservation: RowPreservation::DeclaredReferentialIntegrity { source },
         }) = skeleton_source_closure
         {
-            match emit_count_preservation_probe_from_body(body, source) {
-                Some(probe) => {
-                    let batches = backend.execute_sql(&probe.sql).await?;
-                    let rows = crate::check_runner::batches_to_rows(&batches);
-                    let (driving_count, enriched_count) = rows
-                        .first()
-                        .and_then(|r| {
-                            Some((
-                                r.get("driving_count")?.clone(),
-                                r.get("enriched_count")?.clone(),
-                            ))
-                        })
-                        .ok_or_else(|| BackendError::ExecutionFailed {
-                            model: table.to_string(),
-                            message: format!(
-                                "count-preservation probe for declared referential_integrity on \
-                                 '{source}' returned no driving_count/enriched_count row — \
-                                 refusing to trust an unchecked declared-route narrowing"
-                            ),
-                        })?;
-                    let driving_count: i64 = driving_count.parse().unwrap_or(i64::MAX);
-                    let enriched_count: i64 = enriched_count.parse().unwrap_or(-1);
-                    if enriched_count < driving_count {
-                        return Err(BackendError::ExecutionFailed {
-                            model: table.to_string(),
-                            message: format!(
-                                "SourceCountPreservationViolated: '{source}' declares \
-                                 referential_integrity, but the enrichment join over the \
-                                 touched region ({window_start}..{window_end}) returned \
-                                 {enriched_count} row(s) against {driving_count} driving \
-                                 row(s) — some driving row's join key has no match in the \
-                                 dimension; correct or backfill the dimension's missing key, \
-                                 or drop the declaration"
-                            ),
-                        });
+            let ctx = crate::probes::ProbeContext {
+                probe_code: "SourceCountPreservationViolated".to_string(),
+                fact: "referential_integrity".to_string(),
+                model: table.to_string(),
+                cell: format!("{full_table} declared-route delta restriction"),
+                remedy: "correct or backfill the dimension's missing key, or drop the \
+                         declaration"
+                    .to_string(),
+            };
+            // The count-preservation probe's `driving_count`/`enriched_count`
+            // row shape does not match the shared `violation_count`/
+            // `sample_keys` contract `dispatch_probe` parses, so this site
+            // consults `should_dispatch` directly (the same cadence policy,
+            // the same single decision function) rather than reusing
+            // `dispatch_probe`'s generic executor.
+            match smelt_logical::maintenance::should_dispatch(
+                probe_policy.cadence,
+                probe_policy.run_ordinal,
+            ) {
+                smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
+                smelt_logical::maintenance::ProbeDispatch::Dispatch => {
+                    match emit_count_preservation_probe_from_body(body, source) {
+                        Some(probe) => {
+                            let batches = backend.execute_sql(&probe.sql).await?;
+                            let rows = crate::check_runner::batches_to_rows(&batches);
+                            let (driving_count, enriched_count) = rows
+                                .first()
+                                .and_then(|r| {
+                                    Some((
+                                        r.get("driving_count")?.clone(),
+                                        r.get("enriched_count")?.clone(),
+                                    ))
+                                })
+                                .ok_or_else(|| BackendError::ExecutionFailed {
+                                    model: table.to_string(),
+                                    message: format!(
+                                        "count-preservation probe for declared \
+                                         referential_integrity on '{source}' returned no \
+                                         driving_count/enriched_count row — refusing to trust \
+                                         an unchecked declared-route narrowing"
+                                    ),
+                                })?;
+                            let driving_count: i64 = driving_count.parse().unwrap_or(i64::MAX);
+                            let enriched_count: i64 = enriched_count.parse().unwrap_or(-1);
+                            if enriched_count < driving_count {
+                                return Err(BackendError::ExecutionFailed {
+                                    model: table.to_string(),
+                                    message: format!(
+                                        "SourceCountPreservationViolated: '{source}' declares \
+                                         referential_integrity, but the enrichment join over the \
+                                         touched region ({window_start}..{window_end}) returned \
+                                         {enriched_count} row(s) against {driving_count} driving \
+                                         row(s) — some driving row's join key has no match in the \
+                                         dimension; correct or backfill the dimension's missing \
+                                         key, or drop the declaration.{}",
+                                        crate::probes::probe_violation_suffix(&ctx)
+                                    ),
+                                });
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                source = %source,
+                                table = %table,
+                                "declared referential_integrity closure could not build a \
+                                 count-preservation probe from this model's own body — dropping \
+                                 the delta restriction and falling back to the widened scan"
+                            );
+                            delta = None;
+                        }
                     }
-                }
-                None => {
-                    tracing::warn!(
-                        source = %source,
-                        table = %table,
-                        "declared referential_integrity closure could not build a \
-                         count-preservation probe from this model's own body — dropping the \
-                         delta restriction and falling back to the widened scan"
-                    );
-                    delta = None;
                 }
             }
         }
@@ -3637,6 +3646,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await;
         assert!(result.is_err());
@@ -3667,6 +3677,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();
@@ -3714,6 +3725,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();
@@ -3762,6 +3774,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap_err();
@@ -3835,6 +3848,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();

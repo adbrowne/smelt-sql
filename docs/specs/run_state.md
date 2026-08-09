@@ -71,13 +71,16 @@ A run manifest is a JSON document recording what one execution did:
       "outcome": "success",                 // "success" | "failed" | "skipped"
       "definition_hash": "a1b2c3d4",        // hash of the model's compiled definition at run time
       "error": "Conversion Error: ...",     // omitted unless outcome is "failed"
-      "retry_count": 0                      // number of retry attempts made before the final outcome
+      "retry_count": 0,                     // number of retry attempts made before the final outcome
+      "probes": [                           // omitted if empty; absent entirely on older manifests
+        { "fact": "key_recurrence", "probe": "KeyedRecurrenceBoundViolated", "outcome": "dispatched" }
+      ]
     }
   }
 }
 ```
 
-Every model smelt attempted or considered in a run has an entry keyed by `outcome`: `success` (completed without error), `failed` (the model's execution raised an error), or `skipped` (not attempted — upstream failure, selector exclusion, or `--resume` short-circuit). `definition_hash` is recorded for every entry regardless of outcome; it is what `--resume` compares against to decide whether a `success` from a prior run still applies (see "`--resume` semantics" below). `error` carries the failure's display text for every `failed` entry; `retry_count` records how many retry attempts (`docs/specs/architecture.md`, `RunReporter::model_retrying`) were made for that model before its final outcome, `0` if it succeeded or failed on the first attempt.
+Every model smelt attempted or considered in a run has an entry keyed by `outcome`: `success` (completed without error), `failed` (the model's execution raised an error), or `skipped` (not attempted — upstream failure, selector exclusion, or `--resume` short-circuit). `definition_hash` is recorded for every entry regardless of outcome; it is what `--resume` compares against to decide whether a `success` from a prior run still applies (see "`--resume` semantics" below). `error` carries the failure's display text for every `failed` entry; `retry_count` records how many retry attempts (`docs/specs/architecture.md`, `RunReporter::model_retrying`) were made for that model before its final outcome, `0` if it succeeded or failed on the first attempt. `probes` records, per declared-fact probe this model's run consulted, the fact (`model_properties.md` §"Probe obligation" registry key), the probe's named diagnostic code, and whether the project's `probes:` cadence policy (`smelt_yml.md` §"Top-level keys") actually dispatched it (`"dispatched"`) or skipped it this run (`"skipped"` — the declaration was trusted, not verified). Defaulted to empty for manifests written before probe dispatch was wired in.
 
 **Abort semantics: the in-flight wave finishes, every failure is recorded, then the run aborts.** A run executes selected models in topologically-ordered waves (`docs/specs/architecture.md` §"Run Pipeline Parity"); models within one wave may run concurrently. When a model's execution raises an error, smelt does not abort the instant the first error is observed — it lets every model already dispatched in that wave finish, and every one that also errors gets its own `failed` entry with its own `error` text. Only once the wave has fully drained does the run stop dispatching further waves. This means a run where two independent models fail concurrently in the same wave never silently downgrades the second failure to `skipped` — both are `failed`, each with its own recorded error. Every other selected model that never got a manifest entry (a later wave that never started, or a model mid-flight when the abort happened) is recorded `skipped`.
 

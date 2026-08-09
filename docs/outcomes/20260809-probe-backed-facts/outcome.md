@@ -50,7 +50,7 @@ safe to grow (the contract lattice will grow it).
 | 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
-| 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | planned |
+| 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | pending |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | pending |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
@@ -122,6 +122,18 @@ safe to grow (the contract lattice will grow it).
   **probe that cannot be built** stays fail-closed exactly as today — two distinct
   non-dispatch cases that must not be collapsed; (c) `periodic`'s run ordinal comes from the
   model's existing manifest history (`HistoryQuery::for_model`), so no new counter state.
+
+- 2026-08-10: Phase 4 done. `probes:` lands in `Config` (`ProbesConfig`/`ProbeCadence`,
+  fail-loud `periodic` cross-validation); `smelt-logical::maintenance::probe_cadence::
+  should_dispatch` is the pure cadence decision; `smelt-runtime::probes::dispatch_probe` is the
+  shared executor for probes speaking the `violation_count`/`sample_keys` contract. The
+  recurrence-bound probe routes through it directly; the count-preservation probe's
+  `driving_count`/`enriched_count` row shape (locked by `statement_parity`'s golden SQL) doesn't
+  fit the shared contract, so that site consults `should_dispatch` directly and reuses only the
+  shared `probe_violation_suffix` trailer — `dispatch_probe` stays the generic path for probes
+  that do speak the contract (phases 5–6's four). `ModelRunRecord.probes` exists and round-trips
+  legacy manifests but is not yet populated by any dispatch site — recorded as follow-up, not a
+  blocker. See `phases/04-summary.md`.
 
 ## Blocked
 

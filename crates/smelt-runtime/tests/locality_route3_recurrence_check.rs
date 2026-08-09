@@ -197,6 +197,7 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("in-bound redelivery must merge cleanly, not refuse");
@@ -233,6 +234,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -259,6 +261,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect_err("an out-of-bound redelivery must refuse the run");
@@ -438,6 +441,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -461,6 +465,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("a derived slice must merge cleanly");

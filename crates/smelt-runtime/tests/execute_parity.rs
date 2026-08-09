@@ -304,6 +304,7 @@ async fn test_cli_ui_manifest_parity() {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     });
 
     let (db, graph) = build_db_and_graph(project_dir, &config);
@@ -372,6 +373,7 @@ async fn test_cli_ui_manifest_parity() {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     });
     let (db2, graph2) = build_db_and_graph(project_dir, &config2);
 

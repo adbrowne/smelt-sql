@@ -1522,6 +1522,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         },
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -1554,6 +1555,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         },
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("in-bound redelivery must merge cleanly");
@@ -3349,6 +3351,7 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         "2026-07-02",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("delta-restricted recompute must succeed");
@@ -3428,6 +3431,7 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         "2026-07-02",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("unrestricted recompute must succeed");

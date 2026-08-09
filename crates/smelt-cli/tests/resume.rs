@@ -69,6 +69,7 @@ fn make_config(db_path: &Path) -> Arc<Config> {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     })
 }
 
@@ -919,6 +920,7 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
             definition_hash: String::new(),
             error: None,
             retry_count: 0,
+            probes: Vec::new(),
         },
     );
     let constructed = smelt_state::RunManifest {

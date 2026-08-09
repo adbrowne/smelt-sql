@@ -267,6 +267,7 @@ pub async fn execute_cumulative_aggregate(
     source_key_recurrence: &HashMap<String, smelt_core::sources::KeyRecurrence>,
     verbose: bool,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let _ = (target, compiler); // reserved for future per-target compiler dispatch
@@ -482,6 +483,7 @@ pub async fn execute_cumulative_aggregate(
             Ok(compiled.sql)
         },
         retry,
+        probe_policy,
     )
     .await
 }

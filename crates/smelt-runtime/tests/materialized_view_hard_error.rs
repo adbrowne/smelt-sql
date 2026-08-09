@@ -147,6 +147,7 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     });
 
     let (db, graph) = build_db_and_graph(project_dir, &config);

@@ -63,6 +63,34 @@ pub struct ModelRunRecord {
     /// pre-Phase-8 manifests that never recorded retries).
     #[serde(default)]
     pub retry_count: u32,
+    /// Per-declaration probe cadence outcomes for this model's run
+    /// (`docs/specs/run_state.md` §"Run manifest"; `docs/specs/
+    /// model_properties.md` §"Probe cadence"). Defaults to empty for
+    /// manifests written before probe dispatch was wired in.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<ProbeRecord>,
+}
+
+/// One declared-fact probe's cadence outcome on this run
+/// (`docs/specs/run_state.md` §"Run manifest").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProbeRecord {
+    /// The declared fact this probe verifies, e.g. `key_recurrence`.
+    pub fact: String,
+    /// The registry's named diagnostic code, e.g. `KeyedRecurrenceBoundViolated`.
+    pub probe: String,
+    pub outcome: ProbeRecordOutcome,
+}
+
+/// Whether a probe actually ran this run, or was skipped by cadence policy
+/// (`docs/specs/model_properties.md` §"Probe cadence": a policy skip trusts
+/// the declaration and records it unverified, distinct from a probe that
+/// cannot be built, which stays fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeRecordOutcome {
+    Dispatched,
+    Skipped,
 }
 
 fn default_outcome() -> RunOutcomeKind {
@@ -191,4 +219,28 @@ fn rand_suffix() -> u32 {
         .unwrap_or_default()
         .subsec_nanos();
     (nanos ^ std::process::id()) & 0xFFFFFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A manifest written before probe dispatch existed carries no
+    /// `probes` key at all. Reading it must default to an empty list, not
+    /// fail to deserialize (`docs/specs/run_state.md` §"Manifest evolution
+    /// is backward-compatible").
+    #[test]
+    fn probe_records_default_empty_on_legacy_manifest() {
+        let legacy_json = r#"{
+            "strategy": "full_refresh",
+            "row_count": 42,
+            "duration_ms": 100,
+            "outcome": "success",
+            "definition_hash": "abc123",
+            "retry_count": 0
+        }"#;
+        let record: ModelRunRecord =
+            serde_json::from_str(legacy_json).expect("legacy manifest entry must still parse");
+        assert!(record.probes.is_empty());
+    }
 }

@@ -945,6 +945,7 @@ mod tests {
             target: None,
             state: Default::default(),
             maintenance: None,
+            probes: Default::default(),
         }
     }
 

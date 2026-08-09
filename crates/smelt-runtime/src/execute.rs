@@ -1240,6 +1240,12 @@ pub async fn execute_project(
     // model's work.
     let state_io_lock = tokio::sync::Mutex::new(());
 
+    // Prior-run history for this target, loaded once per run and shared by
+    // every model's `ProbePolicy` (`docs/specs/model_properties.md`
+    // §"Probe cadence"): a model's run ordinal — 0 for its first run — is
+    // its prior-run count via `HistoryQuery::for_model`.
+    let prior_runs = file_store.load_runs(None).unwrap_or_default();
+
     // Every non-`Copy` piece of context the per-model execution unit below
     // needs is rebound here as a reference so the `move` closure — called
     // once per model, potentially many times concurrently in flight — can
@@ -1256,6 +1262,7 @@ pub async fn execute_project(
     let selected = &selected;
     let file_store = &file_store;
     let config = &config;
+    let prior_runs = &prior_runs;
     let target_assignments = &target_assignments;
     let backends = &backends;
     let compilers = &compilers;
@@ -1335,6 +1342,7 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1365,6 +1373,7 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1960,6 +1969,7 @@ pub async fn execute_project(
                                 source_key_recurrence,
                                 false,
                                 &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
                             )
                             .await
                         }
@@ -2295,6 +2305,7 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: sink.retry_count(),
+                    probes: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -2884,6 +2895,7 @@ pub async fn execute_project(
                                 &partition.end,
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3022,6 +3034,7 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
+                        probes: Vec::new(),
                     },
                 );
 
@@ -3268,6 +3281,7 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
+                        probes: Vec::new(),
                     },
                 );
 
@@ -3494,6 +3508,7 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -3544,6 +3559,7 @@ pub async fn execute_project(
                     definition_hash,
                     error: Some(error.to_string()),
                     retry_count: 0,
+                    probes: Vec::new(),
                 }
             });
         }
@@ -3562,6 +3578,7 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -4126,6 +4143,20 @@ pub fn derive_batch_filtered_sql(
 /// meaningful partial summary for `--resume`/tooling to read.
 fn write_run_report(file_store: &FileStore, manifest: &RunManifest) -> Result<()> {
     file_store.save_report(&RunReport::from_manifest(manifest))
+}
+
+/// Build a model's `ProbePolicy` from the project's `probes:` cadence and
+/// its prior-run count in `prior_runs` (`docs/specs/model_properties.md`
+/// §"Probe cadence"): the run ordinal is 0 for a model's first run.
+fn probe_policy_for_model(
+    config: &Config,
+    prior_runs: &[RunManifest],
+    model_name: &str,
+) -> crate::probes::ProbePolicy {
+    let run_ordinal = smelt_state::history::HistoryQuery::new(prior_runs)
+        .for_model(model_name)
+        .len() as u64;
+    crate::probes::ProbePolicy::new(config.probes.cadence, run_ordinal)
 }
 
 fn build_outcome(

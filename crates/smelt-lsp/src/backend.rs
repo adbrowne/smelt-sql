@@ -990,6 +990,7 @@ impl Backend {
                     target: None,
                     state: Default::default(),
                     maintenance: None,
+                    probes: Default::default(),
                 });
             build_python_context(&all_files, &config, &project_root)
         };

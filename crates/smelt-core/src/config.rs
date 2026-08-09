@@ -302,6 +302,12 @@ pub struct Config {
     /// See [`ProjectMaintenanceConfig`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<ProjectMaintenanceConfig>,
+    /// Project-wide cadence policy for every declared-fact probe
+    /// (`model_properties.md` §"Probe obligation"). Defaults to `per_run`.
+    /// One policy governs every probe — per-declaration override is open
+    /// (`smelt_yml.md` §Known Divergences).
+    #[serde(default)]
+    pub probes: ProbesConfig,
 }
 
 /// Opt-in state posture for virtual environments (D-47).
@@ -965,6 +971,91 @@ pub struct ProjectMaintenanceConfig {
     pub scan_bounds: Option<ScanBoundsConfig>,
 }
 
+/// `probes:` (`smelt_yml.md` §"Top-level keys") — the project-wide cadence
+/// policy governing every declared-fact probe (`model_properties.md`
+/// §"Probe obligation"). Custom `Deserialize` (rather than a plain derive)
+/// because `periodic` cross-validates against `cadence`: a `periodic`
+/// cadence without a positive `every_n_runs` is a configuration error, not
+/// a silent default (root `CLAUDE.md` §"Fail-loud discipline").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ProbesConfig {
+    pub cadence: ProbeCadence,
+}
+
+impl Default for ProbesConfig {
+    fn default() -> Self {
+        ProbesConfig {
+            cadence: ProbeCadence::PerRun,
+        }
+    }
+}
+
+/// The resolved probe-dispatch cadence
+/// (`smelt-logical::maintenance::probe_cadence::should_dispatch` consumes
+/// this directly).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeCadence {
+    /// Dispatch every `built` probe on every consuming run (the default).
+    PerRun,
+    /// Dispatch once every `every_n_runs` runs (ordinal 0 always dispatches).
+    Periodic { every_n_runs: u32 },
+    /// Never dispatch — every declaration is trusted and recorded
+    /// unverified on the run manifest.
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ProbeCadenceKind {
+    #[default]
+    PerRun,
+    Periodic,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPeriodicProbeConfig {
+    every_n_runs: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProbesConfig {
+    #[serde(default)]
+    cadence: ProbeCadenceKind,
+    #[serde(default)]
+    periodic: Option<RawPeriodicProbeConfig>,
+}
+
+impl<'de> Deserialize<'de> for ProbesConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawProbesConfig::deserialize(deserializer)?;
+        let cadence = match raw.cadence {
+            ProbeCadenceKind::PerRun => ProbeCadence::PerRun,
+            ProbeCadenceKind::Off => ProbeCadence::Off,
+            ProbeCadenceKind::Periodic => {
+                let every_n_runs = raw.periodic.map(|p| p.every_n_runs).ok_or_else(|| {
+                    serde::de::Error::custom(
+                        "probes: cadence: periodic requires a `periodic.every_n_runs` block",
+                    )
+                })?;
+                if every_n_runs == 0 {
+                    return Err(serde::de::Error::custom(
+                        "probes.periodic.every_n_runs must be greater than 0",
+                    ));
+                }
+                ProbeCadence::Periodic { every_n_runs }
+            }
+        };
+        Ok(ProbesConfig { cadence })
+    }
+}
+
 /// Parse the `unstable_schema:` flag from the text of a `smelt.yml` file.
 ///
 /// Returns `true` when the text contains `unstable_schema: true`.
@@ -1206,6 +1297,7 @@ impl Config {
                     "unstable_schema",
                     "vars",
                     "state",
+                    "probes",
                 ];
                 for (key, _) in map {
                     if let Some(key_str) = key.as_str() {
@@ -2395,6 +2487,7 @@ models:
             target: None,
             state: StateConfig::default(),
             maintenance: None,
+            probes: ProbesConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -2429,6 +2522,7 @@ models:
             target: None,
             state: StateConfig::default(),
             maintenance: None,
+            probes: ProbesConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -2548,6 +2642,7 @@ targets:
             target: None,
             state: StateConfig::default(),
             maintenance: None,
+            probes: ProbesConfig::default(),
         };
 
         let mut metadata = HashMap::new();
@@ -3187,5 +3282,51 @@ vars:
         assert!(!StateMode::Stateless.can_narrow_to(&StateMode::Environments));
         // intervals cannot widen to environments
         assert!(!StateMode::Intervals.can_narrow_to(&StateMode::Environments));
+    }
+
+    #[test]
+    fn test_probes_defaults_to_per_run() {
+        let yaml = "name: p\nversion: 1\n";
+        let (config, _) = Config::parse_with_warnings(yaml).unwrap();
+        assert_eq!(config.probes.cadence, ProbeCadence::PerRun);
+    }
+
+    #[test]
+    fn test_probes_periodic_requires_positive_every_n_runs() {
+        let missing_block = "name: p\nversion: 1\nprobes:\n  cadence: periodic\n";
+        assert!(
+            Config::parse_with_warnings(missing_block).is_err(),
+            "periodic without a `periodic.every_n_runs` block must be a configuration error"
+        );
+
+        let zero =
+            "name: p\nversion: 1\nprobes:\n  cadence: periodic\n  periodic:\n    every_n_runs: 0\n";
+        assert!(
+            Config::parse_with_warnings(zero).is_err(),
+            "every_n_runs: 0 must be a configuration error, never a silent default"
+        );
+
+        let ok =
+            "name: p\nversion: 1\nprobes:\n  cadence: periodic\n  periodic:\n    every_n_runs: 5\n";
+        let (config, _) = Config::parse_with_warnings(ok).unwrap();
+        assert_eq!(
+            config.probes.cadence,
+            ProbeCadence::Periodic { every_n_runs: 5 }
+        );
+    }
+
+    #[test]
+    fn test_probes_rejects_unknown_cadence_and_unknown_fields() {
+        let unknown_cadence = "name: p\nversion: 1\nprobes:\n  cadence: sometimes\n";
+        assert!(
+            Config::parse_with_warnings(unknown_cadence).is_err(),
+            "an unrecognised cadence value must fail loud, never fall back to a default"
+        );
+
+        let unknown_field = "name: p\nversion: 1\nprobes:\n  cadence: per_run\n  bogus: true\n";
+        assert!(
+            Config::parse_with_warnings(unknown_field).is_err(),
+            "an unknown field under probes: must fail loud (deny_unknown_fields)"
+        );
     }
 }

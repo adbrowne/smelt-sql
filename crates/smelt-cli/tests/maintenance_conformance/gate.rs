@@ -4995,6 +4995,7 @@ async fn drive_composed_route2_and_assert(
             &composed_route2_suppression(),
             compile_step,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("composed route-2 window {i} merge failed: {e}"))?;
@@ -5040,6 +5041,7 @@ async fn drive_composed_route3_and_assert(
             &composed_route3_suppression(),
             compile_step,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .map_err(|e| {
@@ -5623,6 +5625,7 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             "2026-07-02",
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: restricted recompute failed: {e}"));
@@ -5644,6 +5647,7 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             "2026-07-02",
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: widened recompute failed: {e}"));

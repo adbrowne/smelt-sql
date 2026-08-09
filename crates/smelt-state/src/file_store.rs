@@ -626,6 +626,7 @@ mod tests {
                 definition_hash: "sha256:abc".to_string(),
                 error: None,
                 retry_count: 0,
+                probes: Vec::new(),
             },
         );
         RunManifest {
@@ -1123,6 +1124,7 @@ mod tests {
                 definition_hash: "sha256:aaa".to_string(),
                 error: None,
                 retry_count: 0,
+                probes: Vec::new(),
             },
         );
         models.insert(
@@ -1138,6 +1140,7 @@ mod tests {
                 definition_hash: "sha256:bbb".to_string(),
                 error: None,
                 retry_count: 0,
+                probes: Vec::new(),
             },
         );
         models.insert(
@@ -1153,6 +1156,7 @@ mod tests {
                 definition_hash: "sha256:ccc".to_string(),
                 error: None,
                 retry_count: 0,
+                probes: Vec::new(),
             },
         );
 

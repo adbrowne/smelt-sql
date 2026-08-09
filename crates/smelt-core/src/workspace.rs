@@ -18,7 +18,7 @@
 //! - Per-entity sources (already shared via the Salsa `project_sources`
 //!   query).
 
-use crate::config::{Config, Materialization, StateConfig};
+use crate::config::{Config, Materialization, ProbesConfig, StateConfig};
 use crate::discovery::{ModelDiscovery, ModelFile};
 use std::path::{Path, PathBuf};
 
@@ -91,6 +91,7 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
         target: None,
         state: StateConfig::default(),
         maintenance: None,
+        probes: ProbesConfig::default(),
     });
 
     // Sources: read sources.yml / sources.yaml if present.

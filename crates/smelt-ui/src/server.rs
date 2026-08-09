@@ -336,6 +336,7 @@ mod tests {
                 target: None,
                 state: Default::default(),
                 maintenance: None,
+                probes: Default::default(),
             }),
             sources: Arc::new(None),
             graph: Arc::new(tokio::sync::Mutex::new(graph)),

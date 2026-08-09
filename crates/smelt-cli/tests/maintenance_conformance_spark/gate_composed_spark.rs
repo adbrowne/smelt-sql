@@ -344,6 +344,7 @@ async fn drive_composed_route3_and_assert_spark(
             &composed_route3_suppression(),
             compile_step,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .map_err(|e| {

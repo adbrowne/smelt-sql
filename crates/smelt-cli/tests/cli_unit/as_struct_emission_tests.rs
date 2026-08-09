@@ -54,6 +54,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     };
     (config, target)
 }

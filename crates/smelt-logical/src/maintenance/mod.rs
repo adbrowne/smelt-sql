@@ -32,6 +32,7 @@ pub mod emit;
 pub mod granularity;
 pub mod grouping;
 pub mod locality;
+pub mod probe_cadence;
 pub mod propagate;
 pub mod repair;
 pub mod skeleton;
@@ -43,6 +44,7 @@ use serde::Serialize;
 pub use crate::analysis::fingerprint::Projection as FingerprintProjection;
 pub use crate::analysis::skeleton_closure::{RowPreservation, SkeletonSourceClosure};
 use crate::analysis::walk::{ColumnComparability, Comparability};
+pub use probe_cadence::{should_dispatch, ProbeDispatch, SkipReason};
 
 /// How a source's rows change after they first appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

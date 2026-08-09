@@ -215,6 +215,7 @@ mod tests {
             target: None,
             state: Default::default(),
             maintenance: None,
+            probes: Default::default(),
         };
 
         let (change_tx, _) = broadcast::channel(16);

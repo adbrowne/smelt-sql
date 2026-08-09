@@ -3766,6 +3766,7 @@ mod external_source_point_lookup_recompute {
             "2025-01-11",
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await;
 
@@ -3848,6 +3849,7 @@ mod external_source_point_lookup_recompute {
             "2025-01-11",
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .expect("conforming data must not fail the tripwire");
@@ -3925,6 +3927,7 @@ mod external_source_point_lookup_recompute {
             "2025-01-11",
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .expect("an unbuildable probe must fall back, never fail the run");
@@ -3986,6 +3989,7 @@ mod in_place_update_lowering {
             target: None,
             state: Default::default(),
             maintenance: None,
+            probes: Default::default(),
         }
     }
 
