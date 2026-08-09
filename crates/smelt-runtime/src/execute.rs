@@ -708,6 +708,10 @@ pub async fn execute_project(
             } {
                 compilers_dry.set_upstream_schemas_all(Arc::new(upstream));
             }
+            compilers_dry.set_state_bearing_models_all(build_state_bearing_models(
+                &all_models_dry,
+                &source_timeseries,
+            ));
             if !fn_bodies.is_empty() {
                 compilers_dry.set_function_bodies_all(fn_bodies);
             }
@@ -984,6 +988,8 @@ pub async fn execute_project(
     // schema `apply_type_casts` already uses for every other model.
     let upstream_schemas_for_bootstrap = Arc::clone(&upstream_schemas);
     compilers.set_upstream_schemas_all(upstream_schemas);
+    compilers
+        .set_state_bearing_models_all(build_state_bearing_models(&all_models, &source_timeseries));
     if !fn_bodies.is_empty() {
         compilers.set_function_bodies_all(fn_bodies);
     }
@@ -4018,6 +4024,57 @@ pub fn build_source_timeseries_map(
     }
 
     map
+}
+
+/// Classify every `refresh: keyed` model in `models` and collect which of
+/// them carry at least one aggregator column with decomposed state
+/// (`AggregatorColumn.state.is_some()`) — the set `SqlCompiler::
+/// set_state_bearing_models_all` needs so a downstream `SELECT *` never
+/// surfaces `__part` state columns (`docs/specs/incremental_models.md`
+/// §"Decomposed state (rung 2) in keyed models" → "Presentation
+/// projection"). A model that fails classification is simply excluded
+/// (its own classifier error surfaces separately, on the path that
+/// actually maintains it — this map only feeds *consumers'* wildcard
+/// rewrites, so a producer-side rejection here must not derail an
+/// unrelated compile).
+///
+/// Always empty today: `AggregatorColumn.state` is `None` at every current
+/// classification site (`docs/outcomes/20260809-rung2-state-shapes/
+/// outcome.md` rows 5-6 haven't widened admission onto it yet). The
+/// wiring is built now so it is correct the moment they do.
+fn build_state_bearing_models(
+    models: &[smelt_core::ModelFile],
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for model in models {
+        let metadata = model.metadata.as_deref();
+        if !metadata.is_some_and(|m| m.is_keyed()) {
+            continue;
+        }
+        let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+        let model_has_timeseries = metadata.is_some_and(|m| m.timeseries.is_some());
+        let declared_fds: &[smelt_core::config::FunctionalDependency] = metadata
+            .map(|m| m.functional_dependencies.as_slice())
+            .unwrap_or(&[]);
+        let Ok(classification) = crate::cumulative::classify_cumulative_sql(
+            &model.name,
+            &clean_sql,
+            source_timeseries,
+            model_has_timeseries,
+            declared_fds,
+        ) else {
+            continue;
+        };
+        let is_state_bearing = classification
+            .aggregator_columns
+            .iter()
+            .any(|col| col.state.is_some());
+        if is_state_bearing {
+            out.insert(model.name.clone());
+        }
+    }
+    out
 }
 
 /// Build the project-wide `smelt.<path> → key_recurrence` lookup map —

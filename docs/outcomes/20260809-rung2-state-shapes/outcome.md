@@ -47,7 +47,7 @@ success criteria above.
 | 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
-| 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | planned |
+| 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
 | 7 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end; ledger grading audit | pending |
@@ -138,6 +138,29 @@ success criteria above.
   `check_native_ivm_gate`'s precedent, not a new diagnostic code — it arises on the build path
   where no `KeyedDiagnostic` is being collected, and inventing a code there would split the
   fail-loud surface for one unreachable-until-row-5 condition.
+
+- 2026-08-09 (implement 4): `presentation_projection` runs on the pre-print SQL text inside
+  `compile()`/`compile_with_sql*()` (`smelt.models.*` still literal), not on `apply_type_casts`'s
+  post-print SQL (already rewritten to physical table names) — the only point in the pipeline
+  where a refusal can still name the user's ref path, matching the plan's instruction. Rejected:
+  rewriting after printing and reconstructing the original path from `cross_engine_refs`/schema
+  metadata, which would make refusal messages depend on backend-specific naming.
+- 2026-08-09 (implement 4): `SqlCompiler::state_bearing_models` is a bare `BTreeSet<String>`
+  (membership only); the presented-column list is derived on demand from the compiler's own
+  `upstream_schemas.models` inside a private `presentation_map()` rather than duplicated into the
+  set at `execute.rs`'s classification site — task 3's "no new source of truth for which columns
+  are presented" reading taken literally: the set answers "is this model state-bearing", the
+  already-existing public schema answers "what are its columns".
+- 2026-08-09 (implement 4): test 9's diagnostic assertion uses `type_diagnostics`/
+  `UndeclaredColumn` rather than `file_diagnostics`/`ColumnTypeUnresolved` as the plan's own line
+  sketched — a hand-written `agg.avg_amount__sum` reference against a resolvable upstream model
+  fires `UndeclaredColumn` (the column-existence check), the more precise diagnostic and what the
+  harness actually produced; `ColumnTypeUnresolved` fires for a different failure shape
+  (unresolvable *type*, not a missing column). Also discovered along the way (not fixed, out of
+  scope): `TestDb::file_diagnostics` resolves cross-model refs via `resolve_ref_path`, which needs
+  fuller project/address-index setup than `model_schema`/`type_diagnostics`'s `resolve_ref` does —
+  a legitimately-defined upstream ref reports a spurious `UndefinedModelRef` through
+  `file_diagnostics` alone in a minimal `TestDb` harness. Pre-existing, unrelated to this phase.
 
 ## Blocked
 

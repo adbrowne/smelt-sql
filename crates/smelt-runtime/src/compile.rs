@@ -599,6 +599,15 @@ pub struct SqlCompiler {
     /// the Salsa database. When `None` (the default), `smelt.fn.*` calls
     /// pass through the printer verbatim.
     fn_bodies: Option<Arc<FnBodyMap>>,
+    /// Names of models classified as state-bearing (`AggregatorColumn.state`
+    /// carries a decomposed state shape on at least one column,
+    /// `docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models"). Consulted by `presentation_projection` so a
+    /// downstream `SELECT *` over one of these models never surfaces its
+    /// `__part` state columns. Empty until rows 5-6 of
+    /// `docs/outcomes/20260809-rung2-state-shapes/outcome.md` widen
+    /// admission — `AggregatorColumn.state` is `None` everywhere today.
+    state_bearing_models: std::collections::BTreeSet<String>,
 }
 
 /// Pre-computed upstream model and seed column schemas, plus the project's
@@ -985,6 +994,7 @@ impl SqlCompiler {
             cross_engine_refs: HashMap::new(),
             upstream_schemas: Arc::new(UpstreamSchemas::default()),
             fn_bodies: None,
+            state_bearing_models: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1004,6 +1014,47 @@ impl SqlCompiler {
     /// resolve `smelt.<path>` ref and source column types correctly.
     pub(crate) fn set_upstream_schemas(&mut self, schemas: Arc<UpstreamSchemas>) {
         self.upstream_schemas = schemas;
+    }
+
+    /// Provide the set of model names classified as state-bearing, so a
+    /// downstream `SELECT *` reading one of them gets its `__part` state
+    /// columns hidden by `presentation_projection`
+    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models" → "Presentation projection").
+    pub(crate) fn set_state_bearing_models(&mut self, models: std::collections::BTreeSet<String>) {
+        self.state_bearing_models = models;
+    }
+
+    /// The presented-column map `presentation_projection` needs: keyed by
+    /// `state_bearing_models`, valued from the *public* schema
+    /// (`upstream_schemas.models`) — no new source of truth for "which
+    /// columns are presented". A state-bearing model absent from
+    /// `upstream_schemas.models` (its schema wasn't resolvable) is simply
+    /// omitted; `presentation_projection` then treats any relation to it as
+    /// non-state-bearing rather than refusing, since this compiler has no
+    /// column list to hide behind anyway.
+    fn presentation_map(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+        self.state_bearing_models
+            .iter()
+            .filter_map(|name| {
+                self.upstream_schemas
+                    .models
+                    .get(name)
+                    .map(|cols| (name.clone(), cols.iter().map(|(n, _)| n.clone()).collect()))
+            })
+            .collect()
+    }
+
+    /// Hide decomposed state columns behind a presentation projection
+    /// before this SQL reaches ref-name rewriting/printing, so a refusal
+    /// can still name the user's `smelt.models.*` path
+    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models" → "Presentation projection"). A no-op (returns `sql`
+    /// unchanged) when no state-bearing model is in scope.
+    fn hide_state_columns(&self, sql: &str) -> Result<String> {
+        let state_bearing = self.presentation_map();
+        smelt_logical::maintenance::emit::presentation_projection(sql, &state_bearing)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Provide pre-resolved `smelt.fn.*` function bodies for SQL emission.
@@ -1313,6 +1364,11 @@ impl SqlCompiler {
         // engine (build-path half of the diagnostic-parity rule).
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
+        // Hide decomposed state columns behind a presentation projection
+        // while `smelt.models.*` ref names are still recoverable in the
+        // text (before printing rewrites them to physical table names) —
+        // see `hide_state_columns`.
+        let clean_content = self.hide_state_columns(&clean_content)?;
         let parse = smelt_parser::parse(&clean_content);
 
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -1435,6 +1491,7 @@ impl SqlCompiler {
         self.check_native_ivm_gate(model)?;
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
+        let sql = self.hide_state_columns(&sql)?;
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
@@ -1497,6 +1554,7 @@ impl SqlCompiler {
             .collect();
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
+        let sql = self.hide_state_columns(&sql)?;
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
@@ -2154,6 +2212,17 @@ impl CompilerRegistry {
         }
     }
 
+    /// Set the state-bearing model set on every compiler in the registry —
+    /// resolved once per project (`build_state_bearing_models` in
+    /// `execute.rs`) and shared across targets, since which models carry
+    /// decomposed state doesn't depend on which backend ultimately
+    /// materialises the consumer.
+    pub fn set_state_bearing_models_all(&mut self, models: std::collections::BTreeSet<String>) {
+        for compiler in self.compilers.values_mut() {
+            compiler.set_state_bearing_models(models.clone());
+        }
+    }
+
     /// Set pre-resolved `smelt.fn.*` function bodies on every compiler in the
     /// registry. Bodies are computed once per project (via
     /// [`build_fn_body_map`]) and shared across targets so that every backend
@@ -2261,6 +2330,93 @@ GROUP BY user_id
 
         assert!(compiled.sql.contains("FROM main.raw_events"));
         assert!(!compiled.sql.contains("smelt.raw_events"));
+    }
+
+    /// A compiler carrying a state-bearing model map compiles a downstream
+    /// `SELECT *` into the presented column list instead of a bare `*`
+    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models" → "Presentation projection").
+    #[test]
+    fn compile_hides_state_columns_from_downstream_star() {
+        let sql = "SELECT * FROM smelt.models.agg";
+        let model = ModelFile {
+            name: "downstream".to_string(),
+            path: "models/downstream.sql".into(),
+            content: sql.to_string(),
+            refs: extract_refs_from_sql(sql),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let config = make_test_config();
+        let mut compiler = SqlCompiler::new(config, &make_test_target());
+
+        let mut models = HashMap::new();
+        models.insert(
+            "agg".to_string(),
+            vec![
+                (
+                    "customer_id".to_string(),
+                    TypedColumn::new(DataType::BigInt, false),
+                ),
+                (
+                    "avg_amount".to_string(),
+                    TypedColumn::new(DataType::Double, true),
+                ),
+            ],
+        );
+        compiler.set_upstream_schemas(Arc::new(UpstreamSchemas {
+            models,
+            ..Default::default()
+        }));
+        let mut state_bearing = std::collections::BTreeSet::new();
+        state_bearing.insert("agg".to_string());
+        compiler.set_state_bearing_models(state_bearing);
+
+        let compiled = compiler.compile(&model, "main").unwrap();
+
+        assert!(
+            compiled.sql.contains("customer_id") && compiled.sql.contains("avg_amount"),
+            "expected the presented column list, got: {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains('*'),
+            "the bare wildcard must not survive compilation: {}",
+            compiled.sql
+        );
+    }
+
+    /// An empty state-bearing model set compiles the identical SQL a
+    /// pre-presentation-projection compile would have produced — the
+    /// parity guard for every project that never touches decomposed state.
+    #[test]
+    fn compile_is_unchanged_without_state_bearing_models() {
+        let sql = "SELECT * FROM smelt.models.agg";
+        let model = ModelFile {
+            name: "downstream".to_string(),
+            path: "models/downstream.sql".into(),
+            content: sql.to_string(),
+            refs: extract_refs_from_sql(sql),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let config = make_test_config();
+        let compiler_baseline = SqlCompiler::new(config.clone(), &make_test_target());
+        let compiler_empty_state = SqlCompiler::new(config, &make_test_target());
+
+        let baseline = compiler_baseline.compile(&model, "main").unwrap();
+        let empty_state = compiler_empty_state.compile(&model, "main").unwrap();
+
+        assert_eq!(baseline.sql, empty_state.sql);
+        assert!(baseline.sql.contains('*'));
     }
 
     #[test]

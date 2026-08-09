@@ -522,6 +522,14 @@ only presented columns. A state column name colliding with a declared or project
 is a fail-loud refusal (`KeyedStateColumnCollision`, §Diagnostics), never a silent rename —
 smelt does not guess which of the two a consumer meant.
 
+Because state columns share the stored table, a wildcard in a consumer that reads a state-bearing
+model is rewritten at compile time to that model's presented columns (sibling relations in the
+same `FROM` keep their own `<rel>.*`); explicit column references are untouched, and a `__part`
+name written by hand is an ordinary unresolved-column diagnostic, since it is not in the model's
+public schema. If a wildcard's relations cannot be resolved while a state-bearing model is in
+scope, the compile fails loud with the model and the unresolvable wildcard named — never a
+pass-through that would leak state columns into the consumer's schema.
+
 **The state-shape catalogue.** Each decomposable family has one fixed, hand-encoded state shape
 and presentation map; there is no general decomposition procedure, matching rung 2's own
 "kept in a state table, exposed through a presentation view" framing (above) with a concrete

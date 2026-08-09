@@ -9,10 +9,12 @@ use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
     emit_keyed_fold, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, state_augmented_projection, MaintenanceDialect,
-    Region, StateAugmentRefusal,
+    emit_staged_candidate_conditional_recompute, presentation_projection,
+    state_augmented_projection, MaintenanceDialect, PresentationRefusal, Region,
+    StateAugmentRefusal,
 };
 use smelt_logical::CrossPartitionCombiner;
+use std::collections::BTreeMap;
 
 #[test]
 fn delete_insert_group_is_transactional_and_matches_production_shape() {
@@ -666,4 +668,113 @@ fn state_augmented_projection_refuses_unparseable_sql() {
     }];
     let result = state_augmented_projection("not even sql (((", &state_columns);
     assert_eq!(result, Err(StateAugmentRefusal::Unparseable));
+}
+
+/// A bare `SELECT *` over a single state-bearing relation expands to that
+/// model's presented columns, in schema order.
+#[test]
+fn presentation_projection_expands_bare_star() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert(
+        "agg".to_string(),
+        vec!["customer_id".to_string(), "avg_amount".to_string()],
+    );
+    let sql = "SELECT * FROM smelt.models.agg";
+    let rewritten = presentation_projection(sql, &state_bearing).expect("must rewrite");
+    assert_eq!(
+        rewritten,
+        "SELECT customer_id, avg_amount FROM smelt.models.agg"
+    );
+}
+
+/// `<alias>.*` over an aliased state-bearing relation expands to
+/// `<alias>.<col>` per presented column; the alias is honoured.
+#[test]
+fn presentation_projection_expands_qualified_star() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert(
+        "agg".to_string(),
+        vec!["customer_id".to_string(), "avg_amount".to_string()],
+    );
+    let sql = "SELECT a.* FROM smelt.models.agg AS a";
+    let rewritten = presentation_projection(sql, &state_bearing).expect("must rewrite");
+    assert_eq!(
+        rewritten,
+        "SELECT a.customer_id, a.avg_amount FROM smelt.models.agg AS a"
+    );
+}
+
+/// A bare `*` over a state-bearing relation and a sibling relation expands
+/// the state-bearing side's columns explicitly (qualified by its own
+/// unaliased model name) and leaves the sibling as `<sibling>.*`.
+#[test]
+fn presentation_projection_keeps_sibling_star() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert(
+        "agg".to_string(),
+        vec!["customer_id".to_string(), "avg_amount".to_string()],
+    );
+    let sql = "SELECT * FROM smelt.models.agg JOIN users ON agg.customer_id = users.id";
+    let rewritten = presentation_projection(sql, &state_bearing).expect("must rewrite");
+    assert_eq!(
+        rewritten,
+        "SELECT agg.customer_id, agg.avg_amount, users.* FROM smelt.models.agg JOIN users ON \
+         agg.customer_id = users.id"
+    );
+}
+
+/// No state-bearing ref in scope: the SQL round-trips byte-identical, so
+/// projects that never touch decomposed state carry zero rewrite risk.
+#[test]
+fn presentation_projection_is_identity_without_state_refs() {
+    let state_bearing = BTreeMap::new();
+    let sql = "SELECT * FROM smelt.models.agg";
+    assert_eq!(
+        presentation_projection(sql, &state_bearing).expect("identity path must not refuse"),
+        sql
+    );
+
+    // A non-empty state_bearing map that names no relation actually present
+    // in this SQL's FROM clause is the same identity path.
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert("other_model".to_string(), vec!["x".to_string()]);
+    assert_eq!(
+        presentation_projection(sql, &state_bearing).expect("no matching relation must not refuse"),
+        sql
+    );
+}
+
+/// A wildcard whose relation cannot be resolved (unknown alias) while a
+/// state-bearing ref is in scope refuses rather than silently passing the
+/// wildcard through — a pass-through would leak state columns.
+#[test]
+fn presentation_projection_refuses_unresolvable_star() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert("agg".to_string(), vec!["customer_id".to_string()]);
+    let sql = "SELECT b.* FROM smelt.models.agg AS a";
+    let result = presentation_projection(sql, &state_bearing);
+    assert_eq!(
+        result,
+        Err(PresentationRefusal::UnresolvableWildcard {
+            wildcard: "b.*".to_string()
+        })
+    );
+}
+
+/// A string literal containing `*` and a state column name is untouched —
+/// the rewrite locates wildcards via CST location, never a whole-text scan.
+#[test]
+fn presentation_projection_ignores_star_in_string_literal() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert(
+        "agg".to_string(),
+        vec!["customer_id".to_string(), "avg_amount".to_string()],
+    );
+    let sql = "SELECT a.*, 'contains * and avg_amount__sum' AS note FROM smelt.models.agg AS a";
+    let rewritten = presentation_projection(sql, &state_bearing).expect("must rewrite");
+    assert_eq!(
+        rewritten,
+        "SELECT a.customer_id, a.avg_amount, 'contains * and avg_amount__sum' AS note FROM \
+         smelt.models.agg AS a"
+    );
 }

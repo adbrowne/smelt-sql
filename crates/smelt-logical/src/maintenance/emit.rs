@@ -1083,6 +1083,252 @@ pub fn state_augmented_projection(
     Ok(out)
 }
 
+// ── Presentation projection (rung 2, `docs/specs/incremental_models.md`
+// §"Decomposed state (rung 2) in keyed models" → "Presentation
+// projection") ────────────────────────────────────────────────────────
+
+/// Why [`presentation_projection`] could not hide state columns behind a
+/// wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationRefusal {
+    /// `sql` could not be parsed, or its SELECT list could not be located —
+    /// fail-closed rather than text-splice blind.
+    Unparseable,
+    /// A wildcard's relation could not be resolved while a state-bearing
+    /// model was in scope. Passing it through unrewritten risks leaking
+    /// state columns into the consumer's schema, so this refuses instead of
+    /// guessing (`docs/specs/incremental_models.md` §"Decomposed state
+    /// (rung 2) in keyed models" → "Presentation projection").
+    UnresolvableWildcard {
+        /// The offending wildcard's own source text (`*` or
+        /// `<qualifier>.*`).
+        wildcard: String,
+    },
+}
+
+impl std::fmt::Display for PresentationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PresentationRefusal::Unparseable => {
+                write!(f, "SQL could not be parsed for presentation projection")
+            }
+            PresentationRefusal::UnresolvableWildcard { wildcard } => write!(
+                f,
+                "wildcard `{wildcard}` could not be resolved to a FROM/JOIN relation while a \
+                 state-bearing model is in scope"
+            ),
+        }
+    }
+}
+
+/// One relation in a SELECT's `FROM`/`JOIN` clause, as `presentation_
+/// projection` needs it: the name a wildcard can qualify it by, and (when
+/// it is a `smelt.<path>` reference) the leaf model name `state_bearing`
+/// is keyed by.
+struct Relation {
+    /// The name this relation can be referenced by from the select list —
+    /// its explicit/implicit alias, falling back to the leaf model name or
+    /// plain identifier when unaliased. `None` only for a relation this
+    /// walk cannot name at all (e.g. an unaliased subquery).
+    qualifier: Option<String>,
+    /// The name `state_bearing` is keyed by: a `smelt.<path>` reference's
+    /// leaf segment, or a plain identifier. `None` for a relation with
+    /// neither (a subquery), which can never be state-bearing.
+    resolved_name: Option<String>,
+}
+
+/// Resolve one `TableRef`'s leaf `smelt.<path>` model name (value or
+/// call form), mirroring the leaf-segment extraction every other
+/// `smelt-logical` walk over a `FROM`/`JOIN` clause already duplicates
+/// (`analysis/walk.rs`'s `normalize_table_ref`, `analysis/source_bounds.rs`,
+/// `rules/incremental.rs`) — there is no shared helper to call instead, and
+/// `smelt-logical` has no dependency on `smelt-db` to borrow one from.
+fn table_ref_model_name(table_ref: &smelt_parser::ast::TableRef) -> Option<String> {
+    table_ref
+        .smelt_path_ref()
+        .and_then(|p| p.segments().last().cloned())
+        .or_else(|| {
+            table_ref
+                .smelt_path_call()
+                .and_then(|p| p.segments().last().cloned())
+        })
+}
+
+/// All relations a SELECT's `FROM`/comma-list/`JOIN`s contribute, in source
+/// order — the same `table_refs().chain(joins()...)` traversal
+/// `analysis/walk.rs`'s `normalize_from` already uses for from-clause
+/// enumeration.
+fn from_relations(from: &smelt_parser::ast::FromClause) -> Vec<Relation> {
+    from.table_refs()
+        .chain(from.joins().filter_map(|j| j.table_ref()))
+        .map(|table_ref| {
+            let resolved_name = table_ref_model_name(&table_ref).or_else(|| table_ref.identifier());
+            let qualifier = table_ref.alias().or_else(|| resolved_name.clone());
+            Relation {
+                qualifier,
+                resolved_name,
+            }
+        })
+        .collect()
+}
+
+/// Rewrite `sql`'s wildcard select items so a state-bearing model's
+/// `__part` state columns never reach a consumer's schema: a wildcard over
+/// a relation `state_bearing` names is expanded to that model's presented
+/// columns (`state_bearing`'s values, in schema order); a wildcard over a
+/// relation `state_bearing` does not name is left byte-unchanged.
+/// `state_bearing` maps model name → presented column names — its values
+/// come from the public schema (`UpstreamSchemas::models` at the caller),
+/// its keys from the set of models classified as state-bearing; this
+/// function invents no new source of truth for "which columns are
+/// presented".
+///
+/// Returns `sql` byte-identical when no relation in scope is
+/// state-bearing (`state_bearing.is_empty()` or none of its keys appear in
+/// `sql`'s `FROM`/`JOIN`) — the parity path every project not using
+/// decomposed state still takes. Refuses
+/// ([`PresentationRefusal::UnresolvableWildcard`]) rather than passing a
+/// wildcard through unexpanded when a state-bearing relation is in scope
+/// and the wildcard's own relation cannot be resolved (an unknown
+/// qualifier, or a bare `*` over an unnameable relation) — a silent
+/// pass-through there would leak state columns into the consumer's schema.
+///
+/// The rewrite locates each wildcard select item via its own CST
+/// `range()`, never a whole-text scan for `*` — this emitter is a leaf
+/// operation over one already-parsed SELECT (`docs/specs/architecture.md`
+/// §"Property composition walk rule"), so a `*` inside a string literal
+/// (wrapped in an `EXPRESSION` node, `SelectItem::is_wildcard()` returns
+/// `false` for it) is never touched.
+pub fn presentation_projection(
+    sql: &str,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<String, PresentationRefusal> {
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax()).ok_or(PresentationRefusal::Unparseable)?;
+    let select = file.select_stmt().ok_or(PresentationRefusal::Unparseable)?;
+    let list = select
+        .select_list()
+        .ok_or(PresentationRefusal::Unparseable)?;
+    let relations: Vec<Relation> = select
+        .from_clause()
+        .map(|from| from_relations(&from))
+        .unwrap_or_default();
+
+    let any_state_bearing = relations
+        .iter()
+        .any(|r| matches_state_bearing(r, state_bearing));
+    if !any_state_bearing {
+        return Ok(sql.to_string());
+    }
+
+    let mut out = String::with_capacity(sql.len());
+    let mut last_end: usize = 0;
+    for item in list.items() {
+        let replacement = if let Some(qualifier) = item.qualified_wildcard_target() {
+            match relations
+                .iter()
+                .find(|r| r.qualifier.as_deref() == Some(qualifier.as_str()))
+            {
+                Some(rel) => match state_bearing_columns(rel, state_bearing) {
+                    Some(cols) => Some(
+                        cols.iter()
+                            .map(|c| format!("{qualifier}.{c}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    None => None,
+                },
+                None => {
+                    return Err(PresentationRefusal::UnresolvableWildcard {
+                        wildcard: sql[item.range()].to_string(),
+                    });
+                }
+            }
+        } else if item.is_wildcard() {
+            Some(
+                expand_bare_wildcard(&relations, state_bearing).ok_or_else(|| {
+                    PresentationRefusal::UnresolvableWildcard {
+                        wildcard: sql[item.range()].to_string(),
+                    }
+                })?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(replacement) = replacement {
+            let start: usize = item.range().start().into();
+            let end: usize = item.range().end().into();
+            out.push_str(&sql[last_end..start]);
+            out.push_str(&replacement);
+            last_end = end;
+        }
+    }
+    out.push_str(&sql[last_end..]);
+    Ok(out)
+}
+
+fn matches_state_bearing(
+    rel: &Relation,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    rel.resolved_name
+        .as_deref()
+        .is_some_and(|n| state_bearing.contains_key(n))
+}
+
+fn state_bearing_columns<'a>(
+    rel: &Relation,
+    state_bearing: &'a std::collections::BTreeMap<String, Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    rel.resolved_name
+        .as_deref()
+        .and_then(|n| state_bearing.get(n))
+}
+
+/// Expand a bare `*` given the relations in scope. A single relation
+/// expands to its bare (unqualified) presented column list; multiple
+/// relations expand per-relation — a state-bearing relation to its
+/// qualified presented columns, a non-state-bearing (or non-state-bearing-
+/// unresolvable) relation to `<qualifier>.*`. `None` means the wildcard
+/// cannot be resolved (a relation this walk cannot name, still in scope
+/// alongside a state-bearing one) and the caller must refuse.
+fn expand_bare_wildcard(
+    relations: &[Relation],
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Option<String> {
+    if relations.len() == 1 {
+        let rel = &relations[0];
+        return match state_bearing_columns(rel, state_bearing) {
+            Some(cols) => Some(cols.join(", ")),
+            // Only reachable if this sole relation isn't state-bearing —
+            // but the caller only reaches `expand_bare_wildcard` once it
+            // has already established some relation in scope IS
+            // state-bearing, and with one relation that must be this one.
+            // Kept as a refusal (never a silent unchanged copy) rather
+            // than an `unreachable!()`, so a future relaxation of the
+            // caller's gate fails loud instead of miscompiling.
+            None => None,
+        };
+    }
+    let mut parts = Vec::with_capacity(relations.len());
+    for rel in relations {
+        match state_bearing_columns(rel, state_bearing) {
+            Some(cols) => {
+                let qualifier = rel.qualifier.as_deref()?;
+                for c in cols {
+                    parts.push(format!("{qualifier}.{c}"));
+                }
+            }
+            None => {
+                let qualifier = rel.qualifier.as_deref()?;
+                parts.push(format!("{qualifier}.*"));
+            }
+        }
+    }
+    Some(parts.join(", "))
+}
+
 // ── Fingerprint sidecar diff (F3, `docs/plans/20260715-composed-axes-
 // conditional-maintenance.md` Phase F3; `docs/specs/sources.md` §"The
 // fingerprint sidecar") ────────────────────────────────────────────────
