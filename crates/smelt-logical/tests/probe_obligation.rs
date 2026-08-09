@@ -181,6 +181,52 @@ fn probe_registry_built_rows_name_a_real_emitter() {
     );
 }
 
+/// Widens the emitter-existence check above to specifically pin the four
+/// `built (unwired)` rows this phase adds
+/// (`docs/outcomes/20260809-probe-backed-facts/phases/02-plan.md` test 10):
+/// each must name its exact expected emitter, not merely some `emit_*`
+/// symbol.
+#[test]
+fn built_and_unwired_rows_name_a_real_emitter() {
+    let model_properties = read("docs/specs/model_properties.md");
+    let section = probe_obligation_section(&model_properties);
+    let rows = registry_rows(section);
+    let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
+
+    let expected: &[(&str, &str)] = &[
+        ("timeseries.assert_monotonic", "emit_monotonicity_probe"),
+        (
+            "functional_dependencies:",
+            "emit_functional_dependency_probe",
+        ),
+        ("bounded_domain:", "emit_bounded_domain_probe"),
+        ("append_only", "emit_append_only_posture_probe"),
+    ];
+
+    for (decl, emitter) in expected {
+        let row = rows
+            .iter()
+            .find(|row| row.first().is_some_and(|d| d.contains(decl)))
+            .unwrap_or_else(|| panic!("no registry row found for declaration `{decl}`"));
+        let status = row.last().map(String::as_str).unwrap_or("");
+        assert!(
+            status.contains("built (unwired)"),
+            "declaration `{decl}` expected Status `built (unwired)`, found `{status}`"
+        );
+        let probe_cell = row.get(1).map(String::as_str).unwrap_or("");
+        assert!(
+            probe_cell.contains(emitter),
+            "declaration `{decl}`'s Probe cell must name `{emitter}`, found `{probe_cell}`"
+        );
+        let decl_sig = format!("pub fn {emitter}(");
+        assert!(
+            emit_source.contains(&decl_sig),
+            "expected `{decl_sig}` in crates/smelt-logical/src/maintenance/emit.rs for \
+             declaration `{decl}`"
+        );
+    }
+}
+
 #[test]
 fn probe_registry_diagnostics_are_catalogued() {
     let model_properties = read("docs/specs/model_properties.md");

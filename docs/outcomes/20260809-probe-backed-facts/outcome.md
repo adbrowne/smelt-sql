@@ -42,7 +42,7 @@ safe to grow (the contract lattice will grow it).
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
-| 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | planned |
+| 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | pending |
 | 4 | Runtime wiring: `probes:` in `Config`, cadence control, firing → named diagnostic + cell remedy marking | pending |
 | 5 | Conformance recipes: violated-fact scenarios caught by probes | pending |
@@ -62,6 +62,15 @@ safe to grow (the contract lattice will grow it).
   gate already reads), with real-DuckDB executability tests since dispatch is phases 3–4. The
   `unique_key`/`delta_identity` registry row stays `not-yet` — it is outside success criterion 2's
   named four and is already recorded in `model_properties.md` §Known Divergences.
+
+- 2026-08-10: Phase 2 done. Four new pure emitters (`emit_functional_dependency_probe`,
+  `emit_bounded_domain_probe`, `emit_monotonicity_probe`, `emit_append_only_posture_probe`) land
+  in `crates/smelt-logical/src/maintenance/emit.rs`, each proven against a real DuckDB to
+  discriminate conforming from violating data; registry rows move `not-yet` → `built (unwired)`.
+  A design correction surfaced by the executability tests: the monotonicity probe's `LAG` must
+  order by a processed-row ordinal (`ROW_NUMBER() OVER ()`), never by the event-time column
+  itself, or every partition trivially sorts and no violation is detectable. See
+  `phases/02-summary.md`.
 
 ## Blocked
 

@@ -8,11 +8,12 @@
 use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
-    emit_keyed_fold, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, presentation_projection,
-    state_augmented_projection, MaintenanceDialect, PresentationRefusal, Region,
-    StateAugmentRefusal,
+    emit_append_only_posture_probe, emit_bounded_domain_probe, emit_column_scoped_merge,
+    emit_create_table_as, emit_delete_insert, emit_functional_dependency_probe,
+    emit_in_place_update, emit_keyed_fold, emit_monotonicity_probe, emit_recurrence_bound_probe,
+    emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
+    presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
+    MaintenanceDialect, PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -1003,5 +1004,277 @@ fn presentation_projection_ignores_star_in_string_literal() {
         rewritten,
         "SELECT a.customer_id, a.avg_amount, 'contains * and avg_amount__sum' AS note FROM \
          smelt.models.agg AS a"
+    );
+}
+
+// --- Probe obligation emitters (docs/outcomes/20260809-probe-backed-facts) ---
+
+/// The functional-dependency probe (`docs/specs/model_properties.md`
+/// §"Probe obligation", row `functional_dependencies:`): re-aggregates the
+/// declared key over the scope select, counting keys with more than one
+/// distinct `determines` value.
+#[test]
+fn functional_dependency_probe_counts_keys_with_multiple_determines() {
+    let stmt = emit_functional_dependency_probe(
+        "SELECT customer_id, plan_tier FROM subscriptions",
+        &["customer_id".to_string()],
+        "plan_tier",
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        stmt.sql,
+        "WITH __fd_violations AS (SELECT CAST(customer_id AS VARCHAR) AS violation_key FROM \
+         (SELECT customer_id, plan_tier FROM subscriptions) AS __smelt_scope GROUP BY \
+         customer_id HAVING COUNT(DISTINCT plan_tier) > 1) SELECT COUNT(*) AS violation_count, \
+         (SELECT STRING_AGG(violation_key, ', ') FROM (SELECT violation_key FROM \
+         __fd_violations LIMIT 5) AS __sample) AS sample_keys FROM __fd_violations"
+    );
+}
+
+/// A composite key concatenates every key column into one `violation_key`
+/// string and groups by every column, mirroring
+/// [`emit_recurrence_bound_probe`]'s composite-key handling.
+#[test]
+fn functional_dependency_probe_composite_key_concatenates_and_groups() {
+    let stmt = emit_functional_dependency_probe(
+        "SELECT tenant_id, customer_id, plan_tier FROM subscriptions",
+        &["tenant_id".to_string(), "customer_id".to_string()],
+        "plan_tier",
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        stmt.sql
+            .contains("CAST(tenant_id AS VARCHAR) || '|' || CAST(customer_id AS VARCHAR)"),
+        "expected composite key concatenation in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains("GROUP BY tenant_id, customer_id"),
+        "expected composite GROUP BY in: {}",
+        stmt.sql
+    );
+}
+
+/// The bounded-domain probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `bounded_domain:`): emits a distinct-count of the
+/// declared column compared against `max_cardinality`; zero when within
+/// cap.
+#[test]
+fn bounded_domain_probe_counts_distinct_over_cap() {
+    let stmt = emit_bounded_domain_probe(
+        "SELECT country_code FROM shipments",
+        "country_code",
+        200,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        stmt.sql,
+        "WITH __bounded_domain_values AS (SELECT DISTINCT CAST(country_code AS VARCHAR) AS \
+         violation_key FROM (SELECT country_code FROM shipments) AS __smelt_scope), \
+         __bounded_domain_count AS (SELECT COUNT(*) AS distinct_count FROM \
+         __bounded_domain_values) SELECT CASE WHEN distinct_count > 200 THEN distinct_count \
+         ELSE 0 END AS violation_count, CASE WHEN distinct_count > 200 THEN (SELECT \
+         STRING_AGG(violation_key, ', ') FROM (SELECT violation_key FROM \
+         __bounded_domain_values LIMIT 5) AS __sample) ELSE NULL END AS sample_keys FROM \
+         __bounded_domain_count"
+    );
+}
+
+/// The monotonicity probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `timeseries.assert_monotonic`): a `LAG` over the
+/// declared partition key, ordered by the run's own processed-row order (a
+/// `ROW_NUMBER() OVER ()` ordinal, never by the event-time column itself —
+/// see the emitter's own doc comment for why); a row below its predecessor
+/// is a violation.
+#[test]
+fn monotonicity_probe_flags_out_of_order_event_time_per_partition() {
+    let stmt = emit_monotonicity_probe(
+        "SELECT user_id, event_time FROM events",
+        &["user_id".to_string()],
+        "event_time",
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        stmt.sql.contains(
+            "LAG(__smelt_event_time) OVER (PARTITION BY user_id ORDER BY __smelt_seq) AS \
+             __smelt_prev_event_time"
+        ),
+        "expected LAG window in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains("ROW_NUMBER() OVER () AS __smelt_seq"),
+        "expected a processed-row ordinal in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql
+            .contains("WHERE __smelt_prev_event_time IS NOT NULL AND __smelt_event_time < __smelt_prev_event_time"),
+        "expected out-of-order predicate in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.starts_with("WITH __monotonicity_violations AS ("),
+        "expected the shared violation-probe CTE wrapper in: {}",
+        stmt.sql
+    );
+}
+
+/// The append-only posture probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `mutation_profile.kind: append_only`): current
+/// per-partition `COUNT(*)` plus a skeleton-column fingerprint compared
+/// against a caller-supplied recorded baseline; either a decreased count or
+/// a changed fingerprint counts as a violation.
+#[test]
+fn append_only_posture_probe_flags_shrunk_partition_and_changed_fingerprint() {
+    let baseline = vec![AppendOnlyBaselinePartition {
+        partition_value: "2026-01-01".to_string(),
+        recorded_count: 100,
+        recorded_fingerprint: "abc123".to_string(),
+    }];
+    let stmt = emit_append_only_posture_probe(
+        "main.raw_events",
+        "event_date",
+        &["event_id".to_string(), "payload".to_string()],
+        &baseline,
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        stmt.sql.contains("VALUES ('2026-01-01', 100, 'abc123')"),
+        "expected the baseline VALUES list in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql
+            .contains("WHERE __current.current_count < __baseline.recorded_count OR \
+                        __current.current_fingerprint IS DISTINCT FROM __baseline.recorded_fingerprint"),
+        "expected the shrunk-or-changed predicate in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql.contains("GROUP BY event_date"),
+        "expected per-partition grouping in: {}",
+        stmt.sql
+    );
+}
+
+/// Every probe emitter in this module returns the shared
+/// `violation_count`/`sample_keys` result shape
+/// (`docs/specs/model_properties.md` §"Probe obligation") across both
+/// dialects, and the Spark rendering uses no `STRING_AGG`/unsized
+/// `VARCHAR`.
+#[test]
+fn every_probe_emitter_returns_violation_count_and_sample_keys() {
+    let baseline = vec![AppendOnlyBaselinePartition {
+        partition_value: "p1".to_string(),
+        recorded_count: 1,
+        recorded_fingerprint: "fp".to_string(),
+    }];
+    for dialect in [MaintenanceDialect::DuckDb, MaintenanceDialect::Spark] {
+        let statements = [
+            emit_recurrence_bound_probe(
+                "main.t",
+                &["id".to_string()],
+                "d",
+                "SELECT id, d FROM events",
+                "2026-01-01",
+                dialect,
+            ),
+            emit_functional_dependency_probe(
+                "SELECT id, v FROM t",
+                &["id".to_string()],
+                "v",
+                dialect,
+            ),
+            emit_bounded_domain_probe("SELECT c FROM t", "c", 10, dialect),
+            emit_monotonicity_probe("SELECT id, ts FROM t", &["id".to_string()], "ts", dialect),
+            emit_append_only_posture_probe("main.t", "d", &["c".to_string()], &baseline, dialect),
+        ];
+        for stmt in &statements {
+            assert!(
+                stmt.sql.contains("violation_count"),
+                "expected violation_count in ({dialect:?}): {}",
+                stmt.sql
+            );
+            assert!(
+                stmt.sql.contains("sample_keys"),
+                "expected sample_keys in ({dialect:?}): {}",
+                stmt.sql
+            );
+            if dialect == MaintenanceDialect::Spark {
+                assert!(
+                    !stmt.sql.contains("STRING_AGG"),
+                    "Spark dialect must never emit STRING_AGG: {}",
+                    stmt.sql
+                );
+                assert!(
+                    !stmt.sql.contains("VARCHAR"),
+                    "Spark dialect must never emit VARCHAR: {}",
+                    stmt.sql
+                );
+            }
+        }
+    }
+}
+
+/// The refactor extracting the shared dialect-keyed wrapper out of
+/// [`emit_recurrence_bound_probe`] must not perturb its emitted SQL —
+/// `statement_parity`/`technique_lowering` compare against this exact text.
+#[test]
+fn recurrence_bound_probe_sql_is_unchanged_by_the_shared_wrapper() {
+    let stmt = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        "SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10'",
+        "2026-01-07",
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        stmt.sql,
+        "WITH __recurrence_violations AS (SELECT DISTINCT CAST(target.event_id AS VARCHAR) AS \
+         violation_key FROM main.events_last_seen AS target JOIN (SELECT DISTINCT event_id FROM \
+         (SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10')) AS delta ON \
+         target.event_id = delta.event_id WHERE target.last_seen_date < '2026-01-07') SELECT \
+         COUNT(*) AS violation_count, (SELECT STRING_AGG(violation_key, ', ') FROM (SELECT \
+         violation_key FROM __recurrence_violations LIMIT 5) AS __sample) AS sample_keys FROM \
+         __recurrence_violations"
+    );
+}
+
+/// Empty key/digest-column vectors are a fail-loud panic, not a degenerate
+/// always-passing query.
+#[test]
+#[should_panic(expected = "non-empty key")]
+fn functional_dependency_probe_panics_on_empty_key() {
+    emit_functional_dependency_probe("SELECT v FROM t", &[], "v", MaintenanceDialect::DuckDb);
+}
+
+#[test]
+#[should_panic(expected = "non-empty partition key")]
+fn monotonicity_probe_panics_on_empty_partition_key() {
+    emit_monotonicity_probe("SELECT ts FROM t", &[], "ts", MaintenanceDialect::DuckDb);
+}
+
+#[test]
+#[should_panic(expected = "non-empty digest column set")]
+fn append_only_posture_probe_panics_on_empty_digest_columns() {
+    let baseline = vec![AppendOnlyBaselinePartition {
+        partition_value: "p1".to_string(),
+        recorded_count: 1,
+        recorded_fingerprint: "fp".to_string(),
+    }];
+    emit_append_only_posture_probe("main.t", "d", &[], &baseline, MaintenanceDialect::DuckDb);
+}
+
+#[test]
+#[should_panic(expected = "non-empty recorded baseline")]
+fn append_only_posture_probe_panics_on_empty_baseline() {
+    emit_append_only_posture_probe(
+        "main.t",
+        "d",
+        &["c".to_string()],
+        &[],
+        MaintenanceDialect::DuckDb,
     );
 }

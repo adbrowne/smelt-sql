@@ -1072,20 +1072,7 @@ pub fn emit_recurrence_bound_probe(
     slice_lower: &str,
     dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
-    // The unsized string-cast type name and the "join sampled keys into one
-    // string" aggregate both vary by dialect: DuckDB accepts an unsized
-    // `VARCHAR` and has `STRING_AGG`; Spark SQL requires a length on
-    // `VARCHAR` (`DATATYPE_MISSING_SIZE`) and has no `STRING_AGG` — its
-    // unsized string type is `STRING`, and the equivalent join-aggregate is
-    // `CONCAT_WS(', ', COLLECT_LIST(...))`. Confirmed live against Spark
-    // (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
-    let (cast_type, sample_expr) = match dialect {
-        MaintenanceDialect::DuckDb => ("VARCHAR", "STRING_AGG(violation_key, ', ')".to_string()),
-        MaintenanceDialect::Spark => (
-            "STRING",
-            "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
-        ),
-    };
+    let cast_type = probe_dialect_string_type(dialect);
     let key_list = key.join(", ");
     let join_cond = key
         .iter()
@@ -1098,20 +1085,75 @@ pub fn emit_recurrence_bound_probe(
         .collect::<Vec<_>>()
         .join(" || '|' || ");
     let safe_lower = slice_lower.replace('\'', "''");
-    let sql = format!(
-        "WITH __recurrence_violations AS (\
-            SELECT DISTINCT {key_concat} AS violation_key \
-            FROM {schema_table} AS target \
-            JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
-            WHERE target.{partition_column} < '{safe_lower}'\
-         ) \
+    let violations_select = format!(
+        "SELECT DISTINCT {key_concat} AS violation_key \
+         FROM {schema_table} AS target \
+         JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
+         WHERE target.{partition_column} < '{safe_lower}'"
+    );
+    let sql = wrap_violation_probe("__recurrence_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The unsized string-cast type name for a probe's key-display expression:
+/// DuckDB accepts an unsized `VARCHAR`; Spark SQL requires a length on
+/// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
+/// `STRING`. Confirmed live against Spark
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
+fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
+    match dialect {
+        MaintenanceDialect::DuckDb => "VARCHAR",
+        MaintenanceDialect::Spark => "STRING",
+    }
+}
+
+/// The "join up to 5 sampled `violation_key` values into one string"
+/// aggregate: DuckDB has `STRING_AGG`; Spark SQL has no `STRING_AGG`, so the
+/// equivalent join-aggregate is `CONCAT_WS(', ', COLLECT_LIST(...))`.
+/// Shared by every probe emitter in this module (`docs/outcomes/
+/// 20260809-probe-backed-facts/phases/02-plan.md` — "Design constraint: one
+/// probe result shape").
+fn probe_dialect_sample_agg(dialect: MaintenanceDialect) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb => "STRING_AGG(violation_key, ', ')".to_string(),
+        MaintenanceDialect::Spark => "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
+    }
+}
+
+/// Wraps a caller-supplied `violations_select` — any `SELECT` projecting a
+/// `violation_key` column, one row per offending identifier — into the
+/// canonical one-row probe result every emitter in this module returns:
+/// `violation_count` (the number of offending rows) and `sample_keys` (up to
+/// 5 comma-joined offending identifiers, `NULL` when `violation_count` is
+/// `0`). `cte_name` lets each caller pick its own descriptive CTE alias
+/// (`docs/specs/model_properties.md` §"Probe obligation" — "a probe's answer
+/// is a single `violation_count`/`sample_keys` row").
+fn wrap_violation_probe(
+    cte_name: &str,
+    violations_select: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let sample_expr = probe_dialect_sample_agg(dialect);
+    format!(
+        "WITH {cte_name} AS ({violations_select}) \
          SELECT COUNT(*) AS violation_count, \
                 (SELECT {sample_expr} FROM \
-                 (SELECT violation_key FROM __recurrence_violations LIMIT 5) AS __sample) \
+                 (SELECT violation_key FROM {cte_name} LIMIT 5) AS __sample) \
                  AS sample_keys \
-         FROM __recurrence_violations"
-    );
-    MaintenanceStatement::new(sql)
+         FROM {cte_name}"
+    )
+}
+
+/// A key's display expression for a probe's `violation_key` column: each
+/// column CAST to the dialect's unsized string type and pipe-concatenated —
+/// the same composite-key shape [`emit_recurrence_bound_probe`] uses,
+/// factored out so the four declaration probes below share it.
+fn probe_key_display_expr(columns: &[String], cast_type: &str) -> String {
+    columns
+        .iter()
+        .map(|c| format!("CAST({c} AS {cast_type})"))
+        .collect::<Vec<_>>()
+        .join(" || '|' || ")
 }
 
 /// The referential-integrity count-preservation tripwire
@@ -1148,6 +1190,251 @@ pub fn emit_count_preservation_probe(
         "SELECT (SELECT COUNT(*) FROM ({driving_select}) AS __smelt_driving) AS driving_count, \
          (SELECT COUNT(*) FROM ({enriched_select}) AS __smelt_enriched) AS enriched_count"
     );
+    MaintenanceStatement::new(sql)
+}
+
+/// The functional-dependency probe (`docs/specs/model_properties.md`
+/// §"Probe obligation", row `functional_dependencies:`): a read-only query
+/// re-aggregating the declared `key` over `scope_select`'s own processed
+/// rows and counting the distinct `determines` values found per key. A key
+/// with more than one distinct `determines` value disproves the declared
+/// per-key constancy the once-write column family was admitted on the
+/// strength of (`model_properties.md` §Known Divergences).
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns (`docs/outcomes/20260809-probe-backed-facts/
+/// phases/02-plan.md`): the number of offending keys, and up to 5
+/// comma-joined offending key values.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed rows; this emitter does no scoping of its own, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `key` is empty — an empty `GROUP BY` would aggregate the whole
+/// scope into one row, never a per-key constancy check.
+pub fn emit_functional_dependency_probe(
+    scope_select: &str,
+    key: &[String],
+    determines: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !key.is_empty(),
+        "emit_functional_dependency_probe requires a non-empty key"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let key_list = key.join(", ");
+    let violation_key = probe_key_display_expr(key, cast_type);
+    let violations_select = format!(
+        "SELECT {violation_key} AS violation_key \
+         FROM ({scope_select}) AS __smelt_scope \
+         GROUP BY {key_list} \
+         HAVING COUNT(DISTINCT {determines}) > 1"
+    );
+    let sql = wrap_violation_probe("__fd_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The bounded-domain probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `bounded_domain:`): a read-only query counting the
+/// distinct values of the declared `column` within `scope_select`'s own
+/// processed region and comparing that count against the declared
+/// `max_cardinality`.
+///
+/// Returns one row: `violation_count` is the distinct-value count when it
+/// exceeds `max_cardinality`, `0` when the domain is within cap;
+/// `sample_keys` is up to 5 comma-joined sample values, `NULL` when within
+/// cap — the same shape every probe in this module returns, specialised
+/// (unlike the key-recurring probes) to a magnitude check rather than a
+/// membership check.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed region; this emitter does no scoping of its own,
+/// matching every other function in this module.
+pub fn emit_bounded_domain_probe(
+    scope_select: &str,
+    column: &str,
+    max_cardinality: u64,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    let cast_type = probe_dialect_string_type(dialect);
+    let sample_expr = probe_dialect_sample_agg(dialect);
+    let sql = format!(
+        "WITH __bounded_domain_values AS (\
+            SELECT DISTINCT CAST({column} AS {cast_type}) AS violation_key \
+            FROM ({scope_select}) AS __smelt_scope\
+         ), __bounded_domain_count AS (\
+            SELECT COUNT(*) AS distinct_count FROM __bounded_domain_values\
+         ) \
+         SELECT CASE WHEN distinct_count > {max_cardinality} THEN distinct_count ELSE 0 END \
+                AS violation_count, \
+                CASE WHEN distinct_count > {max_cardinality} THEN \
+                  (SELECT {sample_expr} FROM \
+                   (SELECT violation_key FROM __bounded_domain_values LIMIT 5) AS __sample) \
+                ELSE NULL END AS sample_keys \
+         FROM __bounded_domain_count"
+    );
+    MaintenanceStatement::new(sql)
+}
+
+/// The monotonicity probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `timeseries.assert_monotonic`): a read-only query
+/// re-deriving the traced event-time ordering over `scope_select`'s own
+/// processed rows, per `partition_key` — a `LAG` window over
+/// `event_time_column` ordered by itself within each partition, flagging a
+/// row whose event time falls below its partition predecessor's.
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns: the number of out-of-order rows, and up to 5
+/// comma-joined offending partition-key values.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed rows; this emitter does no scoping of its own, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `partition_key` is empty — an empty partition would order the
+/// entire scope as one sequence, never a per-partition monotonicity check.
+pub fn emit_monotonicity_probe(
+    scope_select: &str,
+    partition_key: &[String],
+    event_time_column: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !partition_key.is_empty(),
+        "emit_monotonicity_probe requires a non-empty partition key"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let partition_list = partition_key.join(", ");
+    let violation_key = probe_key_display_expr(partition_key, cast_type);
+    // The `LAG` must be ordered by the run's own PROCESSED-row order (a
+    // `ROW_NUMBER() OVER ()` ordinal over `scope_select`'s own row
+    // sequence), never by `event_time_column` itself — ordering the window
+    // by the very column being checked would sort every partition into
+    // non-decreasing order by construction, making a violation
+    // undetectable. "The traced event-time ordering" (`docs/specs/
+    // model_properties.md` §"Probe obligation") means the order rows were
+    // processed in, which the caller's `scope_select` already reflects
+    // (e.g. an append-only ingestion order).
+    let violations_select = format!(
+        "SELECT {violation_key} AS violation_key \
+         FROM (\
+            SELECT {partition_list}, __smelt_event_time, \
+                   LAG(__smelt_event_time) OVER (\
+                       PARTITION BY {partition_list} ORDER BY __smelt_seq\
+                   ) AS __smelt_prev_event_time \
+            FROM (\
+               SELECT {partition_list}, {event_time_column} AS __smelt_event_time, \
+                      ROW_NUMBER() OVER () AS __smelt_seq \
+               FROM ({scope_select}) AS __smelt_scope\
+            ) AS __smelt_seqd\
+         ) AS __smelt_lagged \
+         WHERE __smelt_prev_event_time IS NOT NULL \
+         AND __smelt_event_time < __smelt_prev_event_time"
+    );
+    let sql = wrap_violation_probe("__monotonicity_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// One partition's recorded baseline for [`emit_append_only_posture_probe`]:
+/// the row count and skeleton-column fingerprint observed the last time the
+/// posture was checked, kept by the caller (the run driver, phases 3-4 of
+/// `docs/outcomes/20260809-probe-backed-facts/outcome.md`) — this emitter
+/// carries no storage of its own, matching the maintenance-plan purity
+/// invariant (`docs/specs/architecture.md` §"Constraints & Invariants" item
+/// 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendOnlyBaselinePartition {
+    /// The partition column's value, as text.
+    pub partition_value: String,
+    /// The row count last recorded for this partition.
+    pub recorded_count: i64,
+    /// The row-content fingerprint (hex `sha256`) last recorded for this
+    /// partition, over the same `digest_columns` the caller passes to
+    /// [`emit_append_only_posture_probe`].
+    pub recorded_fingerprint: String,
+}
+
+/// The append-only posture probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `mutation_profile.kind: append_only`; `docs/specs/
+/// sources.md` §Semantics 4 — "watermark-monotonicity + frontier-checksum"):
+/// a read-only query comparing each partition's CURRENT row count and
+/// row-content fingerprint (over `digest_columns`, the source's skeleton
+/// columns) against a caller-supplied recorded `baseline` — a partition
+/// whose row count decreased (a delete or reload) or whose fingerprint
+/// changed (an in-place update) disproves the declared `append_only`
+/// posture.
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns: the number of violating partitions, and up to 5
+/// comma-joined offending partition values.
+///
+/// The per-row fingerprint reuses [`row_fingerprint_expr`] (the same
+/// collision-free construction the fingerprint sidecar digests with); the
+/// per-partition aggregate fingerprint is `sha256` of those row
+/// fingerprints joined in a fixed (sorted) order, so two runs over the same
+/// unchanged partition content always agree regardless of physical row
+/// order.
+///
+/// `source_table` is already fully qualified (`schema.table`); `baseline`
+/// is rendered as a `VALUES` list, one row per recorded partition — a
+/// partition with no baseline row is not compared (nothing recorded yet to
+/// disprove).
+///
+/// # Panics
+/// Panics if `digest_columns` or `baseline` is empty — nothing to
+/// fingerprint, or nothing recorded to compare against, is not a
+/// degenerate always-passing probe.
+pub fn emit_append_only_posture_probe(
+    source_table: &str,
+    partition_column: &str,
+    digest_columns: &[String],
+    baseline: &[AppendOnlyBaselinePartition],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_append_only_posture_probe requires a non-empty digest column set for {source_table}"
+    );
+    assert!(
+        !baseline.is_empty(),
+        "emit_append_only_posture_probe requires a non-empty recorded baseline for {source_table}"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let row_hash = row_fingerprint_expr(digest_columns, dialect);
+    let agg_fingerprint = match dialect {
+        MaintenanceDialect::DuckDb => {
+            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+        }
+        MaintenanceDialect::Spark => {
+            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
+        }
+    };
+    let baseline_values = baseline
+        .iter()
+        .map(|b| {
+            let value = b.partition_value.replace('\'', "''");
+            let fingerprint = b.recorded_fingerprint.replace('\'', "''");
+            format!("('{value}', {}, '{fingerprint}')", b.recorded_count)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let violations_select = format!(
+        "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
+         FROM (\
+            SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
+                   COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
+            FROM {source_table} \
+            GROUP BY {partition_column}\
+         ) AS __current \
+         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, recorded_fingerprint) \
+         ON __current.partition_value = __baseline.partition_value \
+         WHERE __current.current_count < __baseline.recorded_count \
+         OR __current.current_fingerprint IS DISTINCT FROM __baseline.recorded_fingerprint"
+    );
+    let sql = wrap_violation_probe("__append_only_violations", &violations_select, dialect);
     MaintenanceStatement::new(sql)
 }
 
@@ -1708,9 +1995,9 @@ const VALUE_TAG: &str = "V";
 /// join multiple columns' fingerprints with no separator at all — see its
 /// own doc comment for why fixed-length concatenation removes the
 /// separator-collision hazard structurally rather than by convention.
-fn column_fingerprint_expr(column: &str) -> String {
+fn column_fingerprint_expr(column: &str, cast_type: &str) -> String {
     format!(
-        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS VARCHAR)) END)"
+        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS {cast_type})) END)"
     )
 }
 
@@ -1739,9 +2026,17 @@ fn column_fingerprint_expr(column: &str) -> String {
 /// literal, un-hashed value instead; see that function's own doc comment
 /// for why.
 fn concat_varchar_expr(columns: &[String]) -> String {
+    concat_varchar_expr_typed(columns, "VARCHAR")
+}
+
+/// [`concat_varchar_expr`], parameterized over the unsized string-cast type
+/// name — DuckDB's `VARCHAR` for every existing (DuckDB-only) caller, or the
+/// dialect's own type via [`probe_dialect_string_type`] for
+/// [`row_fingerprint_expr`]'s dialect-aware probe caller.
+fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
     let per_column = columns
         .iter()
-        .map(|c| column_fingerprint_expr(c))
+        .map(|c| column_fingerprint_expr(c, cast_type))
         .collect::<Vec<_>>()
         .join(", ");
     if columns.len() == 1 {
@@ -1750,6 +2045,22 @@ fn concat_varchar_expr(columns: &[String]) -> String {
     } else {
         format!("CONCAT({per_column})")
     }
+}
+
+/// A whole-row content fingerprint over `columns`: `sha256` of the
+/// per-column digest-of-digests concatenation ([`concat_varchar_expr_typed`])
+/// — the same construction [`emit_fingerprint_digest_select`] uses for its
+/// `delta_digest` column, factored out so
+/// [`emit_append_only_posture_probe`] can build the identical row-content
+/// hash without re-authoring the hashing SQL. `dialect` selects the
+/// unsized string-cast type ([`probe_dialect_string_type`]) — DuckDB's
+/// `VARCHAR` or Spark's `STRING` — so the fingerprint is well-formed under
+/// either dialect, unlike [`concat_varchar_expr`]'s DuckDB-only default.
+fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
+    format!(
+        "sha256({})",
+        concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect))
+    )
 }
 
 /// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
@@ -1845,10 +2156,8 @@ pub fn emit_fingerprint_digest_select(
         "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
     );
     let key_expr = key_expr_for_columns(source_key);
-    let digest_expr = concat_varchar_expr(digest_columns);
-    format!(
-        "SELECT {key_expr} AS delta_key, sha256({digest_expr}) AS delta_digest FROM {source_table}"
-    )
+    let digest_expr = row_fingerprint_expr(digest_columns, MaintenanceDialect::DuckDb);
+    format!("SELECT {key_expr} AS delta_key, {digest_expr} AS delta_digest FROM {source_table}")
 }
 
 /// The synthesized external change-feed diff (`docs/specs/sources.md`
