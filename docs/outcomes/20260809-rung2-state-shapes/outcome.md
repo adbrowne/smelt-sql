@@ -46,7 +46,7 @@ success criteria above.
 |---|-------|--------|
 | 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
-| 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | planned |
+| 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | pending |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
@@ -110,6 +110,17 @@ success criteria above.
   the incumbent's unless the delta's `written` is true, in which case the delta's"), which
   contradicts the family's first-write-wins semantics and its own rung-1 `COALESCE(target, delta)`
   form. The fold is `COALESCE(target.value, delta.value)`.
+
+- 2026-08-09 (implement 3): state columns are physically real — `StateColumn` carries its own
+  combiner, `AggregatorColumn.state` threads it through (`None` everywhere today),
+  `state_augmented_projection` (new pure emitter) appends state select items via CST location,
+  and `build_cumulative_merge_sql` expands a state-bearing column into per-state-column folds
+  plus a presented column recomputed from the merged state. `KeyedStateColumnCollision` is wired
+  end-to-end but unreachable until rows 5-6 widen admission. Caught and fixed in the same pass:
+  `CrossPartitionCombiner::OrderMonotone`'s `render` was unconditionally `>`, silently wrong for
+  `MIN_BY` (`prefer_greater: bool` added, all call sites updated). Spec cell corrected
+  (once-write "Combiner over state": last-write-wins → `COALESCE(target.value, delta.value)`).
+  No admission widened; `maintenance_conformance`'s 47 tests stayed green unchanged.
 
 ## Blocked
 

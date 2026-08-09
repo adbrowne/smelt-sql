@@ -51,6 +51,13 @@ pub struct AggregatorColumn {
     /// the new partition's value. Stored as a name; the rule renders it
     /// as `f(target.col, delta.col)` or the equivalent (e.g. `LEAST`/`GREATEST`).
     pub cross_partition_combiner: CrossPartitionCombiner,
+    /// The hidden decomposed state this column folds through instead of
+    /// folding its own presented value directly (`docs/specs/
+    /// incremental_models.md` §"Decomposed state (rung 2) in keyed
+    /// models"). `None` for every column family admitted before this
+    /// mechanism existed — admission is not yet widened onto it
+    /// (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6).
+    pub state: Option<crate::analysis::decomposed_state::DecomposedState>,
 }
 
 /// How target and delta values combine for a column on `MERGE`.
@@ -85,7 +92,17 @@ pub enum CrossPartitionCombiner {
     /// comparison always come from that column's own `target.<name>` /
     /// `delta.<name>` refs — no decomposed/hidden state
     /// (`docs/specs/incremental_models.md` §Known Divergences).
-    OrderMonotone { ordering_column: String },
+    OrderMonotone {
+        ordering_column: String,
+        /// `true` for `MAX_BY`/`ArgMax` (the delta wins iff its ordering
+        /// value is strictly greater); `false` for `MIN_BY`/`ArgMin` (the
+        /// delta wins iff its ordering value is strictly lesser). Storage
+        /// decision (Phase 3, `docs/outcomes/20260809-rung2-state-shapes`):
+        /// `render` was unconditionally `>`, which was correct only for
+        /// `MAX_BY` — `MIN_BY`'s state-shape fold (`decomposed_state.rs`)
+        /// needs the opposite comparison over its `o` state column.
+        prefer_greater: bool,
+    },
     /// The plain-overwrite family (`ANY_VALUE(...)`,
     /// `incremental_models.md` §"The column-family catalogue"): the delta's
     /// value always wins — the incoming row is the current observation, no
@@ -116,7 +133,10 @@ impl CrossPartitionCombiner {
             CrossPartitionCombiner::BitAnd => format!("{} & {}", target_col, delta_col),
             CrossPartitionCombiner::BitOr => format!("{} | {}", target_col, delta_col),
             CrossPartitionCombiner::BitXor => format!("xor({}, {})", target_col, delta_col),
-            CrossPartitionCombiner::OrderMonotone { ordering_column } => {
+            CrossPartitionCombiner::OrderMonotone {
+                ordering_column,
+                prefer_greater,
+            } => {
                 // `target_col`/`delta_col` are already qualified
                 // (`target.<name>`/`delta.<name>`, the caller's own
                 // convention, `smelt-runtime::cumulative::build_cumulative_
@@ -126,11 +146,13 @@ impl CrossPartitionCombiner {
                 let delta_qualifier = delta_col.rsplit_once('.').map_or("delta", |(q, _)| q);
                 let target_ord = format!("{target_qualifier}.{ordering_column}");
                 let delta_ord = format!("{delta_qualifier}.{ordering_column}");
-                // Strict `>` — incumbent wins on a tie (§"Ordering ties":
-                // "the delta wins iff `delta.ordering > target.ordering`
-                // (strict); on equality the incumbent wins").
+                // Strict comparison — incumbent wins on a tie (§"Ordering
+                // ties": "the delta wins iff `delta.ordering > target.ordering`
+                // (strict); on equality the incumbent wins"), mirrored for
+                // `MIN_BY`/`ArgMin` (`prefer_greater: false`) with `<`.
+                let op = if *prefer_greater { ">" } else { "<" };
                 format!(
-                    "CASE WHEN {delta_ord} > {target_ord} THEN {delta_col} ELSE {target_col} END"
+                    "CASE WHEN {delta_ord} {op} {target_ord} THEN {delta_col} ELSE {target_col} END"
                 )
             }
             CrossPartitionCombiner::PlainOverwrite => delta_col.to_string(),
@@ -542,6 +564,17 @@ pub enum KeyedDiagnostic {
         column: String,
         reason: String,
     },
+    /// A hidden decomposed-state column (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models") collides with a
+    /// user-declared or projected output column of the same name.
+    /// `state_column` is the generated state column's name (always carrying
+    /// the reserved `__` suffix, e.g. `spend__sum`); `user_column` is the
+    /// colliding user-facing column. Never silently renamed — smelt does not
+    /// guess which of the two a consumer meant.
+    KeyedStateColumnCollision {
+        state_column: String,
+        user_column: String,
+    },
 }
 
 impl std::fmt::Display for KeyedDiagnostic {
@@ -632,8 +665,51 @@ impl std::fmt::Display for KeyedDiagnostic {
                  determines: {column}}}]`), or (3) remodelling `{column}` out into its own \
                  separate model."
             ),
+            KeyedDiagnostic::KeyedStateColumnCollision {
+                state_column,
+                user_column,
+            } => write!(
+                f,
+                "KeyedStateColumnCollision: the hidden decomposed-state column `{state_column}` \
+                 collides with the user column `{user_column}` — column names ending in the \
+                 reserved `__` suffix (e.g. `__sum`, `__count`, `__v`, `__o`, `__value`, \
+                 `__written`) are reserved for decomposed state; rename `{user_column}`."
+            ),
         }
     }
+}
+
+/// Pure detector for `KeyedStateColumnCollision`: which of `aggregator_columns`'
+/// own hidden decomposed-state columns collide with another projection's
+/// output name in the same classification. Every column family admitted
+/// before the decomposed-state mechanism existed classifies with `state:
+/// None` (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6 have not yet
+/// widened admission onto it), so this is unreachable via
+/// [`classify_cumulative`] today — wired in now so a future admission widen
+/// inherits the check for free, never a second place deciding it.
+pub fn diagnose_state_column_collisions(
+    aggregator_columns: &[AggregatorColumn],
+) -> Vec<KeyedDiagnostic> {
+    let user_columns: Vec<String> = aggregator_columns
+        .iter()
+        .map(|c| c.output_name.clone())
+        .collect();
+    aggregator_columns
+        .iter()
+        .filter_map(|c| c.state.as_ref())
+        .flat_map(|state| {
+            crate::analysis::decomposed_state::state_column_collisions(
+                &state.state_columns,
+                &user_columns,
+            )
+        })
+        .map(
+            |(state_column, user_column)| KeyedDiagnostic::KeyedStateColumnCollision {
+                state_column,
+                user_column,
+            },
+        )
+        .collect()
 }
 
 /// The result of classifying a `cumulative_aggregate` model.
@@ -909,6 +985,7 @@ pub fn classify_cumulative(
                                 output_name: alias.clone(),
                                 per_partition_agg: "COALESCE".to_string(),
                                 cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+                                state: None,
                             });
                         }
                         continue;
@@ -1007,6 +1084,7 @@ pub fn classify_cumulative(
                                 output_name: alias.clone(),
                                 per_partition_agg: "ANY_VALUE".to_string(),
                                 cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                                state: None,
                             });
                         } else {
                             diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
@@ -1089,6 +1167,7 @@ pub fn classify_cumulative(
                                 output_name: alias.clone(),
                                 per_partition_agg: agg_upper,
                                 cross_partition_combiner: combiner,
+                                state: None,
                             });
                         } else {
                             diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
@@ -1172,6 +1251,13 @@ pub fn classify_cumulative(
             }
         }
     }
+
+    // Rule: no hidden decomposed-state column may collide with a user
+    // column of the same name. Unreachable today (every admitted family
+    // classifies with `state: None`) — wired in so a future admission
+    // widen (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6)
+    // inherits the check for free.
+    diagnostics.extend(diagnose_state_column_collisions(&aggregator_columns));
 
     if !diagnostics.is_empty() {
         return Err(diagnostics);
@@ -1257,7 +1343,11 @@ fn classify_order_monotone_column(
             aggregator_columns.push(AggregatorColumn {
                 output_name: alias.to_string(),
                 per_partition_agg: agg_upper.to_string(),
-                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone { ordering_column },
+                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone {
+                    ordering_column,
+                    prefer_greater: sql_fn == SqlFunction::ArgMax,
+                },
+                state: None,
             });
         }
         None => {
@@ -1779,5 +1869,82 @@ GROUP BY e.device_id, e.user_id"#;
         assert_eq!(combiner_for("Sum"), Some(CrossPartitionCombiner::Sum));
         assert_eq!(combiner_for("avg"), None);
         assert_eq!(combiner_for("string_agg"), None);
+    }
+
+    /// A projection aliased `spend__sum` alongside a state-bearing `spend`
+    /// (whose derived state carries a `spend__sum` column) collides —
+    /// `KeyedStateColumnCollision` names both the state column and the user
+    /// column, and the reserved `__` suffix.
+    #[test]
+    fn state_column_collision_is_diagnosed() {
+        use crate::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let aggregator_columns = vec![
+            AggregatorColumn {
+                output_name: "spend".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "spend__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "spend__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "spend__sum / spend__count".to_string(),
+                }),
+            },
+            AggregatorColumn {
+                output_name: "spend__sum".to_string(),
+                per_partition_agg: "SUM".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            },
+        ];
+
+        let diagnostics = diagnose_state_column_collisions(&aggregator_columns);
+        assert_eq!(
+            diagnostics,
+            vec![KeyedDiagnostic::KeyedStateColumnCollision {
+                state_column: "spend__sum".to_string(),
+                user_column: "spend__sum".to_string(),
+            }]
+        );
+        let message = diagnostics[0].to_string();
+        assert!(message.contains("spend__sum"), "{message}");
+        assert!(message.contains("__"), "{message}");
+    }
+
+    /// Every column family admitted today still classifies with `state:
+    /// None` — the no-admission-widening guard for this phase
+    /// (`docs/outcomes/20260809-rung2-state-shapes` phase 3).
+    #[test]
+    fn existing_keyed_classifications_carry_no_state() {
+        let sql = r#"SELECT
+    device_id,
+    user_id,
+    COUNT(*) AS event_count,
+    MIN(event_ts) AS first_seen,
+    MAX(event_ts) AS last_seen
+FROM smelt.silver.events_parsed
+WHERE user_id IS NOT NULL
+GROUP BY device_id, user_id"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+            .expect("must classify");
+        assert!(
+            classification
+                .aggregator_columns
+                .iter()
+                .all(|c| c.state.is_none()),
+            "admission is not yet widened onto decomposed state: {:?}",
+            classification.aggregator_columns
+        );
     }
 }

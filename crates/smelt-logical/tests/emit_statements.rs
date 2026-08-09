@@ -5,11 +5,14 @@
 //! (byte-parity against production text is asserted from the execution side
 //! in `crates/smelt-runtime/tests/statement_parity.rs`).
 
+use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
     emit_keyed_fold, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region,
+    emit_staged_candidate_conditional_recompute, state_augmented_projection, MaintenanceDialect,
+    Region, StateAugmentRefusal,
 };
+use smelt_logical::CrossPartitionCombiner;
 
 #[test]
 fn delete_insert_group_is_transactional_and_matches_production_shape() {
@@ -568,4 +571,99 @@ fn staged_candidate_conditional_recompute_panics_on_empty_key() {
         &["a".to_string()],
         MaintenanceDialect::DuckDb,
     );
+}
+
+/// A state-bearing fold set (`docs/specs/incremental_models.md` §"Decomposed
+/// state (rung 2) in keyed models"): `emit_keyed_fold` assembles the `SET`
+/// clause from whatever `(column, expr)` pairs it is handed — the state
+/// columns' own combiner expressions, plus the presented column set to `π`
+/// over the merged state exprs (`smelt-runtime`'s
+/// `build_cumulative_merge_sql` is the caller that derives this expanded
+/// fold list; this test pins the emitter's generic handling of that shape).
+#[test]
+fn keyed_fold_over_state_projects_and_folds_state_columns() {
+    let group = emit_keyed_fold(
+        "main.customer_stats",
+        &["customer_id".to_string()],
+        &[
+            (
+                "avg_amount__sum".to_string(),
+                "target.avg_amount__sum + delta.avg_amount__sum".to_string(),
+            ),
+            (
+                "avg_amount__count".to_string(),
+                "target.avg_amount__count + delta.avg_amount__count".to_string(),
+            ),
+            (
+                "avg_amount".to_string(),
+                "(target.avg_amount__sum + delta.avg_amount__sum) / \
+                 (target.avg_amount__count + delta.avg_amount__count)"
+                    .to_string(),
+            ),
+        ],
+        "SELECT customer_id, SUM(amount) AS avg_amount__sum, COUNT(amount) AS avg_amount__count \
+         FROM events GROUP BY 1",
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.customer_stats AS target USING (SELECT customer_id, SUM(amount) AS \
+         avg_amount__sum, COUNT(amount) AS avg_amount__count FROM events GROUP BY 1) AS delta \
+         ON target.customer_id = delta.customer_id \
+         WHEN MATCHED THEN UPDATE SET \
+         avg_amount__sum = target.avg_amount__sum + delta.avg_amount__sum, \
+         avg_amount__count = target.avg_amount__count + delta.avg_amount__count, \
+         avg_amount = (target.avg_amount__sum + delta.avg_amount__sum) / \
+         (target.avg_amount__count + delta.avg_amount__count) \
+         WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// `state_augmented_projection` appends `, <per_partition_expr> AS <state
+/// col>` for each state column, leaving the key/GROUP BY and the model's own
+/// presented select item unchanged.
+#[test]
+fn state_augmented_projection_appends_state_select_items() {
+    let sql = "SELECT customer_id, SUM(amount) / COUNT(amount) AS avg_amount FROM events \
+               GROUP BY customer_id";
+    let state_columns = vec![
+        StateColumn {
+            name: "avg_amount__sum".to_string(),
+            per_partition_expr: "SUM(amount)".to_string(),
+            combiner: CrossPartitionCombiner::Sum,
+        },
+        StateColumn {
+            name: "avg_amount__count".to_string(),
+            per_partition_expr: "COUNT(amount)".to_string(),
+            combiner: CrossPartitionCombiner::Sum,
+        },
+    ];
+    let augmented =
+        state_augmented_projection(sql, &state_columns).expect("well-formed SQL must augment");
+    assert_eq!(
+        augmented,
+        "SELECT customer_id, SUM(amount) / COUNT(amount) AS avg_amount, SUM(amount) AS \
+         avg_amount__sum, COUNT(amount) AS avg_amount__count FROM events GROUP BY customer_id"
+    );
+
+    // An empty state-column list returns the SQL unchanged (the stateless
+    // shape every column family admitted before this mechanism existed
+    // still produces).
+    assert_eq!(
+        state_augmented_projection(sql, &[]).expect("empty state must round-trip unchanged"),
+        sql
+    );
+}
+
+/// Unparseable SQL is refused, never mangled into a broken string.
+#[test]
+fn state_augmented_projection_refuses_unparseable_sql() {
+    let state_columns = vec![StateColumn {
+        name: "x__sum".to_string(),
+        per_partition_expr: "SUM(x)".to_string(),
+        combiner: CrossPartitionCombiner::Sum,
+    }];
+    let result = state_augmented_projection("not even sql (((", &state_columns);
+    assert_eq!(result, Err(StateAugmentRefusal::Unparseable));
 }

@@ -1430,12 +1430,15 @@ fn max_by_merge_renders_incumbent_comparison() {
                 per_partition_agg: "MAX_BY".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::OrderMonotone {
                     ordering_column: "updated_at".to_string(),
+                    prefer_greater: true,
                 },
+                state: None,
             },
             AggregatorColumn {
                 output_name: "updated_at".to_string(),
                 per_partition_agg: "MAX".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Max,
+                state: None,
             },
         ],
         driving_source: DrivingSource {
@@ -1493,6 +1496,7 @@ fn once_write_renders_coalesce_target_first() {
             output_name: "signup_referrer".to_string(),
             per_partition_agg: "COALESCE".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),
@@ -1545,6 +1549,7 @@ fn snapshot_reconcile_merges_whole_source_no_window() {
             output_name: "current_val".to_string(),
             per_partition_agg: "ANY_VALUE".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.dim".to_string(),

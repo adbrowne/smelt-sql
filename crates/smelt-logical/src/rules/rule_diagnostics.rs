@@ -53,6 +53,7 @@ pub enum RuleDiagnosticCode {
     KeyedMultipleDrivingSources,
     KeyedSqlNotParseable,
     KeyedOnceWriteUnproven,
+    KeyedStateColumnCollision,
     PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
@@ -512,6 +513,9 @@ fn keyed_to_rule(diag: &KeyedDiagnostic) -> RuleDiagnostic {
         KeyedDiagnostic::KeyedSqlNotParseable => RuleDiagnosticCode::KeyedSqlNotParseable,
         KeyedDiagnostic::KeyedOnceWriteUnproven { .. } => {
             RuleDiagnosticCode::KeyedOnceWriteUnproven
+        }
+        KeyedDiagnostic::KeyedStateColumnCollision { .. } => {
+            RuleDiagnosticCode::KeyedStateColumnCollision
         }
     };
     RuleDiagnostic {

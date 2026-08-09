@@ -335,6 +335,18 @@ pub async fn execute_cumulative_aggregate(
     // conditional-maintenance.md` Phase C6) — never re-derived per step.
     let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
 
+    // The hidden decomposed-state columns every state-bearing aggregator
+    // column carries (`docs/specs/incremental_models.md` §"Decomposed state
+    // (rung 2) in keyed models") — derived once, like `suppression` above.
+    // Empty for every column family admitted before this mechanism existed,
+    // in which case `state_augmented_projection` below is a no-op.
+    let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> = classification
+        .aggregator_columns
+        .iter()
+        .filter_map(|c| c.state.as_ref())
+        .flat_map(|s| s.state_columns.clone())
+        .collect();
+
     run_windowed_keyed_maintenance(
         backend,
         model_name,
@@ -364,16 +376,28 @@ pub async fn execute_cumulative_aggregate(
                 .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
                 .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
+            let augmented_sql = smelt_logical::maintenance::emit::state_augmented_projection(
+                &compiled.sql,
+                &state_columns,
+            )
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to append decomposed-state columns to model '{}': its compiled SELECT \
+                     could not be parsed",
+                    model_name
+                )
+            })?;
+
             if verbose {
                 tracing::debug!(
                     "-- {} (partition {})\n{}",
                     model_name,
                     step.partition_value,
-                    compiled.sql
+                    augmented_sql
                 );
             }
 
-            Ok(compiled.sql)
+            Ok(augmented_sql)
         },
         retry,
     )
@@ -418,6 +442,22 @@ pub async fn execute_snapshot_reconcile(
         .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
         .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
+    let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> = classification
+        .aggregator_columns
+        .iter()
+        .filter_map(|c| c.state.as_ref())
+        .flat_map(|s| s.state_columns.clone())
+        .collect();
+    let augmented_sql =
+        smelt_logical::maintenance::emit::state_augmented_projection(&compiled.sql, &state_columns)
+            .map_err(|_| {
+                anyhow::anyhow!(
+            "Failed to append decomposed-state columns to model '{}': its compiled SELECT could \
+             not be parsed",
+            model_name
+        )
+            })?;
+
     let table_exists = backend
         .table_exists(schema, db_table_name)
         .await
@@ -425,7 +465,7 @@ pub async fn execute_snapshot_reconcile(
 
     if !table_exists {
         backend
-            .create_table_as(schema, db_table_name, &compiled.sql)
+            .create_table_as(schema, db_table_name, &augmented_sql)
             .await
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
@@ -433,7 +473,7 @@ pub async fn execute_snapshot_reconcile(
         let merge_sql = build_cumulative_merge_sql(
             schema,
             db_table_name,
-            &compiled.sql,
+            &augmented_sql,
             classification,
             None,
             &suppression,
@@ -505,12 +545,7 @@ pub fn build_cumulative_merge_sql(
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
         .iter()
-        .map(|col: &AggregatorColumn| {
-            let target_col = format!("target.{}", col.output_name);
-            let delta_col = format!("delta.{}", col.output_name);
-            let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
-            (col.output_name.clone(), expr)
-        })
+        .flat_map(expand_aggregator_column_folds)
         .collect();
 
     let schema_table = format!("{schema}.{table}");
@@ -534,6 +569,73 @@ pub fn build_cumulative_merge_sql(
         ),
     };
     group.statements[0].sql.clone()
+}
+
+/// Expand one [`AggregatorColumn`] into its `(column, combine_expression)`
+/// fold pairs for the `MERGE`'s `SET` clause (`docs/specs/
+/// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
+/// "Combiner over state"). A stateless column (`state: None`, every family
+/// admitted before this mechanism existed) still produces exactly the one
+/// pair it always has. A state-bearing column expands into one pair per
+/// hidden state column (each folded by its own combiner over
+/// `target.<c>`/`delta.<c>`) plus the presented column, set to the
+/// presentation expression with every state-column reference substituted by
+/// that column's own *merged* expression — so the presented value is always
+/// recomputed fresh from the just-merged state, never folded directly.
+fn expand_aggregator_column_folds(col: &AggregatorColumn) -> Vec<(String, String)> {
+    let Some(state) = &col.state else {
+        let target_col = format!("target.{}", col.output_name);
+        let delta_col = format!("delta.{}", col.output_name);
+        let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
+        return vec![(col.output_name.clone(), expr)];
+    };
+
+    let mut folds: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len() + 1);
+    let mut presentation_expr = state.presentation_expr.clone();
+    for state_col in &state.state_columns {
+        let target_col = format!("target.{}", state_col.name);
+        let delta_col = format!("delta.{}", state_col.name);
+        let merged = state_col.combiner.render(&target_col, &delta_col);
+        presentation_expr =
+            substitute_identifier(&presentation_expr, &state_col.name, &format!("({merged})"));
+        folds.push((state_col.name.clone(), merged));
+    }
+    folds.push((col.output_name.clone(), presentation_expr));
+    folds
+}
+
+/// Replace every whole-identifier occurrence of `name` in `text` with
+/// `replacement` — a match must not be preceded or followed by another
+/// identifier character (`[A-Za-z0-9_]`), so `avg_amount__sum` is not
+/// matched inside `avg_amount__sum_2`. Used to rewrite a `DecomposedState`
+/// presentation expression's state-column references onto their merged
+/// fold expressions (`expand_aggregator_column_folds`) — plain string
+/// substitution over SQL identifiers, not general SQL rewriting.
+fn substitute_identifier(text: &str, name: &str, replacement: &str) -> String {
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut skip_until = 0usize;
+    for (i, ch) in text.char_indices() {
+        if i < skip_until {
+            continue;
+        }
+        if text[i..].starts_with(name) {
+            let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
+            let after = i + name.len();
+            let after_ok = after >= bytes.len() || !is_ident_char(bytes[after] as char);
+            if before_ok && after_ok {
+                result.push_str(replacement);
+                skip_until = after;
+                continue;
+            }
+        }
+        result.push(ch);
+    }
+    result
 }
 
 /// Resolve this classification's [`WriteSuppression`] verdict
@@ -658,16 +760,19 @@ mod tests {
                     output_name: "event_count".to_string(),
                     per_partition_agg: "COUNT".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Sum,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "first_seen".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "last_seen".to_string(),
                     per_partition_agg: "MAX".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
                 },
             ],
             driving_source: DrivingSource {
@@ -732,6 +837,7 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
@@ -789,6 +895,7 @@ mod tests {
                 output_name: "max_amount".to_string(),
                 per_partition_agg: "MAX".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Max,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.transactions".to_string(),
@@ -837,6 +944,7 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
@@ -892,6 +1000,7 @@ mod tests {
                 output_name: "max_amount".to_string(),
                 per_partition_agg: "MAX".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Max,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
@@ -977,11 +1086,13 @@ mod tests {
                     output_name: "device_id".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "first_seen_date".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
             ],
             driving_source: DrivingSource {
@@ -1018,6 +1129,7 @@ mod tests {
                 output_name: "xor_bits".to_string(),
                 per_partition_agg: "BIT_XOR".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::BitXor,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
@@ -1043,11 +1155,13 @@ mod tests {
                     output_name: "max_val".to_string(),
                     per_partition_agg: "MAX".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "and_bits".to_string(),
                     per_partition_agg: "BIT_AND".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::BitAnd,
+                    state: None,
                 },
             ],
             driving_source: DrivingSource {
@@ -1070,6 +1184,7 @@ mod tests {
                 output_name: "median_latency".to_string(),
                 per_partition_agg: "MEDIAN".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
@@ -1089,6 +1204,7 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
@@ -1110,5 +1226,123 @@ mod tests {
         let sql = "SELECT smelt.functions.foo(x) FROM smelt.silver.events";
         let refs = collect_refs_from_sql(sql);
         assert_eq!(refs, vec!["smelt.silver.events".to_string()]);
+    }
+
+    /// A state-bearing classification's `MERGE` folds each hidden state
+    /// column by its own combiner and recomputes the presented column from
+    /// the merged state — byte-identical to a direct `emit_keyed_fold` call
+    /// over the state-expanded fold set (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models").
+    #[test]
+    fn build_cumulative_merge_sql_folds_state_columns() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["customer_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT customer_id, SUM(amount) AS avg_amount__sum, COUNT(amount) AS \
+                          avg_amount__count FROM events GROUP BY 1";
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "customer_stats",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+        );
+
+        let expected = emit_keyed_fold(
+            "main.customer_stats",
+            &classification.unique_key,
+            &[
+                (
+                    "avg_amount__sum".to_string(),
+                    "target.avg_amount__sum + delta.avg_amount__sum".to_string(),
+                ),
+                (
+                    "avg_amount__count".to_string(),
+                    "target.avg_amount__count + delta.avg_amount__count".to_string(),
+                ),
+                (
+                    "avg_amount".to_string(),
+                    "(target.avg_amount__sum + delta.avg_amount__sum) / \
+                     (target.avg_amount__count + delta.avg_amount__count)"
+                        .to_string(),
+                ),
+            ],
+            delta_sql,
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            sql, expected.statements[0].sql,
+            "state-bearing merge must be byte-identical to a direct emitter call over the \
+             state-expanded fold set"
+        );
+    }
+
+    /// A classification with no state-bearing column (every family admitted
+    /// today) folds exactly as before this mechanism existed — the
+    /// no-admission-widening guard, mirrored at the runtime layer.
+    #[test]
+    fn stateless_merge_sql_is_unchanged() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+        );
+        let expected = emit_keyed_fold(
+            "main.device_daily",
+            &classification.unique_key,
+            &[(
+                "event_count".to_string(),
+                "target.event_count + delta.event_count".to_string(),
+            )],
+            delta_sql,
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(sql, expected.statements[0].sql);
     }
 }

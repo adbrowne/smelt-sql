@@ -532,7 +532,7 @@ per-family shape:
 | `AVG(x)` | `sum`, `count` | pairwise `+` on each column | `sum / count`, `NULL` when `count = 0` |
 | `STDDEV_*(x)` / `VAR_*(x)` | `n`, `sx` (`Σx`), `sxx` (`Σx²`) | pairwise `+` on each column | per-family closed form over `(n, Σx, Σx²)` (population vs. sample divisor and `sqrt` per the specific function), `NULL` below the family's minimum `n` (`0` population, `1` sample) |
 | `MAX_BY(v, o)` / `MIN_BY(v, o)` | `v`, `o` (the hidden ordering value) | keep the pair whose `o` is greater (`MAX_BY`) / lesser (`MIN_BY`); on equality the incumbent wins, matching §"Ordering ties" | `v` — `o` is never presented |
-| once-write | `value`, `written` (boolean) | `written` is `OR`; `value` is the incumbent's unless the delta's `written` is true, in which case the delta's | family-specific, below |
+| once-write | `value`, `written` (boolean) | `written` is `OR`; `value` is `COALESCE(target.value, delta.value)` — the incumbent's value survives once written, the delta only ever fills a state row that was never written | family-specific, below |
 
 `AVG`'s and `STDDEV_*`/`VAR_*`'s state combiners are commutative monoids over their state tuples
 (component-wise `SUM`, itself a monoid), so the equivalence invariant and the order/set-determinacy

@@ -745,6 +745,10 @@ pub enum DiagnosticCode {
     /// column-family catalogue"). Names the column and the three fixes:
     /// key-derived form, declared functional dependency, or remodelling.
     KeyedOnceWriteUnproven,
+    /// A hidden decomposed-state column (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models") collides with a
+    /// user-declared or projected output column of the same name.
+    KeyedStateColumnCollision,
     /// A `refresh: keyed` model incorrectly declares a `timeseries:` block
     /// (key temporal locality is not established). The keyed output has no
     /// partition column by default; the rule reads it from the driving

@@ -191,21 +191,25 @@ fn full_classification() -> CumulativeClassification {
             output_name: "event_count".to_string(),
             per_partition_agg: "COUNT".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Sum,
+            state: None,
         },
         AggregatorColumn {
             output_name: "any_flag".to_string(),
             per_partition_agg: "BOOL_OR".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::BoolOr,
+            state: None,
         },
         AggregatorColumn {
             output_name: "max_score".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         },
         AggregatorColumn {
             output_name: "min_score".to_string(),
             per_partition_agg: "MIN".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Min,
+            state: None,
         },
     ])
 }
@@ -408,6 +412,7 @@ async fn bool_and_combiner_round_trips() {
         output_name: "all_flag".to_string(),
         per_partition_agg: "BOOL_AND".to_string(),
         cross_partition_combiner: CrossPartitionCombiner::BoolAnd,
+        state: None,
     }]);
 
     let delta_p1 = "SELECT device_id, user_id, BOOL_AND(flag) AS all_flag \
@@ -476,16 +481,19 @@ async fn bitwise_combiners_round_trip() {
                 output_name: "all_bits".to_string(),
                 per_partition_agg: "BIT_AND".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::BitAnd,
+                state: None,
             },
             AggregatorColumn {
                 output_name: "any_bits".to_string(),
                 per_partition_agg: "BIT_OR".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::BitOr,
+                state: None,
             },
             AggregatorColumn {
                 output_name: "xor_bits".to_string(),
                 per_partition_agg: "BIT_XOR".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::BitXor,
+                state: None,
             },
         ],
         driving_source: DrivingSource {

@@ -1020,6 +1020,69 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
     }
 }
 
+// ── Decomposed state (rung 2) select augmentation (`docs/specs/
+// incremental_models.md` §"Decomposed state (rung 2) in keyed models") ────
+
+/// Why [`state_augmented_projection`] could not append the state columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateAugmentRefusal {
+    /// `sql` could not be parsed, or its SELECT list could not be located —
+    /// fail-closed rather than text-splice blind.
+    Unparseable,
+}
+
+/// Append one `, <per_partition_expr> AS <name>` select item per
+/// `state_columns` to `sql`'s own SELECT list, leaving every other clause
+/// (the key/GROUP BY columns, the model's own presented select items, WHERE/
+/// FROM/GROUP BY) byte-unchanged. `state_columns` is derived once from the
+/// classification (`decomposed_state::DecomposedState::state_columns`
+/// across every state-bearing `AggregatorColumn`); the caller applies this
+/// to the compiled delta SELECT so the stored table and the delta agree on
+/// columns before `CREATE TABLE AS` / `MERGE ... WHEN NOT MATCHED THEN
+/// INSERT *` (`docs/specs/incremental_models.md` §"Decomposed state (rung 2)
+/// in keyed models"). `state_columns.is_empty()` returns `sql` unchanged —
+/// the stateless shape every column family admitted before this mechanism
+/// existed still produces.
+///
+/// The insertion point is located via the CST (the last select item's own
+/// `text_range`), never a whole-text scan — this emitter is a leaf
+/// operation over one already-parsed SELECT, not a second admission pass
+/// (`docs/specs/architecture.md` §"Property composition walk rule").
+/// Refuses (never mangles the string) when `sql` doesn't parse or its
+/// SELECT list can't be located.
+pub fn state_augmented_projection(
+    sql: &str,
+    state_columns: &[crate::analysis::decomposed_state::StateColumn],
+) -> Result<String, StateAugmentRefusal> {
+    if state_columns.is_empty() {
+        return Ok(sql.to_string());
+    }
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax()).ok_or(StateAugmentRefusal::Unparseable)?;
+    let select = file.select_stmt().ok_or(StateAugmentRefusal::Unparseable)?;
+    let list = select
+        .select_list()
+        .ok_or(StateAugmentRefusal::Unparseable)?;
+    let last_item = list
+        .items()
+        .last()
+        .ok_or(StateAugmentRefusal::Unparseable)?;
+    let insert_at: usize = last_item.range().end().into();
+
+    let mut additions = String::new();
+    for state_col in state_columns {
+        additions.push_str(&format!(
+            ", {} AS {}",
+            state_col.per_partition_expr, state_col.name
+        ));
+    }
+    let mut out = String::with_capacity(sql.len() + additions.len());
+    out.push_str(&sql[..insert_at]);
+    out.push_str(&additions);
+    out.push_str(&sql[insert_at..]);
+    Ok(out)
+}
+
 // ── Fingerprint sidecar diff (F3, `docs/plans/20260715-composed-axes-
 // conditional-maintenance.md` Phase F3; `docs/specs/sources.md` §"The
 // fingerprint sidecar") ────────────────────────────────────────────────

@@ -1246,6 +1246,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
             output_name: "last_seen_date".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),

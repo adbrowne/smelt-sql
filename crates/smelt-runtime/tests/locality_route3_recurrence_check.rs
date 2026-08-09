@@ -82,6 +82,7 @@ fn classification() -> CumulativeClassification {
             output_name: "last_seen_date".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),

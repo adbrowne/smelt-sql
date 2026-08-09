@@ -190,6 +190,7 @@ fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
             output_name: "last_seen".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: format!("smelt.sources.{}", recipe.source.name),

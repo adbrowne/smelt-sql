@@ -52,8 +52,12 @@ GROUP BY device_id"#;
         .expect("status column present");
     assert_eq!(status_col.per_partition_agg, "MAX_BY");
     match &status_col.cross_partition_combiner {
-        CrossPartitionCombiner::OrderMonotone { ordering_column } => {
+        CrossPartitionCombiner::OrderMonotone {
+            ordering_column,
+            prefer_greater,
+        } => {
             assert_eq!(ordering_column, "updated_at");
+            let _ = prefer_greater;
         }
         other => panic!("expected OrderMonotone combiner, got {other:?}"),
     }
@@ -90,8 +94,12 @@ GROUP BY device_id"#;
         .find(|c| c.output_name == "status")
         .expect("status column present");
     match &status_col.cross_partition_combiner {
-        CrossPartitionCombiner::OrderMonotone { ordering_column } => {
+        CrossPartitionCombiner::OrderMonotone {
+            ordering_column,
+            prefer_greater,
+        } => {
             assert_eq!(ordering_column, "updated_at");
+            let _ = prefer_greater;
         }
         other => panic!("expected OrderMonotone combiner, got {other:?}"),
     }
@@ -392,6 +400,7 @@ GROUP BY device_id"#;
 fn order_monotone_combiner_renders_incumbent_wins_comparison() {
     let combiner = CrossPartitionCombiner::OrderMonotone {
         ordering_column: "updated_at".to_string(),
+        prefer_greater: true,
     };
     let rendered = combiner.render("target.status", "delta.status");
     assert_eq!(

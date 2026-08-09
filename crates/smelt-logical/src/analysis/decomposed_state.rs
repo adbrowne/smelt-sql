@@ -13,23 +13,31 @@
 
 use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::presentation::{presentation_map_purity, Purity};
+use crate::rules::cumulative::CrossPartitionCombiner;
+use serde::Serialize;
 use smelt_parser::Expr;
 use smelt_types::SqlFunction;
 
-/// One hidden state column backing a decomposed aggregate: its name and the
+/// One hidden state column backing a decomposed aggregate: its name, the
 /// per-partition expression that accumulates it (e.g. `SUM(x)` for the `sum`
-/// half of `AVG`'s `(sum, count)` decomposition).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// half of `AVG`'s `(sum, count)` decomposition), and the cross-partition
+/// combiner the keyed `MERGE` folds it with (`docs/specs/
+/// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
+/// "Combiner over state"). Reuses `CrossPartitionCombiner` rather than a
+/// second combiner vocabulary — a state column's fold is not conceptually
+/// different from a stateless presented column's fold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct StateColumn {
     pub name: String,
     pub per_partition_expr: String,
+    pub combiner: CrossPartitionCombiner,
 }
 
 /// The decomposition of one aggregate output into hidden state columns plus
 /// a pure presentation view. `(state_columns, presentation_expr)` is one
 /// atomically-swapped unit: `merge_into` maintains the state columns; the
 /// presentation view is a pure read of that state row (F7), never history.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DecomposedState {
     pub state_columns: Vec<StateColumn>,
     /// The presentation expression `π(state)`, e.g. `sum / count` for `AVG`.
@@ -86,10 +94,12 @@ pub fn decompose_to_state(
                 StateColumn {
                     name: sum_col.clone(),
                     per_partition_expr: format!("SUM({arg_expr})"),
+                    combiner: CrossPartitionCombiner::Sum,
                 },
                 StateColumn {
                     name: count_col.clone(),
                     per_partition_expr: format!("COUNT({arg_expr})"),
+                    combiner: CrossPartitionCombiner::Sum,
                 },
             ];
             let presentation_text = format!("{sum_col} / {count_col}");
@@ -159,14 +169,17 @@ fn decompose_variance_family(
         StateColumn {
             name: n_col.clone(),
             per_partition_expr: format!("COUNT({arg_expr})"),
+            combiner: CrossPartitionCombiner::Sum,
         },
         StateColumn {
             name: sx_col.clone(),
             per_partition_expr: format!("SUM({arg_expr})"),
+            combiner: CrossPartitionCombiner::Sum,
         },
         StateColumn {
             name: sxx_col.clone(),
             per_partition_expr: format!("SUM({arg_expr} * {arg_expr})"),
+            combiner: CrossPartitionCombiner::Sum,
         },
     ];
 
@@ -209,10 +222,19 @@ fn decompose_arg_by(
         StateColumn {
             name: v_col.clone(),
             per_partition_expr: format!("{arg_fn}({value_expr}, {ordering_expr})"),
+            combiner: CrossPartitionCombiner::OrderMonotone {
+                ordering_column: o_col.clone(),
+                prefer_greater: is_max,
+            },
         },
         StateColumn {
             name: o_col,
             per_partition_expr: format!("{order_fn}({ordering_expr})"),
+            combiner: if is_max {
+                CrossPartitionCombiner::Max
+            } else {
+                CrossPartitionCombiner::Min
+            },
         },
     ];
     build_decomposed_state(state_columns, v_col.clone(), &[])
@@ -268,10 +290,12 @@ pub fn decompose_once_write(
         state_columns.push(StateColumn {
             name: value_col.clone(),
             per_partition_expr: candidate.reduction_expr.clone(),
+            combiner: CrossPartitionCombiner::OnceWrite,
         });
         state_columns.push(StateColumn {
             name: written_col.clone(),
             per_partition_expr: format!("({}) IS NOT NULL", candidate.reduction_expr),
+            combiner: CrossPartitionCombiner::BoolOr,
         });
         pairs.push((value_col, written_col));
     }
@@ -369,10 +393,12 @@ mod tests {
                 StateColumn {
                     name: "avg_amount__sum".to_string(),
                     per_partition_expr: "SUM(amount)".to_string(),
+                    combiner: CrossPartitionCombiner::Sum,
                 },
                 StateColumn {
                     name: "avg_amount__count".to_string(),
                     per_partition_expr: "COUNT(amount)".to_string(),
+                    combiner: CrossPartitionCombiner::Sum,
                 },
             ]
         );
@@ -430,6 +456,7 @@ mod tests {
         let state_columns = vec![StateColumn {
             name: "avg_amount__sum".to_string(),
             per_partition_expr: "SUM(amount)".to_string(),
+            combiner: CrossPartitionCombiner::Sum,
         }];
         let result = build_decomposed_state(state_columns, "other_table.amount".to_string(), &[]);
         assert!(matches!(
@@ -456,14 +483,17 @@ mod tests {
                     StateColumn {
                         name: "stat_amount__n".to_string(),
                         per_partition_expr: "COUNT(amount)".to_string(),
+                        combiner: CrossPartitionCombiner::Sum,
                     },
                     StateColumn {
                         name: "stat_amount__sx".to_string(),
                         per_partition_expr: "SUM(amount)".to_string(),
+                        combiner: CrossPartitionCombiner::Sum,
                     },
                     StateColumn {
                         name: "stat_amount__sxx".to_string(),
                         per_partition_expr: "SUM(amount * amount)".to_string(),
+                        combiner: CrossPartitionCombiner::Sum,
                     },
                 ],
                 "{function:?}"
@@ -522,10 +552,15 @@ mod tests {
                 StateColumn {
                     name: "latest_v__v".to_string(),
                     per_partition_expr: "ARG_MAX(v, o)".to_string(),
+                    combiner: CrossPartitionCombiner::OrderMonotone {
+                        ordering_column: "latest_v__o".to_string(),
+                        prefer_greater: true,
+                    },
                 },
                 StateColumn {
                     name: "latest_v__o".to_string(),
                     per_partition_expr: "MAX(o)".to_string(),
+                    combiner: CrossPartitionCombiner::Max,
                 },
             ]
         );
@@ -540,10 +575,15 @@ mod tests {
                 StateColumn {
                     name: "earliest_v__v".to_string(),
                     per_partition_expr: "ARG_MIN(v, o)".to_string(),
+                    combiner: CrossPartitionCombiner::OrderMonotone {
+                        ordering_column: "earliest_v__o".to_string(),
+                        prefer_greater: false,
+                    },
                 },
                 StateColumn {
                     name: "earliest_v__o".to_string(),
                     per_partition_expr: "MIN(o)".to_string(),
+                    combiner: CrossPartitionCombiner::Min,
                 },
             ]
         );
@@ -562,10 +602,12 @@ mod tests {
                 StateColumn {
                     name: "target__value".to_string(),
                     per_partition_expr: "MAX(col)".to_string(),
+                    combiner: CrossPartitionCombiner::OnceWrite,
                 },
                 StateColumn {
                     name: "target__written".to_string(),
                     per_partition_expr: "(MAX(col)) IS NOT NULL".to_string(),
+                    combiner: CrossPartitionCombiner::BoolOr,
                 },
             ]
         );
@@ -607,18 +649,22 @@ mod tests {
                 StateColumn {
                     name: "target__value_1".to_string(),
                     per_partition_expr: "MAX(a)".to_string(),
+                    combiner: CrossPartitionCombiner::OnceWrite,
                 },
                 StateColumn {
                     name: "target__written_1".to_string(),
                     per_partition_expr: "(MAX(a)) IS NOT NULL".to_string(),
+                    combiner: CrossPartitionCombiner::BoolOr,
                 },
                 StateColumn {
                     name: "target__value_2".to_string(),
                     per_partition_expr: "MAX(b)".to_string(),
+                    combiner: CrossPartitionCombiner::OnceWrite,
                 },
                 StateColumn {
                     name: "target__written_2".to_string(),
                     per_partition_expr: "(MAX(b)) IS NOT NULL".to_string(),
+                    combiner: CrossPartitionCombiner::BoolOr,
                 },
             ]
         );
@@ -658,10 +704,12 @@ mod tests {
             StateColumn {
                 name: "total_spend__sum".to_string(),
                 per_partition_expr: "SUM(amount)".to_string(),
+                combiner: CrossPartitionCombiner::Sum,
             },
             StateColumn {
                 name: "total_spend__count".to_string(),
                 per_partition_expr: "COUNT(amount)".to_string(),
+                combiner: CrossPartitionCombiner::Sum,
             },
         ];
 
@@ -682,5 +730,100 @@ mod tests {
             &["customer_id".to_string(), "total_spend".to_string()],
         );
         assert!(none.is_empty());
+    }
+
+    /// `AVG`'s `(sum, count)` state columns both fold additively —
+    /// `docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// keyed models".
+    #[test]
+    fn avg_state_columns_carry_sum_combiners() {
+        let decomposed = decompose_to_state(SqlFunction::Avg, false, &["amount"], "avg_amount")
+            .expect("AVG should decompose");
+        for state_col in &decomposed.state_columns {
+            assert_eq!(
+                state_col.combiner,
+                CrossPartitionCombiner::Sum,
+                "{state_col:?}"
+            );
+        }
+    }
+
+    /// `ARG_MAX`'s `v` state column folds order-monotone against its own
+    /// `o` state column (never a hidden ordering column); `o` folds `Max`.
+    #[test]
+    fn arg_max_state_value_folds_on_ordering_column() {
+        let decomposed = decompose_to_state(SqlFunction::ArgMax, false, &["v", "o"], "latest_v")
+            .expect("MAX_BY should decompose");
+        assert_eq!(
+            decomposed.state_columns[0].combiner,
+            CrossPartitionCombiner::OrderMonotone {
+                ordering_column: "latest_v__o".to_string(),
+                prefer_greater: true,
+            }
+        );
+        assert_eq!(
+            decomposed.state_columns[1].combiner,
+            CrossPartitionCombiner::Max
+        );
+    }
+
+    /// `ARG_MIN`'s `v` fold wins on `delta.o < target.o` — the mirror of
+    /// `ARG_MAX`'s `>` — and `o` folds `Min`.
+    #[test]
+    fn arg_min_state_prefers_the_lesser_ordering() {
+        let decomposed = decompose_to_state(SqlFunction::ArgMin, false, &["v", "o"], "earliest_v")
+            .expect("MIN_BY should decompose");
+        let CrossPartitionCombiner::OrderMonotone {
+            ordering_column,
+            prefer_greater,
+        } = &decomposed.state_columns[0].combiner
+        else {
+            panic!(
+                "expected OrderMonotone combiner, got {:?}",
+                decomposed.state_columns[0].combiner
+            );
+        };
+        assert_eq!(ordering_column, "earliest_v__o");
+        assert!(
+            !prefer_greater,
+            "MIN_BY's v fold must prefer the lesser ordering value"
+        );
+        let rendered = decomposed.state_columns[0]
+            .combiner
+            .render("target.earliest_v__v", "delta.earliest_v__v");
+        assert!(
+            rendered.contains("delta.earliest_v__o < target.earliest_v__o"),
+            "{rendered}"
+        );
+        assert_eq!(
+            decomposed.state_columns[1].combiner,
+            CrossPartitionCombiner::Min
+        );
+    }
+
+    /// Once-write's `value` state column folds `OnceWrite` (the incumbent
+    /// keeps its value once written); `written` folds `BoolOr`.
+    #[test]
+    fn once_write_state_value_keeps_the_incumbent() {
+        let candidates = vec![OnceWriteCandidate {
+            reduction_expr: "MAX(col)".to_string(),
+        }];
+        let decomposed = decompose_once_write(&candidates, None, &[], "target")
+            .expect("single reduction should decompose");
+        assert_eq!(
+            decomposed.state_columns[0].combiner,
+            CrossPartitionCombiner::OnceWrite
+        );
+        assert_eq!(
+            decomposed.state_columns[1].combiner,
+            CrossPartitionCombiner::BoolOr
+        );
+        let rendered = decomposed.state_columns[0]
+            .combiner
+            .render("target.target__value", "delta.target__value");
+        assert_eq!(
+            rendered,
+            "COALESCE(target.target__value, delta.target__value)"
+        );
     }
 }

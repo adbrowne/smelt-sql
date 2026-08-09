@@ -1123,6 +1123,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
         R::KeyedOnceWriteUnproven => DiagnosticCode::KeyedOnceWriteUnproven,
+        R::KeyedStateColumnCollision => DiagnosticCode::KeyedStateColumnCollision,
         R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
