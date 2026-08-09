@@ -48,7 +48,7 @@ reconciliation runs and idempotent re-runs.
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
 | 8 | Conformance recipes for repair + diff-patch families | done |
 | 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | done |
-| 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | planned |
+| 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | done |
 | 11 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
@@ -246,6 +246,19 @@ reconciliation runs and idempotent re-runs.
   predicate compares hidden state columns alongside the presented compared columns, so a group
   whose presented value is unchanged but whose state moved is still rewritten (strictly less
   suppression, sound by construction) rather than left with stale state behind a correct value.
+
+- 2026-08-10 (implement 10): landed `CumulativeClassification::state_columns()`, replacing three
+  hand-rolled copies; `repair_augmented_model_sql` widens the repair candidate/insert (and the
+  `diff_patch` compared-column set) with the fold's own hidden state columns before compiling —
+  the same widening the ordinary fold path already applies. Discovered and fixed a real, latent
+  bug the widened mutation-loop test exposed: a repair `PlanCell`'s `group` string was built from
+  SQL-declaration column order while the canonical `ColumnGroup::name()` (used by
+  `matching_write_pin`) is alphabetical, so a `write: diff_patch` pin over a multi-column FD group
+  whose SQL order wasn't already alphabetical (`OrderMonotone`'s `(max_by_val, max_by_ord)`)
+  silently never matched — fixed by sorting the repair cell's own column list in `derive.rs`
+  before building its group string. `repair_pool_upholds_equivalence_under_retraction` now drives
+  `OrderMonotone` through the full mutation loop; the matching `KnownBug` registry entry and spec
+  divergence are deleted.
 
 ## Blocked
 

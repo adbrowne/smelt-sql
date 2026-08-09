@@ -419,12 +419,7 @@ pub async fn execute_cumulative_aggregate(
     // (rung 2) in keyed models") — derived once, like `suppression` above.
     // Empty for every column family admitted before this mechanism existed,
     // in which case `state_augmented_projection` below is a no-op.
-    let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> = classification
-        .aggregator_columns
-        .iter()
-        .filter_map(|c| c.state.as_ref())
-        .flat_map(|s| s.state_columns.clone())
-        .collect();
+    let state_columns = classification.state_columns();
 
     run_windowed_keyed_maintenance(
         backend,
@@ -529,12 +524,7 @@ pub async fn execute_snapshot_reconcile(
     // matching comment in `execute_windowed_keyed` for why (the state
     // expressions need the model's own source columns, only in scope
     // before the compiler's `_smelt_typed` cast wrapper).
-    let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> = classification
-        .aggregator_columns
-        .iter()
-        .filter_map(|c| c.state.as_ref())
-        .flat_map(|s| s.state_columns.clone())
-        .collect();
+    let state_columns = classification.state_columns();
     let augmented_sql =
         smelt_logical::maintenance::emit::state_augmented_projection(&clean_sql, &state_columns)
             .map_err(|_| {

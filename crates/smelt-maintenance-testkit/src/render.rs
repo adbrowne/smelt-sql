@@ -975,19 +975,29 @@ pub fn render_repair_model_body(recipe: &RepairRecipe) -> String {
 /// The full repair model file: `materialization: table` + `refresh:
 /// incremental` + `grain: key` + `unique_key: customer_id` frontmatter
 /// (mirrors `repair_lowering.rs::REPAIR_FIXTURE_FILE`), plus a `maintenance:
-/// cells: [{on: <source>, columns: [<alias>], write: diff_patch}]` block
+/// cells: [{on: <source>, columns: [<alias>...], write: diff_patch}]` block
 /// when [`RepairRecipe::write_mode`] pins `RepairWriteMode::DiffPatch`
 /// (mirrors `REPAIR_FIXTURE_DIFF_PATCH_FILE`), followed by
-/// [`render_repair_model_body`].
+/// [`render_repair_model_body`]. The pin's `columns:` list names every
+/// presented column the combiner projects (the value alias plus, for
+/// [`KeyedCombiner::OrderMonotone`], its ordering companion) — the derived
+/// plan cell's own column group is the FD-linked pair, never just the
+/// value alias alone, and `matching_write_pin` requires an exact match.
 pub fn render_repair_model_file(recipe: &RepairRecipe) -> String {
     let maintenance_block = match recipe.write_mode {
         RepairWriteMode::TargetedDeleteInsert => String::new(),
-        RepairWriteMode::DiffPatch => format!(
-            "maintenance:\n  cells:\n  - on: {source}\n    columns: [{col}]\n    write: \
-             diff_patch\n",
-            source = recipe.source_name,
-            col = recipe.value_alias(),
-        ),
+        RepairWriteMode::DiffPatch => {
+            let mut columns = vec![recipe.value_alias().to_string()];
+            if let Some(ord) = recipe.combiner.ordering_alias() {
+                columns.push(ord.to_string());
+            }
+            format!(
+                "maintenance:\n  cells:\n  - on: {source}\n    columns: [{cols}]\n    write: \
+                 diff_patch\n",
+                source = recipe.source_name,
+                cols = columns.join(", "),
+            )
+        }
     };
     format!(
         "---\nmaterialization: table\nrefresh: incremental\ngrain: key\nunique_key: \

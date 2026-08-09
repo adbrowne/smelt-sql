@@ -554,13 +554,7 @@ fn build_technique_statements(
             // 5): a state expression's `per_partition_expr` needs the
             // model's own raw source columns, only in scope before the
             // compiler's `_smelt_typed` cast wrapper.
-            let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> =
-                classification
-                    .aggregator_columns
-                    .iter()
-                    .filter_map(|c| c.state.as_ref())
-                    .flat_map(|s| s.state_columns.clone())
-                    .collect();
+            let state_columns = classification.state_columns();
             let pushed = smelt_logical::maintenance::emit::state_augmented_projection(
                 &pushed,
                 &state_columns,
@@ -707,9 +701,44 @@ fn build_technique_statements(
                 Some(clamp),
                 &region,
             );
+            // The fold's own create/merge path already carries a decomposed
+            // combiner's hidden state columns in the physical table (P10,
+            // `docs/outcomes/20260809-repair-family/phases/10-plan.md`) — a
+            // repair candidate must widen for them too, or this preview's
+            // shape would diverge from what a real run executes. A live
+            // `Technique::PerGroupRecompute` cell only ever exists for a
+            // model that already classified as a cumulative aggregate
+            // (`derive_new_data`'s key-grain narrowing), but this preview
+            // can be asked to illustrate the technique against an
+            // arbitrary `PlanCell`/model pairing that never classifies —
+            // fall back to "no hidden state" rather than refusing the
+            // whole preview.
+            let model_has_timeseries = model
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
+            let state_columns = classify_cumulative_sql(
+                &model.name,
+                &stripped_sql,
+                source_timeseries,
+                model_has_timeseries,
+                declared_fds,
+            )
+            .map(|c| c.state_columns())
+            .unwrap_or_default();
+            let augmented_sql = crate::maintenance_driver::repair_augmented_model_sql(
+                &stripped_sql,
+                &state_columns,
+            )
+            .map_err(|e| format!("{e}"))?;
             let compiled = registry
                 .get(target)
-                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
+                .compile_with_sql_and_ephemerals(model, schema, &augmented_sql, resolver)
                 .map_err(|e| format!("failed to compile model body: {e}"))?;
             let candidate_select = crate::maintenance_driver::repair_candidate_select(
                 &compiled.sql,

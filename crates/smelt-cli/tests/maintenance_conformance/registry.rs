@@ -53,13 +53,17 @@ enum DivergenceStatus {
     /// (`model_properties.md`/`incremental_models.md` §Known Divergences).
     Documented,
     /// A confirmed production gap, deliberately not fixed by this plan
-    /// (this plan's "Deferred during implementation" section). Three prior
+    /// (this plan's "Deferred during implementation" section). Four prior
     /// members of this status were closed this way (see this module's own
     /// doc comment) — most recently
-    /// `known_bug_repair_affected_key_discovery_misses_full_group_deletion`,
-    /// closed by the group-grain fingerprint sidecar diff
-    /// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`); the
-    /// current member is `known_bug_repair_candidate_select_ignores_decomposed_state`.
+    /// `known_bug_repair_candidate_select_ignores_decomposed_state`, closed
+    /// by widening the repair candidate/insert with the fold's own hidden
+    /// state columns (`docs/outcomes/20260809-repair-family/phases/
+    /// 10-plan.md`). No entry currently holds this status — kept alive
+    /// (`#[allow(dead_code)]`) as the governance machinery
+    /// (`known_bug_still_reproduces`, the staleness-report match arm) for
+    /// whichever production gap this suite discovers next.
+    #[allow(dead_code)]
     KnownBug,
 }
 
@@ -105,20 +109,6 @@ fn registry() -> Vec<DivergenceEntry> {
                 column cannot populate a Bounded scan window — NotDerivable, not an approximate \
                 fixed-day guess (model_properties.md interval-literal parsing note).",
             status: DivergenceStatus::Documented,
-        },
-        DivergenceEntry {
-            id: "known_bug_repair_candidate_select_ignores_decomposed_state",
-            description: "repair_candidate_select wraps the model's plain PRESENTED projection \
-                with no knowledge of a decomposed combiner's hidden state (e.g. OrderMonotone's \
-                (v, o) pair); the physical table the fold's own create path built carries the \
-                extra __-marked state columns, so a live PerGroupRecompute INSERT for such a \
-                combiner supplies fewer columns than the table has and the run errors. \
-                Discovered by repair::repair_pool_upholds_equivalence_under_retraction \
-                (docs/outcomes/20260809-repair-family/outcome.md); that test drives only \
-                KeyedCombiner::Idempotent through the mutation loop and proves OrderMonotone's \
-                creation-run equivalence only, to keep the standing gate honest about what it \
-                actually covers.",
-            status: DivergenceStatus::KnownBug,
         },
     ]
 }
@@ -178,15 +168,6 @@ fn known_bug_still_reproduces(id: &str) -> bool {
             // site in the incremental branch.
             let src = include_str!("../../../smelt-runtime/src/execute.rs");
             src.matches("save_deployed_schema").count() == 1
-        }
-        "known_bug_repair_candidate_select_ignores_decomposed_state" => {
-            // `repair_candidate_select` still wraps `full_model_sql`
-            // verbatim (`__smelt_repair_candidate.*` over the model's own
-            // plain projection) — the moment it instead widens the select
-            // for a decomposed combiner's hidden state columns, this
-            // literal text changes and the gap is closed.
-            let src = include_str!("../../../smelt-runtime/src/maintenance_driver.rs");
-            src.contains("SELECT __smelt_repair_candidate.* FROM ({full_model_sql})")
         }
         other => panic!("known_bug_still_reproduces: unhandled id {other:?}"),
     }

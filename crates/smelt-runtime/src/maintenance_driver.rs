@@ -1824,6 +1824,32 @@ pub fn repair_affected_keys_select(
 /// candidate's key columns against `delta_key`, mirroring
 /// [`repair_slice_predicate`]'s and `emit_per_group_recompute`'s identical
 /// shape.
+/// Widen `clean_sql` (the model's own raw, pre-compile SELECT) with one
+/// `, <per_partition_expr> AS <name>` per `state_columns` — a named wrapper
+/// over [`smelt_logical::maintenance::emit::state_augmented_projection`]
+/// with the repair path's own error text, so the widening is independently
+/// unit-testable rather than inlined at each call site
+/// (`docs/outcomes/20260809-repair-family/phases/10-plan.md`). Mirrors
+/// `smelt-runtime::cumulative::execute_windowed_keyed`/
+/// `execute_snapshot_reconcile`'s own use of the same emitter: the fold's
+/// create/merge path already carries a decomposed combiner's hidden state
+/// columns in the physical table, so a repair's own candidate/insert must
+/// supply them too, or the `INSERT`'s implicit column list mismatches the
+/// table. `state_columns.is_empty()` returns `clean_sql` unchanged.
+pub fn repair_augmented_model_sql(
+    clean_sql: &str,
+    state_columns: &[smelt_logical::analysis::decomposed_state::StateColumn],
+) -> Result<String> {
+    smelt_logical::maintenance::emit::state_augmented_projection(clean_sql, state_columns).map_err(
+        |_| {
+            anyhow::anyhow!(
+                "Failed to append decomposed-state columns to a repair candidate: the model's \
+                 SELECT could not be parsed"
+            )
+        },
+    )
+}
+
 pub fn repair_candidate_select(
     full_model_sql: &str,
     key: &[String],

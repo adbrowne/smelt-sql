@@ -902,6 +902,20 @@ its slice, exactly like a region recompute (§"The transactional merge ledger"):
 reproduces the same state, and it resets any additive ledger record for those keys rather than
 folding a second time on top of it.
 
+**Repair over a decomposed combiner.** A decomposed combiner's fold path (§"Decomposed state
+(rung 2) in keyed models") materialises hidden `__`-marked state columns alongside its presented
+ones — a repaired group's candidate must carry them too, or the write's implicit column list
+mismatches the physical table. The repair candidate a cell stages is therefore the model's own
+**state-augmented** projection, identical to the projection the fold's own create/merge path
+materialises: the raw model SQL widened with the state columns' own `per_partition_expr`s before
+compilation, the same widening `execute_windowed_keyed`/`execute_snapshot_reconcile` already apply
+for the ordinary fold. A stateless column family widens to nothing — this is a no-op for every
+combiner admitted before decomposed state existed. A `diff_patch` write over a decomposed repair
+extends its change-suppression predicate to compare the hidden state columns alongside the
+presented compared columns: a group whose presented value is unchanged but whose state moved is
+still rewritten, since suppressing that write would leave stale state behind a correct-looking
+value — strictly less suppression than presented-only comparison, sound by construction.
+
 ### Windowed maintenance and the horizon
 
 Maintenance runs over a **bounded input window by default** — a full scan is the surfaced
@@ -2279,16 +2293,6 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   falling through to a plain write, but no caller today reaches that resolver for the
   `DeleteInsert` recompute, so the pin is presently unenforced for that case rather than refused.
   Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
-- **The repair family's affected-key recompute ignores a decomposed combiner's hidden state.**
-  `repair_candidate_select` wraps the model's plain PRESENTED projection with no widening for a
-  decomposed combiner's hidden state (e.g. the order-monotone family's `(v, o)` pair, §"The
-  column-family catalogue"); the physical table the fold's own create path built carries the
-  extra hidden state columns, so a live `PerGroupRecompute` `INSERT` for such a combiner supplies
-  fewer columns than the table has and the run errors rather than repairing. Only a combiner
-  needing no hidden state (e.g. a plain `MAX`) repairs correctly today. Discovered by the
-  conformance gate's repair-family recipe pool
-  (`crates/smelt-cli/tests/maintenance_conformance/repair.rs`). Tracked:
-  `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key
   only at plan derivation, not at frontmatter validation; a bare `grain: key` model with neither

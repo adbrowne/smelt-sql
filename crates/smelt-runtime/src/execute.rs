@@ -1862,10 +1862,28 @@ pub async fn execute_project(
                             // membership-recompute dispatch below compiles,
                             // for the same reason: a repaired group must
                             // equal a full refresh of that group.
+                            //
+                            // Widened with `classification`'s own hidden
+                            // decomposed-state columns (P10,
+                            // `docs/outcomes/20260809-repair-family/phases/
+                            // 10-plan.md`) BEFORE compiling — a decomposed
+                            // combiner's create/merge path already carries
+                            // those `__`-marked columns in the physical
+                            // table, so the repair's candidate/insert must
+                            // supply them too, or the `INSERT`'s implicit
+                            // column list mismatches the table. Raw,
+                            // pre-compile SQL, same ordering rationale as
+                            // `execute_snapshot_reconcile`. A no-op for
+                            // every stateless column family.
+                            let state_columns = classification.state_columns();
+                            let augmented_sql = crate::maintenance_driver::repair_augmented_model_sql(
+                                &clean_sql_for_merge,
+                                &state_columns,
+                            )?;
                             let compiled = compiler.compile_with_sql_and_ephemerals(
                                 &plan.model_file,
                                 schema,
-                                &clean_sql_for_merge,
+                                &augmented_sql,
                                 resolver,
                             )?;
                             let candidate_select =
@@ -1899,6 +1917,18 @@ pub async fn execute_project(
                                             key,
                                             &affected_keys_select,
                                         );
+                                    // A group whose PRESENTED value is
+                                    // unchanged but whose hidden state moved
+                                    // must still be rewritten — comparing
+                                    // only the presented columns would
+                                    // suppress the write and leave stale
+                                    // state behind a correct-looking value
+                                    // (strictly less suppression than
+                                    // presented-only, sound by
+                                    // construction).
+                                    let mut compared_columns = compared_columns.clone();
+                                    compared_columns
+                                        .extend(state_columns.iter().map(|sc| sc.name.clone()));
                                     used_diff_patch = true;
                                     crate::maintenance_driver::execute_diff_patch(
                                         backend,
@@ -1906,7 +1936,7 @@ pub async fn execute_project(
                                         &db_table_name,
                                         key,
                                         &candidate_select,
-                                        compared_columns,
+                                        &compared_columns,
                                         &slice_predicate,
                                         delete_leg,
                                         &retry_policy,

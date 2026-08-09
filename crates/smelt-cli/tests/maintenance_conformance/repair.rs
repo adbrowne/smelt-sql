@@ -280,50 +280,17 @@ fn repair_recipe_admits_per_group_recompute() {
     );
 }
 
-/// `repair_pool_upholds_equivalence_under_retraction` (plan Phase 8 test 2):
-/// for each non-invertible combiner in the small deterministic repair pool,
-/// drive insert → update-in-place → delete steps; after EVERY step the
-/// model table is multiset-equal to a full-refresh oracle over the current
-/// source state.
-///
-/// `KeyedCombiner::OrderMonotone` admits a `PerGroupRecompute` cell and its
-/// CREATION run is proven equivalent (below), but driving a live repair for
-/// it crashes: `repair_candidate_select` wraps the model's plain PRESENTED
-/// projection with no knowledge of the decomposed hidden `(v, o)` state
-/// `OrderMonotone` needs (`KeyedCombiner::OrderMonotone`'s own doc
-/// comment), while the physical table the fold's OWN create path built
-/// carries those extra `__`-marked columns — the repair's `INSERT`'s
-/// implicit column list then mismatches the table's column count. A
-/// genuine production gap, not a silent divergence: registered as
-/// `known_bug_repair_candidate_select_ignores_decomposed_state` in
-/// `registry.rs` rather than driven through the mutation loop here.
+/// `repair_pool_upholds_equivalence_under_retraction` (plan Phase 8 test 2,
+/// widened by P10 test 5): for each non-invertible combiner in the small
+/// deterministic repair pool — including `KeyedCombiner::OrderMonotone`,
+/// whose decomposed hidden `(v, o)` state a repair candidate now carries
+/// (`docs/outcomes/20260809-repair-family/phases/10-plan.md`) — drive
+/// insert → update-in-place → delete steps; after EVERY step the model
+/// table is multiset-equal to a full-refresh oracle over the current source
+/// state.
 #[tokio::test]
 async fn repair_pool_upholds_equivalence_under_retraction() {
-    // The order-monotone combiner: admission + creation-run equivalence
-    // only (see this test's own doc comment for why the mutation loop
-    // below is Idempotent-only).
-    {
-        let recipe = RepairRecipe::new(
-            KeyedCombiner::OrderMonotone,
-            RepairWriteMode::TargetedDeleteInsert,
-        );
-        let tmp = tempfile::TempDir::new().expect("tempdir");
-        let project =
-            stage_repair_recipe(&recipe, &tmp).expect("stage OrderMonotone repair recipe");
-        let plan =
-            classify_repair(&project, &recipe).expect("classify OrderMonotone repair recipe");
-        assert!(
-            !plan.cells.is_empty(),
-            "OrderMonotone repair recipe admitted zero cells: {plan:#?}"
-        );
-        seed_repair_orders(&project, &recipe).expect("seed OrderMonotone");
-        run_repair_creation(&project, "repair-pool-order-monotone-create")
-            .await
-            .expect("OrderMonotone creation run");
-        assert_repair_equivalence(&project, &recipe).await;
-    }
-
-    for combiner in [KeyedCombiner::Idempotent] {
+    for combiner in [KeyedCombiner::Idempotent, KeyedCombiner::OrderMonotone] {
         let recipe = RepairRecipe::new(combiner, RepairWriteMode::TargetedDeleteInsert);
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let project = stage_repair_recipe(&recipe, &tmp)
@@ -510,6 +477,59 @@ async fn diff_patch_pinned_repair_upholds_equivalence_under_reconcile() {
         before, after,
         "re-running the same window with no source change must write nothing — the maintained \
          table's contents must be byte-identical before/after (an empty diff)"
+    );
+}
+
+/// `diff_patch_repair_over_decomposed_state_upholds_equivalence` (P10 test
+/// 6): a `RepairRecipe::new(OrderMonotone, RepairWriteMode::DiffPatch)`
+/// case — equivalence after a retraction plus the assertion that diff-patch
+/// statements were actually executed
+/// (`docs/outcomes/20260809-repair-family/phases/10-plan.md`).
+#[tokio::test]
+async fn diff_patch_repair_over_decomposed_state_upholds_equivalence() {
+    let recipe = RepairRecipe::new(KeyedCombiner::OrderMonotone, RepairWriteMode::DiffPatch);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_repair_recipe(&recipe, &tmp).expect("stage repair recipe");
+    let plan = classify_repair(&project, &recipe).expect("classify repair recipe");
+    assert!(!plan.cells.is_empty(), "expected admission: {plan:#?}");
+
+    seed_repair_orders(&project, &recipe).expect("seed");
+    run_repair_creation(&project, "diff-patch-decomposed-create")
+        .await
+        .expect("creation run");
+    assert_repair_equivalence(&project, &recipe).await;
+
+    // Update in place: the retraction a fold cannot undo — the case that
+    // exercises the decomposed combiner's hidden `(v, o)` state on a live
+    // repair, not just the creation run.
+    update_repair_row_amount(&project, &recipe, 1, "10.00").expect("mutate");
+    let (outcome, backend) = project
+        .run_recording("diff-patch-decomposed-retract", {
+            let mut request = base_request("dev");
+            request.start = Some("2025-01-16".to_string());
+            request.end = Some("2025-01-17".to_string());
+            request
+        })
+        .await
+        .expect("retraction run");
+    let record = outcome
+        .models
+        .get(&recipe.model_name)
+        .unwrap_or_else(|| panic!("model {:?} ran", recipe.model_name));
+    assert_eq!(
+        record.strategy, "diff_patch",
+        "the write: diff_patch pin must dispatch the diff-patch write"
+    );
+    assert_repair_equivalence(&project, &recipe).await;
+
+    let diff_relation = format!("__smelt_diff_patch_{}", recipe.model_name);
+    let has_diff_patch_group = backend
+        .recorded_groups()
+        .iter()
+        .any(|g| g.statements.iter().any(|s| s.sql.contains(&diff_relation)));
+    assert!(
+        has_diff_patch_group,
+        "expected an emit_diff_patch statement group for the decomposed-combiner retraction"
     );
 }
 

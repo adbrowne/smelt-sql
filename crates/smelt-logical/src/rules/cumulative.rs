@@ -841,6 +841,21 @@ impl CumulativeClassification {
     pub fn is_snapshot_reconcile(&self) -> bool {
         self.driving_source.timeseries.is_none()
     }
+
+    /// The hidden decomposed-state columns every state-bearing
+    /// `aggregator_columns` entry carries (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models"), in column order —
+    /// empty for a classification where no column folds through decomposed
+    /// state. Single derivation, reused everywhere a caller needs to widen
+    /// a compiled/candidate select for the fold's own hidden state (was
+    /// previously hand-rolled at each call site).
+    pub fn state_columns(&self) -> Vec<crate::analysis::decomposed_state::StateColumn> {
+        self.aggregator_columns
+            .iter()
+            .filter_map(|c| c.state.as_ref())
+            .flat_map(|s| s.state_columns.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2066,6 +2081,94 @@ GROUP BY e.device_id, e.user_id"#;
         let message = diagnostics[0].to_string();
         assert!(message.contains("spend__sum"), "{message}");
         assert!(message.contains("__"), "{message}");
+    }
+
+    /// `CumulativeClassification::state_columns()` collects every
+    /// state-bearing aggregator column's `StateColumn`s in column order,
+    /// empty for a stateless classification
+    /// (`docs/outcomes/20260809-repair-family/phases/10-plan.md` test 1).
+    #[test]
+    fn cumulative_classification_state_columns_collects_every_state_bearing_column() {
+        use crate::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let stateless = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "total".to_string(),
+                per_partition_agg: "SUM".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: None,
+            },
+        };
+        assert!(stateless.state_columns().is_empty());
+
+        let stateful = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "avg_amount".to_string(),
+                    per_partition_agg: "AVG".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                    state: Some(DecomposedState {
+                        state_columns: vec![
+                            StateColumn {
+                                name: "avg_amount__sum".to_string(),
+                                per_partition_expr: "SUM(amount)".to_string(),
+                                combiner: CrossPartitionCombiner::Sum,
+                            },
+                            StateColumn {
+                                name: "avg_amount__count".to_string(),
+                                per_partition_expr: "COUNT(amount)".to_string(),
+                                combiner: CrossPartitionCombiner::Sum,
+                            },
+                        ],
+                        presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                    }),
+                },
+                AggregatorColumn {
+                    output_name: "max_val".to_string(),
+                    per_partition_agg: "MAX_BY".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                    state: Some(DecomposedState {
+                        state_columns: vec![
+                            StateColumn {
+                                name: "max_val__v".to_string(),
+                                per_partition_expr: "MAX_BY(v, o)".to_string(),
+                                combiner: CrossPartitionCombiner::PlainOverwrite,
+                            },
+                            StateColumn {
+                                name: "max_val__o".to_string(),
+                                per_partition_expr: "MAX(o)".to_string(),
+                                combiner: CrossPartitionCombiner::Max,
+                            },
+                        ],
+                        presentation_expr: "max_val__v".to_string(),
+                    }),
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: None,
+            },
+        };
+        let names: Vec<String> = stateful
+            .state_columns()
+            .into_iter()
+            .map(|sc| sc.name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "avg_amount__sum".to_string(),
+                "avg_amount__count".to_string(),
+                "max_val__v".to_string(),
+                "max_val__o".to_string(),
+            ]
+        );
     }
 
     /// `state_column_summary` reports one entry for an `AVG` column's hidden

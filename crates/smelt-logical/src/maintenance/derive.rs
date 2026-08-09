@@ -1096,17 +1096,26 @@ fn derive_new_data(
                     &delta,
                 ) {
                     Ok(admitted) => {
+                        // Alphabetically sorted, matching
+                        // `ColumnGroup::name()`'s own convention
+                        // (`grouping::derive_column_groups` buckets columns
+                        // via a `BTreeMap<String, _>` keyed by column name,
+                        // never SQL declaration order) — `matching_write_pin`
+                        // compares this string against a `ColumnGroup`'s own
+                        // `name()` by exact equality, so a repair cell whose
+                        // presented columns aren't already alphabetical in
+                        // the SQL (e.g. `OrderMonotone`'s `(max_by_val,
+                        // max_by_ord)`) must still agree with it.
+                        let mut add_column_names: Vec<String> = fold
+                            .add_columns
+                            .iter()
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        add_column_names.sort();
                         plan.cells.push(repair::derive_repair_cell(
                             &admitted,
                             trigger,
-                            format!(
-                                "{{{}}}",
-                                fold.add_columns
-                                    .iter()
-                                    .map(|(name, _)| name.clone())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ),
+                            format!("{{{}}}", add_column_names.join(", ")),
                         ));
                     }
                     Err(refusal) => {

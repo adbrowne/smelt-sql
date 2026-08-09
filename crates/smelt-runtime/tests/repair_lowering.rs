@@ -511,6 +511,129 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
     );
 }
 
+/// `repair_augmented_model_sql_appends_state_columns` (P10 test 2): widens
+/// the model SQL with one `, <per_partition_expr> AS <name>` select item per
+/// state column, and returns the SQL unchanged for an empty state-column
+/// list; an unparseable body errors by name.
+#[test]
+fn repair_augmented_model_sql_appends_state_columns() {
+    use smelt_logical::analysis::decomposed_state::StateColumn;
+    use smelt_logical::rules::cumulative::CrossPartitionCombiner;
+    use smelt_runtime::maintenance_driver::repair_augmented_model_sql;
+
+    let sql = "SELECT customer_id, MAX_BY(amount, order_date) AS max_val FROM \
+               smelt.sources.raw.orders GROUP BY customer_id";
+
+    let unchanged = repair_augmented_model_sql(sql, &[]).expect("empty state must round-trip");
+    assert_eq!(unchanged, sql);
+
+    let state_columns = vec![
+        StateColumn {
+            name: "max_val__v".to_string(),
+            per_partition_expr: "MAX_BY(amount, order_date)".to_string(),
+            combiner: CrossPartitionCombiner::PlainOverwrite,
+        },
+        StateColumn {
+            name: "max_val__o".to_string(),
+            per_partition_expr: "MAX(order_date)".to_string(),
+            combiner: CrossPartitionCombiner::Max,
+        },
+    ];
+    let augmented =
+        repair_augmented_model_sql(sql, &state_columns).expect("well-formed SQL must augment");
+    assert!(
+        augmented.contains(", MAX_BY(amount, order_date) AS max_val__v"),
+        "{augmented}"
+    );
+    assert!(
+        augmented.contains(", MAX(order_date) AS max_val__o"),
+        "{augmented}"
+    );
+
+    let err = repair_augmented_model_sql("not even sql (((", &state_columns)
+        .expect_err("unparseable SQL must refuse, not mangle");
+    assert!(err.to_string().contains("could not be parsed"), "{err}");
+}
+
+/// `repair_candidate_select_carries_hidden_state_columns` (P10 test 3): a
+/// candidate select built over the augmented SQL projects the state column
+/// aliases, so a repair `INSERT` matches the fold-created table's column
+/// list.
+#[test]
+fn repair_candidate_select_carries_hidden_state_columns() {
+    use smelt_logical::analysis::decomposed_state::StateColumn;
+    use smelt_logical::rules::cumulative::CrossPartitionCombiner;
+    use smelt_runtime::maintenance_driver::repair_augmented_model_sql;
+
+    let sql = "SELECT customer_id, MAX_BY(amount, order_date) AS max_val FROM \
+               smelt.sources.raw.orders GROUP BY customer_id";
+    let state_columns = vec![
+        StateColumn {
+            name: "max_val__v".to_string(),
+            per_partition_expr: "MAX_BY(amount, order_date)".to_string(),
+            combiner: CrossPartitionCombiner::PlainOverwrite,
+        },
+        StateColumn {
+            name: "max_val__o".to_string(),
+            per_partition_expr: "MAX(order_date)".to_string(),
+            combiner: CrossPartitionCombiner::Max,
+        },
+    ];
+    let augmented = repair_augmented_model_sql(sql, &state_columns).expect("must augment");
+
+    let key = vec!["customer_id".to_string()];
+    let affected_keys_select = repair_affected_keys_select(
+        "main.sources_raw_orders",
+        &key,
+        None,
+        &Region {
+            start: "'2025-01-12'".to_string(),
+            end: "'2025-01-13'".to_string(),
+        },
+    );
+    let candidate = repair_candidate_select(&augmented, &key, &affected_keys_select);
+
+    // `repair_candidate_select` wraps its input verbatim in `SELECT
+    // __smelt_repair_candidate.*` — the augmented input's extra select
+    // items flow through the wildcard, so the state aliases only need to
+    // appear in the wrapped subquery text.
+    assert!(candidate.contains("AS max_val__v"), "{candidate}");
+    assert!(candidate.contains("AS max_val__o"), "{candidate}");
+}
+
+/// `diff_patch_compared_columns_include_hidden_state` (P10 test 4): the
+/// compared-column set handed to `emit_diff_patch` for a state-bearing cell
+/// contains the state column names, so the emitted suppression predicate
+/// mentions them.
+#[test]
+fn diff_patch_compared_columns_include_hidden_state() {
+    let table = "main.customer_max_amount";
+    let key = vec!["customer_id".to_string()];
+    let mut compared_columns = vec!["max_val".to_string()];
+    compared_columns.extend(["max_val__v".to_string(), "max_val__o".to_string()]);
+
+    let statements = smelt_logical::maintenance::emit::emit_diff_patch(
+        table,
+        "__smelt_diff_patch_customer_max_amount",
+        &key,
+        "SELECT customer_id, 1 AS max_val, 1 AS max_val__v, DATE '2025-01-01' AS max_val__o",
+        &compared_columns,
+        "TRUE",
+        &DeleteLeg::Omitted {
+            why: "test fixture — delete leg irrelevant to this assertion".to_string(),
+        },
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    let full_text: String = statements
+        .statements
+        .iter()
+        .map(|s| s.sql.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(full_text.contains("max_val__v"), "{full_text}");
+    assert!(full_text.contains("max_val__o"), "{full_text}");
+}
+
 // ── DuckDB-backed legs (5, 6) ────────────────────────────────────────────
 //
 // A real `execute_project` run over a staged project: creation folds (there
