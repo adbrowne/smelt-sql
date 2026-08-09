@@ -1,7 +1,7 @@
 # Outcome: The repair family — per-group recompute and diff-then-patch
 
 **Created:** 2026-08-09
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260809-incremental-rethink.md` §3 T-A/T-B, §6 step 2
 **Spec anchors:** `docs/specs/incremental_models.md` (technique families, write-pattern registry), `docs/research/20260724-ivm-pattern-gap-catalogue.md` §A1/§C1
 
@@ -39,7 +39,7 @@ reconciliation runs and idempotent re-runs.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | pending |
+| 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | planned |
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | pending |
 | 3 | Per-group recompute technique: derivation, admission, emitter | pending |
 | 4 | `diff_patch` write pattern: registry entry, emitter, statement parity | pending |
@@ -50,6 +50,8 @@ reconciliation runs and idempotent re-runs.
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-08-09 (plan 1): outcome activated; phase table kept as scaffolded (rung-2 outcome closed clean, nothing to reshape). Phase 1 scoped spec-only: repair family as a §Semantics section, affected-key discovery owned by `model_properties.md`, `diff_patch` as a write-pattern registry entry, two new `Maintenance*` refusal codes.
 
 ## Blocked
 
