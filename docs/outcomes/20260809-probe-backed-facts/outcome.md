@@ -52,7 +52,7 @@ safe to grow (the contract lattice will grow it).
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
-| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | pending |
+| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | planned |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
 | 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
 
@@ -156,6 +156,20 @@ safe to grow (the contract lattice will grow it).
   `partition_column` — always available. `dispatch_declared_model_probes` returns
   `Vec<ProbeRecord>` for held/skipped probes, still unconsumed until phase 8 wires
   `ModelRunRecord.probes`. See `phases/05-summary.md`.
+
+- 2026-08-10: Phase 6 planned. No reshape — phase 5's summary surfaced nothing new outside the
+  outcome, and its one deferred item (`ModelRunRecord.probes` population) already has phase 8's
+  row. Three decisions taken while planning, all forced by the fact that the phase-2 emitter
+  compares against a caller-held baseline that nothing yet persists: (a) the baseline lives in a
+  new `smelt-state` store (`source_postures.json`), written under the existing `state_io_lock`
+  critical section the landed-delta recording already uses; (b) a whole-partition fingerprint
+  changes on a *legitimate* append, so the fingerprint leg is gated to partitions strictly below
+  the recorded maximum ("frontier") while the count leg stays ungated — the gate is caller data
+  (`AppendOnlyBaselinePartition.check_fingerprint`), keeping the emitter pure, and a matching
+  `emit_append_only_baseline_snapshot` guarantees recorded and compared fingerprints are the same
+  construction; (c) a cadence-skipped run does NOT refresh the baseline, so the next dispatched
+  run still compares against the last verified point. Declared `mutation_profile.lateness` is not
+  consulted (outcome §Out of scope) — recorded as a known divergence rather than absorbed.
 
 ## Blocked
 
