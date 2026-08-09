@@ -1177,6 +1177,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         None,
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -3100,11 +3101,50 @@ mod external_source_point_lookup_recompute {
         Region,
     };
     use smelt_logical::maintenance::{
-        Grain, MutationProfile, OutputSpec, SkeletonSourceClosure, SourceFacts, Trigger,
+        Grain, MutationProfile, OutputSpec, RowPreservation, SkeletonSourceClosure, SourceFacts,
+        Trigger,
     };
     use smelt_runtime::maintenance_driver::{
-        diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
+        diff_fingerprint_sidecar_changed_keys, execute_delete_insert_with_delta_restriction,
+        refresh_fingerprint_sidecar,
     };
+
+    /// Seed the observed-delta table for `upstream_model`'s `[window_start,
+    /// window_end)` with `changed_keys`, mirroring `delta_restricted_
+    /// recompute.rs`'s own helper — the SAME `_smelt_observed_delta` table
+    /// `read_observed_delta_changed_keys` reads.
+    async fn record_observed_delta(
+        backend: &DuckDbBackend,
+        schema: &str,
+        upstream_model: &str,
+        window_start: &str,
+        window_end: &str,
+        changed_keys: &[&str],
+    ) {
+        let ensure = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl(schema);
+        backend
+            .execute_sql(&ensure)
+            .await
+            .expect("ensure observed-delta table");
+        let keys_list = changed_keys
+            .iter()
+            .map(|k| format!("('{k}', NULL)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let changed_keys_query =
+            format!("SELECT * FROM (VALUES {keys_list}) AS t(delta_key, delta_partition)");
+        let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+            schema,
+            upstream_model,
+            window_start,
+            window_end,
+            &changed_keys_query,
+        );
+        backend
+            .execute_sql(&upsert)
+            .await
+            .expect("record observed delta");
+    }
 
     /// The real fixture's SQL body (frontmatter stripped), read straight off
     /// disk so this suite can never silently drift from the file
@@ -3221,7 +3261,15 @@ mod external_source_point_lookup_recompute {
     #[test]
     fn closure_admits_and_restrict_column_resolves() {
         let closure = user_name_cell_closure();
-        assert_eq!(closure, Some(SkeletonSourceClosure::Closed));
+        assert_eq!(
+            closure,
+            Some(SkeletonSourceClosure::Closed {
+                row_preservation:
+                    smelt_logical::maintenance::RowPreservation::DeclaredReferentialIntegrity {
+                        source: "raw.users".to_string()
+                    }
+            })
+        );
 
         let dimension_key = ["user_id".to_string()];
         let restrict_column = enrichment_restrict_column(&dimension_key);
@@ -3630,12 +3678,11 @@ mod external_source_point_lookup_recompute {
             .contains("SourceCountPreservationViolated"));
     }
 
-    /// Test-local scaffolding for the not-yet-wired runtime consumer of
-    /// [`emit_count_preservation_probe`]'s result (`docs/specs/sources.md`
-    /// §"Referential integrity" — the tripwire "fails the run loudly,
-    /// transactionally"). `crates/smelt-runtime/src/maintenance_driver.rs`
-    /// is outside this phase's allowed files (see this module's own doc
-    /// comment); this mirrors exactly what that future call site must do.
+    /// Mirrors the shape `execute_delete_insert_with_delta_restriction`'s
+    /// real dispatch now checks (`docs/outcomes/20260809-probe-backed-facts/
+    /// phases/03-plan.md`) — kept here as a direct unit check of
+    /// [`emit_count_preservation_probe`]'s own result shape, independent of
+    /// the full async runtime path exercised by the tests below.
     fn check_count_preservation(
         driving_count: i64,
         enriched_count: i64,
@@ -3651,6 +3698,243 @@ mod external_source_point_lookup_recompute {
         } else {
             Ok(())
         }
+    }
+
+    /// A `Closed { DeclaredReferentialIntegrity }` restriction over a
+    /// dangling fact key fails the run loudly (`SourceCountPreservationViolated`,
+    /// naming the source and the counts), and the target table is
+    /// byte-unchanged — the probe runs before any write
+    /// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test
+    /// 5).
+    #[tokio::test]
+    async fn declared_ri_restriction_over_a_dangling_key_fails_before_any_write() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("dangling_ri.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        seed(&backend).await;
+        // Introduce a dangling fact key: event 7 references user 99, which
+        // has no row in main.sources_raw_users.
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_events VALUES \
+                 (7, 99, 'login', TIMESTAMP '2025-01-10 14:00:00')",
+            )
+            .await
+            .expect("seed dangling event");
+
+        let body = enrichment_select("main.sources_raw_events", "main.sources_raw_users");
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.daily_events_enriched AS {body}"
+            ))
+            .await
+            .expect("baseline full refresh");
+        let baseline_rows = user_names(&backend).await;
+
+        record_observed_delta(
+            &backend,
+            "main",
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            &["1", "2", "3", "99"],
+        )
+        .await;
+
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                source: "main.sources_raw_users".to_string(),
+            },
+        };
+        let region = Region {
+            start: "'2025-01-10'".to_string(),
+            end: "'2025-01-11'".to_string(),
+        };
+        let result = execute_delete_insert_with_delta_restriction(
+            &backend,
+            "main",
+            "daily_events_enriched",
+            "event_date",
+            &region,
+            &body,
+            Some("user_id"),
+            Some(&closure),
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            MaintenanceDialect::DuckDb,
+            &super::no_retry_policy(),
+        )
+        .await;
+
+        let err = result.expect_err("a dangling fact key must fail the tripwire");
+        let message = err.to_string();
+        assert!(
+            message.contains("SourceCountPreservationViolated"),
+            "expected the named tripwire diagnostic, got: {message}"
+        );
+        assert!(
+            message.contains("main.sources_raw_users"),
+            "expected the declared source named in the error, got: {message}"
+        );
+        assert!(
+            message.contains("or drop the declaration"),
+            "expected the remedy in the error, got: {message}"
+        );
+
+        // The probe runs before any write — the target table is
+        // byte-unchanged from the baseline full refresh.
+        let after_rows = user_names(&backend).await;
+        assert_eq!(
+            baseline_rows, after_rows,
+            "a failed tripwire must leave the target table byte-unchanged"
+        );
+    }
+
+    /// The same call over conforming data (no dangling key) succeeds and
+    /// returns the delta-restricted `StatementGroup` unchanged — the probe
+    /// does not perturb the emitted statements
+    /// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test
+    /// 6).
+    #[tokio::test]
+    async fn declared_ri_restriction_over_conforming_data_succeeds_unperturbed() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("conforming_ri.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        seed(&backend).await;
+
+        let body = enrichment_select("main.sources_raw_events", "main.sources_raw_users");
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.daily_events_enriched AS {body}"
+            ))
+            .await
+            .expect("baseline full refresh");
+
+        record_observed_delta(
+            &backend,
+            "main",
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            &["1"],
+        )
+        .await;
+
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                source: "main.sources_raw_users".to_string(),
+            },
+        };
+        let region = Region {
+            start: "'2025-01-10'".to_string(),
+            end: "'2025-01-11'".to_string(),
+        };
+        let group = execute_delete_insert_with_delta_restriction(
+            &backend,
+            "main",
+            "daily_events_enriched",
+            "event_date",
+            &region,
+            &body,
+            Some("user_id"),
+            Some(&closure),
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            MaintenanceDialect::DuckDb,
+            &super::no_retry_policy(),
+        )
+        .await
+        .expect("conforming data must not fail the tripwire");
+
+        assert!(
+            group.statements[0].sql.contains("user_id IN ('1')"),
+            "the restricted DELETE must still carry the semi-join predicate: {}",
+            group.statements[0].sql
+        );
+        assert!(
+            group.statements[1].sql.contains("user_id IN ('1')"),
+            "the restricted INSERT must still carry the semi-join predicate: {}",
+            group.statements[1].sql
+        );
+    }
+
+    /// A declared-RI `Closed` verdict whose body the probe builder cannot
+    /// reconstruct (no join against the declared source in this body) falls
+    /// back to the ordinary widened-scan group — the narrowing is dropped,
+    /// never silently attempted with no verification
+    /// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test
+    /// 7).
+    #[tokio::test]
+    async fn unbuildable_probe_falls_back_to_the_widened_scan() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("unbuildable_probe.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        seed(&backend).await;
+
+        // No join against `main.sources_raw_users` in this body at all —
+        // the probe builder cannot locate the declared enrichment join.
+        let body =
+            "SELECT event_id, CAST(event_timestamp AS DATE) AS event_date, user_id, event_type, \
+             'unknown' AS user_name FROM main.sources_raw_events"
+                .to_string();
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.daily_events_enriched AS {body}"
+            ))
+            .await
+            .expect("baseline full refresh");
+
+        record_observed_delta(
+            &backend,
+            "main",
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            &["1"],
+        )
+        .await;
+
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                source: "main.sources_raw_users".to_string(),
+            },
+        };
+        let region = Region {
+            start: "'2025-01-10'".to_string(),
+            end: "'2025-01-11'".to_string(),
+        };
+        let group = execute_delete_insert_with_delta_restriction(
+            &backend,
+            "main",
+            "daily_events_enriched",
+            "event_date",
+            &region,
+            &body,
+            Some("user_id"),
+            Some(&closure),
+            "raw.events",
+            "2025-01-10",
+            "2025-01-11",
+            MaintenanceDialect::DuckDb,
+            &super::no_retry_policy(),
+        )
+        .await
+        .expect("an unbuildable probe must fall back, never fail the run");
+
+        assert!(
+            !group.statements[0].sql.contains("user_id IN"),
+            "an unbuildable probe must drop the restriction — the widened-scan DELETE carries \
+             no semi-join predicate: {}",
+            group.statements[0].sql
+        );
     }
 }
 

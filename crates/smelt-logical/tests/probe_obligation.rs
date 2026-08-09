@@ -227,6 +227,43 @@ fn built_and_unwired_rows_name_a_real_emitter() {
     }
 }
 
+/// Pins the `referential_integrity` row's Status transition `built
+/// (unwired)` → `built` (`docs/outcomes/20260809-probe-backed-facts/
+/// phases/03-plan.md` test 8) — the tripwire is now dispatched at its one
+/// live consumer (`execute_delete_insert_with_delta_restriction`), so the
+/// row's Status must read exactly `built`, not `built (unwired)`.
+#[test]
+fn referential_integrity_row_status_is_built() {
+    let model_properties = read("docs/specs/model_properties.md");
+    let section = probe_obligation_section(&model_properties);
+    let rows = registry_rows(section);
+    let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
+
+    let row = rows
+        .iter()
+        .find(|row| {
+            row.first()
+                .is_some_and(|d| d.contains("referential_integrity"))
+        })
+        .expect("no registry row found for declaration `referential_integrity`");
+    let status = row.last().map(String::as_str).unwrap_or("");
+    assert_eq!(
+        status, "built",
+        "the `referential_integrity` row's Status must be exactly `built`, found `{status}`"
+    );
+    let probe_cell = row.get(1).map(String::as_str).unwrap_or("");
+    assert!(
+        probe_cell.contains("emit_count_preservation_probe"),
+        "the `referential_integrity` row's Probe cell must name \
+         `emit_count_preservation_probe`, found `{probe_cell}`"
+    );
+    assert!(
+        emit_source.contains("pub fn emit_count_preservation_probe_from_body("),
+        "expected `emit_count_preservation_probe_from_body` in \
+         crates/smelt-logical/src/maintenance/emit.rs"
+    );
+}
+
 #[test]
 fn probe_registry_diagnostics_are_catalogued() {
     let model_properties = read("docs/specs/model_properties.md");

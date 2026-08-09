@@ -43,14 +43,33 @@ use crate::analysis::{item_expr, select_stmt_items};
 use crate::maintenance::grouping::derive_column_groups;
 use crate::maintenance::skeleton::skeleton_roles;
 
+/// Which route proved conjunct 4 (row preservation) for a `Closed` verdict —
+/// carried on the verdict itself so a consumer can tell a `LEFT JOIN`-proven
+/// closure (needs no runtime check) from a declaration-licensed one (whose
+/// admissibility rests on an *unverified* world-fact until a run actually
+/// probes it — `model_properties.md` §"Probe obligation": no probe, no
+/// declaration).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowPreservation {
+    /// A `LEFT JOIN` proves row preservation structurally — no declared
+    /// world-fact, and no runtime probe, is needed.
+    JoinShape,
+    /// An inner/equi-join's row preservation rests on `source`'s declared
+    /// `referential_integrity` world-fact — a narrowing consumer must
+    /// dispatch the count-preservation probe over the touched region before
+    /// trusting it (`model_properties.md` §"Skeleton-source closure").
+    DeclaredReferentialIntegrity { source: String },
+}
+
 /// The five-conjunct verdict (`model_properties.md` §"Skeleton-source
 /// closure"). `Open` always names which conjunct (or the v1 scope
 /// restriction) failed to prove.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkeletonSourceClosure {
     /// All five conjuncts are proven: the enrichment join's output rows are
-    /// entirely accounted for by the driving side.
-    Closed,
+    /// entirely accounted for by the driving side. `row_preservation` names
+    /// which route proved conjunct 4.
+    Closed { row_preservation: RowPreservation },
     /// At least one conjunct could not be proven — never a positive
     /// disproof only; absence of proof is refusal.
     Open { reason: String },
@@ -58,7 +77,16 @@ pub enum SkeletonSourceClosure {
 
 impl SkeletonSourceClosure {
     pub fn is_closed(&self) -> bool {
-        matches!(self, SkeletonSourceClosure::Closed)
+        matches!(self, SkeletonSourceClosure::Closed { .. })
+    }
+
+    /// The row-preservation route that proved conjunct 4, when this verdict
+    /// is `Closed`. `None` for `Open`.
+    pub fn row_preservation(&self) -> Option<&RowPreservation> {
+        match self {
+            SkeletonSourceClosure::Closed { row_preservation } => Some(row_preservation),
+            SkeletonSourceClosure::Open { .. } => None,
+        }
     }
 }
 
@@ -141,7 +169,9 @@ pub fn skeleton_source_closure(
 
     // Conjunct 4: row preservation.
     let is_outer_preserving = matches!(join.join_type(), Some(JoinType::Left));
-    if !is_outer_preserving {
+    let row_preservation = if is_outer_preserving {
+        RowPreservation::JoinShape
+    } else {
         let ri_licenses = referential_integrity.is_some_and(|ri| !ri.is_empty());
         if !ri_licenses {
             return open(format!(
@@ -150,7 +180,10 @@ pub fn skeleton_source_closure(
                  declared referential_integrity proves every driving row survives the join"
             ));
         }
-    }
+        RowPreservation::DeclaredReferentialIntegrity {
+            source: enrichment_source.to_string(),
+        }
+    };
 
     // Conjunct 1: skeleton-role extraction — no enrichment-side column
     // occupies a row-membership position. `declared_unique_key`/
@@ -228,7 +261,7 @@ pub fn skeleton_source_closure(
         }
     }
 
-    SkeletonSourceClosure::Closed
+    SkeletonSourceClosure::Closed { row_preservation }
 }
 
 /// Resolve the alias (or bare identifier, when unaliased) that `sql`'s
@@ -296,7 +329,13 @@ mod tests {
                     LEFT JOIN smelt.sources.dim d ON f.dim_id = d.id";
         let ctx = JoinContext::new().with_unique_key("d", "id");
         let verdict = skeleton_source_closure(sql, "dim", None, &ctx);
-        assert_eq!(verdict, SkeletonSourceClosure::Closed, "{verdict:?}");
+        assert_eq!(
+            verdict,
+            SkeletonSourceClosure::Closed {
+                row_preservation: RowPreservation::JoinShape
+            },
+            "{verdict:?}"
+        );
     }
 
     #[test]
@@ -306,7 +345,15 @@ mod tests {
         let ctx = JoinContext::new().with_unique_key("d", "id");
         let ri = vec!["id".to_string()];
         let verdict = skeleton_source_closure(sql, "dim", Some(&ri), &ctx);
-        assert_eq!(verdict, SkeletonSourceClosure::Closed, "{verdict:?}");
+        assert_eq!(
+            verdict,
+            SkeletonSourceClosure::Closed {
+                row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                    source: "dim".to_string()
+                }
+            },
+            "{verdict:?}"
+        );
     }
 
     #[test]

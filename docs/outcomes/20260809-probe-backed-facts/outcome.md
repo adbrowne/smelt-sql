@@ -49,7 +49,7 @@ safe to grow (the contract lattice will grow it).
 |---|-------|--------|
 | 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
-| 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | planned |
+| 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
 | 4 | Runtime wiring: `probes:` in `Config`, cadence control, firing → named diagnostic + cell remedy marking | pending |
 | 5 | Conformance recipes: violated-fact scenarios caught by probes | pending |
 | 6 | Surface: explain rendering of probes + cost, docs-site update | pending |
@@ -57,6 +57,20 @@ safe to grow (the contract lattice will grow it).
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-08-10: Phase 3 done. `SkeletonSourceClosure::Closed` names its row-preservation route
+  (`RowPreservation::JoinShape`/`DeclaredReferentialIntegrity{source}`); `emit_count_preservation_
+  probe_from_body` builds the tripwire directly from a model's compiled body (matching the join by
+  physical table identifier, a new `TableRef::bare_path_text`, never `smelt.<path>`-ref resolution
+  — compiled bodies carry no unresolved refs); `execute_delete_insert_with_delta_restriction`
+  dispatches it before trusting a declared-route restriction, failing loud
+  (`SourceCountPreservationViolated`) before any write, or falling back to the widened scan when
+  unbuildable. `derive_model_maintenance_plan` gained a `source_referential_integrity` param,
+  threaded with real facts at the production Salsa call sites (`build_source_referential_integrity`,
+  mirroring `build_key_recurrences`). Runtime dispatch reachability for the declared route stays
+  scoped to the model-edge call site (model edges never carry RI, per Out of scope); a live
+  UpstreamMutation-driven dispatch path is unbuilt and not this phase's target. See
+  `phases/03-summary.md`.
 
 - 2026-08-10: Outcome activated. Phase table kept as scaffolded (no prior summary to reshape from). Phase 1 plans the probe registry as a spec-parsed standing gate (`crates/smelt-logical/tests/probe_obligation.rs`) so later phases flip Status cells from `not-yet` to `built` under test, rather than the table drifting from the emitters.
 - 2026-08-10: Phase 1 done. §"Probe obligation" lands in `model_properties.md` with an 8-row registry (2 built/built-unwired, 5 not-yet, 2 exempt); `sources.md`/`diagnostics.md`/`smelt_yml.md` cross-reference it. `diagnostics.md`'s unified table also picked up `SourceMutationProfileViolated`/`SourceUniqueKeyViolated`, previously defined only in `sources.md`'s own local table — a pre-existing gap the registry's citations exposed. `probes:` (`smelt_yml.md`) is spec-only; no `Config` field yet. See `phases/01-summary.md`.

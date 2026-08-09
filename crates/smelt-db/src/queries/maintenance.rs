@@ -19,7 +19,10 @@ use smelt_core::config::{
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
-use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
+use smelt_logical::maintenance::derive::{
+    derive_maintenance_plan_with_referential_integrity, FoldSpec, ModelInputs,
+    SourceReferentialIntegrity,
+};
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::locality::{
@@ -336,6 +339,15 @@ pub fn derive_fold_spec(
 /// `&[]` unchanged. `smelt-runtime`'s maintenance driver is the one caller
 /// with real I/O access to the deployed-schema store, and is the only one
 /// that ever supplies a non-empty slice.
+/// `source_referential_integrity` is every referenced source's declared
+/// `referential_integrity` world-fact (`sources.md` §"Referential
+/// integrity"), keyed by bare source name — threaded into every
+/// `UpstreamMutation` cell's P1 skeleton-source-closure proof exactly like
+/// [`derive_maintenance_plan_with_referential_integrity`] does. An empty map
+/// (the caller's own default when it has not resolved the declaration)
+/// behaves byte-identically to this function's behaviour before this
+/// parameter existed — this only *adds* closure attempts for the sources
+/// the caller names.
 #[allow(clippy::too_many_arguments)]
 pub fn derive_model_maintenance_plan(
     sql: &str,
@@ -346,6 +358,7 @@ pub fn derive_model_maintenance_plan(
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
+    source_referential_integrity: &SourceReferentialIntegrity,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -582,7 +595,11 @@ pub fn derive_model_maintenance_plan(
         });
     }
 
-    let mut plan = derive_maintenance_plan(&inputs, &triggers);
+    let mut plan = derive_maintenance_plan_with_referential_integrity(
+        &inputs,
+        &triggers,
+        source_referential_integrity,
+    );
     plan.key_locality = established_key_locality.map(|slice| {
         let bound = smelt_logical::maintenance::locality::settle_bound(&slice);
         smelt_logical::maintenance::KeyLocality {
@@ -624,6 +641,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
+    source_referential_integrity: &SourceReferentialIntegrity,
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -634,6 +652,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         driving_source_granularity,
         key_recurrences,
         deployed_column_names,
+        source_referential_integrity,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -762,6 +781,27 @@ pub fn build_key_recurrences(
             .and_then(|m| m.key_recurrence.clone())
         {
             out.push((name.clone(), kr));
+        }
+    }
+    out
+}
+
+/// Build the `SourceReferentialIntegrity` map (bare source name →
+/// declared `referential_integrity` columns) [`derive_model_maintenance_
+/// plan`]'s `source_referential_integrity` parameter needs, over the same
+/// `(ref_string, source_info)` pairs [`build_source_facts`] consumes.
+/// Sourced independently of `SourceFacts` (rather than adding a field
+/// there) so the many existing `SourceFacts` literal-construction call
+/// sites across the workspace stay unaffected by a route this phase alone
+/// introduces — the same rationale [`build_key_recurrences`] documents for
+/// its own sibling map.
+pub fn build_source_referential_integrity(
+    refs: &[(String, Option<SourceInfo>)],
+) -> SourceReferentialIntegrity {
+    let mut out = SourceReferentialIntegrity::new();
+    for (name, info) in refs {
+        if let Some(ri) = info.as_ref().and_then(|s| s.referential_integrity.clone()) {
+            out.insert(name.clone(), ri);
         }
     }
     out
@@ -1071,6 +1111,7 @@ pub fn maintenance_plan_diagnostics(
     clocked_granularities.extend(extra_model_sources.iter().map(|(_, g)| *g));
     let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
+    let source_referential_integrity = build_source_referential_integrity(source_refs);
     let Some(result) = derive_model_maintenance_plan(
         sql,
         table,
@@ -1084,6 +1125,7 @@ pub fn maintenance_plan_diagnostics(
         // trigger is derivable here; `smelt-runtime`'s maintenance driver
         // is the production caller that supplies a real snapshot.
         &[],
+        &source_referential_integrity,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -1340,6 +1382,7 @@ mod tests {
             None,
             &[],
             &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1395,6 +1438,7 @@ mod tests {
             None,
             &[],
             &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1440,6 +1484,7 @@ mod tests {
             None,
             &[],
             &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -1504,6 +1549,7 @@ mod tests {
             Some(Granularity::Day),
             &[],
             &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -1513,6 +1559,126 @@ mod tests {
             )),
             "route 1 must admit — no locality refusal expected: {:?}",
             result.plan.refusals
+        );
+    }
+
+    /// A source declaring `referential_integrity` in its `.yml` reaches
+    /// `derive_model_maintenance_plan` as a real `SourceReferentialIntegrity`
+    /// entry (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md`
+    /// test 9) — the production Salsa call site's own always-empty map
+    /// (before this phase) is replaced by [`build_source_referential_
+    /// integrity`], threaded from `source_refs`. A `dim` source declaring
+    /// both `unique_key` and `referential_integrity` closes its own
+    /// `UpstreamMutation` cell's P1 verdict; the same call with an empty map
+    /// (byte-identical to the pre-phase-3 default) leaves it unattempted.
+    #[test]
+    fn source_declared_referential_integrity_reaches_the_derivation() {
+        let sql = "SELECT fact.event_id, fact.event_date, dim.tier \
+                    FROM smelt.sources.fact fact \
+                    LEFT JOIN smelt.sources.dim dim ON fact.dim_id = dim.id";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Partition),
+            timeseries: Some(smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let sources = vec![
+            SourceFacts {
+                name: "fact".to_string(),
+                mutation: PlanMutationProfile::AppendOnly,
+                partition_col: Some("event_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: true,
+            },
+            SourceFacts {
+                name: "dim".to_string(),
+                mutation: PlanMutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: vec!["id".to_string()],
+                allow_full_scan: true,
+            },
+        ];
+        let explicitly_mutable: std::collections::HashSet<String> =
+            std::collections::HashSet::from(["dim".to_string()]);
+        let dim_source_info = SourceInfo {
+            path: std::path::PathBuf::from("/tmp/dim.yml"),
+            address_segments: vec!["sources".to_string(), "dim".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: None,
+            mutation_profile: None,
+            source_lateness: None,
+            watermark: None,
+            unique_key: Some(vec!["id".to_string()]),
+            retention: None,
+            referential_integrity: Some(vec!["id".to_string()]),
+        };
+        let source_refs: Vec<(String, Option<SourceInfo>)> =
+            vec![("dim".to_string(), Some(dim_source_info))];
+        let real_ri = build_source_referential_integrity(&source_refs);
+        assert_eq!(
+            real_ri.get("dim"),
+            Some(&vec!["id".to_string()]),
+            "build_source_referential_integrity must surface dim's declared \
+             referential_integrity, got {real_ri:?}"
+        );
+
+        let trigger = smelt_logical::maintenance::Trigger::UpstreamMutation {
+            source: "dim".to_string(),
+        };
+        let with_real_ri = derive_model_maintenance_plan(
+            sql,
+            "main.t",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            None,
+            &[],
+            &[],
+            &real_ri,
+        )
+        .expect("model must derive a plan");
+        let cell = with_real_ri
+            .plan
+            .cell_for(&trigger)
+            .expect("expected an UpstreamMutation cell for dim");
+        assert_eq!(
+            cell.skeleton_source_closure.as_ref().map(|c| c.is_closed()),
+            Some(true),
+            "a LEFT JOIN, payload-only, declared-unique_key dimension must close once its \
+             declared referential_integrity reaches the derivation, got {:?}",
+            cell.skeleton_source_closure
+        );
+
+        let with_empty_ri = derive_model_maintenance_plan(
+            sql,
+            "main.t",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            None,
+            &[],
+            &[],
+            &SourceReferentialIntegrity::new(),
+        )
+        .expect("model must derive a plan");
+        let cell = with_empty_ri
+            .plan
+            .cell_for(&trigger)
+            .expect("expected an UpstreamMutation cell for dim");
+        assert_eq!(
+            cell.skeleton_source_closure, None,
+            "an empty referential-integrity map (the pre-phase-3 default) must leave the \
+             closure proof unattempted, got {:?}",
+            cell.skeleton_source_closure
         );
     }
 
@@ -1583,6 +1749,7 @@ mod tests {
             Some(Granularity::Day),
             &[],
             &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("route 1 must derive a plan");
         assert!(

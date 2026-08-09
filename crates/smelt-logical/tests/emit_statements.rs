@@ -9,11 +9,12 @@ use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_bounded_domain_probe, emit_column_scoped_merge,
-    emit_create_table_as, emit_delete_insert, emit_functional_dependency_probe,
-    emit_in_place_update, emit_keyed_fold, emit_monotonicity_probe, emit_recurrence_bound_probe,
-    emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
-    presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
-    MaintenanceDialect, PresentationRefusal, Region, StateAugmentRefusal,
+    emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
+    emit_functional_dependency_probe, emit_in_place_update, emit_keyed_fold,
+    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
+    emit_staged_candidate_conditional_recompute, presentation_projection,
+    state_augmented_projection, AppendOnlyBaselinePartition, MaintenanceDialect,
+    PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -1277,4 +1278,41 @@ fn append_only_posture_probe_panics_on_empty_baseline() {
         &[],
         MaintenanceDialect::DuckDb,
     );
+}
+
+/// [`emit_count_preservation_probe_from_body`]'s driving side omits the
+/// enrichment join clause, the enriched side keeps it, and both carry the
+/// body's own `WHERE` — the SAME `emit_count_preservation_probe` shape
+/// underneath (`docs/outcomes/20260809-probe-backed-facts/phases/
+/// 03-plan.md` test 2).
+#[test]
+fn count_preservation_probe_from_body_splices_out_the_enrichment_join() {
+    let body = "SELECT f.id, f.amount, d.category FROM main.fact f JOIN main.dim d ON \
+                 f.dim_id = d.id WHERE f.amount > 0";
+    let stmt = emit_count_preservation_probe_from_body(body, "main.dim")
+        .expect("body has a top-level join against main.dim");
+    assert_eq!(
+        stmt.sql,
+        "SELECT (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f  WHERE f.amount > 0) AS \
+         __smelt_driving) AS driving_count, (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f \
+         JOIN main.dim d ON f.dim_id = d.id  WHERE f.amount > 0) AS __smelt_enriched) AS \
+         enriched_count"
+    );
+}
+
+/// Fail-closed: no top-level `SELECT`, no `FROM` clause, or no join against
+/// the named source all yield `None` rather than a best-effort guess
+/// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test 3).
+#[test]
+fn count_preservation_probe_from_body_refuses_when_unreconstructable() {
+    assert!(emit_count_preservation_probe_from_body("not sql at all", "main.dim").is_none());
+    assert!(
+        emit_count_preservation_probe_from_body("SELECT f.id FROM main.fact f", "main.dim")
+            .is_none()
+    );
+    assert!(emit_count_preservation_probe_from_body(
+        "SELECT f.id, d.category FROM main.fact f JOIN main.other o ON f.id = o.id",
+        "main.dim"
+    )
+    .is_none());
 }

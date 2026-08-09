@@ -16,7 +16,9 @@
 //! the fixture's source YAML currently says.
 
 use smelt_logical::analysis::join_shape::JoinContext;
-use smelt_logical::analysis::skeleton_closure::{skeleton_source_closure, SkeletonSourceClosure};
+use smelt_logical::analysis::skeleton_closure::{
+    skeleton_source_closure, RowPreservation, SkeletonSourceClosure,
+};
 
 fn daily_events_enriched_sql() -> String {
     std::fs::read_to_string(concat!(
@@ -72,7 +74,11 @@ fn inner_join_enrichment_closes_with_declared_referential_integrity() {
 
     assert_eq!(
         verdict,
-        SkeletonSourceClosure::Closed,
+        SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                source: "raw.users".to_string()
+            }
+        },
         "daily_events_enriched.sql's inner join against raw.users must close once fed the \
          dimension's declared unique_key + referential_integrity facts: {verdict:?}"
     );

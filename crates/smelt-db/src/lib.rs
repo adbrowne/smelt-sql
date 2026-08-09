@@ -1608,6 +1608,8 @@ pub fn maintenance_plan_report(
     clocked_granularities.extend(model_source_granularities);
     let driving_source_granularity =
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
+    let source_referential_integrity =
+        crate::queries::maintenance::build_source_referential_integrity(&source_refs);
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1621,6 +1623,7 @@ pub fn maintenance_plan_report(
         // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
         // own call site for the same rationale.
         &[],
+        &source_referential_integrity,
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`

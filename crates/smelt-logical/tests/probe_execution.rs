@@ -9,7 +9,8 @@
 use duckdb::Connection;
 
 use smelt_logical::maintenance::emit::{
-    emit_append_only_posture_probe, emit_bounded_domain_probe, emit_functional_dependency_probe,
+    emit_append_only_posture_probe, emit_bounded_domain_probe,
+    emit_count_preservation_probe_from_body, emit_functional_dependency_probe,
     emit_monotonicity_probe, AppendOnlyBaselinePartition, MaintenanceDialect,
 };
 
@@ -266,4 +267,56 @@ fn append_only_posture_probe_returns_nonzero_with_samples_on_violating_data() {
         sample.contains("2026-01-01"),
         "expected offending partition `2026-01-01` in: {sample}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Count-preservation probe (built from a model's own compiled body,
+// `emit_count_preservation_probe_from_body` — `docs/outcomes/
+// 20260809-probe-backed-facts/phases/03-plan.md` test 4)
+// ---------------------------------------------------------------------------
+
+fn count_preservation_result(conn: &Connection, sql: &str) -> (i64, i64) {
+    conn.query_row(sql, [], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("count-preservation probe")
+}
+
+#[test]
+fn count_preservation_probe_reports_equal_counts_on_conforming_data() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE main.fact (id INT, dim_id INT);
+         CREATE TABLE main.dim (id INT);
+         INSERT INTO main.fact VALUES (1, 1), (2, 2);
+         INSERT INTO main.dim VALUES (1), (2);",
+    )
+    .expect("stage");
+
+    let body = "SELECT f.id FROM main.fact f JOIN main.dim d ON f.dim_id = d.id";
+    let stmt = emit_count_preservation_probe_from_body(body, "main.dim")
+        .expect("body has a top-level join against main.dim");
+    let (driving_count, enriched_count) = count_preservation_result(&conn, &stmt.sql);
+    assert_eq!(driving_count, enriched_count);
+}
+
+#[test]
+fn count_preservation_probe_reports_a_shortfall_when_a_fact_key_is_dangling() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    conn.execute_batch(
+        "CREATE TABLE main.fact (id INT, dim_id INT);
+         CREATE TABLE main.dim (id INT);
+         INSERT INTO main.fact VALUES (1, 1), (2, 99);
+         INSERT INTO main.dim VALUES (1);",
+    )
+    .expect("stage (fact row 2's dim_id 99 has no matching dim row)");
+
+    let body = "SELECT f.id FROM main.fact f JOIN main.dim d ON f.dim_id = d.id";
+    let stmt = emit_count_preservation_probe_from_body(body, "main.dim")
+        .expect("body has a top-level join against main.dim");
+    let (driving_count, enriched_count) = count_preservation_result(&conn, &stmt.sql);
+    assert_eq!(driving_count, 2, "both fact rows are the driving side");
+    assert_eq!(
+        enriched_count, 1,
+        "the inner join drops the row whose dim_id has no matching dim row"
+    );
+    assert!(enriched_count < driving_count);
 }

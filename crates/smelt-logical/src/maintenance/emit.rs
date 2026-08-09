@@ -1193,6 +1193,70 @@ pub fn emit_count_preservation_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// Build [`emit_count_preservation_probe`]'s `driving_select`/`enriched_select`
+/// pair directly from a model's own already-compiled `body_sql`, for a
+/// caller (`smelt-runtime`'s `execute_delete_insert_with_delta_restriction`)
+/// that has the body but not a hand-maintained pair of scoped `SELECT`s: the
+/// **enriched** side is `body_sql`'s own top-level `FROM`/`JOIN`/`WHERE`
+/// text unchanged (the join against `enrichment_source` still present); the
+/// **driving** side is the SAME text with that one join clause spliced out
+/// by text range — never re-authored, never re-derived from a second parse
+/// of a different string, so both sides carry byte-identical scoping
+/// (WHERE, other joins) except for the one join this probe exists to
+/// falsify.
+///
+/// `body_sql` is already-compiled SQL (`smelt.<path>` refs already resolved
+/// to physical `schema.table` names by the SQL compiler, matching what
+/// `execute_delete_insert_with_delta_restriction` actually holds at its
+/// call site) — the join is found by `TableRef::bare_path_text`'s plain
+/// dotted-identifier text, never `analysis::source_bounds::
+/// resolve_table_ref_source_name` (which only recognises unresolved
+/// `smelt.<path>` refs and would never match a compiled body). A match is
+/// exact-path or last-segment equality, so a caller may name
+/// `enrichment_source` either as the full physical path (`main.dim`) or
+/// just its bare table name (`dim`).
+///
+/// Fail-closed to `None` — never a best-effort guess — when `body_sql` has
+/// no top-level `SELECT`, no `FROM` clause, or no join against
+/// `enrichment_source` found in that `FROM` clause's own joins.
+pub fn emit_count_preservation_probe_from_body(
+    body_sql: &str,
+    enrichment_source: &str,
+) -> Option<MaintenanceStatement> {
+    let parse = smelt_parser::parse(body_sql);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let from_clause = select.from_clause()?;
+
+    let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let target_last = last_segment(enrichment_source);
+    let join = from_clause.joins().find(|join| {
+        join.table_ref()
+            .and_then(|table_ref| table_ref.bare_path_text())
+            .is_some_and(|path| path == enrichment_source || last_segment(&path) == target_last)
+    })?;
+
+    let from_range = from_clause.text_range();
+    let join_range = join.syntax().text_range();
+    let where_suffix = select
+        .where_clause()
+        .map(|w| format!(" {}", &body_sql[w.text_range()]))
+        .unwrap_or_default();
+
+    let enriched_from = &body_sql[from_range];
+    let before_join = smelt_parser::TextRange::new(from_range.start(), join_range.start());
+    let after_join = smelt_parser::TextRange::new(join_range.end(), from_range.end());
+    let driving_from = format!("{}{}", &body_sql[before_join], &body_sql[after_join]);
+
+    let driving_select = format!("SELECT 1 {driving_from}{where_suffix}");
+    let enriched_select = format!("SELECT 1 {enriched_from}{where_suffix}");
+
+    Some(emit_count_preservation_probe(
+        &driving_select,
+        &enriched_select,
+    ))
+}
+
 /// The functional-dependency probe (`docs/specs/model_properties.md`
 /// §"Probe obligation", row `functional_dependencies:`): a read-only query
 /// re-aggregating the declared `key` over `scope_select`'s own processed

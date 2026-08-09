@@ -1001,11 +1001,13 @@ mod enrichment_restrict_column_tests {
 #[cfg(test)]
 mod recompute_restriction_tests {
     use super::*;
-    use crate::maintenance::SkeletonSourceClosure;
+    use crate::maintenance::{RowPreservation, SkeletonSourceClosure};
 
     #[test]
     fn closed_with_nonempty_delta_restricts() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let delta = vec!["ev-1".to_string(), "ev-2".to_string()];
         let verdict = resolve_recompute_restriction(Some(&closure), Some(&delta));
         assert_eq!(
@@ -1035,14 +1037,18 @@ mod recompute_restriction_tests {
 
     #[test]
     fn closed_with_absent_delta_falls_back_unrestricted() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let verdict = resolve_recompute_restriction(Some(&closure), None);
         assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
     }
 
     #[test]
     fn closed_with_empty_delta_falls_back_unrestricted() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let empty: Vec<String> = vec![];
         let verdict = resolve_recompute_restriction(Some(&closure), Some(&empty));
         assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));

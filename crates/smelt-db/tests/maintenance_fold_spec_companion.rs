@@ -111,6 +111,7 @@ fn sum_over_unclocked_append_only_source_is_refused_at_plan_layer() {
         None,
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -315,6 +316,7 @@ fn once_write_column_derives_keyed_fold_cell_at_plan_layer() {
         Some(Granularity::Day),
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -373,6 +375,7 @@ fn avg_model_derives_fold_spec_and_keyed_fold_cell() {
         Some(Granularity::Day),
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
     assert!(

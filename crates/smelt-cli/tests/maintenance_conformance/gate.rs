@@ -4108,6 +4108,7 @@ fn derive_plan_with_real_deployed_schema(
         None,
         &[],
         &deployed,
+        &std::collections::BTreeMap::new(),
     )
     .ok_or_else(|| anyhow::anyhow!("model {:?} carries no maintenance plan", recipe.model_name))?;
     Ok(result.plan)
@@ -5605,7 +5606,9 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
         let body = "SELECT event_id, device_id, event_date, event_utm_campaign, session_id, \
                      session_utm_campaign FROM main.enrichment_recompute";
 
-        let closed_verdict = smelt_logical::maintenance::SkeletonSourceClosure::Closed;
+        let closed_verdict = smelt_logical::maintenance::SkeletonSourceClosure::Closed {
+            row_preservation: smelt_logical::maintenance::RowPreservation::JoinShape,
+        };
         smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
             &backend,
             "main",

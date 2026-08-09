@@ -611,6 +611,13 @@ fn derive_clamp_and_locality_pass(
             // creation cells — a `ColumnAdded` trigger never affects them,
             // so no deployed-schema snapshot is needed here.
             &[],
+            // Same rationale as `build_key_recurrences` above: the SAME
+            // declared `referential_integrity` facts `smelt-db`'s own
+            // `smelt explain` derivation reaches
+            // (`build_source_referential_integrity`), so a declared-route
+            // `UpstreamMutation` cell's closure is real here too, never a
+            // separately re-derived admission.
+            &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
         ) else {
             continue;
         };

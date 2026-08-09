@@ -516,7 +516,9 @@ fn model_edge_enrichment_closure(
     if joined_edges.is_empty() {
         return None;
     }
-    let mut verdict = crate::analysis::skeleton_closure::SkeletonSourceClosure::Closed;
+    let mut verdict = crate::analysis::skeleton_closure::SkeletonSourceClosure::Closed {
+        row_preservation: crate::analysis::skeleton_closure::RowPreservation::JoinShape,
+    };
     for edge in joined_edges {
         let v = skeleton_source_closure(sql, &edge.name, None, join_ctx);
         if !v.is_closed() {

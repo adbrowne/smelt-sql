@@ -12,7 +12,7 @@
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, Region};
-use smelt_logical::maintenance::SkeletonSourceClosure;
+use smelt_logical::maintenance::{RowPreservation, SkeletonSourceClosure};
 use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
 use tempfile::TempDir;
 
@@ -147,7 +147,9 @@ async fn closed_with_exact_delta_touches_only_the_delta_keys() {
     let (_dir, backend) = setup().await;
     record_delta(&backend, &["ev-1", "ev-2"]).await;
 
-    let closure = SkeletonSourceClosure::Closed;
+    let closure = SkeletonSourceClosure::Closed {
+        row_preservation: RowPreservation::JoinShape,
+    };
     let group = execute_delete_insert_with_delta_restriction(
         &backend,
         "main",
@@ -246,7 +248,9 @@ async fn absent_observed_delta_runs_the_ordinary_widened_scan() {
     let (_dir, backend) = setup().await;
     // No `record_delta` call — the window was never recorded.
 
-    let closure = SkeletonSourceClosure::Closed;
+    let closure = SkeletonSourceClosure::Closed {
+        row_preservation: RowPreservation::JoinShape,
+    };
     let group = execute_delete_insert_with_delta_restriction(
         &backend,
         "main",
@@ -281,7 +285,9 @@ async fn empty_observed_delta_falls_back_to_the_widened_scan() {
     let (_dir, backend) = setup().await;
     record_delta(&backend, &[]).await;
 
-    let closure = SkeletonSourceClosure::Closed;
+    let closure = SkeletonSourceClosure::Closed {
+        row_preservation: RowPreservation::JoinShape,
+    };
     let group = execute_delete_insert_with_delta_restriction(
         &backend,
         "main",

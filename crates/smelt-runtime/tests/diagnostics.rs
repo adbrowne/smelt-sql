@@ -99,6 +99,7 @@ fn derive_plan_cells(model: &ModelFile, source_infos: &[SourceInfo]) -> Vec<Plan
         None,
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .map(|r| r.plan.cells)
     .unwrap_or_default()

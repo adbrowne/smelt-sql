@@ -1151,6 +1151,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         None,
         &[],
         &[],
+        &std::collections::BTreeMap::new(),
     )
     .expect("device_avg_amount must derive a maintenance plan");
     let cell = plan_result
@@ -3330,7 +3331,9 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         end: "'2026-07-02'".to_string(),
     };
     let body = "SELECT event_id, event_date, tier FROM main.enrichment_recompute";
-    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Closed;
+    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Closed {
+        row_preservation: smelt_logical::maintenance::RowPreservation::JoinShape,
+    };
 
     smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
         &backend,

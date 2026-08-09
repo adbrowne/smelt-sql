@@ -396,6 +396,7 @@ fn column_added_trigger_derived_from_deployed_schema() {
         None,
         &[],
         &deployed_column_names,
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -458,6 +459,7 @@ fn column_added_trigger_skeleton_position_refuses() {
         None,
         &[],
         &deployed_column_names,
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -545,6 +547,7 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
         None,
         &[],
         &deployed_column_names,
+        &std::collections::BTreeMap::new(),
     )
     .expect("refresh: incremental model must derive a plan");
 

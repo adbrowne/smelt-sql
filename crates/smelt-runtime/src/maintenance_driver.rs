@@ -31,9 +31,11 @@ use smelt_logical::maintenance::choice::{
     resolve_write_suppression, resolve_write_variant, ChosenTechnique, RecomputeRestriction,
     WriteSuppression,
 };
+use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
-    emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
+    emit_column_scoped_merge, emit_column_scoped_merge_suppressed,
+    emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
+    emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
     emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
     emit_repair_group_digest_select, emit_repair_group_sidecar_diff,
     emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
@@ -42,8 +44,8 @@ use smelt_logical::maintenance::emit::{
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, ScanClamp, SkeletonSourceClosure,
-    SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation, ScanClamp,
+    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -581,6 +583,7 @@ pub fn resolve_incremental_strategy(
         // `ColumnAdded` trigger never affects it, so no deployed-schema
         // snapshot is needed here.
         &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return backend_default;
     };
@@ -830,6 +833,7 @@ pub fn resolve_live_column_scoped_cell(
         // `ColumnAdded` trigger never affects them, so no deployed-schema
         // snapshot is needed here.
         &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return Ok(None);
     };
@@ -1048,6 +1052,7 @@ pub fn resolve_live_in_place_update_cell(
         None,
         &[],
         deployed_column_names,
+        &SourceReferentialIntegrity::new(),
     )?;
     let cell = result
         .plan
@@ -1175,6 +1180,7 @@ pub fn resolve_live_membership_recompute_cell(
         // `ColumnAdded` trigger never affects them, so no deployed-schema
         // snapshot is needed here.
         &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return Ok(None);
     };
@@ -1578,6 +1584,7 @@ pub fn resolve_live_per_group_recompute_cell(
         None,
         &[],
         &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return Ok(None);
     };
@@ -2929,12 +2936,77 @@ pub async fn execute_delete_insert_with_delta_restriction(
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
-    let delta = if restrict_column.is_some() && closed {
+    let mut delta = if restrict_column.is_some() && closed {
         read_observed_delta_changed_keys(backend, schema, upstream_model, window_start, window_end)
             .await?
     } else {
         None
     };
+    // The declared-`referential_integrity` route's row-preservation leg is
+    // an *unverified* world-fact until a run actually probes it
+    // (`model_properties.md` §"Skeleton-source closure", §"Probe
+    // obligation"): a `JoinShape` (`LEFT JOIN`) route needs no runtime
+    // check, but a `DeclaredReferentialIntegrity` route must dispatch the
+    // count-preservation probe over the touched region *before* trusting
+    // the restriction it licenses — never after the write, and never
+    // silently skipped.
+    let restriction_taken =
+        restrict_column.is_some() && delta.as_deref().is_some_and(|d| !d.is_empty());
+    if restriction_taken {
+        if let Some(SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity { source },
+        }) = skeleton_source_closure
+        {
+            match emit_count_preservation_probe_from_body(body, source) {
+                Some(probe) => {
+                    let batches = backend.execute_sql(&probe.sql).await?;
+                    let rows = crate::check_runner::batches_to_rows(&batches);
+                    let (driving_count, enriched_count) = rows
+                        .first()
+                        .and_then(|r| {
+                            Some((
+                                r.get("driving_count")?.clone(),
+                                r.get("enriched_count")?.clone(),
+                            ))
+                        })
+                        .ok_or_else(|| BackendError::ExecutionFailed {
+                            model: table.to_string(),
+                            message: format!(
+                                "count-preservation probe for declared referential_integrity on \
+                                 '{source}' returned no driving_count/enriched_count row — \
+                                 refusing to trust an unchecked declared-route narrowing"
+                            ),
+                        })?;
+                    let driving_count: i64 = driving_count.parse().unwrap_or(i64::MAX);
+                    let enriched_count: i64 = enriched_count.parse().unwrap_or(-1);
+                    if enriched_count < driving_count {
+                        return Err(BackendError::ExecutionFailed {
+                            model: table.to_string(),
+                            message: format!(
+                                "SourceCountPreservationViolated: '{source}' declares \
+                                 referential_integrity, but the enrichment join over the \
+                                 touched region ({window_start}..{window_end}) returned \
+                                 {enriched_count} row(s) against {driving_count} driving \
+                                 row(s) — some driving row's join key has no match in the \
+                                 dimension; correct or backfill the dimension's missing key, \
+                                 or drop the declaration"
+                            ),
+                        });
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        source = %source,
+                        table = %table,
+                        "declared referential_integrity closure could not build a \
+                         count-preservation probe from this model's own body — dropping the \
+                         delta restriction and falling back to the widened scan"
+                    );
+                    delta = None;
+                }
+            }
+        }
+    }
     let group = build_delete_insert_group_dispatched(
         &full_table,
         partition_col,
@@ -3020,6 +3092,7 @@ pub fn resolve_live_delta_restriction_facts(
         // a `ColumnAdded` trigger never affects it, so no deployed-schema
         // snapshot is needed here.
         &[],
+        &SourceReferentialIntegrity::new(),
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),

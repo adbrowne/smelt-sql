@@ -41,7 +41,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 pub use crate::analysis::fingerprint::Projection as FingerprintProjection;
-pub use crate::analysis::skeleton_closure::SkeletonSourceClosure;
+pub use crate::analysis::skeleton_closure::{RowPreservation, SkeletonSourceClosure};
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
 /// How a source's rows change after they first appear.
