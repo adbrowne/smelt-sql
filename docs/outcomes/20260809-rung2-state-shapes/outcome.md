@@ -46,11 +46,12 @@ success criteria above.
 |---|-------|--------|
 | 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
-| 3 | Storage + emitters: state columns in the stored table, keyed fold over state, presentation projection, `KeyedStateColumnCollision` diagnostic wiring | pending |
-| 4 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
-| 5 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
-| 6 | Conformance-gate recipes for decomposed-state families; ledger grading audit | pending |
-| 7 | Surface cleanup: delete superseded obligations from spec + docs-site; `smelt explain` state rendering | pending |
+| 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | planned |
+| 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | pending |
+| 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
+| 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
+| 7 | Conformance-gate recipes for decomposed-state families; ledger grading audit | pending |
+| 8 | Surface cleanup: delete superseded obligations from spec + docs-site; `smelt explain` state rendering | pending |
 
 ## Decision log
 
@@ -91,6 +92,24 @@ success criteria above.
   per the plan-2 decision. `presentation.rs`'s existing walk needed no new arms — CASE/binary-op/
   scalar-function coverage already accepted the new `π` shapes. All 14 new/updated
   `decomposed_state` tests and 3 new `presentation` tests pass; full `verify-phase.sh` green.
+
+- 2026-08-09 (plan 3, reshape): old row 3 split into two — row 3 (state columns materialised +
+  keyed fold over state + collision diagnostic) and a new row 4 (presentation projection: hiding
+  state columns from `ref()` expansion, `SELECT *`, declared-schema checks, downstream type
+  inference). The hiding half lives in a different layer (`smelt-db`/`smelt-runtime` schema
+  resolution) from the storage/emitter half and is what success criterion 4 checks; bundling both
+  in one phase made a row that could not be red-green'd coherently. Admission/conformance/surface
+  rows shift to 5–8. Nothing left the outcome.
+- 2026-08-09 (plan 3): phase 3 carries state through the classification without widening
+  admission — the state-bearing shapes stay unreachable from real SQL until rows 5–6 flip
+  admission, so phase 3's tests construct the state-bearing classification directly. Rejected:
+  folding the `MAX_BY` admission flip into phase 3 to get an end-to-end fixture, which would make
+  one phase both mechanism and admission and leave no clean red test for either.
+- 2026-08-09 (plan 3): small spec correction queued into phase 3 (spec-first) — the state-shape
+  catalogue's once-write "combiner over state" cell currently reads last-write-wins ("`value` is
+  the incumbent's unless the delta's `written` is true, in which case the delta's"), which
+  contradicts the family's first-write-wins semantics and its own rung-1 `COALESCE(target, delta)`
+  form. The fold is `COALESCE(target.value, delta.value)`.
 
 ## Blocked
 
