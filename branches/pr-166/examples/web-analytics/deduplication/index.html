@@ -2976,7 +2976,7 @@ happens to see. There's nothing left to order.</p>
 <a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>      region key: Key([&quot;event_id&quot;])
 <a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>      locality:  partition_local
 <a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>      scan clamps: (none)
-<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
 <a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>      write pin: (none)
 <a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>      write variant: suppressed (preference — steady-state trigger over prior state)
 <a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>  - group {*} on trigger Backfill
@@ -2986,7 +2986,7 @@ happens to see. There's nothing left to order.</p>
 <a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>      region key: Key([&quot;event_id&quot;])
 <a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>      locality:  partition_local
 <a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>      scan clamps: (none)
-<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
 <a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>      write pin: (none)
 <a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>
 <a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>Key temporal locality:
@@ -3145,14 +3145,9 @@ of the whole table.</p>
 <p>A third capability — skipping the merge's write entirely when a key's
 folded state didn't actually change — needs to read the stored rows to
 compare against, and only a bounded target scan makes that comparison
-cheap enough to be worth doing. That's exactly the <code>write variant:
-suppressed</code> line in the <code>smelt explain</code> output above: on a steady-state
-run like this one, the merge's matched arm gains an <code>IS DISTINCT FROM</code>
-guard, and a re-run whose delta reproduces the stored state writes zero
-rows. The locality this page establishes is what keeps that comparison
-proportional to the touched slice instead of a scan of every stored key —
-see <a href="../../../guide/incremental-models/#conditional-writes">Conditional writes</a>
-for the full mechanism.</p>
+cheap enough to be worth doing. That machinery isn't wired up yet; the
+locality this page establishes is what will make it affordable when it
+lands.</p>
 <p>If you've built this in other tools: dbt and SQLMesh both treat "dedup a
 key" and "partition a table" as separate concerns you reach for
 independently — there's no single model shape where declaring an identity
