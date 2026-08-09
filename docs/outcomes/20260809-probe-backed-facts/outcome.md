@@ -50,9 +50,11 @@ safe to grow (the contract lattice will grow it).
 | 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
-| 4 | Runtime wiring: `probes:` in `Config`, cadence control, firing → named diagnostic + cell remedy marking | pending |
-| 5 | Conformance recipes: violated-fact scenarios caught by probes | pending |
-| 6 | Surface: explain rendering of probes + cost, docs-site update | pending |
+| 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | planned |
+| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | pending |
+| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | pending |
+| 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
+| 8 | Surface: explain rendering of probes + cost, docs-site update | pending |
 
 ## Decision log
 
@@ -104,6 +106,22 @@ safe to grow (the contract lattice will grow it).
   which-cells-consult-RI widening is recorded under "## Out of scope" instead,
   since criterion 1 asks that every run *relying* on the declaration probe, not
   that more runs rely on it.
+
+- 2026-08-10: Reshape + phase 4 planned. The old phase 4 row bundled three separable jobs —
+  policy (`probes:` config + cadence), dispatch mechanics (execute, read the one-row contract,
+  raise the named diagnostic), and *four* new live dispatch sites with different scopes. Split:
+  phase 4 lands the policy + the one dispatch helper and re-routes the two probes that already
+  dispatch; phase 5 wires the three model-scoped probes (all share the run's compiled delta as
+  `scope_select`); phase 6 wires the append-only posture probe, whose scope is per-partition
+  recorded counts + a frontier fingerprint and therefore needs persisted state the other three
+  do not. Nothing left the outcome — criterion 6's fact-violation recipes need all four
+  dispatched, so all four keep a row. Conformance and surface rows shift to 7 and 8.
+  Decisions taken while planning: (a) phase 3's open question — cadence *does* govern the RI
+  and recurrence dispatches, per `smelt_yml.md` Semantics 10's project-wide policy; (b) a
+  **policy skip** trusts the declaration and records it unverified on the run, while a
+  **probe that cannot be built** stays fail-closed exactly as today — two distinct
+  non-dispatch cases that must not be collapsed; (c) `periodic`'s run ordinal comes from the
+  model's existing manifest history (`HistoryQuery::for_model`), so no new counter state.
 
 ## Blocked
 
