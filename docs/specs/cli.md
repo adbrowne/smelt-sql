@@ -150,8 +150,11 @@ Contract": its clock, identity, and derived `grain` label), and one contract blo
 edge (upstream dependency) — a declared source or an upstream maintained model, rendered through
 the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
 so the reader knows which provider filled them; a row prints `(none)` when that provider declares
-neither fact. The report is read-only and plain text. `--select` and `--json` are ignored when a
-model-name argument is given, except `--json` combined with `--show-sql` (below).
+neither fact. The report is read-only and plain text. `--select` is ignored when a model-name
+argument is given. `--json` is honored with a model-name argument — with or without `--show-sql`
+— and emits the per-model report as JSON (the same schema either way, since the JSON form always
+carries every cell's `statements` and `technique_previews` arrays; `--show-sql` only changes the
+*text* rendering). A flag combination is never silently ignored.
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
@@ -166,8 +169,7 @@ by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend sup
 transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
 given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand
 in, so the emitted shape is inspectable without choosing a window. `--show-sql` never connects
-to a backend and never executes anything. With `--json` alongside `--show-sql` (the one case
-where `--json` is honored together with a model-name argument), the per-model report is emitted
+to a backend and never executes anything. With `--json`, the per-model report is emitted
 as JSON with a `statements` array per cell
 (`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable form
 documentation generators embed.

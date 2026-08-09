@@ -452,7 +452,12 @@ async fn explain_maintenance_plan(
         )
     })?;
 
-    if !args.show_sql {
+    // `--json` is honored with or without `--show-sql` (`docs/specs/cli.md`
+    // §"`smelt explain <model>` maintenance-plan report") — the JSON schema is
+    // identical either way, so only the plain-text rendering short-circuits
+    // here. Falling through on `--json` alone must never print the text
+    // report: a machine consumer would get prose with exit 0 (fail-loud).
+    if !args.show_sql && !args.json {
         println!("{}", report);
         return Ok(());
     }
