@@ -369,6 +369,8 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `MaintenanceGraphUnsupportedNode` | A cyclic edge set, an inadmissible self-referential model, or a bare keyed node in the propagation graph (§"The graph layer"). |
 | `MaintenanceWriteAddressingRefused` | A `cells[].write` pin names an addressing that cannot uphold the cell's equivalence invariant; names the cell and the refused pattern (§"Per-cell write addressing"). |
 | `MaintenanceWritePatternUnavailable` | A `write:` pin names an unrecognised pattern, or one the target backend's capability registry does not provide; names the pattern and the backend (§"Per-cell write addressing"). |
+| `MaintenanceRepairKeysNotDiscoverable` | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set; names the changed input and why the delta yields no key set (§"The repair family" obligation (c)). |
+| `MaintenanceRepairSliceUnbounded` | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked; names the source and the unbounded reach (§"The repair family" obligation (b)). |
 
 **Partition-grain codes.**
 
@@ -392,10 +394,10 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `KeyedMultipleDrivingSources` | More than one timeseries-tagged source in the FROM clause; lists the candidates. |
 | `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns; names the column, the unproven candidate(s), and the three fixes (key-derived form, declared functional dependency, remodelling). |
 | `KeyedStateColumnCollision` | A decomposed-state column name (`<output>__<part>`, §"Decomposed state (rung 2) in keyed models") collides with a declared or projected user column; names both and the reserved suffix. |
-| `KeyedRetractableContribution` | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen. Steers to `refresh: materialized_view` or DAG composition. Never fires on the join spelling alone (§"Enrichment joins"). |
+| `KeyedRetractableContribution` | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen — and the repair family cannot admit a per-group recompute for the retraction; names the failing repair obligation. Steers to `refresh: materialized_view` or DAG composition. Never fires on the join spelling alone (§"Enrichment joins", §"The repair family"). |
 | `KeyedSnapshotSourceUnsupportedColumn` | A column family inadmissible under snapshot-reconcile appears in a model with no clocked driving source; names the column, the family, and why the current-snapshot oracle cannot hold (§"Admission matrix"). |
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source to reconcile against either (two or more unclocked candidates in the FROM clause) — neither run shape can be derived (§"The two run shapes"). |
-| `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window; points at `--full-refresh` (§"Reprocessing"). |
+| `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change; names the failing repair obligation and points at `--full-refresh` (§"Reprocessing", §"The repair family"). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality"). |
 
 ## Semantics
@@ -634,7 +636,8 @@ addressing").
 **Each cell carries:**
 
 - its **corner** of the read-scope × write-scope 2×2 (below);
-- the **technique** that realizes it, drawn from the open write-pattern registry;
+- the **technique** that realizes it, drawn from the open write-pattern registry (which includes
+  the repair family, §"The repair family");
 - the **write mechanism** admitted for it — derived by the available-addressings rule, or a
   validated user `write:` pin (§"Per-cell write addressing");
 - the **derived scan clamps** — per read source, the `(partition_col, before, after)` window the
@@ -654,7 +657,10 @@ region overwrite):
 
 Recompute-a-region is contract-agnostic and unconditionally valid over replayable input; the
 fold corner is contract-specific (it needs a combiner algebra — §"The algebraic maintenance
-ladder"). Where the interchangeability conditions hold (§"Per-cell admission"), a recompute of a
+ladder"). The repair family (§"The repair family") is recompute-a-region's targeted-write
+refinement: it lands in the **column-scoped re-derivation** corner — full-input read, targeted
+write — scoped to a provably finite key slice rather than a whole region, and it inherits
+recompute-a-region's contract-agnostic correctness argument rather than needing one of its own. Where the interchangeability conditions hold (§"Per-cell admission"), a recompute of a
 region **supersedes and resets** what folds had written there. "Unconditionally valid" is a
 correctness claim, not an admission or cost claim: it holds even when no partition bound exists and the
 region is the whole table — whether that degenerate recompute is *admitted* is gated separately
@@ -687,6 +693,10 @@ an unrecognised construct refuses, never defaults). The obligations, each with i
    trajectory column's unbounded forward footprint fails this (`MaintenanceUnboundedFootprint`).
 6. **Well-defined groups** — the mutation-sensitivity partition is computable
    (`model_properties.md`); degenerate collapse is surfaced, never silent.
+7. **Affected-key discovery** (repair family only) — a changed input's delta resolves to a finite
+   output key set, a sound over-approximation admitted (`model_properties.md` §"Affected-key
+   discovery"); an unresolvable delta shape refuses the repair family by name
+   (`MaintenanceRepairKeysNotDiscoverable`, §"The repair family").
 
 **Interchangeability and choice.** Two techniques may serve one cell interchangeably iff, at a
 fixed processed-input set `S`, they produce identical state on the columns that decide which
@@ -706,7 +716,7 @@ Every cell derives its **physical write** — how it locates the stored rows it 
 currently known write-pattern set, an **open registry**, not a closed enum:
 
 ```
-{ region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild, … }
+{ region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild, diff_patch, … }
 ```
 
 **The available-addressings rule.** A write mechanism is admitted for a cell iff:
@@ -803,8 +813,69 @@ and the durable contract is deliberately **not** the enumeration; the enumeratio
   unrecognised pin, or one naming a pattern the target backend cannot provide, is refused with a
   diagnostic — never silently downgraded.
 
+**`diff_patch` — compute, diff, write only the difference.** A pattern for reconciliation runs
+and idempotent re-runs: the candidate rows for a slice are computed, diffed against the slice's
+stored state, and only the difference is written — inserting rows absent from storage, updating
+stored rows whose compared columns differ from the candidate, and deleting stored rows absent
+from a *complete* candidate set. Contract facts it requires: a declared `unique_key` (row
+identity for the diff join) for the insert/update legs, and change comparability
+(`model_properties.md` §"Change comparability") over the written columns for the update leg. The
+delete leg additionally requires **slice completeness** — the candidate set must provably contain
+every row that should exist in the slice, the same premise the repair family's correctness
+argument rests on (§"The repair family") — and is not admitted without it; lacking completeness,
+the pattern degrades explicitly to insert+update, stated as a reduced-capability admission rather
+than a silently dropped delete leg. `diff_patch` is graded **Idempotent** — a second run against
+unchanged input diffs to empty — which is what makes it the reconciliation and drift-repair
+write (§"The transactional merge ledger").
+
 Backends **execute** registered patterns; they never **author** maintenance-statement text
 (§"Statement emission (single owner)").
+
+### The repair family
+
+A non-invertible combiner refuses reprocessing outright when a merged window's input changes
+(§"Reprocessing") — full refresh is the only universally correct fallback for it. The repair
+family narrows that refusal for one common case: when the change is a **retraction or mutation**
+whose affected output keys are provably finite (`model_properties.md` §"Affected-key discovery"),
+the plan recomputes *only those groups* from their bounded input slice instead of rebuilding the
+whole table or region. It is the **targeted-write refinement of recompute-a-region**: the same
+full-input read as a region recompute, addressed by key rather than by region — landing in the
+**column-scoped re-derivation** corner of the 2×2 (§"The plan matrix") — and like a region
+recompute it **supersedes and resets** the ledger for the keys it rewrites (§"Per-cell admission",
+interchangeability).
+
+**Why it is correct.** Recomputing a key set `K` over an input slice that provably contains
+*every* row contributing to any `k ∈ K` reproduces `full_refresh` restricted to `K`; every key
+outside `K` is untouched, and therefore stays bit-identical to its prior state. The equivalence
+invariant (§"The equivalence invariant") holds cell-wide as a consequence: written keys equal the
+full-refresh oracle restricted to `K`, unwritten keys equal it trivially. The load-bearing premise
+is **slice completeness** — the input slice a per-group recompute reads must provably contain
+every row that can contribute to a key in `K`. This is not a new proof: it reuses **key temporal
+locality** (§"Key temporal locality"), whose whole purpose is establishing that a key's
+contributing rows lie within a computable slice of the input.
+
+**Admission obligations.** A repair cell is admitted only when three obligations discharge. Two
+already exist in §"Per-cell admission"'s numbered list and are reused, not restated; the third is
+new:
+
+- **derivable group key** — obligation 6 ("well-defined groups"): the walk's grain names the
+  groups a repair recomputes;
+- **bounded per-group read footprint** — obligation 4 ("bounded reach"): the key→input-slice
+  reach is derived (a key-temporal-locality route) or declared-and-checked;
+- **affected-key discovery** — a new obligation 7, below: the changed input's delta names a
+  finite key set (`model_properties.md` §"Affected-key discovery"). A sound over-approximation
+  (a superset of the true affected keys) is admissible — it costs extra recomputation, never
+  correctness; an under-approximation is never admissible, because a missed key would leave stale
+  state for a group the retraction actually touched.
+
+All three are fail-closed: any one unprovable refuses the repair family by name for that cell —
+it never widens to a whole-table repair, and the refusal always names which obligation failed
+(§Diagnostics, `MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`).
+
+**Ledger grading and re-run safety.** Per-group recompute is graded **Idempotent** for the keys in
+its slice, exactly like a region recompute (§"The transactional merge ledger"): re-running it
+reproduces the same state, and it resets any additive ledger record for those keys rather than
+folding a second time on top of it.
 
 ### Windowed maintenance and the horizon
 
@@ -1623,11 +1694,16 @@ delegated to `refresh: materialized_view`.
 
 #### Reprocessing
 
-If a merged window's source data changes, re-running it does not produce correct state for any
-family (posture 3). The rule refuses at planning time when detectable — the ledger says the
-window was merged; `--auto` staleness says the input changed — with `KeyedReprocessedWindow`
-pointing at the two mitigations: `--full-refresh` (truncate-and-rebuild), or a manual cascade
-rebuild. Subtract-then-add for all-invertible models is a future path (§Known Divergences).
+If a merged window's source data changes, re-running the ordinary reprocessing path does not
+produce correct state for any family (posture 3). Before that refusal fires, the change **routes
+to the repair family first** (§"The repair family"): a retraction or mutation whose affected keys
+are discoverable and whose per-group slice is bounded recomputes just those groups, and no
+reprocessing refusal is raised. This is a plan-level route, not a new mode or a user flag. The
+rule refuses at planning time only when a repair obligation fails — the ledger says the window
+was merged; `--auto` staleness says the input changed — with `KeyedReprocessedWindow` naming the
+failing repair obligation and pointing at the two mitigations: `--full-refresh`
+(truncate-and-rebuild), or a manual cascade rebuild. Subtract-then-add for all-invertible models
+is a future path (§Known Divergences).
 
 #### Ordering ties (order-monotone overwrite)
 
@@ -2170,6 +2246,12 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
+- **The repair family and `diff_patch` are specified ahead of derivation and emission.**
+  Per-group recompute (§"The repair family"), affected-key discovery
+  (`model_properties.md` §"Affected-key discovery"), and the `diff_patch` write pattern
+  (§"Per-cell write addressing") have no deriving proof, technique, or emitter yet — every
+  retraction and reprocessing refusal still falls straight to full refresh. Tracked:
+  `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key
   only at plan derivation, not at frontmatter validation; a bare `grain: key` model with neither
