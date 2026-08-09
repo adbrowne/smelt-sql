@@ -51,7 +51,7 @@ safe to grow (the contract lattice will grow it).
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
-| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | planned |
+| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | pending |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
 | 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
@@ -146,6 +146,16 @@ safe to grow (the contract lattice will grow it).
   which already have the run's `compiled.sql` (the run's own processed rows, exactly the
   `scope_select` the three phase-2 emitters expect) and the existing
   `probe_policy_for_model(...)` policy in scope.
+
+- 2026-08-10: Phase 5 done. `smelt_runtime::model_probes` (`declared_model_probes` +
+  `dispatch_declared_model_probes`) wires the three model-scoped probes into both the
+  full-refresh and incremental-batch pre-write sites in `execute.rs`, over the run's own
+  compiled SQL, governed by the existing `probe_policy_for_model`. The three registry rows
+  flip `built (unwired)` → `built`; only the append-only posture probe (phase 6) remains
+  unwired. Monotonicity's partition key is the declared `unique_key` else the timeseries
+  `partition_column` — always available. `dispatch_declared_model_probes` returns
+  `Vec<ProbeRecord>` for held/skipped probes, still unconsumed until phase 8 wires
+  `ModelRunRecord.probes`. See `phases/05-summary.md`.
 
 ## Blocked
 

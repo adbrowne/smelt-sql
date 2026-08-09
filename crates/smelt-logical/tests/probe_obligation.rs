@@ -182,10 +182,12 @@ fn probe_registry_built_rows_name_a_real_emitter() {
 }
 
 /// Widens the emitter-existence check above to specifically pin the four
-/// `built (unwired)` rows this phase adds
+/// probes phase 2 added emitters for
 /// (`docs/outcomes/20260809-probe-backed-facts/phases/02-plan.md` test 10):
 /// each must name its exact expected emitter, not merely some `emit_*`
-/// symbol.
+/// symbol. Phase 5 wired the three model-scoped probes into live dispatch
+/// (`built`); the source append-only posture probe still has no live
+/// dispatch site (`built (unwired)`, phase 6).
 #[test]
 fn built_and_unwired_rows_name_a_real_emitter() {
     let model_properties = read("docs/specs/model_properties.md");
@@ -193,25 +195,34 @@ fn built_and_unwired_rows_name_a_real_emitter() {
     let rows = registry_rows(section);
     let emit_source = read("crates/smelt-logical/src/maintenance/emit.rs");
 
-    let expected: &[(&str, &str)] = &[
-        ("timeseries.assert_monotonic", "emit_monotonicity_probe"),
+    let expected: &[(&str, &str, &str)] = &[
+        (
+            "timeseries.assert_monotonic",
+            "emit_monotonicity_probe",
+            "built",
+        ),
         (
             "functional_dependencies:",
             "emit_functional_dependency_probe",
+            "built",
         ),
-        ("bounded_domain:", "emit_bounded_domain_probe"),
-        ("append_only", "emit_append_only_posture_probe"),
+        ("bounded_domain:", "emit_bounded_domain_probe", "built"),
+        (
+            "append_only",
+            "emit_append_only_posture_probe",
+            "built (unwired)",
+        ),
     ];
 
-    for (decl, emitter) in expected {
+    for (decl, emitter, expected_status) in expected {
         let row = rows
             .iter()
             .find(|row| row.first().is_some_and(|d| d.contains(decl)))
             .unwrap_or_else(|| panic!("no registry row found for declaration `{decl}`"));
         let status = row.last().map(String::as_str).unwrap_or("");
-        assert!(
-            status.contains("built (unwired)"),
-            "declaration `{decl}` expected Status `built (unwired)`, found `{status}`"
+        assert_eq!(
+            status, *expected_status,
+            "declaration `{decl}` expected Status `{expected_status}`, found `{status}`"
         );
         let probe_cell = row.get(1).map(String::as_str).unwrap_or("");
         assert!(

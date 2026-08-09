@@ -2732,6 +2732,33 @@ pub async fn execute_project(
                     )?;
                     reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
+                    // Live dispatch of the declared model-scoped probes
+                    // before this batch's write — same obligation as the
+                    // full-refresh site above, scoped to this batch's own
+                    // compiled (filtered) SQL
+                    // (`docs/specs/model_properties.md` §"Probe obligation").
+                    let declared_probes = crate::model_probes::declared_model_probes(
+                        &plan.name,
+                        &format!(
+                            "{}.{} batch [{}, {})",
+                            schema,
+                            plan.model_file.db_name_owned(),
+                            batch.partition_start.format("%Y-%m-%d"),
+                            batch.partition_end.format("%Y-%m-%d"),
+                        ),
+                        plan.model_file.metadata.as_deref(),
+                        Some(&inc_plan.timeseries),
+                        &compiled.sql,
+                        smelt_backend::maintenance_dialect(backend.dialect()),
+                    );
+                    crate::model_probes::dispatch_declared_model_probes(
+                        backend,
+                        &probe_policy_for_model(config, prior_runs, &plan.name),
+                        &declared_probes,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
                     // (`docs/specs/model_transforms.md` §Constraints — "Write window
@@ -3155,6 +3182,30 @@ pub async fn execute_project(
                     resolver,
                 )?;
                 reporter.model_compiled(run_id, &plan.name, &compiled.sql);
+
+                // Live dispatch of the declared model-scoped probes
+                // (`timeseries.assert_monotonic`, `functional_dependencies:`,
+                // `bounded_domain:`) before the materialization write —
+                // a firing probe fails the run before anything is written
+                // (`docs/specs/model_properties.md` §"Probe obligation").
+                let declared_probes = crate::model_probes::declared_model_probes(
+                    &plan.name,
+                    &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                    plan.model_file.metadata.as_deref(),
+                    plan.model_file
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.timeseries.as_ref()),
+                    &compiled.sql,
+                    smelt_backend::maintenance_dialect(backend.dialect()),
+                );
+                crate::model_probes::dispatch_declared_model_probes(
+                    backend,
+                    &probe_policy_for_model(config, prior_runs, &plan.name),
+                    &declared_probes,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
