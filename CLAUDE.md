@@ -224,6 +224,18 @@ and the "ask Claude to start it" prompt — lives in
 from inside a Claude session with a bare backgrounded Bash call; use a
 detached tmux session or systemd unit per that doc.
 
+## Outcome loop
+
+A parallel headless loop for **outcome-driven** work: the committed artifact
+is an outcome (goal + checkable success criteria + one-line phase intents in
+`docs/outcomes/<name>/outcome.md`), and each phase's detailed plan is written
+just-in-time by an Opus plan step that reads the previous phase's summary and
+may reshape the remaining phases — work serving the success criteria is never
+deferred out. A Sonnet implement step then executes the plan. Scaffold with
+`/smelt:outcome`; driver `.claude/scripts/outcome-loop.sh`; operator guide in
+[`docs/outcome_loop.md`](docs/outcome_loop.md). Never run both loops in the
+same checkout simultaneously.
+
 ## Architecture
 
 ### High-Level Design
