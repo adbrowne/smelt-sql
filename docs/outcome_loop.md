@@ -19,8 +19,12 @@ phases/NN-plan.md     # written by the PLAN step at the start of phase NN
 phases/NN-summary.md  # written by the IMPLEMENT step at the end of phase NN
 ```
 
-`.claude/active-outcome` names the active outcome directory (one line).
-Scaffold a new outcome with `/smelt:outcome <name>`.
+`.claude/outcome-backlog` is the **ordered backlog**: one outcome directory
+per non-comment line. The loop works the first entry whose `outcome.md`
+`**Status:**` is neither `done` nor `blocked`, and advances to the next when a
+terminal sentinel marks it. Outcome statuses: `queued` → `active` → `done`
+(or `blocked` — recorded, skipped, surfaced to a human later). Scaffold and
+append a new outcome with `/smelt:outcome <name>`; reorder by editing the file.
 
 Phase statuses: `pending` → `planned` → `done` (or `blocked`, recorded and
 skipped, never stop-the-line).
@@ -45,9 +49,12 @@ of the phase table:
   (≤40 lines: what shipped, decisions, discoveries for the next planner, gate
   status), flips the row to `done`, commits, pushes. Emits
   `<<PHASE_COMPLETE>>`.
-- No workable row left → the step emits `<<OUTCOME_COMPLETE>>` if the success
-  criteria are met (planner's judgement, evidence cited in the decision log),
-  else `<<OUTCOME_BLOCKED>>` with a one-line summary for a human.
+- No workable row left → the PLAN step judges the success criteria: met →
+  sets the outcome's Status to `done`, emits `<<OUTCOME_COMPLETE>>`; not met
+  and nothing workable → sets Status to `blocked` with a note for a human,
+  emits `<<OUTCOME_BLOCKED>>`. On either sentinel the wrapper **advances to
+  the next backlog outcome**; it exits only when no workable outcome remains
+  (exit 0 if none blocked, exit 2 if any need a human).
 - Either step may emit `<<PHASE_BLOCKED>>` (record in the Blocked section,
   flip row to `blocked`, commit) — the loop continues to the next row.
 
@@ -80,11 +87,11 @@ and commits; exit 3). Tunables mirror the autonomy loop: `MAX_ITERATIONS`
 (bypassPermissions), `CARGO_BUILD_JOBS` (6), `ITER_MEMORY_MAX`/`_HIGH`
 (32G/28G), `ITER_COST_WARN` ($15). Logs: `~/.claude/logs/outcome/`.
 
-Exit codes: 0 = outcome complete; 2 = outcome blocked (needs a human);
-3 = graceful stop; 4 = session/usage limit (forever-wrapper retries);
-1 = infra failure / max iterations.
+Exit codes: 0 = backlog complete; 2 = backlog exhausted with blocked
+outcomes (needs a human); 3 = graceful stop; 4 = session/usage limit
+(forever-wrapper retries); 1 = infra failure / max iterations.
 
-Before launching: `cat .claude/active-outcome`, confirm the branch, and check
+Before launching: `cat .claude/outcome-backlog`, confirm the branch, and check
 no `bash .*outcome-loop` process is already running.
 
 ## Design notes

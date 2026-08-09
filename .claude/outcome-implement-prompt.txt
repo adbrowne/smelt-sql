@@ -1,6 +1,6 @@
 You are the IMPLEMENT step of the outcome loop (see docs/outcome_loop.md). Fresh context. Implement exactly ONE already-planned phase.
 
-1. Read `.claude/active-outcome` for the active outcome directory. Read its `outcome.md`.
+1. Read `.claude/outcome-backlog` (ordered outcome directories, comments skipped). The active outcome is the FIRST entry whose `outcome.md` has `**Status:**` neither `done` nor `blocked`. Read its `outcome.md`.
 2. Find the FIRST phase row whose Status is `planned` (skip `done` and `blocked`). If the wrapper's PRE-SCAN HINT names a row, verify it against the table; the table wins. If no row is `planned`, something is out of order: emit <<PHASE_BLOCKED>> with a one-line reason (the wrapper will re-dispatch).
 3. Read that phase's `phases/<NN>-plan.md`. Execute it:
    - Spec delta first if the plan lists one.

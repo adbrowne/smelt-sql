@@ -231,8 +231,10 @@ is an outcome (goal + checkable success criteria + one-line phase intents in
 `docs/outcomes/<name>/outcome.md`), and each phase's detailed plan is written
 just-in-time by an Opus plan step that reads the previous phase's summary and
 may reshape the remaining phases — work serving the success criteria is never
-deferred out. A Sonnet implement step then executes the plan. Scaffold with
-`/smelt:outcome`; driver `.claude/scripts/outcome-loop.sh`; operator guide in
+deferred out. A Sonnet implement step then executes the plan. Outcomes queue
+in `.claude/outcome-backlog` (priority order; the loop advances through it).
+Scaffold with `/smelt:outcome`; driver `.claude/scripts/outcome-loop.sh`;
+operator guide in
 [`docs/outcome_loop.md`](docs/outcome_loop.md). Never run both loops in the
 same checkout simultaneously.
 

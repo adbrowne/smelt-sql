@@ -32,8 +32,10 @@ or spec section).
      If the work changes user-visible feature behaviour, phase 1 is the spec
      delta (spec-first rule).
    - Empty **Decision log** and **Blocked** sections.
-3. Ask the user whether to activate it now. If yes, write the directory path
-   as the single line of `.claude/active-outcome`.
+   Set `**Status:** queued` (the loop flips it to `active` when it reaches
+   it).
+3. Append the directory path to `.claude/outcome-backlog` (priority order —
+   ask the user where it ranks if other outcomes are queued).
 4. Commit the new files (`outcome(<name>): scaffold`). Remind the user how to
    launch: detached tmux running `.claude/scripts/outcome-loop-forever.sh`
    from the target checkout — never a backgrounded Bash call from a session.
