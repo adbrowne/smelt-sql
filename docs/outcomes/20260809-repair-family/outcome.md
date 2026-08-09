@@ -42,8 +42,8 @@ reconciliation runs and idempotent re-runs.
 | 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | done |
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
-| 4 | `diff_patch` write pattern: registry entry, emitter, statement parity | pending |
-| 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute | pending |
+| 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | planned |
+| 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute, executed-vs-emitted `statement_parity` legs for repair + `diff_patch` | pending |
 | 6 | Conformance recipes for repair + diff-patch families | pending |
 | 7 | Surface: `smelt explain` rendering, docs-site update | pending |
 
@@ -80,6 +80,15 @@ reconciliation runs and idempotent re-runs.
   (the proof's sole owner), per phase 3's own spec delta. Widened `derive::LocalityInputs`/
   `SourceLink`/`project_source_link` from private to `pub` so `repair.rs` reuses the exact same
   scan-clamp derivation `derive_mutation` uses, rather than a second copy.
+
+- 2026-08-09 (plan 4): one reshape — `statement_parity`'s *executed*-vs-emitted leg for
+  `diff_patch` (and the repair cell) moves into phase 5's row, since a pattern nothing routes to
+  executes no statements; phase 4 keeps the registry entry, admission, pure emitter and the
+  structural no-authoring leg. Criterion 3 is therefore split across phases 4 and 5, not deferred.
+  Phase 4 also decides that `diff_patch` is a write *mechanism*, not a new `Technique`: it enters
+  the closed enum's namespace via a `WriteSelection::DiffPatch` arm plus a
+  `ChosenTechnique::DiffPatch` variant carrying the underlying recompute technique and the
+  delete-leg admission, so a pin can never silently degrade to a blanket delete+insert.
 
 ## Blocked
 
