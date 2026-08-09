@@ -50,9 +50,9 @@ success criteria above.
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
-| 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | pending |
+| 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | planned |
 | 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | pending |
-| 9 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
+| 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | pending |
 
 ## Decision log
 
@@ -220,6 +220,28 @@ success criteria above.
   columns never cross-reference each other, so both phase-5 traps (fold-substitution corruption,
   pre-cast state augmentation) were re-verified clean rather than hit again. `KeyedStateColumnCollision`
   reaches its second family for free (the detector is already generic over `aggregator_columns`).
+
+- 2026-08-09 (plan 7, reshape): row 9 narrowed to `smelt explain` state rendering plus whatever
+  obligation text still stands — the decomposed-fold surface cleanup (the spec's "`AVG`/`STDDEV_*`/
+  `VAR_*` still refuses" Known Divergence and docs-site's "**Out of v1**: `AVG`" line) moves into
+  row 7, following the phase-5 precedent: both become false statements the moment row 7's code
+  lands. No work left the outcome.
+- 2026-08-09 (plan 7, scope): the plan layer refuses `AVG` too, which the row text did not name —
+  `analysis::faithful_fold`'s algebra leg fails any non-monoid, so `derive.rs`'s per-column check
+  would refuse the cell even with the classifier widened. Fixed inside row 7 (it is the same
+  admission), not as a new row.
+- 2026-08-09 (plan 7): the algebra widening lands in `faithful_fold` itself via a new pure
+  `has_monoid_state_shape(function, distinct)` predicate, not as a `derive.rs` waiver — unlike
+  once-write's contextual `Coalesce` waiver, "AVG decomposes into monoid state" is a family-level
+  algebraic fact, and `faithful_fold` has exactly two call sites (both in `derive.rs`), so the
+  widening cannot leak into an unrelated consumer.
+- 2026-08-09 (plan 7): a decomposed fold's presented column gets a new
+  `CrossPartitionCombiner::Recomputed` variant (its value is `π(merged state)`, not a target/delta
+  formula); `render` returns the incumbent and is unreachable by construction, guarded by a loud
+  `refuse()` check for `Recomputed` without state. Rejected: a fallible `render` (ripples `Result`
+  through `merge_sql`'s trait signature) and collapsing `(cross_partition_combiner, state)` into a
+  `ColumnFold` enum — the right shape, but ~40 construction sites would swamp this phase; noted
+  for a later outcome.
 
 ## Blocked
 
