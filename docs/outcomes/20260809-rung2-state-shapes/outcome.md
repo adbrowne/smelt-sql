@@ -48,10 +48,10 @@ success criteria above.
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
-| 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
+| 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | planned |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
 | 7 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end; ledger grading audit | pending |
-| 8 | Surface cleanup: delete superseded obligations from spec + docs-site; `smelt explain` state rendering | pending |
+| 8 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
 
 ## Decision log
 
@@ -161,6 +161,24 @@ success criteria above.
   fuller project/address-index setup than `model_schema`/`type_diagnostics`'s `resolve_ref` does —
   a legitimately-defined upstream ref reports a spurious `UndefinedModelRef` through
   `file_diagnostics` alone in a minimal `TestDb` harness. Pre-existing, unrelated to this phase.
+
+- 2026-08-09 (plan 5, reshape): the order-monotone surface cleanup moves *into* phase 5 rather
+  than waiting for row 8 — the "no decomposed-state storage wired in" Known Divergence and the
+  docs-site companion-projection obligation both become false statements the moment phase 5's
+  code lands, and a spec that lies for three phases is worse than a slightly wider phase. Row 8
+  text sharpened to the residual once-write/decomposed-fold obligations plus `smelt explain`
+  rendering. No work left the outcome.
+- 2026-08-09 (plan 5): `MAX_BY`/`MIN_BY` takes a *single* admission path — always decomposed
+  `(v, o)` state; `order_monotone_companion` is deleted along with both its call sites
+  (`classify_order_monotone_column`, `derive_fold_spec`). Rejected: keeping the companion
+  projection as a stateless fast path, which would leave one family with two admission modes and
+  two stored-table shapes, and preserve the duplicated proof that `faithful_fold`'s module doc
+  and the `derive_fold_spec` doc both have to warn about. A model that already projects
+  `MAX(ord)` keeps it as an ordinary extremal-fold output column.
+- 2026-08-09 (plan 5): the existing 47 `maintenance_conformance` recipes already generate
+  `MAX_BY` models, so phase 5 gets an end-to-end DuckDB witness for free — those recipes will
+  execute with materialised `(v, o)` state and must still match the full-refresh oracle. Row 7
+  still owns the *new* decomposed-state recipes and the downstream `SELECT *` consumers.
 
 ## Blocked
 
