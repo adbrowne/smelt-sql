@@ -43,9 +43,10 @@ reconciliation runs and idempotent re-runs.
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
-| 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute, executed-vs-emitted `statement_parity` legs for repair + `diff_patch` | pending |
-| 6 | Conformance recipes for repair + diff-patch families | pending |
-| 7 | Surface: `smelt explain` rendering, docs-site update | pending |
+| 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | planned |
+| 6 | Runtime lowering: repair + `diff_patch` cells execute, executed-vs-emitted `statement_parity` legs | pending |
+| 7 | Conformance recipes for repair + diff-patch families | pending |
+| 8 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
 
@@ -101,6 +102,19 @@ reconciliation runs and idempotent re-runs.
   would just be delete+insert with extra steps). `resolve_cell_choice`'s new `DiffPatch` arm
   always resolves `DeleteLeg::Omitted` today — the real completeness proof is phase 5's to thread
   through.
+
+- 2026-08-09 (plan 5): one reshape — the old phase 5 split in two, since plan-derivation wiring and
+  runtime lowering are independently verifiable and the combined row was too wide for one step:
+  new phase 5 is derive-layer only (refusal narrowing + the `diff_patch` completeness premise phase
+  4 flagged), new phase 6 owns runtime lowering and both executed-vs-emitted `statement_parity`
+  legs; conformance and surface shift to 7 and 8. Nothing left the outcome. Phase 5 decides: the
+  narrowing hooks `derive_new_data`'s key-grain faithful-fold *source-posture* leg (the retraction
+  case criterion 1 names), repair only ever converts a refusal into a cell — never replaces an
+  admitted `ColumnScopedMerge`/fold cell — a failed obligation pushes its `Refusal::Repair*`
+  *alongside* the existing `NoAdmissibleTechnique`, and the `DeltaShape` is derived from the model's
+  own SQL (a `MutableSnapshot` delta is a whole-row snapshot diff) rather than plumbed as a new
+  world fact. The combiner-algebra leg (holistic combiner over an append-only source) is not
+  narrowed — it is not a success criterion.
 
 ## Blocked
 
