@@ -21,10 +21,13 @@
 //!
 //! Fail-closed on each: a missing/unprovable obligation refuses by name,
 //! naming the failing obligation — never a silent downgrade to an
-//! unconstrained (whole-table) key set. This module is called standalone
-//! (unit-proven, not yet wired into [`super::derive::derive_maintenance_plan`]
-//! — that wiring, and the runtime lowering that executes an admitted cell,
-//! is a later phase's scope).
+//! unconstrained (whole-table) key set.
+//!
+//! [`super::derive::derive_new_data`]'s key-grain branch is this module's
+//! production caller (it narrows a faithful-fold source-posture refusal into
+//! an admitted cell), and `smelt-runtime`'s keyed run loop lowers that cell
+//! through `maintenance_driver::resolve_live_per_group_recompute_cell` →
+//! [`super::emit::emit_per_group_recompute`].
 
 use std::collections::BTreeSet;
 

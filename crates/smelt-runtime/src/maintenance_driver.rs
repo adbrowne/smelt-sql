@@ -34,9 +34,9 @@ use smelt_logical::maintenance::choice::{
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
     emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, emit_in_place_update,
-    emit_staged_candidate_conditional_recompute, MaintenanceDialect, MaintenanceStatement, Region,
-    StatementGroup, TargetSlicePredicate,
+    emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
+    emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
+    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -1365,6 +1365,325 @@ pub async fn execute_staged_membership_recompute(
         row_count,
         preview: None,
     })
+}
+
+/// A live repair cell as [`resolve_live_per_group_recompute_cell`] returns
+/// it: the trigger's source name, the cell itself, its proven
+/// `RowIdentity::Key` and the cell's own derived bounded read slice.
+pub type LiveRepairCell = (String, PlanCell, Vec<String>, ScanClamp);
+
+/// The proven group key of a `Technique::PerGroupRecompute` cell — the
+/// repair family's fail-loud identity check
+/// (`docs/specs/incremental_models.md` §"The repair family").
+///
+/// `smelt_logical::maintenance::repair::derive_repair_cell` only ever builds
+/// a `RowIdentity::Key`, so a `WholeRow` (or empty-key) identity on a
+/// per-group-recompute cell is an internal inconsistency, never a shape this
+/// lowering may quietly widen: a repair with no group key to restrict its
+/// `DELETE`/`INSERT` to would rewrite every stored row. Refuse by name
+/// instead (root `CLAUDE.md` §"Fail-loud discipline"), never a skip.
+pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
+    let RowIdentity::Key(key) = &cell.row_identity.identity else {
+        bail!(
+            "MaintenanceRepairIdentityUnproven: a Technique::PerGroupRecompute cell for group \
+             '{}' carries RowIdentity::WholeRow — the repair family recomputes whole key \
+             groups and has no meaning without a proven group key; widening it to every stored \
+             row is never the fallback",
+            cell.group
+        );
+    };
+    if key.is_empty() {
+        bail!(
+            "MaintenanceRepairIdentityUnproven: a Technique::PerGroupRecompute cell for group \
+             '{}' carries an empty RowIdentity::Key — the repair family recomputes whole key \
+             groups and has no meaning without a proven group key",
+            cell.group
+        );
+    }
+    Ok(key.clone())
+}
+
+/// Find the first source whose `Trigger::NewData` cell resolves live to
+/// `Technique::PerGroupRecompute` — the repair family's counterpart of
+/// [`resolve_live_column_scoped_cell`]/[`resolve_live_membership_recompute_cell`]
+/// (`docs/specs/incremental_models.md` §"The repair family").
+///
+/// Unlike those two, this resolver scans the model's **own driving/fold**
+/// trigger, not an enrichment dimension's mutation trigger:
+/// `derive_new_data`'s key-grain branch narrows a faithful-fold
+/// source-posture refusal into a repair cell attached to that same
+/// `Trigger::NewData { source }`
+/// (`smelt_logical::maintenance::derive::derive_new_data`). The repair cell
+/// is therefore an **alternative to** the `KeyedFold` cell for that trigger,
+/// not a technique dispatched alongside one — which is why the keyed run
+/// loop routes it *instead of* the cumulative fold rather than after it.
+/// `Trigger::UpstreamMutation` cells are scanned too, so a future derivation
+/// that admits repair for a mutation trigger needs no second resolver.
+///
+/// Returns the source name, the cell, its proven `RowIdentity::Key`
+/// ([`repair_cell_key`] — a `WholeRow` identity is a fail-loud `bail!`,
+/// never a skip) and the cell's own derived [`ScanClamp`] (the bounded
+/// per-group read slice `repair::admit_per_group_recompute` proved as
+/// obligation 4). The plan is derived exactly once here (maintenance-plan
+/// purity, root `CLAUDE.md`); nothing downstream re-derives admission.
+pub fn resolve_live_per_group_recompute_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    technique_overrides: &[crate::types::CellTechniqueOverride],
+) -> Result<Option<LiveRepairCell>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        // Same `None`/`&[]` posture as the sibling resolvers above: the
+        // repair cell's own admission (affected-key discovery + bounded
+        // slice) reads neither the driving source's declared granularity,
+        // nor declared key recurrences, nor a deployed-schema snapshot.
+        None,
+        &[],
+        &[],
+    ) else {
+        return Ok(None);
+    };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
+
+    for facts in sources {
+        for trigger in [
+            Trigger::NewData {
+                source: facts.name.clone(),
+            },
+            Trigger::UpstreamMutation {
+                source: facts.name.clone(),
+            },
+        ] {
+            let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+            if sibling_cells.is_empty() {
+                continue;
+            }
+            let sibling_group_columns: Vec<Vec<String>> = sibling_cells
+                .iter()
+                .map(|c| {
+                    result
+                        .column_groups
+                        .iter()
+                        .find(|g| g.name() == c.group)
+                        .map(|g| g.columns.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            // Same dangling-pin fail-loud gate the sibling resolvers apply
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 3).
+            if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
+                &combined_cells,
+                &facts.name,
+                &sibling_group_columns,
+            ) {
+                bail!(
+                    "MaintenanceUnboundedFootprint: cells[on: {}].technique pin (columns: \
+                     {:?}) does not address any of this trigger's own derived column groups \
+                     ({:?}) — a hard technique pin must name columns belonging to exactly one \
+                     of the trigger's admitted cells, never columns absent from every one of \
+                     them",
+                    facts.name,
+                    dangling.columns,
+                    sibling_group_columns,
+                );
+            }
+            for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+                if cell.technique != Technique::PerGroupRecompute {
+                    continue;
+                }
+                // Fail-loud BEFORE the choice ladder: an unprovable group
+                // key is an internal inconsistency, not an override
+                // outcome.
+                let key = repair_cell_key(cell)?;
+                let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                    cell,
+                    &result.column_groups,
+                    cells_cfg,
+                )
+                .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+                let overrides = effective_override(
+                    metadata
+                        .maintenance
+                        .as_ref()
+                        .and_then(|m| m.defaults.as_ref()),
+                    &combined_cells,
+                    &facts.name,
+                    group_columns,
+                );
+                let chosen = resolve_cell_choice(
+                    Some(cell),
+                    &trigger,
+                    &overrides,
+                    write_pin,
+                    // `{recompute, PerGroupRecompute}` never contains
+                    // `ColumnScopedMerge`, so the backend's MERGE capability
+                    // is irrelevant to this resolver's resolvable set — the
+                    // same `false` the membership resolver passes.
+                    false,
+                )
+                .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+                // A `technique: recompute` pin (→ `RegionRecompute`) or a
+                // `write: diff_patch` pin (→ `ChosenTechnique::DiffPatch`)
+                // is simply not THIS live cell: skip the source and let the
+                // caller's own default apply, exactly as the sibling
+                // resolvers do for a choice they have no lowering for.
+                if chosen != ChosenTechnique::Admitted(Technique::PerGroupRecompute) {
+                    continue;
+                }
+                // The cell's own derived slice — obligation 4's bounded
+                // per-group read footprint, matched to the trigger's own
+                // source (never another source's clamp).
+                let Some(slice) = cell
+                    .scans
+                    .iter()
+                    .find(|c| c.source == facts.name)
+                    .or_else(|| cell.scans.first())
+                else {
+                    bail!(
+                        "MaintenanceRepairSliceMissing: a Technique::PerGroupRecompute cell for \
+                         group '{}' on source '{}' carries no derived ScanClamp — the bounded \
+                         per-group read slice is admission obligation 4 and is never assumed",
+                        cell.group,
+                        facts.name,
+                    );
+                };
+                return Ok(Some((facts.name.clone(), cell.clone(), key, slice.clone())));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The affected-key relation a repair reads: the distinct group keys present
+/// in the mutated source over the cell's own bounded slice.
+///
+/// Pure string builder, per this module's "callers resolve strings, emitters
+/// assemble" contract — [`emit_per_group_recompute`] consumes this as opaque
+/// `SELECT` text. The clamp is pushed into **this** read (and only this
+/// one): the widened source band is what bounds how many groups a repair
+/// touches, while the recompute of each touched group must stay unbounded
+/// so the group is recomputed whole (see
+/// [`repair_candidate_select`]).
+///
+/// `clamp: None` yields the unpredicated read. That branch is only reachable
+/// where admission already proved the slice by another route —
+/// `repair::admit_per_group_recompute` refuses `RepairSliceUnbounded` rather
+/// than admitting a clamp-less cell, so this is not a silent widening path.
+pub fn repair_affected_keys_select(
+    source_table: &str,
+    key: &[String],
+    clamp: Option<&ScanClamp>,
+    region: &Region,
+) -> String {
+    let key_list = key.join(", ");
+    match clamp {
+        Some(clamp) => format!(
+            "SELECT DISTINCT {key_list} FROM {source_table} WHERE {}",
+            widened_scan_predicate(clamp, region)
+        ),
+        None => format!("SELECT DISTINCT {key_list} FROM {source_table}"),
+    }
+}
+
+/// The candidate relation a repair stages: the model's **full** (unwindowed)
+/// recompiled SQL, semi-joined to `affected_keys_select`.
+///
+/// Full, not windowed, because the repair family's promise is that an
+/// affected group's stored value equals a full refresh of that group — a
+/// non-invertible combiner (`MAX`) over a retracted contribution cannot be
+/// fixed from a window's rows alone. The semi-join is what keeps the
+/// recompute *bounded*: only the groups the clamped affected-keys read named
+/// are recomputed. `EXISTS` rather than a row-value `IN`, so a composite key
+/// lowers identically across dialects.
+pub fn repair_candidate_select(
+    full_model_sql: &str,
+    key: &[String],
+    affected_keys_select: &str,
+) -> String {
+    let join = key
+        .iter()
+        .map(|k| format!("__smelt_repair_candidate.{k} = __smelt_repair_keys.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "SELECT __smelt_repair_candidate.* FROM ({full_model_sql}) AS __smelt_repair_candidate \
+         WHERE EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
+         {join})"
+    )
+}
+
+/// Execute a live `Technique::PerGroupRecompute` cell
+/// ([`resolve_live_per_group_recompute_cell`]) via the repair family's
+/// targeted `DELETE`+`INSERT` over the affected-key relation
+/// ([`emit_per_group_recompute`]) — the same emitter → `retry_backend_call`
+/// → [`Backend::execute_statement_group`] shape
+/// [`execute_staged_membership_recompute`] uses, so the executed text is
+/// exactly the single owner's output (`docs/specs/incremental_models.md`
+/// §"Statement emission (single owner)").
+pub async fn execute_per_group_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    affected_keys_select: &str,
+    candidate_select: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = repair_staged_relation(table);
+    let group = emit_per_group_recompute(
+        &full_table,
+        &staged_relation,
+        key,
+        affected_keys_select,
+        candidate_select,
+        dialect,
+    );
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| anyhow::anyhow!("per-group recompute failed for '{full_table}': {e}"))?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// The staged temp relation name a repair uses for `table` — one derivation,
+/// so a parity test (and the technique preview) can name the same relation
+/// the live run does without guessing.
+pub fn repair_staged_relation(table: &str) -> String {
+    format!("__smelt_repair_{table}")
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an

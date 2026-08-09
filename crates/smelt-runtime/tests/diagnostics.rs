@@ -752,3 +752,81 @@ fn choice_rs_execution_semantics_unchanged() {
     .expect("recompute is always resolvable");
     assert_eq!(resolved, ChosenTechnique::RegionRecompute);
 }
+
+/// The repair family's technique preview (`docs/specs/incremental_models.md`
+/// §"The repair family"): an admitted `Technique::PerGroupRecompute` cell
+/// renders real, illustrative statements built by the SAME emitter +
+/// affected-key/candidate builders a live run uses
+/// (`smelt_runtime::maintenance_driver::repair_affected_keys_select`/
+/// `repair_candidate_select` → `emit_per_group_recompute`) — not the
+/// "no live statement builder yet" refusal that stood in for it while the
+/// family had no runtime lowering.
+#[test]
+fn per_group_recompute_preview_renders_statements_for_an_admitted_repair_cell() {
+    let (models, source_infos, config) = load_fixture();
+    let model = find_model(&models, "daily_events_status");
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+
+    // A repair cell's shape, verbatim from
+    // `smelt_logical::maintenance::repair::derive_repair_cell`: a proven
+    // group key plus the bounded per-group read slice.
+    let mut cell = synthetic_cell(
+        Technique::PerGroupRecompute,
+        RowIdentity::Key(vec!["user_id".to_string()]),
+    );
+    cell.scans = vec![smelt_logical::maintenance::ScanClamp {
+        source: "raw.user_status".to_string(),
+        column: "changed_at".to_string(),
+        before: smelt_logical::analysis::source_bounds::Seconds::days(1),
+        after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+    }];
+
+    let diagnostics = build_plan_cell_diagnostics(
+        &cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &["user_id".to_string()],
+        &source_timeseries,
+    );
+
+    let preview = diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.technique == Technique::PerGroupRecompute)
+        .expect("every technique has a preview entry");
+    assert_eq!(
+        preview.admissibility,
+        Admissibility::Admitted,
+        "the cell's own admitted technique must render as Admitted, got {:?}",
+        preview.admissibility
+    );
+    assert!(
+        !preview.statements.is_empty(),
+        "the repair preview must render the emitter's statement group, not an empty refusal"
+    );
+    assert!(
+        preview.transactional,
+        "the repair group's DELETE+INSERT pair is transactional"
+    );
+    let joined = preview
+        .statements
+        .iter()
+        .map(|s| s.sql.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        joined.contains("DELETE FROM main.daily_events_status USING")
+            && joined.contains("__smelt_affected"),
+        "the repair's DELETE must be restricted to the affected-key relation: {joined}"
+    );
+    assert!(
+        joined.contains("main.sources_raw_user_status") && joined.contains("changed_at >= "),
+        "the affected-key read must name the mutated source and carry the cell's clamp: {joined}"
+    );
+}

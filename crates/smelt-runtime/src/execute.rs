@@ -1667,6 +1667,39 @@ pub async fn execute_project(
                 }
                 None => None,
             };
+            // The repair family's counterpart of the two resolvers above
+            // (`docs/specs/incremental_models.md` §"The repair family").
+            // Unlike them it serves the model's OWN driving/fold trigger:
+            // `derive_new_data`'s key-grain branch narrows a faithful-fold
+            // source-posture refusal into a `Technique::PerGroupRecompute`
+            // cell on that same `Trigger::NewData { source }`, so the repair
+            // cell is an ALTERNATIVE to the `KeyedFold` cell rather than a
+            // technique dispatched alongside the fold. That is why it is
+            // routed inside the window-forward branch below — *instead of*
+            // `execute_cumulative_aggregate` — rather than at the
+            // post-fold dispatch sites the column-scoped-merge and
+            // membership-recompute cells use: folding a retracted
+            // contribution first and repairing after would already have
+            // corrupted stored state. It is still ordered after those two
+            // in the ladder in the sense that matters — a source they
+            // already claim carries an `UpstreamMutation` cell, never a
+            // repair cell (repair is only derived for a CLOCKED mutable
+            // source, and `derive_model_maintenance_plan` derives an
+            // `UpstreamMutation` trigger only for an UNCLOCKED one), so the
+            // three can never contend for the same source.
+            let per_group_recompute_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => {
+                    crate::maintenance_driver::resolve_live_per_group_recompute_cell(
+                        &clean_sql_for_merge,
+                        &db_table_name,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &request.technique_overrides,
+                    )?
+                }
+                None => None,
+            };
 
             // Classify up front, regardless of window presence, so the
             // derived run shape (`docs/specs/incremental_models.md` §"The
@@ -1695,6 +1728,7 @@ pub async fn execute_project(
                 declared_fds,
             )?;
 
+            let mut used_per_group_recompute = false;
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
                     if classification.is_snapshot_reconcile() {
@@ -1712,21 +1746,111 @@ pub async fn execute_project(
                     };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    crate::cumulative::execute_cumulative_aggregate(
-                        backend,
-                        &plan.model_file,
-                        compilers,
-                        resolver,
-                        model_target,
-                        schema,
-                        &db_table_name,
-                        &time_range,
-                        source_timeseries,
-                        source_key_recurrence,
-                        false,
-                        &retry_policy,
-                    )
-                    .await
+                    // The repair family displaces the fold for this
+                    // trigger, never runs after it: an admitted
+                    // `Technique::PerGroupRecompute` cell exists precisely
+                    // because the faithful-fold source-posture obligation
+                    // FAILED for this source, so folding the delta in would
+                    // be the unsound write the repair exists to avoid. Never
+                    // on the creation run — there is nothing to repair yet,
+                    // and the fold's own create path is what materializes
+                    // the table (`table_exists_before_run` was captured
+                    // before any of this model's writes).
+                    match per_group_recompute_cell
+                        .as_ref()
+                        .filter(|_| table_exists_before_run)
+                    {
+                        Some((source, _cell, key, slice)) => {
+                            // A cell that resolved live but whose emitter
+                            // inputs cannot be built errors by name — never
+                            // a silent fall-through to the fold.
+                            let source_info = source_infos
+                                .iter()
+                                .find(|info| {
+                                    let segs = &info.address_segments;
+                                    let bare = match segs.split_first() {
+                                        Some((first, rest)) if first == "sources" => rest.join("."),
+                                        _ => segs.join("."),
+                                    };
+                                    &bare == source
+                                })
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "keyed run path: model '{}' resolved a live per-group \
+                                         recompute cell on source '{source}', but that source \
+                                         has no resolved physical table — the affected-key read \
+                                         cannot be built",
+                                        plan.name
+                                    )
+                                })?;
+                            let source_table =
+                                source_info.db_name_for_target(model_target, schema);
+                            // Typed literals, unlike the bare quoted strings
+                            // every other `Region` construction in this file
+                            // uses: the repair's affected-key read is the
+                            // one place a region endpoint is an *operand*
+                            // (`widened_scan_predicate` subtracts the
+                            // clamp's margin from it), and a bare string
+                            // literal minus an INTERVAL is ambiguous to the
+                            // binder rather than implicitly a timestamp.
+                            let region = smelt_logical::maintenance::emit::Region {
+                                start: format!("TIMESTAMP '{}'", s.format("%Y-%m-%d")),
+                                end: format!("TIMESTAMP '{}'", e.format("%Y-%m-%d")),
+                            };
+                            let affected_keys_select =
+                                crate::maintenance_driver::repair_affected_keys_select(
+                                    &source_table,
+                                    key,
+                                    Some(slice),
+                                    &region,
+                                );
+                            // The model's own FULL, unwindowed recompute —
+                            // the same `clean_sql_for_merge` the
+                            // membership-recompute dispatch below compiles,
+                            // for the same reason: a repaired group must
+                            // equal a full refresh of that group.
+                            let compiled = compiler.compile_with_sql_and_ephemerals(
+                                &plan.model_file,
+                                schema,
+                                &clean_sql_for_merge,
+                                resolver,
+                            )?;
+                            let candidate_select =
+                                crate::maintenance_driver::repair_candidate_select(
+                                    &compiled.sql,
+                                    key,
+                                    &affected_keys_select,
+                                );
+                            used_per_group_recompute = true;
+                            crate::maintenance_driver::execute_per_group_recompute(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                key,
+                                &affected_keys_select,
+                                &candidate_select,
+                                &retry_policy,
+                            )
+                            .await
+                        }
+                        None => {
+                            crate::cumulative::execute_cumulative_aggregate(
+                                backend,
+                                &plan.model_file,
+                                compilers,
+                                resolver,
+                                model_target,
+                                schema,
+                                &db_table_name,
+                                &time_range,
+                                source_timeseries,
+                                source_key_recurrence,
+                                false,
+                                &retry_policy,
+                            )
+                            .await
+                        }
+                    }
                 }
                 _ if classification.is_snapshot_reconcile() => {
                     // No run window, snapshot-reconcile run shape: whole-
@@ -1979,6 +2103,8 @@ pub async fn execute_project(
             total_rows_overall += total_rows;
             let keyed_strategy_label = if used_in_place_update {
                 "in_place_update".to_string()
+            } else if used_per_group_recompute {
+                "per_group_recompute".to_string()
             } else if used_column_scoped_merge {
                 "column_scoped_merge".to_string()
             } else if used_membership_recompute {

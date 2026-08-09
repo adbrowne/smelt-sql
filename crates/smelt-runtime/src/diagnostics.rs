@@ -32,7 +32,7 @@ use smelt_logical::maintenance::choice::technique_requires_row_identity;
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
-    MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+    emit_per_group_recompute, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
 };
 use smelt_logical::maintenance::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 use smelt_planner::SourceTimeseriesMap;
@@ -454,8 +454,9 @@ fn build_technique_statements(
     dialect: MaintenanceDialect,
     unique_key: &[String],
     source_timeseries: &SourceTimeseriesMap,
-    trigger: &Trigger,
+    cell: &PlanCell,
 ) -> Result<StatementGroup, String> {
+    let trigger = &cell.trigger;
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let table_name = format!("{schema}.{}", model.db_name_owned());
     let placeholder_range = || TimeRange {
@@ -657,19 +658,72 @@ fn build_technique_statements(
             })
         }
         Technique::PerGroupRecompute => {
-            // No cell derives this technique yet — `derive_repair_cell`
-            // (`smelt_logical::maintenance::repair`) is standalone,
-            // callable machinery this phase, not yet consulted by
-            // `derive_maintenance_plan`. An explicit fail-loud arm rather
-            // than an unreachable!/todo!: the executable statement builder
-            // is a later phase's scope
-            // (`docs/outcomes/20260809-repair-family/outcome.md` phase 5).
-            Err(
-                "Technique::PerGroupRecompute has no live statement builder yet — the repair \
-                 family's per-group recompute cell derivation is not yet wired into the \
-                 maintenance plan"
-                    .to_string(),
-            )
+            // The repair family (`docs/specs/incremental_models.md` §"The
+            // repair family"), built through the SAME two string builders
+            // the live keyed run path uses
+            // (`crate::maintenance_driver::repair_affected_keys_select` /
+            // `repair_candidate_select`) before handing them to the single
+            // owner `emit_per_group_recompute` — so this preview's shape
+            // can never diverge from what a real run executes.
+            let key: Vec<String> = match &cell.row_identity.identity {
+                RowIdentity::Key(k) if !k.is_empty() => k.clone(),
+                _ if !unique_key.is_empty() => unique_key.to_vec(),
+                _ => {
+                    return Err(
+                        "no proven row identity (RowIdentity::WholeRow) and no declared \
+                         unique_key — per-group recompute recomputes whole key groups and has \
+                         no meaning without a group key"
+                            .to_string(),
+                    );
+                }
+            };
+            // The bounded per-group read slice is admission obligation 4;
+            // a cell carrying none has no affected-key read to illustrate.
+            let clamp = cell.scans.first().ok_or_else(|| {
+                "this cell carries no derived scan clamp — the repair's affected-key read is \
+                 bounded by the cell's own proven slice, never by an assumed one"
+                    .to_string()
+            })?;
+            // The mutated source's physical table, named the same way the
+            // default source mapping does (`SourceInfo::db_name_for_target`
+            // — `<schema>.<address segments joined by _>`, and a
+            // `PlanCell`'s clamp carries the bare address `raw.orders`,
+            // i.e. the `sources.` prefix already stripped). A preview has
+            // no `SourceInfo` to consult, so a `name:` override is not
+            // reflected here — this SQL is illustrative and never executed.
+            let source_table = format!("{schema}.sources_{}", clamp.source.replace('.', "_"));
+            // Typed literals, unlike `DeleteInsert`'s bare quoted
+            // placeholders: `widened_scan_predicate` uses the region's
+            // endpoints as arithmetic operands, so the substituted text
+            // must bind as a timestamp (mirrors the live run path in
+            // `crate::execute`).
+            let region = Region {
+                start: "TIMESTAMP '{{window_start}}'".to_string(),
+                end: "TIMESTAMP '{{window_end}}'".to_string(),
+            };
+            let affected_keys_select = crate::maintenance_driver::repair_affected_keys_select(
+                &source_table,
+                &key,
+                Some(clamp),
+                &region,
+            );
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+            let candidate_select = crate::maintenance_driver::repair_candidate_select(
+                &compiled.sql,
+                &key,
+                &affected_keys_select,
+            );
+            Ok(emit_per_group_recompute(
+                &table_name,
+                &crate::maintenance_driver::repair_staged_relation(&model.db_name_owned()),
+                &key,
+                &affected_keys_select,
+                &candidate_select,
+                dialect,
+            ))
         }
     }
 }
@@ -768,7 +822,7 @@ pub fn build_plan_cell_diagnostics(
                 dialect,
                 unique_key,
                 source_timeseries,
-                &cell.trigger,
+                cell,
             );
             let (statements, transactional) = match &build_result {
                 Ok(group) => (
@@ -916,6 +970,26 @@ mod tests {
     use smelt_core::{Granularity, RefInfo, SmeltRef};
     use std::collections::HashMap;
 
+    /// A minimal `Trigger::Backfill` cell — `build_technique_statements`
+    /// reads only the trigger off it for the arms this module unit-tests.
+    fn synthetic_backfill_cell() -> PlanCell {
+        PlanCell {
+            group: "{*}".to_string(),
+            trigger: Trigger::Backfill,
+            corner: smelt_logical::maintenance::Corner::RecomputeRegion,
+            technique: Technique::DeleteInsert,
+            partition_local: smelt_logical::maintenance::PartitionLocal::Yes,
+            scans: vec![],
+            ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: Default::default(),
+        }
+    }
+
     fn duckdb_target() -> Target {
         Target {
             target_type: "duckdb".to_string(),
@@ -1019,7 +1093,7 @@ mod tests {
             MaintenanceDialect::DuckDb,
             &[],
             &source_timeseries,
-            &Trigger::Backfill,
+            &synthetic_backfill_cell(),
         )
         .unwrap_or_else(|e| {
             panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")

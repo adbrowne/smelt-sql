@@ -44,7 +44,7 @@ reconciliation runs and idempotent re-runs.
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
 | 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
-| 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | planned |
+| 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | pending |
 | 8 | Conformance recipes for repair + diff-patch families | pending |
 | 9 | Surface: `smelt explain` rendering, docs-site update | pending |
@@ -139,6 +139,19 @@ reconciliation runs and idempotent re-runs.
   for a group-complete recompute), and the cell's `ScanClamp` is pushed into the *affected-keys*
   read (a predicate on the source, where the clamp is actually defined) rather than onto the
   output wrapper, where the partition column need not appear.
+
+- 2026-08-09 (implement 6): landed runtime lowering — `resolve_live_per_group_recompute_cell` +
+  `execute_per_group_recompute` (`maintenance_driver.rs`), routed in the keyed run loop's
+  window-forward branch *instead of* `execute_cumulative_aggregate` (a repair cell is an
+  alternative to `KeyedFold` for the same `NewData` trigger, not a technique dispatched
+  alongside it, unlike column-scoped-merge/membership-recompute). `repair_affected_keys_select`
+  reuses `widened_scan_predicate` (previously test-only) with typed `TIMESTAMP` region literals
+  — the one place a region endpoint is an arithmetic operand. `diagnostics.rs`'s `PerGroupRecompute`
+  preview arm now builds real statements; `build_technique_statements` threads `cell: &PlanCell`
+  instead of just `trigger`. `docs/specs/incremental_models.md` divergence entry narrowed to
+  `diff_patch` routing only (phase 7). Flagged for phase 8: no shipped example workspace reaches
+  the repair family yet — the new DuckDB tests stage their own fixture; a real conformance recipe
+  needs one too.
 
 ## Blocked
 

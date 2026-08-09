@@ -2246,17 +2246,12 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **The repair family and `diff_patch` derive but do not yet execute.** Per-group recompute
-  (§"The repair family") and affected-key discovery (`model_properties.md` §"Affected-key
-  discovery") are derived by the plan: a keyed fold over a mutable/retraction source that fails
-  the faithful-fold source-posture obligation now derives a `PerGroupRecompute` cell instead of
-  refusing outright, and refuses by named repair obligation
-  (`MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`) when it cannot; the
-  `diff_patch` write pattern (§"Per-cell write addressing") likewise admits and threads the
-  slice-completeness premise for a `PerGroupRecompute` recompute's delete leg. What is still
-  missing is runtime lowering — no admitted repair cell or `diff_patch` write executes a statement
-  yet — and the executed-vs-emitted `statement_parity` leg for both. Tracked:
-  `docs/outcomes/20260809-repair-family/outcome.md`.
+- **The `diff_patch` write pattern derives but does not yet execute.** `diff_patch` (§"Per-cell
+  write addressing") admits and threads the slice-completeness premise for a `PerGroupRecompute`
+  recompute's delete leg, but no `diff_patch` write is routed to its emitter at runtime — a cell
+  whose `write:` pin resolves to it falls through to the caller's default technique, and the
+  executed-vs-emitted `statement_parity` leg for the pattern is therefore not yet possible.
+  Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
   `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key
   only at plan derivation, not at frontmatter validation; a bare `grain: key` model with neither
