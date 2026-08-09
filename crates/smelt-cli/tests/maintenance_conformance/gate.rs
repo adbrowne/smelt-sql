@@ -698,6 +698,20 @@ pub fn stage_keyed_recipe(
     render::stage_keyed(recipe, &project_dir, &db_path)
 }
 
+/// [`stage_keyed_recipe`], additionally staging a downstream `SELECT * FROM
+/// smelt.<model>` consumer model (`render::stage_keyed_with_downstream`,
+/// phase 8 task 5) — opt-in so every pre-existing keyed recipe's staged
+/// project shape stays byte-identical.
+pub fn stage_keyed_recipe_with_downstream(
+    recipe: &KeyedRecipe,
+    tmp: &tempfile::TempDir,
+) -> anyhow::Result<LinkCProject> {
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    std::fs::create_dir_all(&project_dir)?;
+    render::stage_keyed_with_downstream(recipe, &project_dir, &db_path)
+}
+
 /// Stage a [`KeyedRecipe`] built over
 /// [`SourceRecipe::unclocked_append_only_dimension`] — [`stage_keyed_recipe`]
 /// (via `render::stage_keyed`) always emits its `AppendOnly` source's
@@ -1038,8 +1052,8 @@ pub fn classify_keyed(
     }
 }
 
-/// The maintained table's PRESENTED columns only, as `SELECT col1, col2,
-/// ... FROM main.<model_name>` — excludes any physical column whose name
+/// The maintained table's PRESENTED columns only, as `(name, data_type)`
+/// pairs in physical column order — excludes any physical column whose name
 /// contains the reserved `__` decomposed-state marker
 /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
 /// models"). A state-bearing model's physical table carries its hidden
@@ -1047,32 +1061,87 @@ pub fn classify_keyed(
 /// a bare `SELECT *` against the live table — unlike a `ref()`-mediated
 /// read through smelt's own compiler, which the `presentation_projection`
 /// mechanism already rewrites — would leak them into an oracle comparison
-/// with a different column count. Column names/order come off
+/// with a different column count. Column names/types/order come off
 /// `information_schema.columns`, mirroring `probes::read_full_output_as_text`.
-fn presented_columns_select(project: &LinkCProject, model_name: &str) -> String {
+fn presented_columns_with_types(project: &LinkCProject, model_name: &str) -> Vec<(String, String)> {
     let conn = project
         .connect()
         .expect("connect for presented-column listing");
-    let columns: Vec<String> = {
+    let columns: Vec<(String, String)> = {
         let mut stmt = conn
             .prepare(&format!(
-                "SELECT column_name FROM information_schema.columns \
+                "SELECT column_name, data_type FROM information_schema.columns \
                  WHERE table_schema = 'main' AND table_name = '{model_name}' \
                  AND column_name NOT LIKE '%\\_\\_%' ESCAPE '\\' \
                  ORDER BY ordinal_position",
             ))
             .expect("prepare presented-column listing");
-        stmt.query_map([], |row| row.get::<_, String>(0))
-            .expect("query presented-column listing")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("collect presented-column listing")
+        stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .expect("query presented-column listing")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect presented-column listing")
     };
     assert!(
         !columns.is_empty(),
         "model {model_name:?} reported zero presented columns via information_schema — \
          staging bug or an over-eager state-column filter"
     );
-    format!("SELECT {} FROM main.{model_name}", columns.join(", "))
+    columns
+}
+
+/// EVERY physical column name of `model_name`'s maintained table, in
+/// ordinal order — unlike [`presented_columns_with_types`], applies no `__`
+/// filter. Used both to prove a state-bearing recipe's table really does
+/// carry hidden state columns (a vacuity guard,
+/// `state_bearing_recipes_physically_carry_state_columns`) and to prove a
+/// downstream `ref()`-mediated consumer carries none
+/// (`assert_downstream_hides_state`).
+fn all_physical_column_names(project: &LinkCProject, model_name: &str) -> Vec<String> {
+    let conn = project
+        .connect()
+        .expect("connect for physical-column listing");
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT column_name FROM information_schema.columns \
+             WHERE table_schema = 'main' AND table_name = '{model_name}' \
+             ORDER BY ordinal_position",
+        ))
+        .expect("prepare physical-column listing");
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .expect("query physical-column listing")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect physical-column listing")
+}
+
+/// `(name, data_type)` pairs (from [`presented_columns_with_types`]) into a
+/// float-aware select-list fragment: `DOUBLE`/`FLOAT`/`REAL` columns are
+/// wrapped `ROUND(col, 6) AS col`, every other column is selected bare. Used
+/// to build BOTH sides of a keyed end-state comparison from the exact same
+/// column list, so a maintained/oracle pair only ever disagrees in the
+/// column list itself (a real bug) rather than in which side got rounded.
+///
+/// Float-aware, not exact, because DuckDB's own `STDDEV_SAMP` uses a
+/// numerically stable (Welford-style) accumulation pass while the
+/// decomposed `(n, Σx, Σx²)` state this outcome derives recomputes variance
+/// from the raw sums (`incremental_models.md` §"Decomposed state (rung 2) in
+/// keyed models") — the two agree only to floating-point noise (~1e-12),
+/// so an exact `EXCEPT ALL` would flake. [`harness_self_check`]'s
+/// `float_equivalence_comparison_tolerates_last_bit_only` pins this
+/// tolerance so it cannot silently widen into swallowing a real fold bug.
+fn rounded_select_list(columns: &[(String, String)]) -> String {
+    columns
+        .iter()
+        .map(|(name, data_type)| {
+            if matches!(data_type.as_str(), "DOUBLE" | "FLOAT" | "REAL") {
+                format!("ROUND({name}, 6) AS {name}")
+            } else {
+                name.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
@@ -1083,7 +1152,9 @@ fn presented_columns_select(project: &LinkCProject, model_name: &str) -> String 
 /// a keyed run merges every row landing in its own window and no
 /// re-delivery occurs in a generated [`KeyedSchedule`]), then compare the
 /// maintained table's full contents against the recipe's own body evaluated
-/// over `S_k`.
+/// over `S_k`. Both sides are selected through the same float-aware,
+/// presented-columns-only projection ([`rounded_select_list`]) built from
+/// one `information_schema`-derived column list.
 pub async fn assert_keyed_equivalence(
     project: &LinkCProject,
     recipe: &KeyedRecipe,
@@ -1092,9 +1163,12 @@ pub async fn assert_keyed_equivalence(
 ) -> anyhow::Result<()> {
     let backend = project.backend().await?;
     tracker.materialize_s(backend.as_ref(), k).await?;
-    let maintained_sql = presented_columns_select(project, &recipe.model_name);
-    let oracle_sql =
+    let columns = presented_columns_with_types(project, &recipe.model_name);
+    let select_list = rounded_select_list(&columns);
+    let maintained_sql = format!("SELECT {select_list} FROM main.{}", recipe.model_name);
+    let oracle_body =
         render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
+    let oracle_sql = format!("SELECT {select_list} FROM ({oracle_body}) AS oracle_sub");
     let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
     if !equal {
         anyhow::bail!(
@@ -1104,6 +1178,58 @@ pub async fn assert_keyed_equivalence(
         );
     }
     Ok(())
+}
+
+/// Phase 8 task 5: asserts a staged downstream `SELECT * FROM
+/// smelt.<model_name>` consumer (`stage_keyed_recipe_with_downstream`,
+/// model file `<model_name>_downstream.sql`) materializes with EXACTLY the
+/// upstream's presented columns (no `__`-marked names — `presentation_projection`
+/// rewrites the wildcard at compile time, `incremental_models.md` §"Decomposed
+/// state (rung 2) in keyed models") and multiset-equals the upstream's
+/// presented contents — the end-to-end DuckDB witness for the hiding
+/// mechanism (unit-tested at compile time in row 4) proven against a real
+/// run. Float-aware via the same [`rounded_select_list`]
+/// [`assert_keyed_equivalence`] uses.
+async fn assert_downstream_hides_state(project: &LinkCProject, model_name: &str) {
+    let downstream_name = format!("{model_name}_downstream");
+
+    let downstream_physical_columns = all_physical_column_names(project, &downstream_name);
+    let leaked: Vec<_> = downstream_physical_columns
+        .iter()
+        .filter(|c| c.contains("__"))
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "downstream consumer {downstream_name:?} carries `__`-marked physical column(s) \
+         {leaked:?} — presentation_projection failed to hide upstream state from a \
+         ref()-mediated read"
+    );
+
+    let upstream_columns = presented_columns_with_types(project, model_name);
+    let upstream_names: Vec<&String> = upstream_columns.iter().map(|(n, _)| n).collect();
+    let downstream_names: Vec<&String> = downstream_physical_columns.iter().collect();
+    assert_eq!(
+        upstream_names, downstream_names,
+        "downstream consumer {downstream_name:?}'s physical column list does not match \
+         upstream {model_name:?}'s presented columns"
+    );
+
+    let select_list = rounded_select_list(&upstream_columns);
+    let upstream_sql = format!("SELECT {select_list} FROM main.{model_name}");
+    let downstream_sql = format!("SELECT {select_list} FROM main.{downstream_name}");
+    let backend = project
+        .backend()
+        .await
+        .expect("backend for downstream comparison");
+    let equal = multiset_equal_via_backend(backend.as_ref(), &upstream_sql, &downstream_sql)
+        .await
+        .expect("compare downstream consumer to upstream presented contents");
+    assert!(
+        equal,
+        "downstream consumer {downstream_name:?} does not multiset-equal upstream \
+         {model_name:?}'s presented contents: upstream ({upstream_sql:?}) != downstream \
+         ({downstream_sql:?})"
+    );
 }
 
 /// Drive `schedule` against `project`/`recipe` (a [`KeyedRecipe`] under the
@@ -1388,14 +1514,73 @@ async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
     );
 }
 
+/// The once-write family's dedicated constant-payload schedule (shared by
+/// [`once_write_pool_upholds_end_state_equivalence`] and phase 8's
+/// `once_write_fallback_pool_upholds_end_state_equivalence`/
+/// `once_write_multi_candidate_pool_upholds_end_state_equivalence`): the
+/// shared key `1` recurs across windows with the SAME value throughout —
+/// the once-write provenance proof's own world-fact precondition
+/// (`incremental_models.md` §"The column-family catalogue") — plus a late
+/// redelivery of the already-merged first window.
+fn once_write_constant_payload_schedule() -> KeyedSchedule {
+    let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
+    KeyedSchedule(vec![
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d1,
+            end: d1 + chrono::Duration::days(1),
+            rows: vec![GenRow {
+                d: d1,
+                id: 1,
+                val: 7,
+            }],
+        },
+        // The shared key `1` recurs with the SAME value — the once-write
+        // world-fact holds by construction, so a `COALESCE`-based
+        // first-write-wins merge equals the full-refresh oracle (`MAX(val)`
+        // over a single distinct value is that value; a fallback/second
+        // candidate over the same single distinct value resolves the same
+        // way).
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d2,
+            end: d2 + chrono::Duration::days(1),
+            rows: vec![
+                GenRow {
+                    d: d2,
+                    id: 1,
+                    val: 7,
+                },
+                GenRow {
+                    d: d2,
+                    id: 2,
+                    val: 42,
+                },
+            ],
+        },
+        // Late redelivery of the ALREADY-MERGED first window, replaying the
+        // same rows with the same values — the world-fact-preserving
+        // direction of "the first-written value survives". The oracle IS
+        // consulted here: the once-write merge re-applied against an
+        // already-reflected delta is a no-op, so the maintained state must
+        // still equal the full-refresh oracle over the (now
+        // duplicate-carrying) source.
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d1,
+            end: d1 + chrono::Duration::days(1),
+            rows: vec![GenRow {
+                d: d1,
+                id: 1,
+                val: 7,
+            }],
+        },
+    ])
+}
+
 /// Phase 4 (`docs/plans/20260809-keyed-frontier.md`): the once-write family
 /// (`COALESCE(MAX(val))`, declared-FD-backed —
 /// [`KeyedRecipe::new_window_forward_once_write`]) upholds end-state
-/// equivalence across a genuine key-recurrence schedule (the shared key
-/// re-touched in a later window with the SAME value — the once-write
-/// provenance proof's own world-fact precondition, `incremental_models.md`
-/// §"The column-family catalogue": the declared functional dependency holds
-/// in staged data by construction) — reuses the same
+/// equivalence across a genuine key-recurrence schedule
+/// ([`once_write_constant_payload_schedule`]) — reuses the same
 /// `drive_keyed_and_assert`/`STracker` oracle machinery every other keyed
 /// combiner family runs through.
 #[tokio::test]
@@ -1416,59 +1601,240 @@ async fn once_write_pool_upholds_end_state_equivalence() {
         "expected a KeyedFold cell for the declared-FD-backed once-write column: {plan:#?}"
     );
 
-    let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
-    let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
-    let schedule = KeyedSchedule(vec![
-        smelt_maintenance_testkit::recipe::KeyedRunWindow {
-            start: d1,
-            end: d1 + chrono::Duration::days(1),
-            rows: vec![GenRow {
-                d: d1,
-                id: 1,
-                val: 7,
-            }],
-        },
-        // The shared key `1` recurs with the SAME value — the once-write
-        // world-fact holds by construction, so `COALESCE(target, delta)`'s
-        // first-write-wins merge equals the full-refresh oracle
-        // (`MAX(val)` over a single distinct value is that value).
-        smelt_maintenance_testkit::recipe::KeyedRunWindow {
-            start: d2,
-            end: d2 + chrono::Duration::days(1),
-            rows: vec![
-                GenRow {
-                    d: d2,
-                    id: 1,
-                    val: 7,
-                },
-                GenRow {
-                    d: d2,
-                    id: 2,
-                    val: 42,
-                },
-            ],
-        },
-        // Late redelivery of the ALREADY-MERGED first window, replaying the
-        // same rows with the same values — the world-fact-preserving
-        // direction of "the first-written value survives". The oracle IS
-        // consulted here: `COALESCE(target, delta)` re-merged against an
-        // already-reflected delta is a no-op, so the maintained state must
-        // still equal the full-refresh oracle over the (now
-        // duplicate-carrying) source.
-        smelt_maintenance_testkit::recipe::KeyedRunWindow {
-            start: d1,
-            end: d1 + chrono::Duration::days(1),
-            rows: vec![GenRow {
-                d: d1,
-                id: 1,
-                val: 7,
-            }],
-        },
-    ]);
+    let schedule = once_write_constant_payload_schedule();
 
     drive_keyed_and_assert(&project, &recipe, &schedule)
         .await
         .expect("once-write keyed schedule must uphold end-state equivalence");
+}
+
+/// Phase 8 task 4: the once-write family's fallback-bearing spelling
+/// (`COALESCE(MAX(val), 0)`, [`KeyedCombiner::OnceWriteFallback`]) upholds
+/// end-state equivalence over the same constant-payload world-fact
+/// schedule — this spelling admits onto hidden `(value, written)` state
+/// (`decompose_once_write`) rather than the bare spelling's stateless
+/// merge, so this is the state-bearing family's own end-to-end DuckDB
+/// witness.
+#[tokio::test]
+async fn once_write_fallback_pool_upholds_end_state_equivalence() {
+    let recipe = KeyedRecipe::new_window_forward_once_write_with(KeyedCombiner::OnceWriteFallback);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project =
+        stage_keyed_recipe(&recipe, &tmp).expect("stage once-write-fallback keyed recipe");
+
+    let plan =
+        classify_keyed(&project, &recipe).expect("classify once-write-fallback keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the once-write-fallback keyed recipe to admit at least one cell: {plan:#?}"
+    );
+    assert!(
+        plan.cells
+            .iter()
+            .any(|c| c.technique == Technique::KeyedFold),
+        "expected a KeyedFold cell for the declared-FD-backed once-write-fallback column: \
+         {plan:#?}"
+    );
+
+    let schedule = once_write_constant_payload_schedule();
+
+    drive_keyed_and_assert(&project, &recipe, &schedule)
+        .await
+        .expect("once-write-fallback keyed schedule must uphold end-state equivalence");
+}
+
+/// Phase 8 task 4: the once-write family's multi-candidate spelling
+/// (`COALESCE(MAX(val), MIN(val))`, [`KeyedCombiner::OnceWriteMultiCandidate`])
+/// upholds end-state equivalence over the same constant-payload world-fact
+/// schedule — each candidate admits its own hidden `(value, written)` state
+/// pair (`decompose_once_write`).
+#[tokio::test]
+async fn once_write_multi_candidate_pool_upholds_end_state_equivalence() {
+    let recipe =
+        KeyedRecipe::new_window_forward_once_write_with(KeyedCombiner::OnceWriteMultiCandidate);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project =
+        stage_keyed_recipe(&recipe, &tmp).expect("stage once-write-multi-candidate keyed recipe");
+
+    let plan = classify_keyed(&project, &recipe)
+        .expect("classify once-write-multi-candidate keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the once-write-multi-candidate keyed recipe to admit at least one cell: \
+         {plan:#?}"
+    );
+    assert!(
+        plan.cells
+            .iter()
+            .any(|c| c.technique == Technique::KeyedFold),
+        "expected a KeyedFold cell for the declared-FD-backed once-write-multi-candidate \
+         column: {plan:#?}"
+    );
+
+    let schedule = once_write_constant_payload_schedule();
+
+    drive_keyed_and_assert(&project, &recipe, &schedule)
+        .await
+        .expect("once-write-multi-candidate keyed schedule must uphold end-state equivalence");
+}
+
+/// Phase 8 task 4: `AVG(val)`/`STDDEV_SAMP(val)` window-forward keyed
+/// recipes, driven through [`drive_keyed_and_assert`] over generated
+/// [`arb_keyed_schedule`] schedules, equal the `STracker` oracle after every
+/// window. Iterates the two decomposed-fold combiners explicitly (not
+/// draw-dependent) — `arb_keyed_combiner()` was widened by this phase to
+/// include both, so `keyed_pool_upholds_end_state_equivalence` already
+/// exercises them too, but only probabilistically; this test guarantees
+/// both get dedicated generative coverage every run.
+#[test]
+fn decomposed_fold_pool_upholds_end_state_equivalence() {
+    let n = keyed_case_count();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for combiner in [
+        KeyedCombiner::DecomposedAvg,
+        KeyedCombiner::DecomposedStddev,
+    ] {
+        let mut runner = TestRunner::deterministic();
+        let schedule_strat = arb_keyed_schedule();
+        let recipe = KeyedRecipe::new_window_forward(combiner);
+
+        for i in 0..n {
+            let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let project = stage_keyed_recipe(&recipe, &tmp).unwrap_or_else(|e| {
+                panic!("case {i} ({combiner:?}): recipe {recipe:?} failed to stage: {e}")
+            });
+
+            let plan = classify_keyed(&project, &recipe).unwrap_or_else(|e| {
+                panic!("case {i} ({combiner:?}): recipe {recipe:?} classify failed: {e}")
+            });
+            assert!(
+                !plan.cells.is_empty(),
+                "case {i} ({combiner:?}): recipe {recipe:?} admitted zero cells — \
+                 generator/derivation regression"
+            );
+
+            rt.block_on(drive_keyed_and_assert(&project, &recipe, &schedule))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i} ({combiner:?}): recipe {recipe:?} schedule {schedule:?} \
+                         equivalence check failed: {e}"
+                    )
+                });
+        }
+    }
+}
+
+/// Phase 8 task 5: for each new state-bearing family plus `OrderMonotone`,
+/// the maintained table's `information_schema` reports at least one
+/// `__`-marked physical column after a real run — a vacuity guard for
+/// [`downstream_select_star_consumer_sees_only_presented_columns`]'s hiding
+/// assertions (a recipe whose table never actually carried hidden state
+/// would make that test's "no `__` columns downstream" check trivially
+/// true rather than a real proof).
+#[tokio::test]
+async fn state_bearing_recipes_physically_carry_state_columns() {
+    let mut runner = TestRunner::deterministic();
+
+    for combiner in [
+        KeyedCombiner::OrderMonotone,
+        KeyedCombiner::DecomposedAvg,
+        KeyedCombiner::DecomposedStddev,
+    ] {
+        let recipe = KeyedRecipe::new_window_forward(combiner);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("{combiner:?}: failed to stage: {e}"));
+        let schedule = arb_keyed_schedule()
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        drive_keyed_and_assert(&project, &recipe, &schedule)
+            .await
+            .unwrap_or_else(|e| panic!("{combiner:?}: equivalence check failed: {e}"));
+
+        let physical_columns = all_physical_column_names(&project, &recipe.model_name);
+        assert!(
+            physical_columns.iter().any(|c| c.contains("__")),
+            "{combiner:?}: model {:?} carries zero `__`-marked physical state columns \
+             (columns: {physical_columns:?}) — vacuity: the downstream hiding assertions \
+             would prove nothing",
+            recipe.model_name
+        );
+    }
+
+    for combiner in [
+        KeyedCombiner::OnceWriteFallback,
+        KeyedCombiner::OnceWriteMultiCandidate,
+    ] {
+        let recipe = KeyedRecipe::new_window_forward_once_write_with(combiner);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("{combiner:?}: failed to stage: {e}"));
+        let schedule = once_write_constant_payload_schedule();
+        drive_keyed_and_assert(&project, &recipe, &schedule)
+            .await
+            .unwrap_or_else(|e| panic!("{combiner:?}: equivalence check failed: {e}"));
+
+        let physical_columns = all_physical_column_names(&project, &recipe.model_name);
+        assert!(
+            physical_columns.iter().any(|c| c.contains("__")),
+            "{combiner:?}: model {:?} carries zero `__`-marked physical state columns \
+             (columns: {physical_columns:?}) — vacuity: the downstream hiding assertions \
+             would prove nothing",
+            recipe.model_name
+        );
+    }
+}
+
+/// Phase 8 task 5: for each state-bearing family, a staged downstream model
+/// `SELECT * FROM smelt.<model>` materializes with exactly the
+/// upstream's presented columns (no `__` names) and multiset-equals the
+/// upstream's presented contents after a real run
+/// ([`assert_downstream_hides_state`]) — success criterion 4's end-to-end
+/// witness against a real DuckDB, complementing row 4's compile-time unit
+/// tests.
+#[tokio::test]
+async fn downstream_select_star_consumer_sees_only_presented_columns() {
+    let mut runner = TestRunner::deterministic();
+
+    for combiner in [
+        KeyedCombiner::OrderMonotone,
+        KeyedCombiner::DecomposedAvg,
+        KeyedCombiner::DecomposedStddev,
+    ] {
+        let recipe = KeyedRecipe::new_window_forward(combiner);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe_with_downstream(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("{combiner:?}: failed to stage with downstream: {e}"));
+        let schedule = arb_keyed_schedule()
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        drive_keyed_and_assert(&project, &recipe, &schedule)
+            .await
+            .unwrap_or_else(|e| panic!("{combiner:?}: equivalence check failed: {e}"));
+
+        assert_downstream_hides_state(&project, &recipe.model_name).await;
+    }
+
+    for combiner in [
+        KeyedCombiner::OnceWriteFallback,
+        KeyedCombiner::OnceWriteMultiCandidate,
+    ] {
+        let recipe = KeyedRecipe::new_window_forward_once_write_with(combiner);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe_with_downstream(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("{combiner:?}: failed to stage with downstream: {e}"));
+        let schedule = once_write_constant_payload_schedule();
+        drive_keyed_and_assert(&project, &recipe, &schedule)
+            .await
+            .unwrap_or_else(|e| panic!("{combiner:?}: equivalence check failed: {e}"));
+
+        assert_downstream_hides_state(&project, &recipe.model_name).await;
+    }
 }
 
 /// The once-write family's NULL-payload direction — the case a total

@@ -551,7 +551,9 @@ pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
     // determines by construction and which would therefore assert nothing
     // (`rules::cumulative::classify_once_write`).
     let fd_block = match recipe.combiner {
-        KeyedCombiner::OnceWrite => format!(
+        KeyedCombiner::OnceWrite
+        | KeyedCombiner::OnceWriteFallback
+        | KeyedCombiner::OnceWriteMultiCandidate => format!(
             "functional_dependencies:\n  - key: [{key}]\n    determines: {value}\n",
             key = recipe.source.key_column,
             value = recipe.source.payload_column,
@@ -592,6 +594,54 @@ pub fn stage_keyed(
     std::fs::write(
         project_dir.join(format!("models/{}.sql", recipe.model_name)),
         render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+        recipe.source.source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    let column_defs = match recipe.source.posture {
+        SourcePosture::AppendOnly => format!(
+            "{d} DATE, {id} INTEGER, {val} INTEGER",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+        SourcePosture::MutableSnapshot => format!(
+            "{id} INTEGER, {val} INTEGER",
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    };
+    create_source_table_via_backend(db_path, &recipe.source.name, &column_defs)?;
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+}
+
+/// [`stage_keyed`], additionally staging a downstream consumer model
+/// `models/<model>_downstream.sql` = `SELECT * FROM smelt.<model>`
+/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// models": state columns must stay invisible to a `ref()`-mediated
+/// consumer, not just a direct `information_schema` probe of the physical
+/// table). No frontmatter on the downstream model — `refresh: Full` is the
+/// default, and a full-refresh `SELECT *` read is exactly the "downstream
+/// consumer" shape this leg proves. Opt-in (a distinct function, not a flag
+/// on [`stage_keyed`]) so every pre-existing keyed recipe's staged project
+/// shape stays byte-identical.
+pub fn stage_keyed_with_downstream(
+    recipe: &KeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/{}_downstream.sql", recipe.model_name)),
+        format!("SELECT * FROM smelt.{}\n", recipe.model_name),
     )?;
     std::fs::write(
         project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),

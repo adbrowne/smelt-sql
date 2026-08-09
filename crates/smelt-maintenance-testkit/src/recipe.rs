@@ -982,12 +982,13 @@ pub enum KeyedCombiner {
     /// `crates/smelt-logical/src/rules/cumulative.rs`
     /// `classify_order_monotone_column`). Also `Grade::Idempotent`
     /// (incumbent-wins re-merge of an already-reflected delta converges).
-    /// The classifier's storage decision requires the ordering expression
-    /// (the driving source's own clock column `d` — strictly monotone
-    /// across this pool's generated windows, §"Ordering ties": ties are
-    /// avoided by construction, not by luck) to also be projected as its
-    /// own running `MAX(d)` column — [`Self::projection_sql`] projects
-    /// both.
+    /// Admits on hidden decomposed `(v, o)` state (row 5) — the ordering
+    /// expression (the driving source's own clock column `d` — strictly
+    /// monotone across this pool's generated windows, §"Ordering ties":
+    /// ties are avoided by construction, not by luck) is folded as hidden
+    /// state, not a projection obligation; [`Self::projection_sql`] still
+    /// additionally projects its own running `MAX(d)` column, kept as an
+    /// ordinary output column rather than a required companion.
     OrderMonotone,
     /// `ANY_VALUE(val)` — the plain-overwrite family
     /// (`docs/plans/20260809-keyed-frontier.md` Phase 3;
@@ -1015,6 +1016,35 @@ pub enum KeyedCombiner {
     /// [`arb_keyed_schedule`]'s deliberately key-re-touching, varying-value
     /// generated data; a dedicated recipe/schedule is required instead.
     OnceWrite,
+    /// `COALESCE(MAX(val), 0) AS once_val` — the once-write family's
+    /// fallback-bearing spelling (`incremental_models.md` §"The
+    /// column-family catalogue", row 6). Admits onto hidden `(value,
+    /// written)` state (`decompose_once_write`) rather than
+    /// [`KeyedCombiner::OnceWrite`]'s stateless `COALESCE(target, delta)`
+    /// merge — the literal fallback makes the raw projection total, so the
+    /// classifier can no longer read "still NULL" off the presented column
+    /// alone. Deliberately excluded from [`arb_keyed_combiner`], for the
+    /// same once-write world-fact reason as [`KeyedCombiner::OnceWrite`]; a
+    /// dedicated recipe/schedule is required
+    /// ([`KeyedRecipe::new_window_forward_once_write_with`]).
+    OnceWriteFallback,
+    /// `COALESCE(MAX(val), MIN(val)) AS once_val` — the once-write family's
+    /// multi-candidate spelling (`incremental_models.md` §"The
+    /// column-family catalogue", row 6). Admits onto hidden
+    /// `(value, written)` state per candidate. Deliberately excluded from
+    /// [`arb_keyed_combiner`], same reason as [`KeyedCombiner::OnceWrite`].
+    OnceWriteMultiCandidate,
+    /// `AVG(val) AS avg_val` — the decomposed-fold family
+    /// (`incremental_models.md` §"The column-family catalogue", row 7):
+    /// admits onto hidden additive `(sum, count)` state via
+    /// `CrossPartitionCombiner::Recomputed`. No per-key world-fact is
+    /// required (unlike once-write), so this variant DOES join
+    /// [`arb_keyed_combiner`]'s draw pool.
+    DecomposedAvg,
+    /// `STDDEV_SAMP(val) AS stddev_val` — the decomposed-fold family's
+    /// stddev-class member: admits onto hidden `(n, Σx, Σx²)` state. Joins
+    /// [`arb_keyed_combiner`]'s draw pool alongside [`Self::DecomposedAvg`].
+    DecomposedStddev,
 }
 
 impl KeyedCombiner {
@@ -1025,6 +1055,10 @@ impl KeyedCombiner {
             KeyedCombiner::OrderMonotone => "order_monotone",
             KeyedCombiner::PlainOverwrite => "plain_overwrite",
             KeyedCombiner::OnceWrite => "once_write",
+            KeyedCombiner::OnceWriteFallback => "once_write_fallback",
+            KeyedCombiner::OnceWriteMultiCandidate => "once_write_multi_candidate",
+            KeyedCombiner::DecomposedAvg => "decomposed_avg",
+            KeyedCombiner::DecomposedStddev => "decomposed_stddev",
         }
     }
 
@@ -1039,21 +1073,30 @@ impl KeyedCombiner {
             KeyedCombiner::Idempotent => ("MAX", "max_val"),
             KeyedCombiner::OrderMonotone => ("MAX_BY", "max_by_val"),
             KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
-            KeyedCombiner::OnceWrite => ("COALESCE", "once_val"),
+            KeyedCombiner::OnceWrite
+            | KeyedCombiner::OnceWriteFallback
+            | KeyedCombiner::OnceWriteMultiCandidate => ("COALESCE", "once_val"),
+            KeyedCombiner::DecomposedAvg => ("AVG", "avg_val"),
+            KeyedCombiner::DecomposedStddev => ("STDDEV_SAMP", "stddev_val"),
         }
     }
 
-    /// The companion ordering-tracking column's output alias — only
-    /// [`KeyedCombiner::OrderMonotone`] needs one (the classifier's storage
-    /// decision: the ordering value must itself be a projected running
-    /// `MAX`/`MIN` column, not hidden state).
+    /// The output alias of the recipe's own running ordering-tracking
+    /// column — only [`KeyedCombiner::OrderMonotone`] projects one
+    /// ([`Self::projection_sql`]'s own `MAX(d)` column, kept as an
+    /// ordinary output; the classifier's hidden `(v, o)` state is separate
+    /// and unrelated to this alias).
     pub fn ordering_alias(self) -> Option<&'static str> {
         match self {
             KeyedCombiner::OrderMonotone => Some("max_by_ord"),
             KeyedCombiner::Additive
             | KeyedCombiner::Idempotent
             | KeyedCombiner::PlainOverwrite
-            | KeyedCombiner::OnceWrite => None,
+            | KeyedCombiner::OnceWrite
+            | KeyedCombiner::OnceWriteFallback
+            | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::DecomposedAvg
+            | KeyedCombiner::DecomposedStddev => None,
         }
     }
 
@@ -1083,6 +1126,22 @@ impl KeyedCombiner {
                 // (`rules::cumulative::classify_once_write`).
                 format!("COALESCE(MAX({val})) AS {alias}")
             }
+            KeyedCombiner::OnceWriteFallback => {
+                // A literal fallback argument makes the projection total —
+                // the shape that widens onto hidden `(value, written)` state
+                // rather than the bare spelling's stateless merge
+                // (`decompose_once_write`, `classify_once_write`).
+                format!("COALESCE(MAX({val}), 0) AS {alias}")
+            }
+            KeyedCombiner::OnceWriteMultiCandidate => {
+                // Two candidates (a leading `MAX` and a trailing `MIN`),
+                // no fallback — each candidate gets its own `(value,
+                // written)` state pair (`decompose_once_write`).
+                format!("COALESCE(MAX({val}), MIN({val})) AS {alias}")
+            }
+            KeyedCombiner::DecomposedAvg | KeyedCombiner::DecomposedStddev => {
+                format!("{agg}({val}) AS {alias}")
+            }
             KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
                 format!("{agg}({val}) AS {alias}")
             }
@@ -1090,12 +1149,22 @@ impl KeyedCombiner {
     }
 }
 
-/// A `Strategy` drawing uniformly from the three [`KeyedCombiner`] families.
+/// A `Strategy` drawing uniformly from the [`KeyedCombiner`] families that
+/// hold over [`arb_keyed_schedule`]'s deliberately key-re-touching, varying-
+/// value generated data — the once-write family's per-key-constant
+/// world-fact does not, so [`KeyedCombiner::OnceWrite`],
+/// [`KeyedCombiner::OnceWriteFallback`], and
+/// [`KeyedCombiner::OnceWriteMultiCandidate`] stay excluded (dedicated
+/// recipes/schedules instead, `KeyedRecipe::new_window_forward_once_write*`).
+/// The decomposed-fold family (`DecomposedAvg`/`DecomposedStddev`) needs no
+/// such world-fact, so it joins the pool.
 pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
     prop_oneof![
         Just(KeyedCombiner::Additive),
         Just(KeyedCombiner::Idempotent),
         Just(KeyedCombiner::OrderMonotone),
+        Just(KeyedCombiner::DecomposedAvg),
+        Just(KeyedCombiner::DecomposedStddev),
     ]
 }
 
@@ -1142,10 +1211,21 @@ impl KeyedRecipe {
     /// [`KeyedCombiner::OnceWrite`]'s own doc comment for why a generic
     /// schedule would violate the once-write world-fact.
     pub fn new_window_forward_once_write() -> Self {
+        Self::new_window_forward_once_write_with(KeyedCombiner::OnceWrite)
+    }
+
+    /// [`Self::new_window_forward_once_write`], generalised over which
+    /// once-write spelling `combiner` names
+    /// (`KeyedCombiner::OnceWrite`/`OnceWriteFallback`/
+    /// `OnceWriteMultiCandidate`) — same FD-backed staging
+    /// ([`render_keyed_model_file`]'s `fd_block` covers all three), same
+    /// clocked append-only `events` source, same reason for staying out of
+    /// [`arb_keyed_combiner`]/[`arb_keyed_schedule`].
+    pub fn new_window_forward_once_write_with(combiner: KeyedCombiner) -> Self {
         Self {
-            model_name: "recipe_keyed_once_write".to_string(),
+            model_name: format!("recipe_keyed_{}", combiner.kind_name()),
             source: SourceRecipe::events(KeyShape::Single),
-            combiner: KeyedCombiner::OnceWrite,
+            combiner,
         }
     }
 

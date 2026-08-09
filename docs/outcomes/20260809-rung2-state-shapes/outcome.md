@@ -51,7 +51,7 @@ success criteria above.
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
 | 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | done |
-| 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | planned |
+| 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | done |
 | 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | pending |
 
 ## Decision log
@@ -280,6 +280,19 @@ success criteria above.
   staging — the 47 existing recipes' run shapes stay byte-identical, so a regression in them is
   unambiguously a state/fold bug rather than staging drift. A vacuity guard asserts the physical
   table really does carry `__` columns before the hiding assertions are believed.
+
+- 2026-08-09 (implement 8): `KeyedCombiner` widened with `DecomposedAvg`/`DecomposedStddev`/
+  `OnceWriteFallback`/`OnceWriteMultiCandidate`; `arb_keyed_combiner` now draws the decomposed
+  pair (once-write variants stay excluded per plan). The end-state comparison
+  (`assert_keyed_equivalence`) became float-aware via one `information_schema`-derived column
+  list feeding a shared `ROUND(col, 6)` select on both the maintained and oracle sides. Tests
+  1-6 all landed and passed on first run — no classifier/emitter defect surfaced; `MAX_BY`/
+  once-write/AVG/STDDEV all fold correctly against the oracle already. One real bug caught and
+  fixed in the process, unrelated to the classifier: the plan's own downstream-consumer SQL
+  (`SELECT * FROM smelt.ref('<model>')`) uses `smelt.ref()`, a syntax removed from the parser;
+  the working form is the bare `smelt.<model>` shorthand `dag.rs` already uses (the parser's own
+  diagnostic named it). `cargo test -p smelt-cli --test maintenance_conformance` now reports
+  53 tests (was 47). No work left the outcome; row 9 (surface cleanup) is what remains.
 
 ## Blocked
 
