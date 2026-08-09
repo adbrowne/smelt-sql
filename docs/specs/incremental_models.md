@@ -303,25 +303,27 @@ The classifier assigns each non-key projection to exactly one **column family**.
 |---|---|---|---|---|---|---|---|
 | **additive fold** | `COUNT(...)`, `SUM(...)`, `BIT_XOR(...)` | `+` / `xor` | no | yes | yes | window-forward only | ledger-enforced re-run refusal (§"The transactional merge ledger") |
 | **extremal / lattice fold** | `MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR` | `LEAST`/`GREATEST`/`AND`/`OR`/`&`/`\|` | yes | yes | no | window-forward only | — |
-| **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering (§"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | the ordering value projected as its own running `MAX`/`MIN` column (below) |
-| **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)` | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency over a NULL-preserving reduction |
+| **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering over hidden `(v, o)` state (§"Decomposed state (rung 2) in keyed models", §"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | — |
+| **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)`, or the decomposed `(value, written)` state fold for the fallback/multi-candidate spellings (§"Decomposed state (rung 2) in keyed models") | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency over a NULL-preserving reduction |
+| **decomposed fold** | `AVG(...)`, `STDDEV_*(...)`, `VAR_*(...)` | pairwise state combiner (§"Decomposed state (rung 2) in keyed models") | no | yes | per underlying combiner (additive state, invertible) | window-forward only | ledger-graded as additive (§"The transactional merge ledger") |
 | **plain overwrite** | `ANY_VALUE(...)` | incoming row wins | yes | n/a — one row per key per scan | no | **snapshot-reconcile only** | — |
 
 Any other aggregate, any non-aggregate non-key expression, and any composite expression over aggregates (`SUM(x) + 1`) is rejected (`KeyedUnknownCombiner`). Add columns for the underlying aggregates and derive downstream.
 
-The order-monotone overwrite family carries one structural requirement: the ordering expression
-must itself be projected as its own running `MAX(<ordering>)` (for `MAX_BY`) or
-`MIN(<ordering>)` (for `MIN_BY`) column in the same `SELECT`, since the cross-window combiner
-compares the *stored* ordering value against the delta's. A `MAX_BY(x, x)` is its own companion.
-Absent the companion projection the column refuses `KeyedUnknownCombiner` naming it, rather than
-smelt deriving a hidden ordering column the model never declared (§Known Divergences).
+The order-monotone overwrite family needs no companion projection: the ordering expression's
+value is carried as hidden state (§"Decomposed state (rung 2) in keyed models"), so the
+cross-window combiner compares the *stored* state's ordering value against the delta's without
+the modeller projecting it themselves. A `MAX_BY(x, x)` is its own degenerate case — value and
+ordering coincide, so the hidden state duplicates rather than adds a column.
 
-The once-write family admits exactly two spellings, and no others:
+The once-write family admits four spellings, and no others:
 
 - `COALESCE(<unique_key column>, …)` — key-derived, no declaration needed. Fallback arguments are permitted here: a key column is non-null within its own group by construction, so a fallback can never stand in for a value a later window would supply.
 - `COALESCE(MAX(<col>))` / `COALESCE(MIN(<col>))` — a single-column reduction with **no further argument**, admitted only under a declared functional dependency naming `<col>` (the source payload, never the projection's alias) over a key the model's `unique_key` covers.
+- `COALESCE(MAX(<col>), <fallback>)` / `COALESCE(MIN(<col>), <fallback>)` — the same reduction with a fallback argument, admitted under the same functional dependency, backed by the decomposed `(value, written)` state (§"Decomposed state (rung 2) in keyed models"): the raw reduction and the fallback are kept apart, so the fallback is applied fresh in `π` on every read rather than merged into the stored value.
+- `COALESCE(MAX(<a>), MAX(<b>))` (and the `MIN` variants, and longer candidate lists) — a multi-candidate reduction, admitted under a declared functional dependency naming *every* candidate column, backed by one decomposed `(value, written)` state pair per candidate: `π` applies the arguments' declared preference order over the candidates whose state is `written`, so the order candidates happened to arrive in across windows never overrides the declared preference.
 
-The no-further-argument restriction is the family's **NULL-preservation obligation**, and it follows directly from the equivalence invariant. The cross-window combiner is `COALESCE(target, delta)` — "the first non-null value any window produced wins" — so the delta must be NULL exactly when the key has no value yet. A fallback makes the delta *total*: a window in which every row for a key carries a NULL payload writes the fallback, the target becomes non-null, and no later window can displace it, while a full refresh returns the value the later window carried. A declared functional dependency asserts that the payload is a per-key constant; it never asserts that the payload is non-null, and this family is literally "first non-null", so intra-key NULLs are anticipated. A second *candidate* argument (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving but still refused: the temporal merge does not preserve the arguments' preference order, so a window carrying only `b` locks `b`'s value in ahead of an `a` that arrives later. Both forms refuse `KeyedOnceWriteUnproven`, which names dropping the fallback and applying the default downstream, in a reader-side projection.
+The family's **NULL-preservation obligation** follows directly from the equivalence invariant: the presented value must be NULL exactly when the key has no value yet under a full refresh. The bare key-derived and no-fallback single-reduction spellings discharge it directly, since their cross-window combiner *is* `COALESCE(target, delta)` — "the first non-null value any window produced wins." The fallback-bearing and multi-candidate spellings discharge it through the decomposed state instead: the state never stores a fallback-applied or preference-collapsed value, only the raw per-candidate reduction plus its `written` flag, and `π` — a pure function of one row's state — applies the fallback or preference order on every read. A declared functional dependency asserts that a candidate's payload is a per-key constant; it never asserts that the payload is non-null, and this family is literally "first non-null", so intra-key NULLs are anticipated for every candidate independently. Every spelling refuses `KeyedOnceWriteUnproven` absent its functional dependency (§Diagnostics).
 
 A `COALESCE(...)` used as a null-safe composite `GROUP BY` key is a key column, not a once-write column, and needs no proof.
 
@@ -380,13 +382,14 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 |---|---|
 | `KeyedRequiresGroupBy` | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
 | `KeyedForbidsTimeseries` | The model declares `timeseries:` but key temporal locality cannot be established — no route applies; names the three routes and the nearest missing fact (§"Key temporal locality"). |
-| `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY` + an ordering column as the fix. |
+| `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
 | `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
 | `KeyedForbidsNondeterministic` | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions; cross-window merge requires deterministic per-window output. |
 | `KeyedSqlNotParseable` | The model body cannot be parsed into the shape the classifier reads. |
 | `KeyedMultipleDrivingSources` | More than one timeseries-tagged source in the FROM clause; lists the candidates. |
-| `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column has no once-write provenance proof, or breaks the family's NULL-preservation obligation by carrying a fallback argument after its reduction; names the column and the three fixes (key-derived form, declared functional dependency, remodelling), and for the fallback case names dropping it and applying the default downstream. |
+| `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns; names the column, the unproven candidate(s), and the three fixes (key-derived form, declared functional dependency, remodelling). |
+| `KeyedStateColumnCollision` | A decomposed-state column name (`<output>__<part>`, §"Decomposed state (rung 2) in keyed models") collides with a declared or projected user column; names both and the reserved suffix. |
 | `KeyedRetractableContribution` | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen. Steers to `refresh: materialized_view` or DAG composition. Never fires on the join spelling alone (§"Enrichment joins"). |
 | `KeyedSnapshotSourceUnsupportedColumn` | A column family inadmissible under snapshot-reconcile appears in a model with no clocked driving source; names the column, the family, and why the current-snapshot oracle cannot hold (§"Admission matrix"). |
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source to reconcile against either (two or more unclocked candidates in the FROM clause) — neither run shape can be derived (§"The two run shapes"). |
@@ -497,6 +500,74 @@ The ladder is the boundary: rungs 1–4 are what smelt maintains itself (a `merg
 optionally with a presentation view). Beyond it — general-operator retraction over joins,
 unbounded non-additive state — is delegated to the engine's native incremental view maintenance
 via `refresh: materialized_view`.
+
+### Decomposed state (rung 2) in keyed models
+
+Ladder rung 2 (above) says the user value can be `π(state)` for a richer monoid element. This
+section fixes where that state physically lives for the key grain, which column families it
+licenses, and how it stays invisible to consumers — the missing piece every decomposed-state
+admission in §"The column-family catalogue" cites by name.
+
+**Physical layout.** State columns live in the *same* stored table as the presented columns,
+named `<output>__<part>` (e.g. `total_spend__sum`, `total_spend__count`). The presented column
+is materialised alongside them at merge time, computed by the presentation map `π` from that
+row's own state. Rejected alternative: a separate `<model>__state` table plus a presentation
+*view*. A second relation would make `ref()` sometimes resolve to a table and sometimes to a
+view, add a second relation to every backend's DDL and atomic-swap path, and buy nothing — `π`
+is a per-row pure function of the same row's state, so nothing about it needs a second query.
+
+**Presentation projection.** State columns are excluded from the model's public schema:
+`smelt.ref()` expansion, `SELECT *`, declared-schema checks, and downstream type inference see
+only presented columns. A state column name colliding with a declared or projected user column
+is a fail-loud refusal (`KeyedStateColumnCollision`, §Diagnostics), never a silent rename —
+smelt does not guess which of the two a consumer meant.
+
+**The state-shape catalogue.** Each decomposable family has one fixed, hand-encoded state shape
+and presentation map; there is no general decomposition procedure, matching rung 2's own
+"kept in a state table, exposed through a presentation view" framing (above) with a concrete
+per-family shape:
+
+| Family | State columns (`__` suffix) | Combiner over state | Presentation map `π` |
+|---|---|---|---|
+| `AVG(x)` | `sum`, `count` | pairwise `+` on each column | `sum / count`, `NULL` when `count = 0` |
+| `STDDEV_*(x)` / `VAR_*(x)` | `n`, `sx` (`Σx`), `sxx` (`Σx²`) | pairwise `+` on each column | per-family closed form over `(n, Σx, Σx²)` (population vs. sample divisor and `sqrt` per the specific function), `NULL` below the family's minimum `n` (`0` population, `1` sample) |
+| `MAX_BY(v, o)` / `MIN_BY(v, o)` | `v`, `o` (the hidden ordering value) | keep the pair whose `o` is greater (`MAX_BY`) / lesser (`MIN_BY`); on equality the incumbent wins, matching §"Ordering ties" | `v` — `o` is never presented |
+| once-write | `value`, `written` (boolean) | `written` is `OR`; `value` is the incumbent's unless the delta's `written` is true, in which case the delta's | family-specific, below |
+
+`AVG`'s and `STDDEV_*`/`VAR_*`'s state combiners are commutative monoids over their state tuples
+(component-wise `SUM`, itself a monoid), so the equivalence invariant and the order/set-determinacy
+corollary (§"The equivalence invariant") hold over the state with no exception — they are graded
+**additive** in the transactional merge ledger (§"The transactional merge ledger"), the same as
+`SUM`/`COUNT`, since their state components are `SUM`-shaped. `MAX_BY`/`MIN_BY`'s state combiner
+carries the same ordering-key-tie carve-out its rung-1 form already had (§"Two named carve-outs",
+§"Ordering ties") — moving the ordering value into hidden state changes nothing about that
+exception, only who tracks the ordering column. Once-write's state combiner is fully
+order-independent given its provenance proof, exactly as its rung-1 `COALESCE(target, delta)`
+form is: a per-key-constant value produces the same result regardless of which window's delta
+supplies it first. `MAX_BY`/`MIN_BY` and once-write keep the idempotent grade their rung-1 form
+already carries — replacing a hand-written companion column or a spelling restriction with
+hidden state changes nothing about re-run safety.
+
+**Once-write's `π` widens what the family admits**, because the state now separates the *raw*
+per-key reduction from the presented value: the raw reduction is never fallback-tainted, so a
+fallback or a preference order can be applied fresh on every read instead of being baked into
+the merged value once and then re-merged incorrectly by a later window (§"The column-family
+catalogue" states which spellings this newly admits). Concretely:
+
+- **Fallback-bearing single reduction** (`COALESCE(MAX(<col>), <fallback>)`): one state pair
+  `(value, written)` over the bare reduction `MAX(<col>)`/`MIN(<col>)`, with `written = (value IS
+  NOT NULL)`. `π = value` if `written`, else `<fallback>`.
+- **Multi-candidate reduction** (`COALESCE(MAX(a), MAX(b))`): one `(value, written)` pair per
+  candidate, each folded independently exactly as the single-reduction case above. `π` applies
+  the arguments' declared preference order over the candidates whose `written` is true — a pure
+  function of that row's state, so the order the source's windows happened to merge in can no
+  longer leak into which candidate wins.
+- The bare key-derived spelling (`COALESCE(<unique_key column>, …)`) needs no decomposed state:
+  a key column is already non-null by construction, so the plain `COALESCE(target, delta)`
+  combiner (§"The column-family catalogue") already computes the presented value directly.
+
+`smelt explain` renders state columns as internal state, distinct from the model's public
+schema (surface detailed alongside the CLI's other plan output, §Surface "CLI").
 
 ### Validator, not chooser
 
@@ -1348,10 +1419,10 @@ Three model-level properties fold from the column families; each is derived, sur
    model's repeated window converges (`GREATEST(x, GREATEST(x, y)) = GREATEST(x, y)`); an
    additive model double-counts and must be refused (the ledger, below).
 2. **Order-independence** — may windows apply out of order or in parallel? Holds iff every
-   column's combiner is order-independent: the extremal/lattice and proven once-write families
-   qualify; the order-monotone overwrite family does not (its order-independence holds only up
-   to ordering-key ties — §"Ordering ties"), so any model with an overwrite column executes
-   windows sequentially in temporal order.
+   column's combiner is order-independent: the extremal/lattice, decomposed-fold, and proven
+   once-write families qualify; the order-monotone overwrite family does not (its
+   order-independence holds only up to ordering-key ties — §"Ordering ties"), so any model with
+   an overwrite column executes windows sequentially in temporal order.
 3. **Reprocessing refusal** — a window whose *input changed* since it was merged must not be
    re-merged for **any** family: an irreversible fold cannot un-see a removed contribution, and
    an overwrite cannot retract a superseded-by-nothing value (§"Reprocessing").
@@ -1389,6 +1460,7 @@ supersedes — current-snapshot semantics required). Checked per column:
 | extremal / lattice fold | ✓ | ✗ — observer semantics (below) |
 | order-monotone overwrite | ✓ | ✗ — observer semantics (below) |
 | once-write | ✓ (provenance proof) | ✗ — observer semantics (below) |
+| decomposed fold | ✓ (ledger-enforced, graded additive) | ✗ — re-folding state double-counts, same as additive fold |
 | plain overwrite | ✗ — order-dependent over events (`KeyedUnknownCombiner` names the `MAX_BY` fix) | ✓ (current-snapshot semantics) |
 
 The three snapshot ✗ cells marked *observer semantics* are not double-count hazards — those
@@ -1527,16 +1599,17 @@ across both; implementation status is recorded in §Known Divergences.
 
 #### The maintenance boundary
 
-On the algebraic ladder (§"The algebraic maintenance ladder") the keyed families sit on the
-direct-monoid rung: every catalogued combiner folds `(state, delta)` with no inverse and no
-history re-read. The additive family is additionally a **group** (invertible) — what a future
-subtract-then-add reprocessing path would exploit; the idempotent families are monoids but not
-groups (a folded contribution cannot be un-seen), which is why reprocessing is refused for them.
-Rungs 2–4 (decomposed state + presentation view for `AVG`-class aggregates; group-rung
-retraction; the opt-in bounded-domain multiset) grow this shape without changing its contract;
-the transforms are catalogued in `model_transforms.md` and the `bounded_domain:` budget
-declaration in `model_properties.md`. Beyond the ladder is delegated to
-`refresh: materialized_view`.
+On the algebraic ladder (§"The algebraic maintenance ladder") the keyed families sit on rungs 1
+and 2: every catalogued combiner folds `(state, delta)` with no inverse and no history re-read.
+The additive and decomposed-fold families sit on rung 1 and rung 2 respectively, and are
+additionally **groups** (invertible) — what a future subtract-then-add reprocessing path would
+exploit; the extremal/lattice, order-monotone-overwrite, and once-write families (the latter two
+rung 2 for the state-widened spellings, §"Decomposed state (rung 2) in keyed models") are monoids
+but not groups (a folded contribution cannot be un-seen), which is why reprocessing is refused
+for them. Rungs 3–4 (group-rung retraction; the opt-in bounded-domain multiset) grow this shape
+further without changing its contract; the transforms are catalogued in `model_transforms.md`
+and the `bounded_domain:` budget declaration in `model_properties.md`. Beyond the ladder is
+delegated to `refresh: materialized_view`.
 
 #### Reprocessing
 
@@ -2273,32 +2346,29 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   the table — including the case where only one of the two flags is supplied. No test asserts
   the refusal, and the user documentation currently describes the fallback rather than the
   required-flags rule.
-- **The once-write family admits only two narrow spellings.** A `COALESCE` whose first argument
-  is a **bare** `unique_key` column (key-derived, no declaration needed, fallbacks permitted), or
-  a sole-argument single-column `MAX(…)`/`MIN(…)` reduction backed by a declared functional
-  dependency naming that **source** column; every other coalesced expression refuses
-  `KeyedOnceWriteUnproven`. Two of those refusals are shapes waiting on machinery rather than
-  model errors: the fallback-bearing reduction (`COALESCE(MAX(col), <literal>)`) and the
-  multi-candidate form (`COALESCE(MAX(a), MAX(b))`) would each need the reduction's raw nullable
-  value held apart from the projected output — decomposed state, ladder rung 2 (below) — before
-  they could be admitted without breaking the family's NULL-preservation obligation. There is no
-  nullability route around the fallback refusal either: the NOT-NULL derivation
+- **The once-write classifier still implements only the two narrow spellings.**
+  §"The column-family catalogue" now admits the fallback-bearing and multi-candidate spellings
+  through decomposed `(value, written)` state (§"Decomposed state (rung 2) in keyed models"), but
+  the implementation still refuses both `KeyedOnceWriteUnproven`: the classifier has not yet been
+  wired to the decomposed-state mechanism for this family. There is also no nullability route
+  around the fallback case yet — the NOT-NULL derivation
   (`crates/smelt-logical/src/analysis/not_null.rs`) proves not-null only for a partition /
-  driving-clock-derived column, so no general non-key NOT-NULL prover exists to establish that a
-  fallback can never fire. Widening the key-derived route to an arbitrary key-derived
+  driving-clock-derived column, so establishing that a fallback can never fire needs the state
+  route, not a static proof. Widening the key-derived route to an arbitrary key-derived
   *expression* (rather than a bare key reference), or replacing the whole-scope
   fan-out/set-operation facts the admission reads today with a per-column join trace, is
-  likewise unbuilt. Decision record:
+  separately unbuilt. Decision record:
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **The order-monotone overwrite family's ordering value has no decomposed-state storage** — the
-  classifier requires the ordering expression to also be projected as its own running
-  `MAX`/`MIN` column in the same `SELECT` (the merge compares `target`/`delta` off that column);
-  a `MAX_BY`/`MIN_BY` column whose ordering expression is not independently tracked this way
-  refuses `KeyedUnknownCombiner` naming the missing companion projection, rather than deriving a
-  hidden shadow column (the degenerate `MAX_BY(x, x)` — value expression identical to the
-  ordering expression — is its own companion and needs no second projection). A hidden-state
-  route is ladder-rung-2 territory (decomposed state) and needs its own spec pass. Tracking:
+- **The order-monotone overwrite family's ordering value still has no decomposed-state storage
+  wired in.** §"The column-family catalogue" no longer requires a companion `MAX`/`MIN`
+  projection — the ordering value is hidden `(v, o)` state (§"Decomposed state (rung 2) in keyed
+  models") — but the classifier has not yet been updated to derive that state, so a
+  `MAX_BY`/`MIN_BY` column whose ordering expression is not independently projected still refuses
+  `KeyedUnknownCombiner` naming the (no-longer-required) companion projection as the workaround.
+  The degenerate `MAX_BY(x, x)` case is unaffected either way. Tracking:
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260809-keyed-frontier.md`.
 - **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional merge ledger"
   gives every window-forward model a ledger, refusal-bearing for additive folds and
@@ -2369,13 +2439,19 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   a change feed with delete events. Tombstones, opt-in hard delete, and the observer contract
   for the refused matrix cells are deferred
   (`docs/research/20260705-keyed-collapse-application.md` §5).
-- **Ladder rungs 2–4 are specified ahead of this profile's use of them.** Wiring decomposed
-  state (rung 2), group-rung retraction (rung 3), and the bounded-domain multiset (rung 4) into
-  keyed columns needs its own spec pass before implementation, and rung 3 additionally depends
-  on the change-feed consumption design — no live fold machinery consumes a change feed's delta
-  shape today. Rung 2 is what the two refused once-write spellings above and a hidden
-  ordering-value shadow column both wait on. Deferred by
-  `docs/plans/20260809-keyed-frontier.md` §Scope.
+- **Ladder rung 2 is specified but not yet wired into the keyed profile's admission and
+  storage.** §"Decomposed state (rung 2) in keyed models" fixes the state shapes, physical
+  layout, and presentation projection; deriving the concrete state per model
+  (`crates/smelt-logical/src/analysis/decomposed_state.rs` encodes only `AVG`'s `(sum, count)`
+  shape today), storing the state columns in the stored table, and widening the once-write and
+  order-monotone admission classifiers to consume it are the two once-write entries and the
+  ordering-value entry above. Tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
+- **Ladder rungs 3–4 remain specified ahead of this profile's use of them.** Group-rung
+  retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the
+  rung-2 work above; rung 3 additionally depends on the change-feed consumption design — no
+  live fold machinery consumes a change feed's delta shape today. Deferred by
+  `docs/plans/20260809-keyed-frontier.md` §Scope,
+  `docs/outcomes/20260809-rung2-state-shapes/outcome.md` §"Out of scope".
 
 ## Future Extensions
 

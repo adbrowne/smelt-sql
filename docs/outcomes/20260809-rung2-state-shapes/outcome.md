@@ -44,7 +44,7 @@ success criteria above.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | planned |
+| 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing) | pending |
 | 3 | Storage + emitters: state columns in the stored table, keyed fold over state, presentation projection | pending |
 | 4 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
@@ -64,6 +64,14 @@ success criteria above.
   columns live in the same stored table as the presented columns (suffix `__part`),
   hidden from the public schema, rather than a separate state table + presentation view;
   keeps `ref()` a table and leaves backend DDL/atomic-swap paths untouched.
+- 2026-08-09 (implement 1): phase 1 landed the spec text (`incremental_models.md`
+  §"Decomposed state (rung 2) in keyed models", catalogue/diagnostics/Known-Divergences
+  edits, plus `model_properties.md`/`model_transforms.md` cross-references). Self-review
+  caught and fixed a stale Design-section claim ("keyed families sit on the direct-monoid
+  rung") and two missing table rows (admission matrix, derived execution postures) for
+  the new decomposed-fold family. Only `AVG` is encoded in `decomposed_state.rs` today;
+  phase 2 needs to decide whether `MAX_BY`/once-write widen through the same
+  `decomposable`-discriminant entry point or need their own.
 
 ## Blocked
 

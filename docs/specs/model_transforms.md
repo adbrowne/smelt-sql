@@ -511,10 +511,14 @@ by `docs/plans/20260704-model-updates.md` (design:
   `decompose_to_state`): given a decomposable combiner (F4) it derives the
   hidden state columns and a presentation expression, refusing (never
   approximating) a holistic combiner, an unencoded state shape, or a
-  presentation expression that fails the purity proof (F7). Only `AVG`'s
-  `(sum, count)` state shape is encoded so far; wiring it as the driver
-  (`merge_into`) for a live refresh mode (cumulative rung-2) is a later,
-  mode-composition phase.
+  presentation expression that fails the purity proof (F7). The state-shape
+  catalogue this mechanism targets — `AVG`, `STDDEV_*`/`VAR_*`, `MAX_BY`/
+  `MIN_BY`'s hidden ordering, and once-write's `(value, written)` pair — is
+  fixed by `incremental_models.md` §"Decomposed state (rung 2) in keyed
+  models"; only `AVG`'s `(sum, count)` shape is encoded so far. Wiring it as
+  the driver (`merge_into`) for the key grain's decomposed-fold and
+  order-monotone-overwrite column families (`incremental_models.md`
+  §"The column-family catalogue") is separate, unfinished consumer work.
 - **Duplicated licensing analyses.** Several transforms are licensed by proofs that
   exist in duplicate in the tree (two driving-fact resolvers); the licences these
   transforms read are being consolidated in `model_properties.md`. The interval-reach
