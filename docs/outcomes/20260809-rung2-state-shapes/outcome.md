@@ -51,7 +51,7 @@ success criteria above.
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state | done |
 | 7 | Admission: `AVG`/`STDDEV_*`/`VAR_*` decomposed folds at keyed grain, including the additive-state ledger grade and the state-aware defence-in-depth/preview paths | done |
-| 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | pending |
+| 8 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end | planned |
 | 9 | Surface cleanup: `smelt explain` state rendering + any obligation text still standing after rows 7-8 | pending |
 
 ## Decision log
@@ -259,6 +259,27 @@ success criteria above.
   "Out of v1" `AVG` entry deleted (nothing residual, following the phase-5
   precedent). 13 new tests, all gates green, `maintenance_conformance` stayed
   47/47 unchanged (no new recipes yet — that's row 8's job).
+
+- 2026-08-09 (plan 8): no reshape — rows 8/9 stand as sharpened by plans 5 and 7. Row 8's
+  new-family list is the union of everything rows 5–7 admitted: `MAX_BY`/`MIN_BY` (already
+  generatively covered for free, so it only needs the downstream-consumer leg), the once-write
+  fallback and multi-candidate spellings, and `AVG`/`STDDEV_SAMP`.
+- 2026-08-09 (plan 8): the once-write variants stay OUT of `arb_keyed_combiner` (their per-key
+  constant world-fact does not hold for that pool's key-re-touching, varying-value data — the same
+  reason `OnceWrite` is excluded today) and get dedicated recipes/schedules; `AVG`/`STDDEV_SAMP`
+  join the pool, since a decomposed fold needs no world-fact.
+- 2026-08-09 (plan 8): the end-state comparison becomes float-aware — presented `DOUBLE`/`FLOAT`
+  columns are wrapped in `ROUND(col, 6)` on BOTH sides, built from one `information_schema`-derived
+  column list. DuckDB's `STDDEV_SAMP` uses a numerically stable pass while the decomposed
+  `(n, Σx, Σx²)` recompute does not, so exact `EXCEPT ALL` would flake at ~1e-12. A
+  harness self-check pins the tolerance so it cannot widen into swallowing a real fold bug.
+  Rejected: rounding inside the model projection (changes the admitted shape) and dropping the
+  stddev family from the pool (criterion 3 names it explicitly).
+- 2026-08-09 (plan 8): the downstream `SELECT *` consumer is an opt-in second model staged
+  alongside the recipe (`SELECT * FROM smelt.ref('<model>')`), not a change to the default keyed
+  staging — the 47 existing recipes' run shapes stay byte-identical, so a regression in them is
+  unambiguously a state/fold bug rather than staging drift. A vacuity guard asserts the physical
+  table really does carry `__` columns before the hiding assertions are believed.
 
 ## Blocked
 
