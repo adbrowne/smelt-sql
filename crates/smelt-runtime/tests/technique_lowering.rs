@@ -1440,13 +1440,13 @@ fn max_by_merge_renders_incumbent_comparison() {
         ],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),
-            timeseries: TimeseriesConfig {
+            timeseries: Some(TimeseriesConfig {
                 event_time_column: "event_date".to_string(),
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
                 assert_monotonic: false,
-            },
+            }),
         },
     };
     let delta_sql = "SELECT device_id, MAX_BY(status, updated_at) AS status, \
@@ -1471,6 +1471,68 @@ fn max_by_merge_renders_incumbent_comparison() {
     assert!(
         sql.contains("updated_at = GREATEST(target.updated_at, delta.updated_at)"),
         "expected the companion tracking column's own running-MAX update, got: {sql}"
+    );
+}
+
+/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): the snapshot-reconcile
+/// run shape's `MERGE` — a whole-source `USING` select (no window predicate
+/// injected into `delta_sql`, unlike the window-forward per-partition
+/// driver), plain-overwrite columns assign `delta.<col>` unconditionally
+/// (incoming row wins, no target comparison), and — critically — no
+/// `DELETE` of departed keys: a key present in the target but absent from
+/// the incoming scan is retained unchanged
+/// (`docs/specs/incremental_models.md` §"The two run shapes").
+#[test]
+fn snapshot_reconcile_merges_whole_source_no_window() {
+    use smelt_core::config::TimeseriesConfig;
+    use smelt_logical::{
+        AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
+    };
+    use smelt_runtime::cumulative::build_cumulative_merge_sql;
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "current_val".to_string(),
+            per_partition_agg: "ANY_VALUE".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.dim".to_string(),
+            // Snapshot-reconcile: no clocked driving source.
+            timeseries: None::<TimeseriesConfig>,
+        },
+    };
+    // The whole-source scan, unmodified — no `[run_start, run_end)` window
+    // predicate injected anywhere.
+    let delta_sql =
+        "SELECT id, ANY_VALUE(current_val) AS current_val FROM main.sources_dim GROUP BY id";
+
+    let sql = build_cumulative_merge_sql(
+        "main",
+        "snapshot_dim",
+        delta_sql,
+        &classification,
+        None,
+        &unconditional(),
+    );
+
+    assert!(
+        sql.contains(&format!("USING ({delta_sql}) AS delta")),
+        "expected the whole-source select verbatim as the USING clause, no window predicate: \
+         {sql}"
+    );
+    assert!(
+        sql.contains("current_val = delta.current_val"),
+        "expected the plain-overwrite family's unconditional incoming-row-wins assignment: {sql}"
+    );
+    assert!(
+        !sql.to_uppercase().contains("DELETE"),
+        "snapshot-reconcile must never delete a departed key — retained unchanged: {sql}"
+    );
+    assert!(
+        sql.contains("WHEN NOT MATCHED THEN INSERT *"),
+        "expected the ordinary unmatched-insert arm: {sql}"
     );
 }
 

@@ -168,7 +168,7 @@ unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, 
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`incremental_models.md` §Known Divergences "The key grain"). Retired once snapshot-reconcile ships. |
+| `KeyedSnapshotPostureUnsupported` | Error | A `grain: key` model has no clocked driving source, AND no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source joined, none clocked) — genuinely unsupportable, not a "not yet" refusal (`incremental_models.md` §"The two run shapes"). |
 
 ---
 

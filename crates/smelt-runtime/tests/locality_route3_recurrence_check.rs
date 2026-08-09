@@ -85,7 +85,7 @@ fn classification() -> CumulativeClassification {
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),
-            timeseries: timeseries(),
+            timeseries: Some(timeseries()),
         },
     }
 }

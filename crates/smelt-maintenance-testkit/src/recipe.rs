@@ -321,6 +321,31 @@ impl SourceRecipe {
         }
     }
 
+    /// The physical `events(d, id, val)` shape ([`Self::events`]) — an
+    /// `AppendOnly`-postured source, `clock_column` set so the standard
+    /// `stage_keyed` AppendOnly DDL branch still applies — used by the
+    /// plan/classifier-agreement probe
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 3 review finding):
+    /// `crates/smelt-cli/tests/maintenance_conformance/gate.rs`'s
+    /// `snapshot_reconcile_unclocked_append_only_source_with_sum_is_refused`
+    /// stages this source's OWN bespoke source YAML with NO `timeseries:`
+    /// block (unlike [`Self::events`]'s [`Self::source_yaml`], which always
+    /// declares one for an `AppendOnly` posture) — an append-only source
+    /// with no declared clock anywhere in the model derives the
+    /// snapshot-reconcile run shape (`incremental_models.md` §"The two run
+    /// shapes") exactly like [`Self::mutable_dimension`] does, over a
+    /// posture that would otherwise (incorrectly) pass the faithful-fold
+    /// source-posture obligation on its own. `KeyedRecipe::
+    /// new_snapshot_reconcile` (mutable-snapshot posture) already exercises
+    /// the "declared posture also independently fails that obligation"
+    /// case; this shape isolates the run-shape gate alone.
+    pub fn unclocked_append_only_dimension(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::events(KeyShape::Single)
+        }
+    }
+
     /// The declared `batched.unique_key` for `construct` over this source:
     /// row-shaped constructs use [`KeyShape`]; aggregate constructs always
     /// key on the partition column alone.
@@ -964,6 +989,19 @@ pub enum KeyedCombiner {
     /// own running `MAX(d)` column — [`Self::projection_sql`] projects
     /// both.
     OrderMonotone,
+    /// `ANY_VALUE(val)` — the plain-overwrite family
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 3;
+    /// `incremental_models.md` §"The column-family catalogue"). Admitted
+    /// ONLY under the snapshot-reconcile run shape — a
+    /// [`KeyedRecipe::new_window_forward`] recipe must never draw this
+    /// variant (`arb_keyed_combiner` deliberately excludes it); only
+    /// [`KeyedRecipe::new_snapshot_reconcile`] uses it. Also
+    /// `Grade::Idempotent` (incoming-row-wins is idempotent by
+    /// construction — re-reconciling an unchanged snapshot converges), but
+    /// unlike every other combiner here, the snapshot-reconcile executor
+    /// keeps no ledger at all (`incremental_models.md` §"The transactional
+    /// merge ledger": "Snapshot-reconcile models keep no ledger").
+    PlainOverwrite,
 }
 
 impl KeyedCombiner {
@@ -972,6 +1010,7 @@ impl KeyedCombiner {
             KeyedCombiner::Additive => "additive",
             KeyedCombiner::Idempotent => "idempotent",
             KeyedCombiner::OrderMonotone => "order_monotone",
+            KeyedCombiner::PlainOverwrite => "plain_overwrite",
         }
     }
 
@@ -985,6 +1024,7 @@ impl KeyedCombiner {
             KeyedCombiner::Additive => ("SUM", "total"),
             KeyedCombiner::Idempotent => ("MAX", "max_val"),
             KeyedCombiner::OrderMonotone => ("MAX_BY", "max_by_val"),
+            KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
         }
     }
 
@@ -995,7 +1035,9 @@ impl KeyedCombiner {
     pub fn ordering_alias(self) -> Option<&'static str> {
         match self {
             KeyedCombiner::OrderMonotone => Some("max_by_ord"),
-            KeyedCombiner::Additive | KeyedCombiner::Idempotent => None,
+            KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
+                None
+            }
         }
     }
 
@@ -1016,7 +1058,7 @@ impl KeyedCombiner {
                 }
                 None => unreachable!("OrderMonotone always carries an ordering alias"),
             },
-            KeyedCombiner::Additive | KeyedCombiner::Idempotent => {
+            KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
                 format!("{agg}({val}) AS {alias}")
             }
         }
@@ -1060,6 +1102,27 @@ impl KeyedRecipe {
         Self {
             model_name: format!("recipe_keyed_snapshot_{}", combiner.kind_name()),
             source: SourceRecipe::mutable_dimension("keyed_snapshot_dim"),
+            combiner,
+        }
+    }
+
+    /// [`Self::new_snapshot_reconcile`], but over
+    /// [`SourceRecipe::unclocked_append_only_dimension`] — the driving
+    /// source declares `mutation_profile: append_only` instead of
+    /// `mutable_snapshot`, while still carrying NO clock column anywhere in
+    /// the model. Isolates the run-shape gate (`docs/plans/
+    /// 20260809-keyed-frontier.md` Phase 3 review finding): a
+    /// `MutationProfile::AppendOnly` source passes the faithful-fold
+    /// source-posture obligation on posture alone, clock-independent, so a
+    /// fold-family column over this shape is admitted (wrongly) unless the
+    /// whole-model run-shape check also fires.
+    pub fn new_snapshot_reconcile_unclocked_append_only(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!(
+                "recipe_keyed_snapshot_unclocked_append_only_{}",
+                combiner.kind_name()
+            ),
+            source: SourceRecipe::unclocked_append_only_dimension("keyed_snapshot_dim_ao"),
             combiner,
         }
     }

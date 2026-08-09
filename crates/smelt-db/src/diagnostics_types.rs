@@ -727,10 +727,14 @@ pub enum DiagnosticCode {
     KeyedForbidsWindowFunctions,
     /// A non-deterministic function appears in a `refresh: keyed` SELECT.
     KeyedForbidsNondeterministic,
-    /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
-    /// clocked driving source and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain").
+    /// A `refresh: keyed` model has no clocked driving source, and no
+    /// single unambiguous source could be resolved to derive the
+    /// snapshot-reconcile run shape either.
     KeyedSnapshotPostureUnsupported,
+    /// A fold-family column (additive, extremal/lattice, or order-monotone
+    /// overwrite) is refused under the derived snapshot-reconcile run shape
+    /// (`docs/specs/incremental_models.md` §"Admission matrix").
+    KeyedSnapshotSourceUnsupportedColumn,
     /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
     /// (v1 supports exactly one driving source).
     KeyedMultipleDrivingSources,

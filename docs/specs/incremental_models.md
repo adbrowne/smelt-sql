@@ -2246,10 +2246,11 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The key grain
 
-- **The classifier covers the direct-monoid families and the order-monotone overwrite family**
-  (additive fold, extremal/lattice fold, `MAX_BY`/`MIN_BY`). The once-write and plain-overwrite
-  families, and the run-shape/posture derivation (snapshot-reconcile), are unbuilt. Decision
-  record: `docs/research/20260705-keyed-collapse-application.md`; tracking:
+- **The classifier covers the direct-monoid families, the order-monotone overwrite family, and
+  the plain-overwrite family** (additive fold, extremal/lattice fold, `MAX_BY`/`MIN_BY`,
+  `ANY_VALUE`) across both derived run shapes (window-forward and snapshot-reconcile). The
+  once-write family (`COALESCE`) is unbuilt. Decision record:
+  `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The order-monotone overwrite family's ordering value has no decomposed-state storage** — the
   classifier requires the ordering expression to also be projected as its own running
@@ -2258,11 +2259,13 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   refuses `KeyedUnknownCombiner` naming the missing companion projection, rather than deriving a
   hidden shadow column. A hidden-state route is ladder-rung-2 territory (decomposed state) and
   needs its own spec pass. Tracking: `docs/plans/20260809-keyed-frontier.md`.
-- **The snapshot-reconcile executor is unbuilt** — an unclocked keyed model refuses fail-loud
-  (`KeyedSnapshotPostureUnsupported`, naming the delivering plan), a not-yet-supported refusal,
-  not a model error. This holds regardless of column family, including `MAX_BY`/`MIN_BY` (the
-  matrix's `KeyedSnapshotSourceUnsupportedColumn` "observer semantics" refusal is Phase 3's
-  concern once the run shape exists).
+- **Snapshot-reconcile admits at most one source of any posture in the FROM clause** when zero
+  are clocked — a join of two or more unclocked candidates refuses
+  `KeyedSnapshotPostureUnsupported` rather than picking one. Widening this to a proven
+  multi-source snapshot scan is unbuilt.
+- **Snapshot-reconcile key deletion is out of scope** — a key present in the target but absent
+  from the incoming scan is retained unchanged (§"The two run shapes"); an explicit mechanism to
+  delete a departed key is not yet built.
 - **Locality open questions**: whether a derived recurrence bound can license slice pruning
   under snapshot-reconcile (v1: window-forward only); relaxing the granularity-equality
   precondition (a daily driver with weekly output partitions); slice-scoped deletion

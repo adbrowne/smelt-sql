@@ -170,6 +170,19 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
             let func = expr.as_function_call()?;
             let name = func.name()?;
             let combiner = SqlFunction::from_name(&name.to_uppercase())?;
+            // `ANY_VALUE` is the plain-overwrite family
+            // (`docs/specs/incremental_models.md` §"The column-family
+            // catalogue") — not a fold-family combiner at all (no
+            // target/delta combine, incoming row always wins), so it never
+            // enters a `FoldSpec`. A model whose non-key columns are ONLY
+            // `ANY_VALUE` calls derives an empty `add_columns` here (→
+            // `None` below), which `derive_new_data`'s `Grain::Key` arm
+            // reads as "no fold-family column over this source" — the
+            // snapshot-reconcile shape, not a refusal
+            // (`docs/plans/20260809-keyed-frontier.md` Phase 3).
+            if combiner == SqlFunction::AnyValue {
+                continue;
+            }
             if matches!(combiner, SqlFunction::ArgMax | SqlFunction::ArgMin) {
                 let args = func.arguments();
                 let value_text = args.first()?.text().trim().to_string();

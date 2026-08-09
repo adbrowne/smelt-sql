@@ -1,10 +1,12 @@
 //! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module
-//! classifies the direct-monoid families (additive fold, extremal/lattice
-//! fold) and the order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
-//! `docs/plans/20260809-keyed-frontier.md` Phase 1) — the once-write and
-//! plain-overwrite families are not yet classified here.
+//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec.
+//! This module classifies the direct-monoid families (additive fold,
+//! extremal/lattice fold), the order-monotone overwrite family
+//! (`MAX_BY`/`MIN_BY`, `docs/plans/20260809-keyed-frontier.md` Phase 1),
+//! and the plain-overwrite family (`ANY_VALUE`, Phase 3) — across both
+//! derived run shapes (window-forward / snapshot-reconcile, §"The two run
+//! shapes"). The once-write family (`COALESCE`) is not yet classified here.
 //!
 //! The classifier is a pure function that reads an inlined SELECT
 //! (post function expansion) plus a small source-timeseries lookup
@@ -14,8 +16,9 @@
 //! - `aggregator_columns` — per non-key projection, the
 //!   `(per_partition_agg, cross_partition_combiner)` pair from a
 //!   fixed allowlist.
-//! - `driving_source` — the single timeseries-tagged source in the
-//!   FROM clause.
+//! - `driving_source` — the single source the rule iterates over,
+//!   clocked (window-forward) or unclocked (snapshot-reconcile) — the run
+//!   shape is derived from which.
 //!
 //! Returns a `CumulativeClassification` on success or a list of
 //! `KeyedDiagnostic`s on rejection.
@@ -78,6 +81,13 @@ pub enum CrossPartitionCombiner {
     /// `delta.<name>` refs — no decomposed/hidden state
     /// (`docs/specs/incremental_models.md` §Known Divergences).
     OrderMonotone { ordering_column: String },
+    /// The plain-overwrite family (`ANY_VALUE(...)`,
+    /// `incremental_models.md` §"The column-family catalogue"): the delta's
+    /// value always wins — the incoming row is the current observation, no
+    /// target comparison is made. Admitted only under the snapshot-reconcile
+    /// run shape (Phase 3, `docs/plans/20260809-keyed-frontier.md`); refused
+    /// window-forward (`KeyedUnknownCombiner`).
+    PlainOverwrite,
 }
 
 impl CrossPartitionCombiner {
@@ -109,6 +119,7 @@ impl CrossPartitionCombiner {
                     "CASE WHEN {delta_ord} > {target_ord} THEN {delta_col} ELSE {target_col} END"
                 )
             }
+            CrossPartitionCombiner::PlainOverwrite => delta_col.to_string(),
         }
     }
 }
@@ -154,11 +165,24 @@ pub enum KeyedDiagnostic {
     KeyedForbidsNondeterministic {
         offending: String,
     },
-    /// Interim not-yet-supported refusal: no clocked driving source was
-    /// found, and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain"). This is a
-    /// fail-loud "not yet" refusal, not a model error.
+    /// No clocked driving source was found, AND no single unambiguous
+    /// source could be resolved to derive the snapshot-reconcile run shape
+    /// either — e.g. the FROM clause joins more than one candidate source
+    /// with none of them clocked. Genuinely unsupportable, not a "not yet"
+    /// refusal (`docs/specs/incremental_models.md` §"The two run shapes").
     KeyedSnapshotPostureUnsupported,
+    /// A fold-family projection (additive, extremal/lattice, or
+    /// order-monotone overwrite) under the snapshot-reconcile run shape
+    /// (`docs/specs/incremental_models.md` §"Admission matrix"): these
+    /// families consume events, not observations — re-folding a mutable
+    /// snapshot double-counts (additive) or computes a history observation
+    /// instead of the current value (observer semantics, the other
+    /// families).
+    KeyedSnapshotSourceUnsupportedColumn {
+        projection: String,
+        family: String,
+        reason: String,
+    },
     KeyedMultipleDrivingSources {
         candidates: Vec<String>,
     },
@@ -209,10 +233,23 @@ impl std::fmt::Display for KeyedDiagnostic {
             KeyedDiagnostic::KeyedSnapshotPostureUnsupported => write!(
                 f,
                 "KeyedSnapshotPostureUnsupported: this model has no clocked driving source \
-                 (no timeseries-tagged source in the FROM clause) — the snapshot-reconcile \
-                 executor for `refresh: keyed` is not yet built (see \
-                 docs/plans/20260705-keyed-collapse.md). Declare `timeseries:` on a driving \
-                 source to use the window-forward run shape instead."
+                 (no timeseries-tagged source in the FROM clause), and no single unambiguous \
+                 source could be resolved to derive the snapshot-reconcile run shape either \
+                 — the FROM clause must join exactly one candidate source when none is \
+                 clocked. Declare `timeseries:` on a driving source to use the window-forward \
+                 run shape instead, or reduce the FROM clause to a single source."
+            ),
+            KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
+                projection,
+                family,
+                reason,
+            } => write!(
+                f,
+                "KeyedSnapshotSourceUnsupportedColumn: projection `{projection}` is a \
+                 {family} column, which is refused under the snapshot-reconcile run shape \
+                 (no clocked driving source) — {reason}. Wrap it as `ANY_VALUE(...)` for the \
+                 plain-overwrite family instead, or declare `timeseries:` on a driving source \
+                 to use the window-forward run shape."
             ),
             KeyedDiagnostic::KeyedMultipleDrivingSources { candidates } => write!(
                 f,
@@ -235,16 +272,32 @@ pub struct CumulativeClassification {
     pub unique_key: Vec<String>,
     /// Non-key projections with their derived combiners.
     pub aggregator_columns: Vec<AggregatorColumn>,
-    /// The single timeseries-tagged source the rule iterates over.
-    /// `name` is the model/source name as it appears in `smelt.<path>`
-    /// references; `timeseries` is the source's declared partition shape.
+    /// The single source the rule iterates over. `name` is the model/source
+    /// name as it appears in `smelt.<path>` references; `timeseries` is
+    /// `Some` (window-forward) or `None` (snapshot-reconcile) — see
+    /// [`DrivingSource::timeseries`].
     pub driving_source: DrivingSource,
+}
+
+impl CumulativeClassification {
+    /// Whether this classification derived the snapshot-reconcile run shape
+    /// (`docs/specs/incremental_models.md` §"The two run shapes") — zero
+    /// clocked sources in the FROM clause. Derived from the classifier's own
+    /// resolved [`DrivingSource`], never a second independent check.
+    pub fn is_snapshot_reconcile(&self) -> bool {
+        self.driving_source.timeseries.is_none()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DrivingSource {
     pub name: String,
-    pub timeseries: TimeseriesConfig,
+    /// `Some` for the window-forward run shape (the source's own declared
+    /// `timeseries:` block, the driving-fact/anchor proof); `None` for the
+    /// snapshot-reconcile run shape — zero clocked sources in the FROM
+    /// clause (`docs/specs/incremental_models.md` §"The two run shapes").
+    /// The run shape is derived from this field, never declared.
+    pub timeseries: Option<TimeseriesConfig>,
 }
 
 /// Lookup table for a source's `timeseries:` declaration. The classifier
@@ -360,8 +413,76 @@ pub fn classify_cumulative(
     // textual identity (the analyser already resolves ordinals).
     let unique_key = group_by_unique_key_from_analysis(&analysis);
 
+    // Find the driving source and derive the run shape (`docs/specs/
+    // incremental_models.md` §"The two run shapes") BEFORE walking the
+    // projection list — every column family's admission depends on which
+    // run shape the model derives (the admission matrix is a `(column
+    // family × run shape)` table), so the run shape must be known first.
+    //
+    // Exactly one clocked (timeseries-tagged) source in the FROM clause is
+    // the window-forward driving source — the shared anchor resolver
+    // (`resolve_single_anchor`) also used by `resolve_join_driving_fact`'s
+    // alias-scoped monotonicity trace. Zero clocked sources derives
+    // snapshot-reconcile instead of refusing outright: a single
+    // unambiguous joined source (of ANY posture — the FROM clause need not
+    // register a `timeseries:` block for this resolution) stands in as
+    // "the source" the whole-scan reconciliation re-scans. Two or more
+    // clocked sources stays `KeyedMultipleDrivingSources`.
+    let alias_sources: Vec<(String, String)> =
+        smelt_parser::File::cast(smelt_parser::parse(sql).syntax())
+            .and_then(|file| file.select_stmt())
+            .and_then(|select| select.from_clause())
+            .map(|from_clause| {
+                crate::analysis::source_bounds::from_clause_alias_sources(&from_clause)
+            })
+            .unwrap_or_default();
+
+    let clocked_resolution = resolve_single_anchor(&alias_sources, |source_name| {
+        let key = format!("smelt.{source_name}");
+        if !refs.iter().any(|r| r == &key) {
+            return None;
+        }
+        source_timeseries.get(&key).map(|ts| DrivingSource {
+            name: key.clone(),
+            timeseries: Some(ts.clone()),
+        })
+    });
+
+    let (driving_source, is_snapshot_reconcile) = match clocked_resolution {
+        Ok(ds) => (Some(ds), false),
+        Err(AnchorAmbiguity::Multiple(candidates)) => {
+            diagnostics.push(KeyedDiagnostic::KeyedMultipleDrivingSources {
+                candidates: candidates
+                    .into_iter()
+                    .map(|n| format!("smelt.{n}"))
+                    .collect(),
+            });
+            (None, false)
+        }
+        Err(AnchorAmbiguity::NoCandidate) => {
+            let snapshot_source = resolve_single_anchor(&alias_sources, |source_name| {
+                let key = format!("smelt.{source_name}");
+                refs.iter().any(|r| r == &key).then_some(key)
+            });
+            match snapshot_source {
+                Ok(name) => (
+                    Some(DrivingSource {
+                        name,
+                        timeseries: None,
+                    }),
+                    true,
+                ),
+                Err(_) => {
+                    diagnostics.push(KeyedDiagnostic::KeyedSnapshotPostureUnsupported);
+                    (None, false)
+                }
+            }
+        }
+    };
+
     // Walk the projection list. Non-key projections must be allowlisted
-    // aggregator calls. GroupByKey items are the key columns.
+    // aggregator calls (per the admission matrix, gated on `is_snapshot_
+    // reconcile` above). GroupByKey items are the key columns.
     let mut aggregator_columns: Vec<AggregatorColumn> = Vec::new();
     for item in &analysis.items {
         match item {
@@ -369,14 +490,26 @@ pub fn classify_cumulative(
                 // A "GroupByKey" item is the analyser's classification for
                 // any non-aggregate expression. If the projection's text
                 // appears in the GROUP BY, it is genuinely a key column.
-                // Otherwise it is a composite expression — possibly one
-                // that wraps an aggregate (`SUM(x) + 1`) — and is not
-                // permitted in a cumulative SELECT.
+                // Otherwise — whether a composite expression (`SUM(x) + 1`)
+                // or a bare column reference — it is not a valid keyed
+                // projection either way: the catalogue's overwrite families
+                // are only ever expressed as aggregate calls (`MAX_BY(...)`,
+                // `ANY_VALUE(...)`), never a bare passthrough column
+                // (`docs/specs/incremental_models.md` §"The column-family
+                // catalogue").
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
                     diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                         projection: alias.clone(),
-                        offending: format!("composite expression `{}`", text.trim()),
+                        offending: format!(
+                            "composite expression `{}` — wrap it as `MAX_BY({}, <ordering>)` \
+                             for the order-monotone overwrite family (window-forward), or \
+                             `ANY_VALUE({})` for the plain-overwrite family \
+                             (snapshot-reconcile only)",
+                            text.trim(),
+                            text.trim(),
+                            text.trim()
+                        ),
                     });
                 }
             }
@@ -404,6 +537,38 @@ pub fn classify_cumulative(
                     .map(|n| n.to_ascii_uppercase())
                     .filter(|n| SqlFunction::from_name(n).is_some_and(|f| f.is_aggregate()));
 
+                // The plain-overwrite family (`ANY_VALUE`,
+                // `incremental_models.md` §"The column-family catalogue"):
+                // admitted only under snapshot-reconcile; refused
+                // window-forward naming the `MAX_BY` fix.
+                if agg_name.as_deref() == Some("ANY_VALUE") {
+                    if is_snapshot_reconcile {
+                        if is_direct_function_call(text, "ANY_VALUE") {
+                            aggregator_columns.push(AggregatorColumn {
+                                output_name: alias.clone(),
+                                per_partition_agg: "ANY_VALUE".to_string(),
+                                cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                            });
+                        } else {
+                            diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+                                projection: alias.clone(),
+                                offending: format!("composite expression `{}`", text.trim()),
+                            });
+                        }
+                    } else {
+                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
+                            projection: alias.clone(),
+                            offending: format!(
+                                "ANY_VALUE (the plain-overwrite family is snapshot-reconcile \
+                                 only) — wrap the value as `MAX_BY({}, <ordering>)` for the \
+                                 order-monotone overwrite family instead",
+                                text.trim()
+                            ),
+                        });
+                    }
+                    continue;
+                }
+
                 // The order-monotone overwrite family (`MAX_BY`/`MIN_BY` —
                 // `ArgMax`/`ArgMin`, `Monotone::Order`) is not gated through
                 // `combiner_for`'s `is_monoid` allowlist (it is a semilattice
@@ -418,22 +583,44 @@ pub fn classify_cumulative(
                     is_order.then_some((n.to_string(), sql_fn))
                 });
                 if let Some((agg_upper, sql_fn)) = order_monotone {
-                    classify_order_monotone_column(
-                        &analysis,
-                        text,
-                        alias,
-                        expr,
-                        sql_fn,
-                        &agg_upper,
-                        &mut aggregator_columns,
-                        &mut diagnostics,
-                    );
+                    if is_snapshot_reconcile {
+                        diagnostics.push(KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
+                            projection: alias.clone(),
+                            family: "order-monotone overwrite".to_string(),
+                            reason: "observer semantics — MAX_BY/MIN_BY over successive \
+                                     snapshots retains a stale incumbent forever if a mutation \
+                                     regresses the ordering value"
+                                .to_string(),
+                        });
+                    } else {
+                        classify_order_monotone_column(
+                            &analysis,
+                            text,
+                            alias,
+                            expr,
+                            sql_fn,
+                            &agg_upper,
+                            &mut aggregator_columns,
+                            &mut diagnostics,
+                        );
+                    }
                     continue;
                 }
 
                 let combiner = agg_name.as_deref().and_then(combiner_for);
                 match (agg_name, combiner) {
                     (Some(agg_upper), Some(combiner)) => {
+                        if is_snapshot_reconcile {
+                            let (family, reason) = snapshot_refusal_reason(&agg_upper);
+                            diagnostics.push(
+                                KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
+                                    projection: alias.clone(),
+                                    family: family.to_string(),
+                                    reason: reason.to_string(),
+                                },
+                            );
+                            continue;
+                        }
                         // Verify the projection is a *direct* call — no
                         // composition like `SUM(x) + 1`. We detect this by
                         // checking that the projection text starts with the
@@ -497,45 +684,6 @@ pub fn classify_cumulative(
         }
     }
 
-    // Find the driving source: the single alias-scoped FROM/JOIN input that
-    // is both a collected ref and registered with a `timeseries:` block —
-    // the shared anchor resolver (`resolve_single_anchor`) also used by
-    // `resolve_join_driving_fact`'s alias-scoped monotonicity trace.
-    let alias_sources: Vec<(String, String)> =
-        smelt_parser::File::cast(smelt_parser::parse(sql).syntax())
-            .and_then(|file| file.select_stmt())
-            .and_then(|select| select.from_clause())
-            .map(|from_clause| {
-                crate::analysis::source_bounds::from_clause_alias_sources(&from_clause)
-            })
-            .unwrap_or_default();
-
-    let driving_source = match resolve_single_anchor(&alias_sources, |source_name| {
-        let key = format!("smelt.{source_name}");
-        if !refs.iter().any(|r| r == &key) {
-            return None;
-        }
-        source_timeseries.get(&key).map(|ts| DrivingSource {
-            name: key.clone(),
-            timeseries: ts.clone(),
-        })
-    }) {
-        Ok(ds) => Some(ds),
-        Err(AnchorAmbiguity::NoCandidate) => {
-            diagnostics.push(KeyedDiagnostic::KeyedSnapshotPostureUnsupported);
-            None
-        }
-        Err(AnchorAmbiguity::Multiple(candidates)) => {
-            diagnostics.push(KeyedDiagnostic::KeyedMultipleDrivingSources {
-                candidates: candidates
-                    .into_iter()
-                    .map(|n| format!("smelt.{n}"))
-                    .collect(),
-            });
-            None
-        }
-    };
-
     // Rule: GROUP BY must not contain the driving source's partition column
     // — narrowed to models with no `timeseries:` block of their own
     // (`docs/specs/incremental_models.md` §"Key temporal locality"). A
@@ -545,8 +693,11 @@ pub fn classify_cumulative(
     // `partition_column` is a `unique_key` column), decided by the locality
     // gate (`maintenance::locality::establish_locality`), not refused here.
     if !model_has_timeseries {
-        if let Some(ds) = &driving_source {
-            let partition_col = &ds.timeseries.partition_column;
+        if let Some(ts) = driving_source
+            .as_ref()
+            .and_then(|ds| ds.timeseries.as_ref())
+        {
+            let partition_col = &ts.partition_column;
             let partition_col_lower = partition_col.to_ascii_lowercase();
             let contains_partition = unique_key
                 .iter()
@@ -724,6 +875,29 @@ pub fn order_monotone_companion(
         }
     }
     None
+}
+
+/// The `(family name, refusal reason)` the admission matrix
+/// (`docs/specs/incremental_models.md` §"Admission matrix") names for a
+/// fold-family aggregator refused under the snapshot-reconcile run shape.
+/// `agg_upper` is one of `combiner_for`'s allowlisted names — the additive
+/// family (`SUM`/`COUNT`/`BIT_XOR`) double-counts on a re-fold; the
+/// remaining extremal/lattice family computes a history observation instead
+/// of the current value.
+fn snapshot_refusal_reason(agg_upper: &str) -> (&'static str, &'static str) {
+    match agg_upper {
+        "SUM" | "COUNT" | "BIT_XOR" => (
+            "additive fold",
+            "re-folding state double-counts — a mutable snapshot is not a replayable, \
+             retraction-free event feed",
+        ),
+        _ => (
+            "extremal/lattice fold",
+            "observer semantics — folding successive snapshots computes the extremal value \
+             ever observed, not the current one (e.g. `MIN(price)` folded over snapshots is \
+             the min ever seen, not the current min)",
+        ),
+    }
 }
 
 /// Verify the projection is a direct call to `expected_fn` and nothing else —
@@ -1012,9 +1186,14 @@ GROUP BY device_id"#;
         );
     }
 
-    /// A SELECT from a source with no timeseries: produces KeyedSnapshotPostureUnsupported.
+    /// A SELECT from a single unclocked source now derives the
+    /// snapshot-reconcile run shape (Phase 3, `docs/plans/20260809-keyed-
+    /// frontier.md`) instead of refusing the whole model outright — but a
+    /// `COUNT(*)` additive-fold column is still refused, per column, with
+    /// `KeyedSnapshotSourceUnsupportedColumn` naming the double-count
+    /// reason.
     #[test]
-    fn test_zero_driving_sources_refused_as_snapshot_posture_unsupported() {
+    fn test_zero_clocked_sources_derives_snapshot_reconcile_but_refuses_fold_column() {
         let sql = r#"SELECT
     device_id,
     COUNT(*) AS n
@@ -1023,8 +1202,17 @@ GROUP BY device_id"#;
         let refs = vec!["smelt.silver.lookup_table".to_string()];
         let err = classify_cumulative(sql, &refs, &HashMap::new(), false).unwrap_err();
         assert!(
-            err.iter()
+            !err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
+            "the posture itself (a single unclocked source) is supportable now: {:?}",
+            err
+        );
+        assert!(
+            err.iter().any(|d| matches!(
+                d,
+                KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { family, .. }
+                    if family == "additive fold"
+            )),
             "diagnostics: {:?}",
             err
         );

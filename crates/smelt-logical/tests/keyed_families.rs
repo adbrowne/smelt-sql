@@ -206,16 +206,80 @@ GROUP BY device_id"#;
     );
 }
 
-/// A `MAX_BY` column under the (still unbuilt) snapshot-reconcile posture —
-/// zero clocked driving sources — refuses `KeyedSnapshotPostureUnsupported`,
-/// same as any other keyed model with no timeseries-tagged source. (The
-/// admission-matrix ✗ direction proper — refusing `MAX_BY` under
-/// snapshot-reconcile with an "observer semantics" reason — is Phase 3's
-/// concern once the snapshot-reconcile run shape exists; today every
-/// zero-clocked-source model refuses at this earlier gate regardless of
-/// column family.)
+/// Zero clocked driving sources derives the snapshot-reconcile run shape
+/// (Phase 3, `docs/plans/20260809-keyed-frontier.md`) instead of refusing
+/// the whole model: a plain `ANY_VALUE(...)` projection (the plain-overwrite
+/// family, `incremental_models.md` §"The column-family catalogue") admits
+/// cleanly, and the classification records no clocked timeseries.
 #[test]
-fn max_by_under_zero_clocked_sources_refuses_snapshot_posture_unsupported() {
+fn zero_clocked_sources_derives_snapshot_reconcile() {
+    let sql = r#"SELECT
+    device_id,
+    ANY_VALUE(status) AS status
+FROM smelt.silver.lookup_table
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.lookup_table".to_string()];
+    let classification = classify_cumulative(sql, &refs, &HashMap::new(), false)
+        .expect("plain-overwrite must classify under snapshot-reconcile");
+
+    assert!(
+        classification.is_snapshot_reconcile(),
+        "expected the snapshot-reconcile run shape (no clocked driving source): {:?}",
+        classification
+    );
+    assert!(
+        classification.driving_source.timeseries.is_none(),
+        "snapshot-reconcile carries no clocked driving-source timeseries"
+    );
+    let status_col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "status")
+        .expect("status column present");
+    assert_eq!(status_col.per_partition_agg, "ANY_VALUE");
+    assert_eq!(
+        status_col.cross_partition_combiner,
+        CrossPartitionCombiner::PlainOverwrite
+    );
+}
+
+/// The admission matrix's snapshot-reconcile ✗ column: an additive-fold
+/// (`SUM`) projection under zero clocked sources refuses
+/// `KeyedSnapshotSourceUnsupportedColumn` naming the double-count reason —
+/// the posture itself is supportable now, only the fold family is refused.
+#[test]
+fn additive_fold_refuses_snapshot_reconcile() {
+    let sql = r#"SELECT
+    device_id,
+    SUM(amount) AS total_amount
+FROM smelt.silver.lookup_table
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.lookup_table".to_string()];
+    let err = classify_cumulative(sql, &refs, &HashMap::new(), false).unwrap_err();
+    assert!(
+        !err.iter()
+            .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
+        "the posture itself (a single unclocked source) is supportable: {:?}",
+        err
+    );
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { family, reason, .. }
+                if family == "additive fold" && reason.contains("double-count")
+        )),
+        "diagnostics: {:?}",
+        err
+    );
+}
+
+/// The admission matrix's snapshot-reconcile ✗ column, order-monotone
+/// overwrite direction: `MAX_BY` under zero clocked sources refuses
+/// `KeyedSnapshotSourceUnsupportedColumn` naming observer semantics — the
+/// same posture that admits a bare `ANY_VALUE` column ([`zero_clocked_
+/// sources_derives_snapshot_reconcile`]) still refuses a fold-family column.
+#[test]
+fn order_monotone_refuses_snapshot_reconcile() {
     let sql = r#"SELECT
     device_id,
     MAX_BY(status, updated_at) AS status,
@@ -225,9 +289,41 @@ GROUP BY device_id"#;
     let refs = vec!["smelt.silver.lookup_table".to_string()];
     let err = classify_cumulative(sql, &refs, &HashMap::new(), false).unwrap_err();
     assert!(
-        err.iter()
+        !err.iter()
             .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
+        "the posture itself (a single unclocked source) is supportable: {:?}",
+        err
+    );
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { family, reason, .. }
+                if family == "order-monotone overwrite" && reason.contains("observer semantics")
+        )),
         "diagnostics: {:?}",
+        err
+    );
+}
+
+/// The admission matrix's other direction: a plain (`ANY_VALUE`) column
+/// under a CLOCKED driving source (window-forward) refuses
+/// `KeyedUnknownCombiner`, and the message names `MAX_BY` as the fix.
+#[test]
+fn plain_overwrite_refuses_window_forward_with_max_by_hint() {
+    let sql = r#"SELECT
+    device_id,
+    ANY_VALUE(status) AS status
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
+                if offending.contains("MAX_BY")
+        )),
+        "expected the KeyedUnknownCombiner refusal to name MAX_BY as the fix: {:?}",
         err
     );
 }

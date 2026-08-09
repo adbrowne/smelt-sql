@@ -421,6 +421,9 @@ impl Backend {
                 DbCode::KeyedForbidsWindowFunctions => "keyed-forbids-window-functions",
                 DbCode::KeyedForbidsNondeterministic => "keyed-forbids-nondeterministic",
                 DbCode::KeyedSnapshotPostureUnsupported => "keyed-snapshot-posture-unsupported",
+                DbCode::KeyedSnapshotSourceUnsupportedColumn => {
+                    "keyed-snapshot-source-unsupported-column"
+                }
                 DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
                 DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
                 DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",

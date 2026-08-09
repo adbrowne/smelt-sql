@@ -1117,6 +1117,9 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::KeyedForbidsWindowFunctions => DiagnosticCode::KeyedForbidsWindowFunctions,
         R::KeyedForbidsNondeterministic => DiagnosticCode::KeyedForbidsNondeterministic,
         R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
+        R::KeyedSnapshotSourceUnsupportedColumn => {
+            DiagnosticCode::KeyedSnapshotSourceUnsupportedColumn
+        }
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
         R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,

@@ -49,6 +49,7 @@ pub enum RuleDiagnosticCode {
     KeyedForbidsWindowFunctions,
     KeyedForbidsNondeterministic,
     KeyedSnapshotPostureUnsupported,
+    KeyedSnapshotSourceUnsupportedColumn,
     KeyedMultipleDrivingSources,
     KeyedSqlNotParseable,
     PartitionGrainNotSafe,
@@ -494,6 +495,9 @@ fn keyed_to_rule(diag: &KeyedDiagnostic) -> RuleDiagnostic {
         }
         KeyedDiagnostic::KeyedSnapshotPostureUnsupported => {
             RuleDiagnosticCode::KeyedSnapshotPostureUnsupported
+        }
+        KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { .. } => {
+            RuleDiagnosticCode::KeyedSnapshotSourceUnsupportedColumn
         }
         KeyedDiagnostic::KeyedMultipleDrivingSources { .. } => {
             RuleDiagnosticCode::KeyedMultipleDrivingSources

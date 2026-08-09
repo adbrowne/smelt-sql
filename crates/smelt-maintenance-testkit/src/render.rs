@@ -527,10 +527,24 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
 /// frontmatter — deliberately no `timeseries:` block (`incremental_models.md`
 /// §Known Divergences "The key grain": "every `timeseries:` block on a keyed model is refused
 /// unconditionally") and no `batched.unique_key` (keyed output has no
-/// partition column) — followed by [`render_keyed_model_body`].
+/// partition column) — followed by [`render_keyed_model_body`]. A
+/// [`SourcePosture::MutableSnapshot`] driving source (Phase 3,
+/// `docs/plans/20260809-keyed-frontier.md` — the snapshot-reconcile run
+/// shape) additionally declares `allow_full_scan` on itself: the
+/// maintenance-plan derivation's `Trigger::UpstreamMutation` cell over this
+/// same source (`derive_mutation`) requires it, the source having no
+/// partition-local proof of its own (unclocked).
 pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
+    let scan_bounds = match recipe.source.posture {
+        SourcePosture::MutableSnapshot => format!(
+            "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
+             allow_full_scan: true\n",
+            name = recipe.source.name,
+        ),
+        SourcePosture::AppendOnly => String::new(),
+    };
     format!(
-        "---\nrefresh: incremental\ngrain: key\n---\n{body}\n",
+        "---\nrefresh: incremental\ngrain: key\n{scan_bounds}---\n{body}\n",
         body = render_keyed_model_body(recipe),
     )
 }

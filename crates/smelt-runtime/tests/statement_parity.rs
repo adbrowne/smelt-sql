@@ -1249,13 +1249,13 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),
-            timeseries: smelt_core::config::TimeseriesConfig {
+            timeseries: Some(smelt_core::config::TimeseriesConfig {
                 event_time_column: "event_ts".to_string(),
                 partition_column: "event_date".to_string(),
                 granularity: smelt_core::config::Granularity::Day,
                 week_start: None,
                 assert_monotonic: false,
-            },
+            }),
         },
     };
     let slice = LocalitySlice::RecurrenceBounded {

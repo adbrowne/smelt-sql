@@ -1662,8 +1662,37 @@ pub async fn execute_project(
                 None => None,
             };
 
+            // Classify up front, regardless of window presence, so the
+            // derived run shape (`docs/specs/incremental_models.md` §"The
+            // two run shapes") can gate which branch below is even
+            // reachable — a classifier rejection must REFUSE the model
+            // (§"Key-grain constraints" #4 — "The catalogue is closed and
+            // the classifier is fail-closed"), never silently fall back to
+            // a full refresh.
+            let clean_sql_for_classify = smelt_parser::strip_frontmatter(&plan.sql);
+            let model_has_timeseries = plan
+                .model_file
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let classification = crate::cumulative::classify_cumulative_sql(
+                &plan.name,
+                &clean_sql_for_classify,
+                source_timeseries,
+                model_has_timeseries,
+            )?;
+
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
+                    if classification.is_snapshot_reconcile() {
+                        anyhow::bail!(
+                            "Model '{}' derives the snapshot-reconcile run shape (no clocked \
+                             driving source, `docs/specs/incremental_models.md` §\"The two run \
+                             shapes\") — --event-time-start/--event-time-end are not accepted; \
+                             run without an event-time window instead.",
+                            plan.name
+                        );
+                    }
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
@@ -1686,30 +1715,30 @@ pub async fn execute_project(
                     )
                     .await
                 }
+                _ if classification.is_snapshot_reconcile() => {
+                    // No run window, snapshot-reconcile run shape: whole-
+                    // source keyed MERGE (create-if-missing, retained-
+                    // departed-keys reconcile otherwise) — never the
+                    // unconditional drop+create the window-forward branch
+                    // below uses, which would silently drop departed keys.
+                    crate::cumulative::execute_snapshot_reconcile(
+                        backend,
+                        &plan.model_file,
+                        compilers,
+                        resolver,
+                        model_target,
+                        schema,
+                        &db_table_name,
+                        &classification,
+                    )
+                    .await
+                }
                 _ => {
-                    // No run window: single-shot full refresh of the
-                    // keyed SELECT. Matches CLI's behaviour for
-                    // `smelt build` / `smelt run` without an event-time
-                    // window.
+                    // No run window, window-forward run shape: single-shot
+                    // full refresh of the keyed SELECT. Matches CLI's
+                    // behaviour for `smelt build` / `smelt run` without an
+                    // event-time window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    // Classify even on the no-window full-refresh path: a
-                    // classifier rejection must REFUSE the model
-                    // (incremental_models.md §"Key-grain constraints" #4 — "The catalogue is
-                    // closed and the classifier is fail-closed"). Without
-                    // this, forbidden keyed SQL (e.g. a non-allowlisted
-                    // aggregator) would be silently materialised as a plain
-                    // full refresh whenever no event-time window is supplied.
-                    let model_has_timeseries = plan
-                        .model_file
-                        .metadata
-                        .as_ref()
-                        .is_some_and(|m| m.timeseries.is_some());
-                    crate::cumulative::classify_cumulative_sql(
-                        &plan.name,
-                        &clean_sql,
-                        source_timeseries,
-                        model_has_timeseries,
-                    )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
                         &plan.model_file,
                         schema,

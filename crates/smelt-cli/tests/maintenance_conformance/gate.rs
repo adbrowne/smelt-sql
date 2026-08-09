@@ -698,6 +698,62 @@ pub fn stage_keyed_recipe(
     render::stage_keyed(recipe, &project_dir, &db_path)
 }
 
+/// Stage a [`KeyedRecipe`] built over
+/// [`SourceRecipe::unclocked_append_only_dimension`] — [`stage_keyed_recipe`]
+/// (via `render::stage_keyed`) always emits its `AppendOnly` source's
+/// standard `source_yaml()`, which unconditionally declares a `timeseries:`
+/// block; this probe needs an `AppendOnly`-postured source with NO
+/// `timeseries:` block anywhere in the model (the model/classifier
+/// plan-agreement finding, `docs/plans/20260809-keyed-frontier.md` Phase 3
+/// review), so it writes a bespoke source YAML directly — same physical
+/// `(d DATE, id INTEGER, val INTEGER)` shape `stage_keyed`'s `AppendOnly`
+/// DDL branch already expects (mirrors `stage_mixed_recipe`'s own
+/// bespoke-YAML staging above for the same reason).
+fn stage_keyed_unclocked_append_only(
+    recipe: &KeyedRecipe,
+    tmp: &tempfile::TempDir,
+) -> anyhow::Result<LinkCProject> {
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render::render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+        format!(
+            "description: plan/classifier-agreement probe source, append-only with no \
+             declared timeseries block.\n\
+             mutation_profile: append_only\n\
+             columns:\n\
+             \x20 - name: {d}\n    type: DATE\n\
+             \x20 - name: {id}\n    type: INTEGER\n\
+             \x20 - name: {val}\n    type: INTEGER\n",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    )?;
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        render::render_smelt_yml(&db_path),
+    )?;
+
+    let conn = duckdb::Connection::open(&db_path)?;
+    conn.execute_batch(&format!(
+        "CREATE SCHEMA IF NOT EXISTS main; \
+         CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
+        name = recipe.source.name,
+        d = recipe.source.clock_column,
+        id = recipe.source.key_column,
+        val = recipe.source.payload_column,
+    ))?;
+    drop(conn);
+
+    LinkCProject::load(project_dir, db_path)
+}
+
 /// Insert one row into a [`KeyedRecipe`]'s staged driving-source table.
 pub fn insert_row_keyed(
     project: &LinkCProject,
@@ -716,6 +772,200 @@ pub fn insert_row_keyed(
         [],
     )?;
     Ok(())
+}
+
+/// Insert one row into a snapshot-reconcile [`KeyedRecipe`]'s staged
+/// (unclocked, `mutable_snapshot`) driving-source table — `(id, attr)`, no
+/// clock column (`SourceRecipe::mutable_dimension`'s shape, unlike
+/// [`insert_row_keyed`]'s clocked `(d, id, val)`).
+fn insert_row_keyed_snapshot(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    id: i64,
+    attr: i64,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    conn.execute(
+        &format!(
+            "INSERT INTO main.sources_{} VALUES ({id}, {attr})",
+            recipe.source.name
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+/// Update a snapshot-reconcile [`KeyedRecipe`]'s staged dimension row's
+/// `attr` column.
+fn update_row_keyed_snapshot(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    id: i64,
+    attr: i64,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    conn.execute(
+        &format!(
+            "UPDATE main.sources_{} SET {} = {attr} WHERE {} = {id}",
+            recipe.source.name, recipe.source.payload_column, recipe.source.key_column,
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+/// Delete a snapshot-reconcile [`KeyedRecipe`]'s staged dimension row — the
+/// genuine-departure case: `id` must be RETAINED, unchanged, in the
+/// maintained table after the next run (`incremental_models.md` §"The two
+/// run shapes" — snapshot-reconcile never deletes a departed key).
+fn delete_row_keyed_snapshot(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    id: i64,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    conn.execute(
+        &format!(
+            "DELETE FROM main.sources_{} WHERE {} = {id}",
+            recipe.source.name, recipe.source.key_column,
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): drive the ONE family
+/// the admission matrix actually admits under snapshot-reconcile
+/// (plain-overwrite, `ANY_VALUE`) end to end through the real
+/// `execute_project` pipeline and the now-built snapshot-reconcile
+/// executor: seed rows, run (creation), mutate/delete/insert source rows,
+/// run again (reconcile), and assert the maintained table equals the
+/// current snapshot's own aggregation UNION the pre-mutation state of any
+/// key that departed the snapshot — the SAME retained-departed-keys
+/// carve-out `retained_departed_keys_adjusts_the_oracle` above pins as pure
+/// data, now exercised against a real backend.
+#[tokio::test]
+async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys() {
+    let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
+
+    // Seed three keys.
+    insert_row_keyed_snapshot(&project, &recipe, 1, 100).expect("seed id=1");
+    insert_row_keyed_snapshot(&project, &recipe, 2, 200).expect("seed id=2");
+    insert_row_keyed_snapshot(&project, &recipe, 3, 300).expect("seed id=3");
+
+    // First run: no event-time window (snapshot-reconcile has no clock) —
+    // creates the target table.
+    project
+        .run_quiet("snapshot-reconcile-1", base_request("dev"))
+        .await
+        .expect("first (creation) run must succeed");
+
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let full_scan_oracle_sql = format!(
+        "SELECT {key}, ANY_VALUE({attr}) AS current_val FROM main.sources_{name} GROUP BY {key}",
+        key = recipe.source.key_column,
+        attr = recipe.source.payload_column,
+        name = recipe.source.name,
+    );
+    {
+        let backend = project.backend().await.expect("backend");
+        let equal =
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &full_scan_oracle_sql)
+                .await
+                .expect("comparison must run");
+        assert!(equal, "creation run must equal the full-scan oracle");
+    }
+
+    // Snapshot the pre-mutation source state — the retained-departed-keys
+    // formula needs the departing key's value AS OF BEFORE it departed.
+    {
+        let conn = project.connect().expect("connect");
+        conn.execute_batch(&format!(
+            "CREATE TABLE main.pre_mutation_snapshot AS SELECT * FROM main.sources_{}",
+            recipe.source.name
+        ))
+        .expect("snapshot pre-mutation state");
+    }
+
+    // Mutate: update id=1's value, delete id=2 (genuine departure), insert
+    // a fresh id=4.
+    update_row_keyed_snapshot(&project, &recipe, 1, 999).expect("update id=1");
+    delete_row_keyed_snapshot(&project, &recipe, 2).expect("delete id=2");
+    insert_row_keyed_snapshot(&project, &recipe, 4, 400).expect("insert id=4");
+
+    // Second run: still no window — reconciles via the whole-source MERGE.
+    project
+        .run_quiet("snapshot-reconcile-2", base_request("dev"))
+        .await
+        .expect("second (reconcile) run must succeed");
+
+    let adjusted_oracle_sql = format!(
+        "{full_scan_oracle_sql} \
+         UNION ALL \
+         SELECT {key}, {attr} AS current_val FROM main.pre_mutation_snapshot \
+         WHERE {key} NOT IN (SELECT {key} FROM main.sources_{name})",
+        key = recipe.source.key_column,
+        attr = recipe.source.payload_column,
+        name = recipe.source.name,
+    );
+    {
+        let backend = project.backend().await.expect("backend");
+        let equal =
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &adjusted_oracle_sql)
+                .await
+                .expect("comparison must run");
+        assert!(
+            equal,
+            "reconcile run must equal the oracle's current rows plus the retained departed key"
+        );
+    }
+
+    // Explicit assertion, not just the multiset comparison: the departed
+    // key (id=2) is present, unchanged from its PRE-mutation value (200) —
+    // not silently deleted.
+    let conn = project.connect().expect("connect");
+    let departed_value: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT current_val FROM main.{} WHERE id = 2",
+                recipe.model_name
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .expect("departed key must still be present");
+    assert_eq!(
+        departed_value, 200,
+        "the departed key must be RETAINED at its pre-departure value, never deleted"
+    );
+}
+
+/// Phase 3: `--event-time-start`/`--event-time-end` on a snapshot-reconcile
+/// model (no clocked driving source) is rejected loudly, naming the run
+/// shape — rather than silently ignored or dispatched through the
+/// window-forward executor.
+#[tokio::test]
+async fn snapshot_reconcile_rejects_event_time_window() {
+    let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
+    insert_row_keyed_snapshot(&project, &recipe, 1, 100).expect("seed id=1");
+
+    let mut request = base_request("dev");
+    request.start = Some("2024-01-01".to_string());
+    request.end = Some("2024-01-02".to_string());
+
+    let err = project
+        .run_quiet("snapshot-reconcile-windowed", request)
+        .await
+        .expect_err("an event-time window on a snapshot-reconcile model must be refused");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("snapshot-reconcile"),
+        "expected the refusal to name the snapshot-reconcile run shape: {message}"
+    );
 }
 
 /// Classify a staged [`KeyedRecipe`] through the real maintenance derivation
@@ -900,21 +1150,25 @@ fn keyed_pool_upholds_end_state_equivalence() {
 /// `retained_departed_keys_adjusts_the_oracle` (plan Phase 5 TDD list):
 /// snapshot-reconcile schedules generating deletes compare against oracle
 /// rows ∪ retained departed keys (`incremental_models.md` §"End-state
-/// equivalence"). Two halves: (1) today's real contract — an unclocked
-/// (zero-clocked-driving-source) keyed model selects the snapshot-reconcile
-/// run shape (`incremental_models.md` §"The two run shapes"), and the *targeted*
-/// keyed-fold cell for it is refused fail-loud
+/// equivalence"). Two halves: (1) an ADDITIVE-combiner (fold-family) keyed
+/// recipe over an unclocked (zero-clocked-driving-source) source still
+/// refuses its *targeted* keyed-fold cell fail-loud
 /// (`Refusal::NoAdmissibleTechnique`/`Refusal::ScanUnbounded`, named on the
-/// plan itself — `maintenance-plan purity`: consumed, not re-derived) rather
-/// than silently treated as window-forward, since the snapshot-reconcile
-/// executor is unbuilt (`incremental_models.md` §Known Divergences "The key grain"); the universal
-/// `Trigger::Backfill`/whole-table-recompute cell every model admits
-/// (`incremental_models.md` §"Per-cell admission" — "a recompute is the
-/// universal ground-truth reset") stays available as the escape hatch, but
-/// no `Trigger::NewData` cell is ever admitted for this source; (2) the pure
-/// oracle adjustment that refusal defers to is independently pinned as data
-/// (`oracle_modes::keyed_end_state_with_retained_departed_keys`), so the
-/// carve-out itself is verified ahead of the executor landing.
+/// plan itself — `maintenance-plan purity`: consumed, not re-derived) —
+/// the snapshot-reconcile run shape (`incremental_models.md` §"The two run
+/// shapes") is supportable now (Phase 3, `docs/plans/20260809-keyed-
+/// frontier.md`), but a fold-family column is refused under it per the
+/// admission matrix (double-count/observer-semantics reasons) regardless —
+/// the universal `Trigger::Backfill`/whole-table-recompute cell every model
+/// admits (`incremental_models.md` §"Per-cell admission" — "a recompute is
+/// the universal ground-truth reset") stays available as the escape hatch,
+/// but no `Trigger::NewData` cell is ever admitted for this source; (2) the
+/// pure oracle adjustment that refusal defers to is independently pinned as
+/// data (`oracle_modes::keyed_end_state_with_retained_departed_keys`) — the
+/// SAME formula [`snapshot_reconcile_plain_overwrite_settles_with_retained_
+/// departed_keys`] below exercises end-to-end against the real, now-built
+/// executor for the one family the matrix actually admits
+/// (plain-overwrite).
 #[test]
 fn retained_departed_keys_adjusts_the_oracle() {
     let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::Additive);
@@ -971,6 +1225,67 @@ fn retained_departed_keys_adjusts_the_oracle() {
         ],
         "stored table must equal the oracle's rows plus retained departed keys, exactly \
          once each"
+    );
+}
+
+/// Plan/classifier-agreement review finding (`docs/plans/
+/// 20260809-keyed-frontier.md` Phase 3): `retained_departed_keys_adjusts_
+/// the_oracle` (above) already covers an ADDITIVE (`SUM`) keyed recipe over
+/// [`KeyedRecipe::new_snapshot_reconcile`]'s `mutable_snapshot`-postured,
+/// unclocked driving source — that case refuses via the pre-existing
+/// faithful-fold source-posture obligation (`MutableSnapshot` fails
+/// obligation 2 regardless of clock), so it never actually exercised the
+/// run-shape gate itself. This case swaps the driving source's declared
+/// posture to `append_only` (`SourceRecipe::unclocked_append_only_dimension`)
+/// while keeping it unclocked — a posture that passes the faithful-fold
+/// source-posture obligation on its own — so the ONLY thing that can still
+/// refuse a `SUM` fold here is the whole-model run-shape check: this model
+/// has no clocked source anywhere (`incremental_models.md` §"The two run
+/// shapes"), deriving snapshot-reconcile, under which every fold-family
+/// column is refused (double-count) regardless of source posture. Before
+/// the gate landed, `derive_new_data`'s `Grain::Key` arm admitted a
+/// `Technique::KeyedFold` cell here — `smelt explain` showed a cell the
+/// runtime classifier (`rules::cumulative::classify_cumulative`,
+/// `KeyedSnapshotSourceUnsupportedColumn`) refuses outright.
+#[test]
+fn snapshot_reconcile_unclocked_append_only_source_with_sum_is_refused() {
+    let recipe = KeyedRecipe::new_snapshot_reconcile_unclocked_append_only(KeyedCombiner::Additive);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_unclocked_append_only(&recipe, &tmp)
+        .expect("stage unclocked append-only keyed recipe");
+
+    let (plan, _diags) = classify_keyed_full(&project, &recipe)
+        .expect("classify unclocked append-only keyed recipe");
+    let plan = plan.expect(
+        "maintenance_plan_report must still return a plan (the universal \
+         Backfill cell), even when the targeted keyed fold is refused",
+    );
+
+    assert!(
+        !plan.cells.iter().any(|c| matches!(
+            &c.trigger,
+            Trigger::NewData { source } if source == &recipe.source.name
+        ) || c.technique
+            == smelt_logical::maintenance::Technique::KeyedFold),
+        "an unclocked (snapshot-reconcile) append-only-postured keyed model must never \
+         admit a KeyedFold/NewData cell for a SUM column, regardless of the source's \
+         declared MutationProfile: {plan:#?}"
+    );
+    let refusal_names_snapshot_reconcile_double_count = plan.refusals.iter().any(|r| {
+        matches!(
+            r,
+            smelt_logical::maintenance::Refusal::NoAdmissibleTechnique { trigger, why }
+                if trigger.contains(&recipe.source.name)
+                    && why.to_lowercase().contains("snapshot-reconcile")
+                    && (why.to_lowercase().contains("double-count")
+                        || why.to_lowercase().contains("double count"))
+        )
+    });
+    assert!(
+        refusal_names_snapshot_reconcile_double_count,
+        "expected a NoAdmissibleTechnique refusal naming the snapshot-reconcile \
+         double-count reason for source '{}', got: {:#?}",
+        recipe.source.name, plan.refusals
     );
 }
 
@@ -3692,7 +4007,7 @@ fn composed_route2_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
         }],
         driving_source: DrivingSource {
             name: format!("smelt.sources.{}", recipe.source.name),
-            timeseries: composed_driving_timeseries(),
+            timeseries: Some(composed_driving_timeseries()),
         },
     }
 }
@@ -3707,7 +4022,7 @@ fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
         }],
         driving_source: DrivingSource {
             name: format!("smelt.sources.{}", recipe.source.name),
-            timeseries: composed_driving_timeseries(),
+            timeseries: Some(composed_driving_timeseries()),
         },
     }
 }

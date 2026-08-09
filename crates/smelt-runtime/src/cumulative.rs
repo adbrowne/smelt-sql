@@ -1,10 +1,8 @@
-//! Per-partition execution loop for `refresh: keyed` table models.
+//! Execution loops for `refresh: keyed` table models, one per derived run
+//! shape (`docs/specs/incremental_models.md` §"The two run shapes").
 //!
-//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
-//! the mode's built seed: it only drives the direct-monoid (additive +
-//! extremal/lattice) column families.
-//!
-//! For a run window `[run_start, run_end)`:
+//! **Window-forward** (`execute_cumulative_aggregate`), for a run window
+//! `[run_start, run_end)`:
 //!
 //! 1. Classify the model's SQL (`smelt_planner::classify_cumulative`).
 //! 2. Step over the driving source's partitions in temporal order.
@@ -12,6 +10,10 @@
 //!    `<driving_source>.<partition_col> ∈ [D, D + granularity)` and the
 //!    rule either creates the target table from the delta SELECT (first
 //!    run) or emits a combiner-aware `MERGE INTO`.
+//!
+//! **Snapshot-reconcile** (`execute_snapshot_reconcile`, Phase 3,
+//! `docs/plans/20260809-keyed-frontier.md`): no window — the whole source
+//! is re-scanned every run; see that function's own doc comment.
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
 use crate::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance, WindowedKeyedRule};
@@ -56,6 +58,13 @@ impl WindowedKeyedRule for CumulativeClassification {
                 // (`rules::cumulative::classify_order_monotone_column`), so
                 // this defense-in-depth pass has nothing further to check.
                 CrossPartitionCombiner::OrderMonotone { .. } => {}
+                // The plain-overwrite family (`ANY_VALUE`) is the
+                // snapshot-reconcile run shape's own family — it never
+                // reaches this window-forward driver (the classifier
+                // refuses it window-forward), but is matched explicitly
+                // rather than falling into the `combiner_for` allowlist
+                // check below, which would spuriously refuse it.
+                CrossPartitionCombiner::PlainOverwrite => {}
                 _ => {
                     if combiner_for(&col.per_partition_agg).is_none() {
                         return Some(format!(
@@ -174,7 +183,23 @@ pub async fn execute_cumulative_aggregate(
             .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
 
     let driving_source_name = classification.driving_source.name.clone();
-    let driving_ts = classification.driving_source.timeseries.clone();
+    // This function is only reachable via the window-forward run shape —
+    // the caller (`execute.rs`'s keyed dispatch) refuses a windowed run for
+    // a snapshot-reconcile model before ever reaching here
+    // (`docs/specs/incremental_models.md` §"The two run shapes"). A `None`
+    // here would be an internal invariant violation, not a model error —
+    // fail loud rather than silently treating it as anything else.
+    let driving_ts = classification
+        .driving_source
+        .timeseries
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal error: model '{}' derived the snapshot-reconcile run shape but reached \
+             the window-forward executor",
+                model_name
+            )
+        })?;
 
     info!(
         "Running model: {} (keyed, driving source = {})",
@@ -320,6 +345,82 @@ pub async fn execute_cumulative_aggregate(
         retry,
     )
     .await
+}
+
+/// Execute a single keyed model under the snapshot-reconcile run shape
+/// (`docs/specs/incremental_models.md` §"The two run shapes"): no
+/// `[run_start, run_end)` window — the whole source is re-scanned every
+/// run. First run (target does not yet exist) creates the table from the
+/// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
+/// scan into the existing target via [`build_cumulative_merge_sql`]
+/// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
+/// target but absent from the incoming scan is retained unchanged — the
+/// documented carve-out, `incremental_models.md` §"End-state equivalence").
+/// No reconciliation ledger: `classification`'s plain-overwrite columns are
+/// idempotent by construction (re-running an unchanged snapshot converges),
+/// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
+/// this executor never touches one.
+///
+/// `classification` must have already derived the snapshot-reconcile run
+/// shape (`classification.is_snapshot_reconcile()`); the caller
+/// (`execute.rs`'s keyed dispatch) is the single admission gate that
+/// resolves this before ever reaching here.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_snapshot_reconcile(
+    backend: &dyn Backend,
+    model: &ModelFile,
+    compiler: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    target: &str,
+    schema: &str,
+    db_table_name: &str,
+    classification: &CumulativeClassification,
+) -> Result<ExecutionResult> {
+    let model_name = &model.address_segments.join(".");
+    let start = std::time::Instant::now();
+
+    let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let compiled = compiler
+        .get(target)
+        .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
+        .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+    let table_exists = backend
+        .table_exists(schema, db_table_name)
+        .await
+        .unwrap_or(false);
+
+    if !table_exists {
+        backend
+            .create_table_as(schema, db_table_name, &compiled.sql)
+            .await
+            .with_context(|| format!("Failed to create keyed model {}", model_name))?;
+    } else {
+        let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
+        let merge_sql = build_cumulative_merge_sql(
+            schema,
+            db_table_name,
+            &compiled.sql,
+            classification,
+            None,
+            &suppression,
+        );
+        backend
+            .execute_sql(&merge_sql)
+            .await
+            .with_context(|| format!("Failed to reconcile keyed model {}", model_name))?;
+    }
+
+    let row_count = backend
+        .get_row_count(schema, db_table_name)
+        .await
+        .unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: model_name.clone(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
 }
 
 /// Build a `MERGE INTO` statement that combines target and delta values
@@ -531,7 +632,7 @@ mod tests {
             ],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2";
@@ -594,7 +695,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, event_date, COUNT(*) AS event_count FROM events \
@@ -651,7 +752,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.transactions".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT transaction_id, MIN(transaction_timestamp) AS first_seen_at, \
@@ -699,7 +800,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
@@ -754,7 +855,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, event_date, MAX(amount) AS max_amount FROM events \
@@ -845,7 +946,7 @@ mod tests {
             ],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let sql = "SELECT event_id, MIN(device_id) AS device_id, \
@@ -877,7 +978,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let reason = classification.refuse();
@@ -896,7 +997,7 @@ mod tests {
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         assert!(classification.refuse().is_none());

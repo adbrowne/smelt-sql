@@ -949,14 +949,7 @@ fn derive_new_data(
                 fingerprint_projections: BTreeMap::new(),
             });
         }
-        Grain::Key { .. } => {
-            let Some(fold) = &inputs.fold else {
-                plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                    trigger: format!("{trigger:?}"),
-                    why: "keyed grain with no fold specification".to_string(),
-                });
-                return;
-            };
+        Grain::Key { unique_key } => {
             let Some(facts) = inputs.source(source) else {
                 plan.refusals.push(Refusal::NoAdmissibleTechnique {
                     trigger: format!("{trigger:?}"),
@@ -964,6 +957,40 @@ fn derive_new_data(
                 });
                 return;
             };
+            let Some(fold) = &inputs.fold else {
+                // No recognised fold-family column (`FoldSpec` only ever
+                // carries additive/extremal/order-monotone combiners,
+                // `smelt-db::queries::maintenance::derive_fold_spec`) over
+                // an UNCLOCKED source, WITH a proven non-empty key (a real
+                // `GROUP BY`, not a degenerate/malformed declaration), is
+                // exactly the plain-overwrite/snapshot-reconcile shape
+                // (`docs/specs/incremental_models.md` §"The two run
+                // shapes"; `docs/plans/20260809-keyed-frontier.md` Phase
+                // 3) — a model whose only non-key columns are
+                // `ANY_VALUE(...)` (or none at all). That shape is not
+                // driven by a `NewData` fold cell at all (the
+                // snapshot-reconcile executor re-scans the whole source
+                // every run, `smelt-runtime::cumulative::execute_
+                // snapshot_reconcile`), so this trigger needs neither a
+                // cell nor a refusal — silently skip, mirroring the
+                // enrich-only waiver above `derive_new_data`'s obligation-2
+                // narrowing. An empty `unique_key` means the model never
+                // proved a real keyed grain in the first place (e.g. no
+                // `GROUP BY` at all) — a genuinely different, malformed
+                // shape that keeps the pre-existing refusal regardless of
+                // clock; a CLOCKED source with no fold columns (but a real
+                // key) is likewise the pre-existing degenerate-refusal
+                // case, unaffected by this narrowing.
+                if facts.partition_col.is_none() && !unique_key.is_empty() {
+                    return;
+                }
+                plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                    trigger: format!("{trigger:?}"),
+                    why: "keyed grain with no fold specification".to_string(),
+                });
+                return;
+            };
+
             // Per-cell admission obligation 2 (`incremental_models.md`
             // §"Per-cell admission"): the faithful fold's two INDEPENDENT
             // conditions — source posture (does the delta stream partition
@@ -1076,6 +1103,60 @@ fn derive_new_data(
                     return;
                 }
             }
+            // Run-shape gate (`docs/specs/incremental_models.md` §"The two
+            // run shapes"; plan/classifier agreement with
+            // `rules::cumulative::classify_cumulative`'s
+            // `KeyedSnapshotSourceUnsupportedColumn`), consulted last —
+            // AFTER both faithful-fold obligations above already passed —
+            // because it is an INDEPENDENT admission axis, not a competing
+            // reason for the same failure: obligations 2/3 read the
+            // TRIGGERING source's declared `MutationProfile`/combiner (an
+            // append-only source's posture passes obligation 2 on its own,
+            // clock-independent), which cannot by itself distinguish "this
+            // source's deltas are a retraction-free event feed"
+            // (window-forward) from "this whole model has no clocked source
+            // at all and is driven by a full-snapshot rescan every run"
+            // (snapshot-reconcile, `smelt-runtime::cumulative::
+            // execute_snapshot_reconcile`). The run shape is a WHOLE-MODEL
+            // property — zero clocked sources anywhere in the model,
+            // mirroring `CumulativeClassification::is_snapshot_reconcile`
+            // — never a property of the single triggering `source`, so
+            // every declared source is consulted here, not just `facts`.
+            // Mirroring `classify_cumulative`'s own resolution
+            // (`resolve_single_anchor`) further: snapshot-reconcile is only
+            // derived when the zero-clocked sources resolve to a SINGLE
+            // unambiguous candidate — two or more declared sources with
+            // none clocked is the distinct `KeyedSnapshotPostureUnsupported`
+            // shape (an unrelated, pre-existing refusal this gate does not
+            // own), not the double-count case this gate names. A model
+            // already refused above (e.g. a `MutableSnapshot` source
+            // failing obligation 2's posture check) keeps ITS refusal
+            // reason — this gate only fires for a fold that would
+            // otherwise be admitted, where under snapshot-reconcile it
+            // always double-counts (or, for an extremal/order-monotone
+            // combiner, computes a history observation instead of the
+            // current value) no matter how clean the triggering source's
+            // own posture is. Refused fail-loud, not silently skipped like
+            // the no-fold arm above (a real fold specification WAS found;
+            // admitting nothing without saying why would hide the gap from
+            // `smelt explain`).
+            if inputs.sources.len() == 1 && inputs.sources[0].partition_col.is_none() {
+                plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                    trigger: format!("{trigger:?}"),
+                    why: format!(
+                        "fold over '{source}' is refused under the snapshot-reconcile run \
+                         shape (no clocked source anywhere in this model) — re-folding state \
+                         double-counts: a mutable snapshot is not a replayable, \
+                         retraction-free event feed (or, for an extremal/order-monotone \
+                         combiner, computes a history observation instead of the current \
+                         value). Wrap the fold column as ANY_VALUE(...) for the \
+                         plain-overwrite family instead, or declare `timeseries:` on a \
+                         driving source to use the window-forward run shape."
+                    ),
+                });
+                return;
+            }
+
             plan.cells.push(PlanCell {
                 group: format!(
                     "{{{}}}",

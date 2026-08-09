@@ -510,16 +510,29 @@ fn build_technique_statements(
             )
             .map_err(|e| format!("{e}"))?;
 
+            // `Technique::KeyedFold` cells are only synthesized for the
+            // window-forward run shape today (`derive_new_data`'s
+            // `Grain::Key` arm requires a `FoldSpec`, which the
+            // plain-overwrite/snapshot-reconcile family does not populate —
+            // `docs/plans/20260809-keyed-frontier.md` Phase 3's own scope
+            // note). A `None` here would mean this cell reached a
+            // snapshot-reconcile model — an internal invariant violation,
+            // not a model error.
+            let driving_ts = classification
+                .driving_source
+                .timeseries
+                .clone()
+                .ok_or_else(|| {
+                    "internal error: KeyedFold cell resolved for a snapshot-reconcile model \
+                 (no clocked driving source)"
+                        .to_string()
+                })?;
             let time_range = placeholder_range();
             let mut bound_map = std::collections::HashMap::new();
             bound_map.insert(
                 classification.driving_source.name.clone(),
                 SourceBound {
-                    partition_col: classification
-                        .driving_source
-                        .timeseries
-                        .partition_column
-                        .clone(),
+                    partition_col: driving_ts.partition_column.clone(),
                     before_secs: 0,
                     after_secs: 0,
                 },

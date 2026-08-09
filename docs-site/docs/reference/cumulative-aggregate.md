@@ -51,14 +51,25 @@ Each non-key projection must be a direct call to one of:
 | `BIT_AND(...)`  | `BIT_AND`  | `target.c & delta.c` |
 | `BIT_OR(...)`   | `BIT_OR`   | `target.c \| delta.c` |
 | `BIT_XOR(...)`  | `xor()`    | `xor(target.c, delta.c)` |
+| `ANY_VALUE(...)` | incoming row wins | `delta.c` |
+
+`ANY_VALUE` is the **plain-overwrite family** — see [Run shapes](#run-shapes) below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.
 
 Each allowed aggregator is commutative and associative — that's the property that lets the rule merge windows in any order and still produce the same final state.
 
 **Out of v1**: `AVG`, `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `COUNT(DISTINCT ...)`, `APPROX_COUNT_DISTINCT`. Composite expressions over aggregates (e.g. `SUM(x) + 1`) are also refused — split into separate projections and compute derived values downstream.
 
+## Run shapes
+
+The run shape is derived from the FROM clause, never declared:
+
+- **Window-forward** — exactly one `timeseries:`-tagged source in the FROM clause (the driving source). Folds (`SUM`, `MIN`, `MAX`, …) and the order-monotone overwrite family (`MAX_BY`/`MIN_BY`) are admitted here; `ANY_VALUE` is refused.
+- **Snapshot-reconcile** — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. `ANY_VALUE` (plain overwrite, incoming row wins) is admitted here; folds and `MAX_BY`/`MIN_BY` are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal/order-monotone).
+- Two or more clocked sources refuses (`KeyedMultipleDrivingSources`).
+
 ## Execution
 
-For a run window `[run_start, run_end)`:
+**Window-forward**, for a run window `[run_start, run_end)`:
 
 1. Classify the model SQL and derive the unique key, per-column combiners, and driving source.
 2. Step over the driving source's partitions in temporal order. For each partition `D`:
@@ -69,7 +80,9 @@ For a run window `[run_start, run_end)`:
 !!! warning "Granularity restriction"
     The driving source must declare `granularity: day` or `granularity: week`. Any other granularity — `hour`, `month`, `quarter`, or `year` — is rejected at runtime with the error `windowed-keyed-maintenance driver supports day and week granularity; got <Granularity>`.
 
-Running without a run window (`smelt run` without `--event-time-start`/`--event-time-end`) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.
+Running a window-forward model without a run window (`smelt run` without `--event-time-start`/`--event-time-end`) falls back to a single-shot full refresh: the target table is dropped and recreated from the SELECT over the entire source.
+
+**Snapshot-reconcile** models never take `--event-time-start`/`--event-time-end` — supplying either is rejected fail-loud, naming the run shape. Every run re-scans the source whole: the first run creates the target table from the SELECT; every subsequent run `MERGE`s the whole-source scan into the existing target — matched keys are overwritten (incoming row wins), unmatched keys inserted, and a key present in the target but **absent** from the incoming scan is **retained unchanged** (there is no `DELETE`; removing a stored row entirely needs an explicit mechanism, out of scope today). No reconciliation ledger is kept — each run is a self-contained reconciliation.
 
 ## End-state equivalence
 
@@ -93,7 +106,8 @@ Reordering merges across source partitions does not change the final state (for 
 | `KeyedForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
 | `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
 | `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block but none of the three [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) routes admits it |
-| `KeyedSnapshotPostureUnsupported` | Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error |
+| `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source, none clocked) |
+| `KeyedSnapshotSourceUnsupportedColumn` | A fold-family column (additive, extremal/lattice, or order-monotone overwrite) is used under the snapshot-reconcile run shape — re-fold this family with `--event-time-start`/`--event-time-end` over a `timeseries:`-tagged source instead, or express the column as `ANY_VALUE(...)` |
 
 There is no `safety_overrides:` block for `grain: key` models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.
 
