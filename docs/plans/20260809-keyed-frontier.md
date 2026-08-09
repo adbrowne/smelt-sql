@@ -43,7 +43,7 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
 | 1     | done     | 030b5cd2 | 2026-08-09 |
 | 2     | done     | 534d9cde | 2026-08-09 |
 | 3     | done     | e437a65f | 2026-08-09 |
-| 4     | pending  |        |      |
+| 4     | done     | 63703979 | 2026-08-09 |
 | 5     | pending  |        |      |
 
 ---
@@ -173,6 +173,18 @@ The keyed classifier (`rules/cumulative.rs::classify_cumulative`) recognizes onl
 ## Deferred during implementation
 
 (Append-only.)
+
+- **Phase 4 — multi-candidate and fallback-bearing once-write spellings.** Only
+  `COALESCE(MAX(col))` (FD-backed) and `COALESCE(<key_col>, …)` (key-derived) are
+  admitted. `COALESCE(MAX(col), <literal>)` and `COALESCE(MAX(a), MAX(b))` are
+  refused: the first masks a NULL payload and locks the fallback into the target,
+  the second does not preserve the arguments' preference order across merges —
+  both diverge from full refresh. Admitting either needs the reduction's raw
+  nullable value held apart from the projected output, i.e. decomposed state
+  (ladder rung 2), which this plan defers pending a spec pass.
+- **Phase 4 — a general non-key NOT-NULL prover.** `analysis/not_null.rs` proves
+  not-null only for partition/driving-clock columns, which is why the fallback
+  form is refused outright rather than admitted on a nullability proof.
 
 ## Verification
 
