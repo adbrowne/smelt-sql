@@ -483,6 +483,16 @@ spec → plan → code
 
 Full source documents (each artifact is committed): `docs/specs/` (specs), `docs/plans/` (plans, naming `YYYYMMDD-name.md`), `docs/research/` (`YYYY-MM-DD-topic.md`), `docs/handoffs/` (`YYYY-MM-DD-name.md`).
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues on `adbrowne/smelt-sql`, managed via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout: `CONTEXT.md` + `docs/adr/` at the repo root (created lazily as concepts/decisions are resolved). See `docs/agents/domain.md`.
+
 ## License
 
 MIT License - Copyright (c) 2025 Andrew Browne
