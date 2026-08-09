@@ -41,9 +41,9 @@ reconciliation runs and idempotent re-runs.
 |---|-------|--------|
 | 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | done |
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
-| 3 | Per-group recompute technique: derivation, admission, emitter | pending |
+| 3 | Per-group recompute technique: derivation, admission, emitter | planned |
 | 4 | `diff_patch` write pattern: registry entry, emitter, statement parity | pending |
-| 5 | Wire refusal narrowing: retraction paths route to repair before full refresh | pending |
+| 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute | pending |
 | 6 | Conformance recipes for repair + diff-patch families | pending |
 | 7 | Surface: `smelt explain` rendering, docs-site update | pending |
 
@@ -63,6 +63,14 @@ reconciliation runs and idempotent re-runs.
   `pub(crate)` visibility rather than a copy; introduced zero new `.contains("` sites. Flagged
   for phase 3: a grain column with zero dependency on the delta's own source is treated as
   "no requirement" — untested corner, no pinning spec sentence.
+
+- 2026-08-09 (plan 3): one reshape — phase 5 now also owns the `smelt-runtime` lowering that
+  executes a repair cell, since a derived-but-unrouted cell has nothing to lower; phase 3 gives
+  the new `Technique` variant an explicit fail-loud lowering arm instead. Phase 3 scoped to
+  pure `smelt-logical` machinery (variant, two refusal variants, `repair.rs` admission +
+  cell derivation, emitter) plus one spec sentence resolving phase 2's flagged corner: when
+  *every* grain column is independent of the delta's source the verdict is `NotDiscoverable`,
+  not an unconstrained key set — the repair family never widens to a whole-table repair.
 
 ## Blocked
 
