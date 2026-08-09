@@ -54,6 +54,8 @@ the addressing of one delta type, not the universal currency.
 
 ## Decision log
 
+- 2026-08-09 — **Delta type is per column group, not per model** (rethink §6 open question 1, settled with Andrew): edges are vector-typed — one typed component (shape × addressing × columns) per column group the consumer reads, projected through the consumer's sensitivity. Per-model scalar typing was rejected because the meet over groups lets one mutable group degrade a model's append-only groups to `general`, blocking composition for mixed-shape models.
+
 <!-- Dated one-liners appended by plan/implement steps. -->
 
 ## Blocked
