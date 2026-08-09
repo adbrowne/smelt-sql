@@ -32,6 +32,7 @@ pub mod granularity;
 pub mod grouping;
 pub mod locality;
 pub mod propagate;
+pub mod repair;
 pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -177,6 +178,14 @@ pub enum Technique {
     ColumnScopedMerge,
     /// In-place `UPDATE` from already-stored columns; no upstream read.
     InPlaceUpdate,
+    /// The repair family's per-group recompute (`incremental_models.md`
+    /// §"The repair family"): a full-input read, targeted-write technique
+    /// (the `ColumnMerge` corner) that recomputes and writes only the
+    /// affected key groups a retraction/mutation delta names — `DELETE` the
+    /// stored rows for those keys, `INSERT` their bounded recompute, never a
+    /// whole-table operation. Admitted by [`repair::admit_per_group_recompute`]
+    /// and emitted by [`emit::emit_per_group_recompute`].
+    PerGroupRecompute,
 }
 
 /// Whether a cell's maintenance is partition-local in each source it reads
@@ -349,6 +358,17 @@ pub enum Refusal {
     /// diagnostic (`locality::LocalityRefusal::message`): it names all
     /// three routes and the nearest missing fact.
     LocalityNotEstablished { message: String },
+    /// The repair family's affected-key obligation (P7,
+    /// `model_properties.md` §"Affected-key discovery") could not resolve a
+    /// finite key set for `source`'s delta — the
+    /// `MaintenanceRepairKeysNotDiscoverable` diagnostic. `why` carries
+    /// [`crate::analysis::affected_keys::AffectedKeys::NotDiscoverable`]'s
+    /// own reason, verbatim.
+    RepairKeysNotDiscoverable { source: String, why: String },
+    /// The repair family's per-group read could not be bounded to a slice
+    /// (no reach / key-temporal-locality route applies) — the
+    /// `MaintenanceRepairSliceUnbounded` diagnostic.
+    RepairSliceUnbounded { source: String, why: String },
 }
 
 /// The admitted key-temporal-locality verdict for a `grain: key` model that

@@ -656,7 +656,7 @@ impl ModelInputs<'_> {
 
 /// How one read source relates to the output's partition axis for a
 /// region-anchored maintenance op.
-enum SourceLink {
+pub enum SourceLink {
     /// Bounded: the derived scan clamp, anchored to the output region.
     Clamp(ScanClamp),
     /// Clocked but with no derivable link to the output partition axis (or
@@ -672,10 +672,10 @@ enum SourceLink {
 /// ([`reflect_footprint`]), and cross-axis predicate evidence
 /// ([`derive_cross_axis_links`]) — derived once per model (or per edge
 /// context) and threaded together to every clamp-construction site.
-struct LocalityInputs<'a> {
-    bounds: &'a HashMap<String, BoundResult>,
-    footprints: &'a HashMap<String, FootprintResult>,
-    links: &'a HashMap<String, CrossAxisLink>,
+pub struct LocalityInputs<'a> {
+    pub bounds: &'a HashMap<String, BoundResult>,
+    pub footprints: &'a HashMap<String, FootprintResult>,
+    pub links: &'a HashMap<String, CrossAxisLink>,
 }
 
 /// Project one source's partition-locality verdict onto a [`SourceLink`] —
@@ -702,7 +702,7 @@ struct LocalityInputs<'a> {
 /// (`model_properties.md` §Known Divergences: a locality-admitted keyed
 /// model's clamps still carry the assumed mirror into propagation): a
 /// nonzero-margin `Bounded` read links, a zero-margin one does not.
-fn project_source_link(
+pub fn project_source_link(
     output_partition_col: Option<&str>,
     loc: &LocalityInputs<'_>,
     facts: &SourceFacts,

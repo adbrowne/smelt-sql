@@ -824,9 +824,10 @@ fn parse_technique_arg(value: &str) -> Result<Technique> {
         "keyed_fold" => Ok(Technique::KeyedFold),
         "column_scoped_merge" => Ok(Technique::ColumnScopedMerge),
         "in_place_update" => Ok(Technique::InPlaceUpdate),
+        "per_group_recompute" => Ok(Technique::PerGroupRecompute),
         other => anyhow::bail!(
             "unknown --technique '{other}': expected one of delete_insert, keyed_fold, \
-             column_scoped_merge, in_place_update, recompute"
+             column_scoped_merge, in_place_update, per_group_recompute, recompute"
         ),
     }
 }

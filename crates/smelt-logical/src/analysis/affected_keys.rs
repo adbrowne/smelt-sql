@@ -129,9 +129,15 @@ pub fn derive_affected_keys(
         .collect();
 
     let mut required = BTreeSet::new();
+    let mut any_grain_column_depends_on_source = false;
     for col in &grain_cols {
         match resolved.get(&col.to_ascii_lowercase()) {
-            Some(Ok(cols)) => required.extend(cols.iter().cloned()),
+            Some(Ok(cols)) => {
+                if !cols.is_empty() {
+                    any_grain_column_depends_on_source = true;
+                }
+                required.extend(cols.iter().cloned());
+            }
             Some(Err(reason)) => {
                 return AffectedKeys::NotDiscoverable {
                     reason: reason.clone(),
@@ -155,6 +161,23 @@ pub fn derive_affected_keys(
                 ),
             };
         }
+    }
+
+    // The corner `model_properties.md` §"Affected-key discovery" pins: a
+    // grain column with no dependency on the delta's own source contributes
+    // no key requirement, and when *every* grain column is independent the
+    // delta names no finite key set. Never widen to the unconstrained
+    // (whole-table) key set here — the repair family never widens to a
+    // whole-table repair (`incremental_models.md` §"The repair family").
+    if !any_grain_column_depends_on_source {
+        return AffectedKeys::NotDiscoverable {
+            reason: format!(
+                "every grain column ({}) is independent of source '{}' — the delta names no \
+                 finite affected-key set",
+                grain_cols.join(", "),
+                delta.source
+            ),
+        };
     }
 
     AffectedKeys::Keys { cols: grain_cols }
@@ -395,6 +418,21 @@ mod tests {
         match verdict {
             AffectedKeys::NotDiscoverable { reason } => {
                 assert!(reason.contains("set operation"), "{reason}");
+            }
+            other => panic!("expected NotDiscoverable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grain_column_independent_of_delta_source_is_not_discoverable() {
+        let sql = "SELECT 'ALL' AS bucket, SUM(amount) AS total FROM smelt.sources.orders \
+                    GROUP BY 'ALL'";
+        let delta = keyed_delta("orders", &["amount"]);
+        let ctx = AffectedKeyContext::with_unique_key(vec!["bucket".to_string()]);
+        let verdict = derive_affected_keys(&delta, sql, &ctx);
+        match verdict {
+            AffectedKeys::NotDiscoverable { reason } => {
+                assert!(reason.contains("independent of source"), "{reason}");
             }
             other => panic!("expected NotDiscoverable, got {other:?}"),
         }

@@ -397,7 +397,10 @@ pub fn resolve_cell_choice(
 pub fn technique_requires_row_identity(technique: Technique) -> bool {
     match technique {
         Technique::DeleteInsert => false,
-        Technique::KeyedFold | Technique::ColumnScopedMerge | Technique::InPlaceUpdate => true,
+        Technique::KeyedFold
+        | Technique::ColumnScopedMerge
+        | Technique::InPlaceUpdate
+        | Technique::PerGroupRecompute => true,
     }
 }
 

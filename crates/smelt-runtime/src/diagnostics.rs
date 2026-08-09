@@ -325,11 +325,12 @@ pub fn build_relation_contract(
 /// may itself admit for a `RecomputeRegion` corner, once as the
 /// always-available fallback every other cell's preview set offers) but a
 /// single emitted-statement shape and a single [`Technique`] value.
-const ALL_TECHNIQUES: [Technique; 4] = [
+const ALL_TECHNIQUES: [Technique; 5] = [
     Technique::DeleteInsert,
     Technique::KeyedFold,
     Technique::ColumnScopedMerge,
     Technique::InPlaceUpdate,
+    Technique::PerGroupRecompute,
 ];
 
 /// One statement of a [`TechniquePreview`]'s illustrative SQL — a
@@ -654,6 +655,21 @@ fn build_technique_statements(
                     .collect(),
                 transactional: false,
             })
+        }
+        Technique::PerGroupRecompute => {
+            // No cell derives this technique yet — `derive_repair_cell`
+            // (`smelt_logical::maintenance::repair`) is standalone,
+            // callable machinery this phase, not yet consulted by
+            // `derive_maintenance_plan`. An explicit fail-loud arm rather
+            // than an unreachable!/todo!: the executable statement builder
+            // is a later phase's scope
+            // (`docs/outcomes/20260809-repair-family/outcome.md` phase 5).
+            Err(
+                "Technique::PerGroupRecompute has no live statement builder yet — the repair \
+                 family's per-group recompute cell derivation is not yet wired into the \
+                 maintenance plan"
+                    .to_string(),
+            )
         }
     }
 }

@@ -189,10 +189,10 @@ fn json_includes_full_preview_array_and_properties() {
         .unwrap_or_else(|| panic!("expected a top-level 'cells' array: {stdout}"));
     assert!(!cells.is_empty(), "expected at least one cell: {stdout}");
 
-    // The technique registry has 4 members (delete_insert, keyed_fold,
-    // column_scoped_merge, in_place_update) — every cell's
-    // `technique_previews` array must carry one entry per member, never
-    // partial by omission, regardless of which one the plan admitted.
+    // The technique registry has 5 members (delete_insert, keyed_fold,
+    // column_scoped_merge, in_place_update, per_group_recompute) — every
+    // cell's `technique_previews` array must carry one entry per member,
+    // never partial by omission, regardless of which one the plan admitted.
     for cell in cells {
         let previews = cell
             .get("technique_previews")
@@ -200,7 +200,7 @@ fn json_includes_full_preview_array_and_properties() {
             .unwrap_or_else(|| panic!("expected a 'technique_previews' array on cell: {cell}"));
         assert_eq!(
             previews.len(),
-            4,
+            5,
             "expected one technique_previews entry per known technique: {cell}"
         );
         let has_admitted = previews.iter().any(|p| {

@@ -41,7 +41,7 @@ reconciliation runs and idempotent re-runs.
 |---|-------|--------|
 | 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | done |
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
-| 3 | Per-group recompute technique: derivation, admission, emitter | planned |
+| 3 | Per-group recompute technique: derivation, admission, emitter | done |
 | 4 | `diff_patch` write pattern: registry entry, emitter, statement parity | pending |
 | 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute | pending |
 | 6 | Conformance recipes for repair + diff-patch families | pending |
@@ -71,6 +71,15 @@ reconciliation runs and idempotent re-runs.
   cell derivation, emitter) plus one spec sentence resolving phase 2's flagged corner: when
   *every* grain column is independent of the delta's source the verdict is `NotDiscoverable`,
   not an unconstrained key set — the repair family never widens to a whole-table repair.
+
+- 2026-08-09 (implement 3): landed `Technique::PerGroupRecompute`, `Refusal::
+  RepairKeysNotDiscoverable`/`RepairSliceUnbounded`, `maintenance::repair::
+  {admit_per_group_recompute, derive_repair_cell}` and `emit::emit_per_group_recompute` — all
+  standalone, unit-proven, not yet called from `derive_maintenance_plan` (phase 5's scope).
+  Fixed the "every grain column independent of source" corner directly in `affected_keys.rs`
+  (the proof's sole owner), per phase 3's own spec delta. Widened `derive::LocalityInputs`/
+  `SourceLink`/`project_source_link` from private to `pub` so `repair.rs` reuses the exact same
+  scan-clamp derivation `derive_mutation` uses, rather than a second copy.
 
 ## Blocked
 

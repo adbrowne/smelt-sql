@@ -143,7 +143,12 @@ costs extra work, never correctness, since a per-group recompute is idempotent
 (`incremental_models.md` §"The repair family"). An **under-approximation is never admissible**: a
 missed key would leave stale state for a group the retraction actually touched, silently breaking
 the equivalence invariant. Fail-closed, matching every other proof in this spec: absence of a
-derivation is `NotDiscoverable`, never an optimistic default.
+derivation is `NotDiscoverable`, never an optimistic default. A grain column with no dependency
+on the delta's own source contributes no key requirement — the same "no requirement" verdict any
+column independent of the changed source gets. When *every* grain column is independent of the
+delta's source, the delta names no finite key set at all: the verdict is `NotDiscoverable`, never
+an unconstrained (whole-table) key set, because the repair family never widens to a whole-table
+repair (`incremental_models.md` §"The repair family").
 
 ### Skeleton-role extraction
 

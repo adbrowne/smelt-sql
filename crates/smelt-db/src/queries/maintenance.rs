@@ -1131,6 +1131,17 @@ pub fn maintenance_plan_diagnostics(
                     message: message.clone(),
                 })
             }
+            // The repair family's two obligation refusals
+            // (`MaintenanceRepairKeysNotDiscoverable`/
+            // `MaintenanceRepairSliceUnbounded`). Not yet produced by any
+            // wired derivation — `derive_repair_cell` is standalone,
+            // callable machinery this phase, not yet consulted by
+            // `derive_maintenance_plan` — and has no `DiagnosticCode`
+            // variant yet. Left unmapped exactly as `ReachNotDerivable`
+            // above, for the same reason: a future phase's own diagnostic
+            // lands it.
+            smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
+            smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
         })
         .collect();
     let cell_column_group_violations = metadata

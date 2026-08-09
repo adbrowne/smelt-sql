@@ -660,6 +660,7 @@ fn every_known_technique_has_an_entry() {
             "KeyedFold".to_string(),
             "ColumnScopedMerge".to_string(),
             "InPlaceUpdate".to_string(),
+            "PerGroupRecompute".to_string(),
         ]),
         "every known technique must have exactly one preview entry, got {:?}",
         techniques

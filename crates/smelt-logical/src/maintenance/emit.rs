@@ -803,6 +803,90 @@ pub fn emit_staged_candidate_conditional_recompute(
     }
 }
 
+/// The repair family's per-group recompute (`docs/specs/incremental_models.md`
+/// §"The repair family"): a targeted `DELETE`+`INSERT` restricted to the
+/// admitted [`super::repair::AdmittedRepair`]'s affected-key relation —
+/// `candidate_select` is the caller's already-bounded per-group recompute
+/// (`super::repair::AdmittedRepair::slice`'s clamp, already injected into
+/// `candidate_select`'s read by the runtime transformer, mirroring every
+/// other emitter's "caller-clamped body" contract).
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `DELETE FROM <table> USING (<affected_keys_select>) WHERE <key join>`
+///    — every stored row whose key is in the affected-key relation, so a
+///    group that vanished entirely from the recompute (its key no longer
+///    appears in `candidate_select`) is still removed.
+/// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s JOIN
+///    (<affected_keys_select>) ON <key join>` — restricted to the SAME
+///    affected-key relation as step 3, so both write statements are
+///    predicated on the named key set; no statement touches `table`
+///    unrestricted.
+/// 5. `DROP TABLE <staged_relation>`
+///
+/// The whole group runs in one transaction — a failed `INSERT` must roll
+/// back the `DELETE` (`docs/specs/incremental_models.md` §"Statement
+/// emission (single owner)").
+///
+/// # Panics
+/// Panics if `key` is empty — per-group recompute has no meaning without a
+/// group key to restrict its writes to.
+pub fn emit_per_group_recompute(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    affected_keys_select: &str,
+    candidate_select: &str,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_per_group_recompute requires a non-empty row identity (key) for {table}"
+    );
+
+    let key_list = key.join(", ");
+    let affected_relation = format!(
+        "(SELECT DISTINCT {key_list} FROM ({affected_keys_select}) AS __smelt_affected_src) AS \
+         __smelt_affected"
+    );
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+
+    let delete_join = key
+        .iter()
+        .map(|k| format!("{table}.{k} = __smelt_affected.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let delete = format!("DELETE FROM {table} USING {affected_relation} WHERE {delete_join}");
+
+    let insert_join = key
+        .iter()
+        .map(|k| format!("s.{k} = __smelt_affected.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s JOIN {affected_relation} ON \
+         {insert_join}"
+    );
+
+    let drop = format!("DROP TABLE {staged_relation}");
+
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
 /// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
 /// §"Key temporal locality", route 3): a read-only query the caller
@@ -2478,6 +2562,100 @@ mod count_preservation_probe_tests {
              COUNT(*) FROM (SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON \
              e.user_id = u.user_id WHERE e.event_date >= '2026-07-01') AS __smelt_enriched) AS \
              enriched_count"
+        );
+    }
+}
+
+#[cfg(test)]
+mod per_group_recompute_tests {
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["customer_id".to_string()]
+    }
+
+    #[test]
+    fn emit_per_group_recompute_deletes_affected_keys_and_inserts_slice_recompute() {
+        let group = emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &key(),
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.transactional);
+        let sqls: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(sqls.len(), 5);
+        assert!(sqls[0].starts_with("CREATE TEMP TABLE __staged AS SELECT * FROM"));
+        assert!(sqls[1].starts_with("INSERT INTO __staged SELECT customer_id, SUM(amount)"));
+        assert!(
+            sqls[2].starts_with("DELETE FROM main.customer_totals USING"),
+            "{}",
+            sqls[2]
+        );
+        assert!(
+            sqls[3].starts_with("INSERT INTO main.customer_totals SELECT s.* FROM __staged"),
+            "{}",
+            sqls[3]
+        );
+        assert_eq!(sqls[4], "DROP TABLE __staged");
+    }
+
+    #[test]
+    fn emit_per_group_recompute_is_key_restricted() {
+        let group = emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &key(),
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::DuckDb,
+        );
+        let delete = &group.statements[2].sql;
+        let insert = &group.statements[3].sql;
+        assert!(
+            delete.contains("__smelt_affected") && delete.contains("customer_id"),
+            "DELETE must be predicated on the affected-key relation: {delete}"
+        );
+        assert!(
+            insert.contains("__smelt_affected") && insert.contains("customer_id"),
+            "INSERT must be predicated on the affected-key relation: {insert}"
+        );
+        for sql in [delete.as_str(), insert.as_str()] {
+            assert!(
+                sql.contains("__smelt_affected"),
+                "every write statement touching main.customer_totals must be restricted to the \
+                 affected-key relation, never unrestricted: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn emit_per_group_recompute_repeats_identically() {
+        let build = || {
+            emit_per_group_recompute(
+                "main.customer_totals",
+                "__staged",
+                &key(),
+                "SELECT customer_id FROM delta",
+                "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+                MaintenanceDialect::DuckDb,
+            )
+        };
+        assert_eq!(build(), build());
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty row identity")]
+    fn emit_per_group_recompute_panics_on_empty_key() {
+        emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &[],
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id FROM orders_slice",
+            MaintenanceDialect::DuckDb,
         );
     }
 }
