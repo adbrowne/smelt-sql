@@ -249,3 +249,44 @@ fn multi_column_one_non_monoid_combiner_refuses_the_whole_cell() {
         "refusal should name the offending column and combiner, got: {why}"
     );
 }
+
+/// The once-write family's waiver is scoped to the ALGEBRA leg only. A
+/// `Coalesce` fold column is exempt from the combiner-algebra condition
+/// (its admission rests on the independent once-write provenance proof,
+/// `rules::cumulative::classify_once_write`), but it is NOT exempt from the
+/// source-posture / delta-discovery condition: over a retracting
+/// (`MutableSnapshot`) source the cell still refuses.
+#[test]
+fn once_write_waives_algebra_only_not_source_posture() {
+    // Append-only: the algebra leg alone would refuse a non-monoid,
+    // non-order-monotone combiner — the once-write waiver admits it.
+    let (append_only, trigger) = inputs(SqlFunction::Coalesce, MutationProfile::AppendOnly);
+    let plan = derive_maintenance_plan(&append_only, &[trigger]);
+    assert!(
+        plan.refusals.is_empty(),
+        "once-write is exempt from the algebra leg, got {:?}",
+        plan.refusals
+    );
+    assert_eq!(
+        plan.cells.len(),
+        1,
+        "expected one cell, got {:?}",
+        plan.cells
+    );
+
+    // Retracting source: the posture leg is NOT waived.
+    let (mutable, trigger) = inputs(SqlFunction::Coalesce, MutationProfile::MutableSnapshot);
+    let plan = derive_maintenance_plan(&mutable, &[trigger]);
+    assert!(
+        plan.cells.is_empty(),
+        "the source-posture leg must still bind for a once-write column, got {:?}",
+        plan.cells
+    );
+    let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+        unreachable!()
+    };
+    assert!(
+        why.contains("append-only") || why.contains("retract"),
+        "refusal should cite the source-posture obligation, got: {why}"
+    );
+}

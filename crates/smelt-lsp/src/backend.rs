@@ -426,6 +426,7 @@ impl Backend {
                 }
                 DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
                 DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
+                DbCode::KeyedOnceWriteUnproven => "keyed-once-write-unproven",
                 DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
                 DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
                 DbCode::MaterializedViewForbidsPartitionGrain => {

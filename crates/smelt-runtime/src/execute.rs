@@ -1675,11 +1675,18 @@ pub async fn execute_project(
                 .metadata
                 .as_ref()
                 .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = plan
+                .model_file
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
             let classification = crate::cumulative::classify_cumulative_sql(
                 &plan.name,
                 &clean_sql_for_classify,
                 source_timeseries,
                 model_has_timeseries,
+                declared_fds,
             )?;
 
             let exec_result = match (start_date, end_date) {

@@ -304,10 +304,19 @@ The classifier assigns each non-key projection to exactly one **column family**.
 | **additive fold** | `COUNT(...)`, `SUM(...)`, `BIT_XOR(...)` | `+` / `xor` | no | yes | yes | window-forward only | ledger-enforced re-run refusal (§"The transactional merge ledger") |
 | **extremal / lattice fold** | `MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR` | `LEAST`/`GREATEST`/`AND`/`OR`/`&`/`\|` | yes | yes | no | window-forward only | — |
 | **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering (§"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | — |
-| **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)` | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency |
+| **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)` | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency over a NULL-preserving reduction |
 | **plain overwrite** | `ANY_VALUE(...)` | incoming row wins | yes | n/a — one row per key per scan | no | **snapshot-reconcile only** | — |
 
 Any other aggregate, any non-aggregate non-key expression, and any composite expression over aggregates (`SUM(x) + 1`) is rejected (`KeyedUnknownCombiner`). Add columns for the underlying aggregates and derive downstream.
+
+The once-write family admits exactly two spellings, and no others:
+
+- `COALESCE(<unique_key column>, …)` — key-derived, no declaration needed. Fallback arguments are permitted here: a key column is non-null within its own group by construction, so a fallback can never stand in for a value a later window would supply.
+- `COALESCE(MAX(<col>))` / `COALESCE(MIN(<col>))` — a single-column reduction with **no further argument**, admitted only under a declared functional dependency naming `<col>` (the source payload, never the projection's alias) over a key the model's `unique_key` covers.
+
+The no-further-argument restriction is the family's **NULL-preservation obligation**, and it follows directly from the equivalence invariant. The cross-window combiner is `COALESCE(target, delta)` — "the first non-null value any window produced wins" — so the delta must be NULL exactly when the key has no value yet. A fallback makes the delta *total*: a window in which every row for a key carries a NULL payload writes the fallback, the target becomes non-null, and no later window can displace it, while a full refresh returns the value the later window carried. A declared functional dependency asserts that the payload is a per-key constant; it never asserts that the payload is non-null, and this family is literally "first non-null", so intra-key NULLs are anticipated. A second *candidate* argument (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving but still refused: the temporal merge does not preserve the arguments' preference order, so a window carrying only `b` locks `b`'s value in ahead of an `a` that arrives later. Both forms refuse `KeyedOnceWriteUnproven`, which names dropping the fallback and applying the default downstream, in a reader-side projection.
+
+A `COALESCE(...)` used as a null-safe composite `GROUP BY` key is a key column, not a once-write column, and needs no proof.
 
 The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.once(value)` (→ the once-write canonical spelling), and `smelt.current(value)` (→ `ANY_VALUE`) are intent-naming sugar for the overwrite, once-write, and plain-overwrite families; they are ordinary transparent functions (`functions.md`) whose expansions are admitted on exactly the same terms as hand-written calls.
 
@@ -370,7 +379,7 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `KeyedForbidsNondeterministic` | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions; cross-window merge requires deterministic per-window output. |
 | `KeyedSqlNotParseable` | The model body cannot be parsed into the shape the classifier reads. |
 | `KeyedMultipleDrivingSources` | More than one timeseries-tagged source in the FROM clause; lists the candidates. |
-| `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column has no once-write provenance proof; names the column and the three fixes (key-derived form, declared functional dependency, remodelling). |
+| `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column has no once-write provenance proof, or breaks the family's NULL-preservation obligation by carrying a fallback argument after its reduction; names the column and the three fixes (key-derived form, declared functional dependency, remodelling), and for the fallback case names dropping it and applying the default downstream. |
 | `KeyedRetractableContribution` | An enrichment join's per-key contribution is retractable — it feeds a decrementing aggregate or a value that must be un-seen. Steers to `refresh: materialized_view` or DAG composition. Never fires on the join spelling alone (§"Enrichment joins"). |
 | `KeyedSnapshotSourceUnsupportedColumn` | A column family inadmissible under snapshot-reconcile appears in a model with no clocked driving source; names the column, the family, and why the current-snapshot oracle cannot hold (§"Admission matrix"). |
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window; points at `--full-refresh` (§"Reprocessing"). |
@@ -2162,8 +2171,9 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   model-author lateness-flag pattern. Tracked: `docs/plans/20260704-model-updates.md`.
 - **Locality machinery gaps.** The per-input scope-map explain surface is specified but
   unbuilt. Route 2's declared-FD sub-route is unreachable for an arbitrary non-clock-derived
-  dimension column (the NOT-NULL derivation recognises only driving-clock-derived shapes), and a
-  runnable end-to-end route-2 fixture needs the once-write classifier family
+  dimension column (the NOT-NULL derivation recognises only driving-clock-derived shapes), so a
+  runnable end-to-end route-2 fixture is still missing — the once-write column family it needs
+  now exists, but that NOT-NULL derivation gap remains
   (`docs/plans/20260705-keyed-collapse.md`). Route 2's `IN (SELECT DISTINCT …)` slice predicate
   is unexercised against a real backend due to a DuckDB MERGE binder limitation (confirmed
   v1.4.4/v1.5.4) — merges run unpruned; lifting needs a rewrite or a fixed DuckDB
@@ -2246,10 +2256,18 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The key grain
 
-- **The classifier covers the direct-monoid families, the order-monotone overwrite family, and
-  the plain-overwrite family** (additive fold, extremal/lattice fold, `MAX_BY`/`MIN_BY`,
-  `ANY_VALUE`) across both derived run shapes (window-forward and snapshot-reconcile). The
-  once-write family (`COALESCE`) is unbuilt. Decision record:
+- **The classifier covers the direct-monoid families, the order-monotone overwrite family, the
+  plain-overwrite family, and the once-write family** (additive fold, extremal/lattice fold,
+  `MAX_BY`/`MIN_BY`, `ANY_VALUE`, `COALESCE`) across both derived run shapes (window-forward and
+  snapshot-reconcile). The once-write family's admitted shapes are narrow: a `COALESCE` whose
+  first argument is a bare `unique_key` column (key-derived, no declaration needed, fallbacks
+  permitted), or a sole-argument single-column `MAX(…)`/`MIN(…)` reduction backed by a declared
+  functional dependency over that **source** column; any other coalesced expression — including
+  the same reduction carrying a fallback, which would break the family's NULL-preservation
+  obligation — refuses `KeyedOnceWriteUnproven`. Widening
+  the proof to an arbitrary key-derived expression (rather than a bare key reference), or to a
+  per-column join trace in place of the whole-scope fan-out/set-operation facts the admission
+  reads today, is unbuilt. Decision record:
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
 - **The order-monotone overwrite family's ordering value has no decomposed-state storage** — the

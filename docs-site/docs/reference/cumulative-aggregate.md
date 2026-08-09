@@ -51,20 +51,82 @@ Each non-key projection must be a direct call to one of:
 | `BIT_AND(...)`  | `BIT_AND`  | `target.c & delta.c` |
 | `BIT_OR(...)`   | `BIT_OR`   | `target.c \| delta.c` |
 | `BIT_XOR(...)`  | `xor()`    | `xor(target.c, delta.c)` |
+| `MAX_BY(v, ord)` / `MIN_BY(v, ord)` | ordering value wins, incumbent on a tie | `CASE WHEN delta.ord > target.ord THEN delta.v ELSE target.v END` |
+| `COALESCE(...)` | first non-null wins | `COALESCE(target.c, delta.c)` |
 | `ANY_VALUE(...)` | incoming row wins | `delta.c` |
+
+The first nine rows are the **fold families** — additive (`COUNT`/`SUM`) and extremal/lattice (`MIN`, `MAX`, the boolean and bitwise combiners). Each is commutative and associative; that's the property that lets the rule merge windows in any order and still produce the same final state.
+
+`MAX_BY`/`MIN_BY` is the **order-monotone overwrite family**. The ordering expression must also be projected in the same SELECT as its own running `MAX(ord)`/`MIN(ord)` column (or the value expression must *be* the ordering expression, as in `MAX_BY(x, x)`) — the merge compares the stored ordering value against the incoming one, so it has to be a column of the table. Without that companion projection the column is refused (`KeyedUnknownCombiner`, naming the missing projection). Ties keep the incumbent.
+
+`COALESCE` is the **once-write family** — see [Once-write columns](#once-write-columns) below; it is admitted only when its provenance can be proven.
 
 `ANY_VALUE` is the **plain-overwrite family** — see [Run shapes](#run-shapes) below: it is admitted only when the model has no clocked driving source (snapshot-reconcile); it is refused when a clocked source is present.
 
-Each allowed aggregator is commutative and associative — that's the property that lets the rule merge windows in any order and still produce the same final state.
-
 **Out of v1**: `AVG`, `STRING_AGG`, `LIST_AGG`, `FIRST`, `LAST`, `COUNT(DISTINCT ...)`, `APPROX_COUNT_DISTINCT`. Composite expressions over aggregates (e.g. `SUM(x) + 1`) are also refused — split into separate projections and compute derived values downstream.
+
+## Once-write columns
+
+A once-write column keeps the **first non-null value ever written** for a key: the merge is `COALESCE(target.c, delta.c)`, so once a key's value is set no later window can change it. That is only equivalent to a full refresh when the value is genuinely a per-key constant — otherwise "first written" depends on which window happened to arrive first, and the run is no longer reorder-independent. The rule therefore demands a **provenance proof** before admitting the column, and refuses `KeyedOnceWriteUnproven` when it cannot get one.
+
+Two shapes are admitted:
+
+**Key-derived** — the coalesced value is a bare reference to one of the model's own `GROUP BY` key columns. It is a per-key constant by construction, so no declaration is needed:
+
+```sql
+SELECT
+    device_id,
+    COALESCE(device_id, 'n/a') AS first_seen_device
+FROM smelt.silver.events_parsed
+GROUP BY device_id
+```
+
+**Declared functional dependency** — the coalesced value is a single-column `MAX(col)` or `MIN(col)` **with no fallback argument**, and the model declares that the grouping key determines `col`:
+
+```sql
+---
+materialization: table
+refresh: incremental
+grain: key
+functional_dependencies:
+  - key: [device_id]
+    determines: signup_referrer
+---
+SELECT
+    device_id,
+    COALESCE(MAX(signup_referrer)) AS first_referrer
+FROM smelt.silver.events_parsed
+GROUP BY device_id
+```
+
+The declaration is a world fact about the **source data**, not about the output: `determines` must name the source payload column inside the `MAX(...)`/`MIN(...)`, and `key` must name the columns the model actually groups on — not a projection's output alias. A declaration naming the output alias, or naming a column the model does not group by, proves nothing and does not admit. A `key` that is a *subset* of the grouping columns is a stronger statement and is accepted.
+
+A declaration only widens the undecidable case; it never overrides a structural disproof. The column is still refused when the model's body contains a row-multiplying join, or an undiscriminated `UNION ALL` (a dependency holding in each branch need not hold in the union).
+
+**No fallback after the reduction.** `COALESCE(MAX(col), 'unknown')` is refused, declaration or not. The merge is "first non-null wins", so the delta must be NULL exactly when the key has no value yet. A fallback makes it total: a window in which every row for a key has `col IS NULL` writes `'unknown'` into the target, and no later window can ever displace it — while a full refresh would return the real value that later window carried. The declaration says `col` is a per-key *constant*; it does not say `col` is never NULL, and this family is literally "first **non-null**", so NULLs within a key are expected. Drop the fallback and apply the default downstream instead:
+
+```sql
+-- downstream model, or a reader-side projection
+SELECT device_id, COALESCE(first_referrer, 'unknown') AS first_referrer
+FROM smelt.gold.device_first_touch
+```
+
+The key-derived shape above keeps its fallback: a key column is never NULL within its own group, so `COALESCE(device_id, 'n/a')` cannot mask a value a later window would supply.
+
+A second candidate value (`COALESCE(MAX(a), MAX(b))`) is also refused. It preserves NULLs, but the cross-window merge does not preserve your preference for `a` over `b`: a window carrying only `b` writes `b`'s value and locks it in ahead of an `a` that arrives later.
+
+Anything else — a coalesced expression that is neither of the two shapes, a bare non-key column, a multi-argument or non-`MAX`/`MIN` inner aggregate — is refused. The three fixes named by the diagnostic are: make the value key-derived, declare the functional dependency, or remodel the column out into its own model.
+
+A `COALESCE(...)` used as a null-safe composite `GROUP BY` key (`GROUP BY COALESCE(device_id, 'n/a')`) is a key column, not a once-write column, and needs no proof.
+
+Once-write columns are admitted **window-forward only**; under snapshot-reconcile they are refused (`KeyedSnapshotSourceUnsupportedColumn`) — "first observed over history" is not a statement about the current snapshot.
 
 ## Run shapes
 
 The run shape is derived from the FROM clause, never declared:
 
-- **Window-forward** — exactly one `timeseries:`-tagged source in the FROM clause (the driving source). Folds (`SUM`, `MIN`, `MAX`, …) and the order-monotone overwrite family (`MAX_BY`/`MIN_BY`) are admitted here; `ANY_VALUE` is refused.
-- **Snapshot-reconcile** — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. `ANY_VALUE` (plain overwrite, incoming row wins) is admitted here; folds and `MAX_BY`/`MIN_BY` are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal/order-monotone).
+- **Window-forward** — exactly one `timeseries:`-tagged source in the FROM clause (the driving source). Folds (`SUM`, `MIN`, `MAX`, …), the order-monotone overwrite family (`MAX_BY`/`MIN_BY`), and the once-write family (`COALESCE`, given its provenance proof) are admitted here; `ANY_VALUE` is refused.
+- **Snapshot-reconcile** — zero clocked sources. The model re-scans its source whole on every run instead of stepping over partitions. `ANY_VALUE` (plain overwrite, incoming row wins) is admitted here; folds, `MAX_BY`/`MIN_BY`, and `COALESCE` once-write columns are refused — re-folding a mutable snapshot double-counts (additive) or computes a value observed over history rather than the current one (extremal, order-monotone, once-write).
 - Two or more clocked sources refuses (`KeyedMultipleDrivingSources`).
 
 ## Execution
@@ -93,7 +155,7 @@ key_grain_run(model, π(S))
   == full_refresh(model, source.where(partition ∈ S))
 ```
 
-Reordering merges across source partitions does not change the final state (for the additive and extremal/lattice combiners covered above). This is the load-bearing contract `grain: key` upholds — and the reason the allowlist is restricted to commutative-associative aggregators.
+Reordering merges across source partitions does not change the final state: for the additive and extremal/lattice folds because their combiners are commutative and associative, for `MAX_BY`/`MIN_BY` up to ordering-value ties, and for once-write columns because the proof makes the value a per-key constant, so "first written" cannot depend on arrival order. This is the load-bearing contract `grain: key` upholds — and the reason each column family is admitted only on terms that preserve it.
 
 ## Diagnostic codes
 
@@ -107,7 +169,8 @@ Reordering merges across source partitions does not change the final state (for 
 | `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
 | `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block but none of the three [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) routes admits it |
 | `KeyedSnapshotPostureUnsupported` | No clocked driving source, and no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source, none clocked) |
-| `KeyedSnapshotSourceUnsupportedColumn` | A fold-family column (additive, extremal/lattice, or order-monotone overwrite) is used under the snapshot-reconcile run shape — re-fold this family with `--event-time-start`/`--event-time-end` over a `timeseries:`-tagged source instead, or express the column as `ANY_VALUE(...)` |
+| `KeyedSnapshotSourceUnsupportedColumn` | A fold-family, order-monotone-overwrite, or once-write column is used under the snapshot-reconcile run shape — re-fold this family with `--event-time-start`/`--event-time-end` over a `timeseries:`-tagged source instead, or express the column as `ANY_VALUE(...)` |
+| `KeyedOnceWriteUnproven` | A `COALESCE` once-write column has no [provenance proof](#once-write-columns), or carries a fallback argument after its `MAX`/`MIN` reduction — names the column and the three fixes: make it key-derived, declare the functional dependency, or remodel the column into its own model; for the fallback case, drop it and apply the default downstream |
 
 There is no `safety_overrides:` block for `grain: key` models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.
 

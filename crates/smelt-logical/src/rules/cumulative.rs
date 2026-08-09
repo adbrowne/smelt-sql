@@ -4,9 +4,9 @@
 //! This module classifies the direct-monoid families (additive fold,
 //! extremal/lattice fold), the order-monotone overwrite family
 //! (`MAX_BY`/`MIN_BY`, `docs/plans/20260809-keyed-frontier.md` Phase 1),
-//! and the plain-overwrite family (`ANY_VALUE`, Phase 3) — across both
-//! derived run shapes (window-forward / snapshot-reconcile, §"The two run
-//! shapes"). The once-write family (`COALESCE`) is not yet classified here.
+//! the plain-overwrite family (`ANY_VALUE`, Phase 3), and the once-write
+//! family (`COALESCE`, Phase 4) — across both derived run shapes
+//! (window-forward / snapshot-reconcile, §"The two run shapes").
 //!
 //! The classifier is a pure function that reads an inlined SELECT
 //! (post function expansion) plus a small source-timeseries lookup
@@ -24,11 +24,16 @@
 //! `KeyedDiagnostic`s on rejection.
 
 use serde::Serialize;
-use smelt_core::config::TimeseriesConfig;
+use smelt_core::config::{FunctionalDependency, TimeseriesConfig};
 use std::collections::HashMap;
 
+use crate::analysis::functional_dependency::{
+    functional_dependency_verdict, FunctionalDependencyVerdict,
+};
+use crate::analysis::join_shape::JoinContext;
 use crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS;
 use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
+use crate::analysis::walk::{model_property_vector, PropertyVector};
 use crate::analysis::{analyze_select, SelectItemKind};
 use smelt_types::SqlFunction;
 
@@ -88,6 +93,15 @@ pub enum CrossPartitionCombiner {
     /// run shape (Phase 3, `docs/plans/20260809-keyed-frontier.md`); refused
     /// window-forward (`KeyedUnknownCombiner`).
     PlainOverwrite,
+    /// The once-write family (`COALESCE`, `incremental_models.md` §"The
+    /// column-family catalogue"): `COALESCE(target.c, delta.c)` — the
+    /// target's value wins once set; the delta only ever fills a `NULL`
+    /// target. Admitted only under the once-write provenance proof
+    /// (`classify_once_write`): a key-derived value, or a declared
+    /// functional dependency consulted via
+    /// `analysis::functional_dependency::functional_dependency_verdict_over_vector`
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 4).
+    OnceWrite,
 }
 
 impl CrossPartitionCombiner {
@@ -120,8 +134,337 @@ impl CrossPartitionCombiner {
                 )
             }
             CrossPartitionCombiner::PlainOverwrite => delta_col.to_string(),
+            CrossPartitionCombiner::OnceWrite => {
+                format!("COALESCE({target_col}, {delta_col})")
+            }
         }
     }
+}
+
+/// The once-write family's per-projection admission verdict
+/// ([`classify_once_write`]) — shared by the runtime classifier
+/// ([`classify_cumulative`]) and the plan-layer fold derivation
+/// (`smelt_db::queries::maintenance::derive_fold_spec`) so both admit/refuse
+/// a `COALESCE`-shaped once-write column identically
+/// (`docs/specs/incremental_models.md` §"The column-family catalogue").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnceWriteAdmission {
+    /// The projection is not a direct `COALESCE(...)` call at all — not this
+    /// family's concern.
+    NotOnceWrite,
+    /// Admitted: the coalesced value is a key-derived expression (a bare
+    /// reference to one of the model's own `unique_key` columns), or a
+    /// declared functional dependency over the coalesced value's SOURCE
+    /// column (not positively disproven by a fan-out join or a set-operation
+    /// barrier) proves it a per-key constant.
+    Admitted,
+    /// A `COALESCE`-shaped once-write projection with no once-write
+    /// provenance proof. `column` names the coalesced value's source column;
+    /// `reason` names why.
+    Unproven { column: String, reason: String },
+}
+
+/// Classify one projection as the once-write family (`incremental_models.md`
+/// §"The column-family catalogue" row "once-write"): a direct
+/// `COALESCE(<candidate>, <fallback>...)` call, where `<candidate>` is
+/// either
+///
+/// 1. a bare reference to one of `unique_key`'s own columns — a per-key
+///    constant by construction (the key never changes across merges), no
+///    declaration or proof needed; or
+/// 2. a direct `MAX(<col>)`/`MIN(<col>)` reduction of a single non-key
+///    column, and the `COALESCE` carries NO further argument — a fallback
+///    would make the projection TOTAL, and a total projection breaks the
+///    equivalence invariant for this family: a window whose rows all carry
+///    a NULL payload for a key writes the fallback, and the
+///    `COALESCE(target, delta)` merge then locks it in, so the real value a
+///    later window delivers can never displace it while a full refresh
+///    would return it. The declared FD asserts "per-key constant", never
+///    "never NULL", and the family is literally "first NON-NULL", so
+///    intra-key NULLs are anticipated. A second *candidate* argument
+///    (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving yet still refused:
+///    the temporal merge does not preserve the arguments' preference order
+///    across windows. Only route 1 keeps its fallback — a `unique_key`
+///    column is non-null within its own group by construction, so its
+///    fallback can never mask a later observation.
+///
+///    The reduction is admitted only when a declared functional dependency names
+///    that INNER SOURCE column (`<col>`, the payload whose provenance is
+///    actually in question) as its `determines`, over a `key` the model's
+///    own `unique_key` covers. The declaration must never be matched
+///    against the projection's output alias: `unique_key → <alias>` holds
+///    by construction for ANY aggregate over the model's own `GROUP BY`
+///    key, so an alias-matched declaration would assert nothing and the
+///    proof would be vacuous. The world-fact the once-write equivalence
+///    needs is `key → <col>` on the source payload — the same `determines`
+///    column `analysis::functional_dependency` documents.
+///
+///    A declared `key` that is a SUBSET of `unique_key` is accepted: a
+///    smaller key is a strictly stronger statement that implies the
+///    full-key dependency (matching
+///    [`functional_dependency_verdict_over_vector`]'s own `has_subset_key`
+///    treatment).
+///
+///    The verdict is composed from the raw (non-vector)
+///    [`functional_dependency_verdict`] plus this function's own explicit
+///    structural disproofs — deliberately NOT the grain-composed
+///    [`functional_dependency_verdict_over_vector`] variant wholesale:
+///    that helper's "grain is a subset of the declared key ⇒ `Constant`"
+///    shortcut only proves determinism *within one fixed computation*
+///    (trivially true for ANY aggregate over the model's own `GROUP BY`
+///    key, extremal folds included), never invariance *across merges* —
+///    exactly the pitfall `maintenance::locality`'s route 2 documents on
+///    its own once-write route. Its two STRUCTURAL disproofs, however, do
+///    apply verbatim and are both enforced here (`model_properties.md`
+///    §Constraints "Declared escape hatches may only widen"):
+///    `vector.has_fan_out_join` (the walk's whole-scope fan-out fact, a
+///    conservative stand-in for "is the determines column sourced from a
+///    proven-fan-out join" — coarser than a per-column join trace, but
+///    never optimistic: any fan-out anywhere in scope refuses) and
+///    `vector.has_set_op_barrier` (SC-6: an FD holding in each branch of an
+///    undiscriminated `UNION ALL` need not hold in the union). A
+///    declaration widens only past neither of them.
+///
+/// Any other shape (a bare non-key column with no reducing aggregate, a
+/// multi-argument aggregate, a non-MAX/MIN aggregate, …) is
+/// [`OnceWriteAdmission::Unproven`], naming the best-effort offending column
+/// or expression text.
+///
+/// A projection whose expression text appears in `group_by_exprs` is a KEY
+/// column, not a once-write column — a null-safe composite key
+/// (`COALESCE(device_id, 'n/a')` grouped by the same expression) is routine,
+/// and this family never claims it ([`OnceWriteAdmission::NotOnceWrite`]).
+///
+/// `vector` is the model's whole-model [`PropertyVector`]
+/// (`analysis::walk::model_property_vector`) — `None` when the model's SQL
+/// could not be classified for the walk (an unrelated parse shape the outer
+/// classifier will separately refuse); the FD-backed route then fails closed
+/// to [`OnceWriteAdmission::Unproven`] rather than guessing.
+pub fn classify_once_write(
+    text: &str,
+    expr: &smelt_parser::Expr,
+    unique_key: &[String],
+    group_by_exprs: &[String],
+    declared_fds: &[FunctionalDependency],
+    vector: Option<&PropertyVector>,
+) -> OnceWriteAdmission {
+    if !is_direct_function_call(text, "COALESCE") {
+        return OnceWriteAdmission::NotOnceWrite;
+    }
+    // A `COALESCE(...)` expression that IS the model's GROUP BY key (a
+    // null-safe composite key) is a key column, never a once-write column.
+    if group_by_exprs.iter().any(|g| g.trim() == text.trim()) {
+        return OnceWriteAdmission::NotOnceWrite;
+    }
+    let Some(fc) = expr.as_function_call() else {
+        return OnceWriteAdmission::NotOnceWrite;
+    };
+    let args = fc.arguments();
+    let Some(first) = args.first() else {
+        return OnceWriteAdmission::NotOnceWrite;
+    };
+
+    // Route 1: key-derived. A bare column reference to one of the model's
+    // own `unique_key` columns is a per-key constant by construction.
+    if let Some(col_ref) = first.as_column_ref() {
+        let name = col_ref.name().to_string();
+        if unique_key.iter().any(|k| k.eq_ignore_ascii_case(&name)) {
+            return OnceWriteAdmission::Admitted;
+        }
+        return OnceWriteAdmission::Unproven {
+            column: name,
+            reason: "the coalesced value is a bare column reference outside the model's \
+                     unique_key — reduce it per key with MAX(...)/MIN(...) first"
+                .to_string(),
+        };
+    }
+
+    // Route 2: FD-backed. A direct MAX(<col>)/MIN(<col>) reduction, proven
+    // (or declared) a per-key constant.
+    if let Some(inner_fc) = first.as_function_call() {
+        let inner_name = inner_fc.name().unwrap_or_default().to_ascii_uppercase();
+        if inner_name == "MAX" || inner_name == "MIN" {
+            let inner_args = inner_fc.arguments();
+            if let Some(inner_ref) = inner_args
+                .first()
+                .filter(|_| inner_args.len() == 1)
+                .and_then(|a| a.as_column_ref())
+            {
+                // The `determines` column is the coalesced value's SOURCE
+                // payload column — never the projection's output alias
+                // (see this function's doc comment: `unique_key -> alias`
+                // is true by construction and proves nothing).
+                let column = inner_ref.name().to_string();
+                let Some(vector) = vector else {
+                    return OnceWriteAdmission::Unproven {
+                        column,
+                        reason: "the model SQL could not be classified for the once-write \
+                                 provenance proof"
+                            .to_string(),
+                    };
+                };
+                // The declared key must name the model's actual GROUP BY
+                // SOURCE columns, never the projections' output aliases:
+                // `SELECT user_id AS device_id ... GROUP BY user_id` groups
+                // on `user_id`, so a declaration `key: [device_id]` asserts a
+                // dependency on a different column and proves nothing. Where
+                // the alias and the source coincide (the common
+                // `SELECT device_id ... GROUP BY device_id` shape) the source
+                // set contains that name anyway. A GROUP BY expression that
+                // is not a (possibly qualified) plain identifier contributes
+                // only its raw text, which no column-name declaration can
+                // match — failing closed rather than guessing.
+                let source_key_set = group_by_source_columns(group_by_exprs);
+                let declared = declared_fds.iter().any(|fd| {
+                    let declared_key: std::collections::BTreeSet<String> =
+                        fd.key.iter().map(|k| k.to_ascii_lowercase()).collect();
+                    fd.determines.eq_ignore_ascii_case(&column)
+                        && !declared_key.is_empty()
+                        // A subset key is a STRONGER statement that implies
+                        // the unique_key dependency — accepted, mirroring
+                        // `functional_dependency_verdict_over_vector`'s own
+                        // `has_subset_key` treatment.
+                        && declared_key.is_subset(&source_key_set)
+                });
+                // A conservative, whole-scope stand-in for "the determines
+                // column is sourced from a join F6 proves fans out" — see
+                // this function's own doc comment for why the grain-composed
+                // helper's shortcut is unsound here.
+                let determines_fan_out = if vector.has_fan_out_join {
+                    Some(crate::analysis::join_shape::Cardinality::OneToMany)
+                } else {
+                    None
+                };
+                let verdict = functional_dependency_verdict(determines_fan_out, declared);
+                if let FunctionalDependencyVerdict::Refused(reason) = verdict {
+                    return OnceWriteAdmission::Unproven { column, reason };
+                }
+                // The second structural disproof a declaration may not widen
+                // past (`model_properties.md` SC-6), enforced here exactly as
+                // `functional_dependency_verdict_over_vector` enforces it.
+                if vector.has_set_op_barrier {
+                    return OnceWriteAdmission::Unproven {
+                        column,
+                        reason: "the coalesced column crosses a UNION ALL / set operation whose \
+                                 branches are not proven key-disjoint (no literal discriminator \
+                                 covering the declared key); an FD holding in each branch does \
+                                 not hold in the union, so a declared functional dependency \
+                                 cannot be assumed to survive it"
+                            .to_string(),
+                    };
+                }
+                return match verdict {
+                    FunctionalDependencyVerdict::Constant => {
+                        // NULL preservation. The merge arm is
+                        // `COALESCE(target, delta)`, so the maintained value
+                        // is "the first NON-NULL value any window produced".
+                        // That equals the full refresh only while the
+                        // projection itself is NULL-preserving: a fallback
+                        // makes the delta TOTAL, so a window in which every
+                        // row for a key carries a NULL payload writes the
+                        // fallback, and the target — now non-null — can
+                        // never be displaced by the real value a later
+                        // window delivers, while a full refresh returns it.
+                        // The declared FD asserts "per-key constant", never
+                        // "never NULL", and this family is literally "first
+                        // NON-NULL", so intra-key NULLs are anticipated
+                        // (`incremental_models.md` §"The equivalence
+                        // invariant"). A second CANDIDATE argument
+                        // (`COALESCE(MAX(a), MAX(b))`) is NULL-preserving
+                        // but still refused: the merge does not preserve the
+                        // arguments' PREFERENCE order across windows — a
+                        // window with `a IS NULL` and `b` present writes
+                        // `b`, which a later window carrying `a` can never
+                        // displace, while a full refresh prefers `a`.
+                        if args.len() > 1 {
+                            OnceWriteAdmission::Unproven {
+                                column,
+                                reason: "the COALESCE carries a fallback argument, which makes \
+                                         the projection total: a window whose rows all carry a \
+                                         NULL payload for a key writes the fallback into the \
+                                         target, and the first-non-null merge then locks that \
+                                         value in — no later window can deliver the real value, \
+                                         while a full refresh would return it. Drop the fallback \
+                                         (`COALESCE(MAX(...))`) and apply the default downstream, \
+                                         in a reader-side projection"
+                                    .to_string(),
+                            }
+                        } else {
+                            OnceWriteAdmission::Admitted
+                        }
+                    }
+                    FunctionalDependencyVerdict::Refused(reason) => {
+                        OnceWriteAdmission::Unproven { column, reason }
+                    }
+                    FunctionalDependencyVerdict::NotProven => OnceWriteAdmission::Unproven {
+                        column,
+                        reason: "no declared functional dependency names this source column as \
+                                 its `determines` over a key the model's unique_key covers, and \
+                                 it is not a key-derived expression"
+                            .to_string(),
+                    },
+                };
+            }
+        }
+    }
+
+    OnceWriteAdmission::Unproven {
+        column: text.trim().to_string(),
+        reason: "the coalesced value is neither a key-derived expression nor a direct \
+                 MAX(...)/MIN(...) reduction of a single column"
+            .to_string(),
+    }
+}
+
+/// The set of names a declared functional-dependency `key:` may legitimately
+/// use to refer to this model's grouping columns — the GROUP BY **source**
+/// expressions, never the SELECT list's output aliases
+/// (`model_properties.md` §"Algebraic discriminants", the
+/// functional-dependency declaration: the declared key is a world fact about
+/// the model's *inputs*).
+///
+/// Each GROUP BY expression contributes its own lowercased text. A
+/// qualified plain identifier (`e.device_id`) additionally contributes its
+/// bare column name (`device_id`) — the same column, differently spelled —
+/// but only when that bare name is unambiguous across the whole GROUP BY
+/// list; two differently-qualified columns sharing a bare name
+/// (`e.id`, `o.id`) contribute neither, so a declaration naming `id` cannot
+/// match. Anything that is not a plain (optionally qualified) identifier —
+/// `date_trunc('day', ts)`, a `COALESCE(...)` composite key — contributes
+/// only its raw text, which no column-name declaration matches: the
+/// undecidable case fails closed.
+fn group_by_source_columns(group_by_exprs: &[String]) -> std::collections::BTreeSet<String> {
+    fn bare_identifier(text: &str) -> Option<String> {
+        let mut segments = text.split('.');
+        let last = segments.next_back()?.trim();
+        if text
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+            && !last.is_empty()
+            && !last.starts_with(|c: char| c.is_ascii_digit())
+        {
+            Some(last.to_ascii_lowercase())
+        } else {
+            None
+        }
+    }
+
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut bare_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for expr in group_by_exprs {
+        let text = expr.trim();
+        names.insert(text.to_ascii_lowercase());
+        if let Some(bare) = bare_identifier(text) {
+            *bare_counts.entry(bare).or_insert(0) += 1;
+        }
+    }
+    for (bare, count) in bare_counts {
+        if count == 1 {
+            names.insert(bare);
+        }
+    }
+    names
 }
 
 /// Lookup a per-partition aggregator name and return its cross-partition
@@ -187,6 +530,18 @@ pub enum KeyedDiagnostic {
         candidates: Vec<String>,
     },
     KeyedSqlNotParseable,
+    /// A `COALESCE`-shaped once-write column (`incremental_models.md` §"The
+    /// column-family catalogue") has no once-write provenance proof: the
+    /// coalesced value is neither key-derived nor backed by a declared
+    /// functional dependency the fan-out proof does not positively
+    /// disprove. `column` names the coalesced value's source column;
+    /// `reason` names why the proof did not close (unproven, or a
+    /// structural disproof — `analysis::functional_dependency`).
+    KeyedOnceWriteUnproven {
+        projection: String,
+        column: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for KeyedDiagnostic {
@@ -260,6 +615,19 @@ impl std::fmt::Display for KeyedDiagnostic {
             KeyedDiagnostic::KeyedSqlNotParseable => {
                 write!(f, "SQL body could not be parsed for keyed classification")
             }
+            KeyedDiagnostic::KeyedOnceWriteUnproven {
+                projection,
+                column,
+                reason,
+            } => write!(
+                f,
+                "KeyedOnceWriteUnproven: projection `{projection}`'s once-write column `{column}` \
+                 has no once-write provenance proof — {reason}. Fix by: (1) making it a \
+                 key-derived expression (a pure function of the model's unique_key columns), (2) \
+                 declaring a functional dependency (`functional_dependencies: [{{key: [...], \
+                 determines: {column}}}]`), or (3) remodelling `{column}` out into its own \
+                 separate model."
+            ),
         }
     }
 }
@@ -385,6 +753,12 @@ pub fn declared_unique_key_matches(
 /// `timeseries:` is instead decided by the key-temporal-locality gate,
 /// `maintenance::locality::establish_locality`).
 ///
+/// `declared_functional_dependencies` is the model's own declared
+/// `functional_dependencies:` block — the once-write family's provenance
+/// proof (`classify_once_write`) consults it, widening a `COALESCE`
+/// projection whose coalesced value isn't itself key-derived
+/// (`docs/plans/20260809-keyed-frontier.md` Phase 4).
+///
 /// Returns the classification on success, or a vector of diagnostics
 /// describing every classifier rejection (the function does not short-circuit
 /// on the first error — it surfaces every problem it can detect).
@@ -393,6 +767,7 @@ pub fn classify_cumulative(
     refs: &[String],
     source_timeseries: &SourceTimeseriesMap,
     model_has_timeseries: bool,
+    declared_functional_dependencies: &[FunctionalDependency],
 ) -> Result<CumulativeClassification, Vec<KeyedDiagnostic>> {
     let mut diagnostics = Vec::new();
 
@@ -402,6 +777,13 @@ pub fn classify_cumulative(
             return Err(vec![KeyedDiagnostic::KeyedSqlNotParseable]);
         }
     };
+
+    // The whole-model property vector — the once-write family's FD-backed
+    // route consults it (`classify_once_write`). `None` when the walk
+    // itself can't classify this SQL shape; the once-write route then fails
+    // closed rather than guess (`analysis::functional_dependency`'s
+    // documented consumer seam).
+    let property_vector = model_property_vector(sql, &JoinContext::new());
 
     // Rule: GROUP BY required.
     if analysis.group_by_exprs.is_empty() {
@@ -486,7 +868,58 @@ pub fn classify_cumulative(
     let mut aggregator_columns: Vec<AggregatorColumn> = Vec::new();
     for item in &analysis.items {
         match item {
-            SelectItemKind::GroupByKey { text, alias, .. } => {
+            SelectItemKind::GroupByKey { text, alias, expr } => {
+                // The once-write family (`COALESCE`, `incremental_models.md`
+                // §"The column-family catalogue") is checked first — a
+                // `COALESCE(...)` call is a non-aggregate scalar (so it
+                // lands here, not in `OtherAggregate`), and its own
+                // admission has nothing to do with the generic composite-
+                // expression refusal below. A `COALESCE` expression that is
+                // itself the GROUP BY key stays a key column: the helper
+                // consults `group_by_exprs` and declines it.
+                match classify_once_write(
+                    text,
+                    expr,
+                    &unique_key,
+                    &analysis.group_by_exprs,
+                    declared_functional_dependencies,
+                    property_vector.as_ref(),
+                ) {
+                    OnceWriteAdmission::Admitted => {
+                        if is_snapshot_reconcile {
+                            diagnostics.push(
+                                KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn {
+                                    projection: alias.clone(),
+                                    family: "once-write".to_string(),
+                                    reason: "once-write assumes a value is fixed the first \
+                                             time it is observed across window-forward event \
+                                             history — re-scanning a mutable snapshot every \
+                                             run cannot preserve first-write-wins semantics, \
+                                             since the merge would only ever see the current \
+                                             snapshot's value"
+                                        .to_string(),
+                                },
+                            );
+                        } else {
+                            aggregator_columns.push(AggregatorColumn {
+                                output_name: alias.clone(),
+                                per_partition_agg: "COALESCE".to_string(),
+                                cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+                            });
+                        }
+                        continue;
+                    }
+                    OnceWriteAdmission::Unproven { column, reason } => {
+                        diagnostics.push(KeyedDiagnostic::KeyedOnceWriteUnproven {
+                            projection: alias.clone(),
+                            column,
+                            reason,
+                        });
+                        continue;
+                    }
+                    OnceWriteAdmission::NotOnceWrite => {}
+                }
+
                 // A "GroupByKey" item is the analyser's classification for
                 // any non-aggregate expression. If the projection's text
                 // appears in the GROUP BY, it is genuinely a key column.
@@ -503,9 +936,11 @@ pub fn classify_cumulative(
                         projection: alias.clone(),
                         offending: format!(
                             "composite expression `{}` — wrap it as `MAX_BY({}, <ordering>)` \
-                             for the order-monotone overwrite family (window-forward), or \
+                             for the order-monotone overwrite family (window-forward), \
                              `ANY_VALUE({})` for the plain-overwrite family \
-                             (snapshot-reconcile only)",
+                             (snapshot-reconcile only), or `COALESCE({}, <default>)` for the \
+                             once-write family",
+                            text.trim(),
                             text.trim(),
                             text.trim(),
                             text.trim()
@@ -976,8 +1411,8 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id"#;
 
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let classification =
-            classify_cumulative(sql, &refs, &events_source_map(), false).expect("must classify");
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+            .expect("must classify");
 
         assert_eq!(classification.unique_key, vec!["device_id", "user_id"]);
         assert_eq!(classification.aggregator_columns.len(), 3);
@@ -1013,7 +1448,7 @@ GROUP BY device_id, user_id"#;
     fn test_no_group_by_refused() {
         let sql = "SELECT COUNT(*) AS n FROM smelt.silver.events_parsed";
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedRequiresGroupBy)),
@@ -1031,7 +1466,7 @@ GROUP BY device_id, user_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -1052,7 +1487,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -1073,7 +1508,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
@@ -1093,7 +1528,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id, user_id, event_date"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -1122,7 +1557,7 @@ GROUP BY device_id, user_id, event_date"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id, user_id, event_date"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let result = classify_cumulative(sql, &refs, &events_source_map(), true);
+        let result = classify_cumulative(sql, &refs, &events_source_map(), true, &[]);
         match result {
             // With the check narrowed off, this shape has no other
             // rejection — GROUP BY over three plain columns plus a bare
@@ -1159,7 +1594,7 @@ GROUP BY device_id, user_id, event_date"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
@@ -1177,7 +1612,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
@@ -1200,7 +1635,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.lookup_table
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.lookup_table".to_string()];
-        let err = classify_cumulative(sql, &refs, &HashMap::new(), false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &HashMap::new(), false, &[]).unwrap_err();
         assert!(
             !err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
@@ -1234,7 +1669,7 @@ GROUP BY device_id"#;
         let mut map = HashMap::new();
         map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
-        let err = classify_cumulative(sql, &refs, &map, false).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &map, false, &[]).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedMultipleDrivingSources { .. })),
@@ -1263,7 +1698,7 @@ GROUP BY device_id"#;
         let mut map = HashMap::new();
         map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
-        let classification = classify_cumulative(sql, &refs, &map, false)
+        let classification = classify_cumulative(sql, &refs, &map, false, &[])
             .expect("must classify: only events_a is joined");
         assert_eq!(classification.driving_source.name, "smelt.silver.events_a");
     }
@@ -1283,8 +1718,8 @@ GROUP BY e.device_id, e.user_id"#;
             "smelt.silver.events_parsed".to_string(),
             "smelt.silver.user_lookup".to_string(),
         ];
-        let classification =
-            classify_cumulative(sql, &refs, &events_source_map(), false).expect("must classify");
+        let classification = classify_cumulative(sql, &refs, &events_source_map(), false, &[])
+            .expect("must classify");
         assert_eq!(
             classification.driving_source.name,
             "smelt.silver.events_parsed"

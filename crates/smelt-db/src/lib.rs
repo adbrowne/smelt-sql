@@ -1122,6 +1122,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         }
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
+        R::KeyedOnceWriteUnproven => DiagnosticCode::KeyedOnceWriteUnproven,
         R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
@@ -2138,6 +2139,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 } else {
                     None
                 },
+                declared_functional_dependencies: &metadata.functional_dependencies,
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
             for rd in smelt_logical::detect_builtin_rules(&ctx) {

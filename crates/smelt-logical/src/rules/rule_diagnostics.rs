@@ -52,6 +52,7 @@ pub enum RuleDiagnosticCode {
     KeyedSnapshotSourceUnsupportedColumn,
     KeyedMultipleDrivingSources,
     KeyedSqlNotParseable,
+    KeyedOnceWriteUnproven,
     PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
@@ -90,6 +91,11 @@ pub struct RuleContext<'a> {
     pub timeseries_config: Option<&'a TimeseriesConfig>,
     /// Frontmatter `incremental:` block, if any.
     pub incremental_config: Option<&'a PartitionGrainConfig>,
+    /// The model's own declared `functional_dependencies:` block — the
+    /// keyed classifier's once-write family consults it
+    /// (`rules::cumulative::classify_once_write`,
+    /// `docs/plans/20260809-keyed-frontier.md` Phase 4).
+    pub declared_functional_dependencies: &'a [smelt_core::config::FunctionalDependency],
 }
 
 /// A planner rule that surfaces its rejections as diagnostics.
@@ -117,6 +123,7 @@ impl PlannerRule for KeyedRule {
             ctx.refs,
             ctx.source_timeseries,
             ctx.timeseries_config.is_some(),
+            ctx.declared_functional_dependencies,
         ) {
             Ok(_) => Vec::new(),
             Err(diags) => diags.iter().map(keyed_to_rule).collect(),
@@ -503,6 +510,9 @@ fn keyed_to_rule(diag: &KeyedDiagnostic) -> RuleDiagnostic {
             RuleDiagnosticCode::KeyedMultipleDrivingSources
         }
         KeyedDiagnostic::KeyedSqlNotParseable => RuleDiagnosticCode::KeyedSqlNotParseable,
+        KeyedDiagnostic::KeyedOnceWriteUnproven { .. } => {
+            RuleDiagnosticCode::KeyedOnceWriteUnproven
+        }
     };
     RuleDiagnostic {
         code,
@@ -596,6 +606,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -621,6 +632,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -641,6 +653,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -675,6 +688,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -701,6 +715,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -726,6 +741,7 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -768,6 +784,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -820,6 +837,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -860,6 +878,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -892,6 +911,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -933,6 +953,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         let hit = diags
@@ -984,6 +1005,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -1017,6 +1039,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
         };
         assert!(
             check_batched_bound_derivable(&ctx).is_none(),
@@ -1052,6 +1075,7 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
         };
         // Note: PartitionGrainNotSafe Warning may fire (subquery in FROM),
         // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.

@@ -13,6 +13,20 @@
 //! multiplying) is refused regardless of the declaration — the declaration
 //! can widen only the *undecidable* case (no traceable join at all, or one F6
 //! cannot resolve), never substitute for F6's positive proof of variance.
+//!
+//! This module's first production consumer is the keyed classifier's
+//! once-write (`COALESCE`) family (`rules::cumulative::classify_once_write`):
+//! a `COALESCE(MAX(col))`/`COALESCE(MIN(col))` projection's inner
+//! SOURCE column `col` is the `determines` column (never the projection's
+//! output alias, which the model's own `GROUP BY` key determines by
+//! construction). That consumer calls the raw
+//! [`functional_dependency_verdict`] and re-states this module's two
+//! STRUCTURAL disproofs (fan-out join, set-operation barrier) itself, rather
+//! than calling [`functional_dependency_verdict_over_vector`] wholesale: the
+//! latter's grain-subset shortcut proves determinism within one fixed
+//! computation, not invariance across merges, which is the property the
+//! once-write family needs. See that function's doc comment for the full
+//! argument.
 
 use crate::analysis::join_shape::Cardinality;
 use crate::analysis::walk::PropertyVector;

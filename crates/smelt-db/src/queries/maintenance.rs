@@ -33,7 +33,7 @@ use smelt_logical::maintenance::{
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
-    order_monotone_companion,
+    order_monotone_companion, OnceWriteAdmission,
 };
 use smelt_types::SqlFunction;
 
@@ -159,42 +159,106 @@ pub fn effective_scan_bounds(
 /// unrecognised combiner does — this keeps `smelt explain`/LSP diagnostics
 /// from reporting a `KeyedFold` admission the runtime then refuses with
 /// `KeyedUnknownCombiner` (`CLAUDE.md` §"Fail-loud discipline").
-pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
+///
+/// `declared_functional_dependencies` is the model's own declared
+/// `functional_dependencies:` block, threaded straight into
+/// [`smelt_logical::rules::cumulative::classify_once_write`] — the SAME
+/// shared helper the runtime classifier
+/// (`smelt_logical::rules::cumulative::classify_cumulative`) uses for the
+/// once-write (`COALESCE`) family, so this plan-layer derivation and the
+/// runtime admission never diverge (`docs/plans/20260809-keyed-frontier.md`
+/// Phase 4's "single shared helper" review lesson from Phases 1/3).
+pub fn derive_fold_spec(
+    sql: &str,
+    declared_functional_dependencies: &[smelt_core::config::FunctionalDependency],
+) -> Option<FoldSpec> {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
     let select = file.select_stmt()?;
     let items = select_stmt_items(&select)?;
+    let unique_key = derive_group_by_unique_key(sql);
+    // The model's own GROUP BY expressions — `classify_once_write` consults
+    // them so a null-safe composite key (`COALESCE(x, 'n/a')` grouped by the
+    // same expression) stays a KEY column rather than being claimed by the
+    // once-write family.
+    let group_by_exprs = smelt_logical::analyze_select(sql)
+        .map(|a| a.group_by_exprs)
+        .unwrap_or_default();
+    let vector = smelt_logical::analysis::walk::model_property_vector(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    );
     let mut add_columns: Vec<(String, SqlFunction)> = Vec::new();
     for item in &items {
-        if let SelectItemKind::OtherAggregate { alias, expr, .. } = item {
-            let func = expr.as_function_call()?;
-            let name = func.name()?;
-            let combiner = SqlFunction::from_name(&name.to_uppercase())?;
-            // `ANY_VALUE` is the plain-overwrite family
-            // (`docs/specs/incremental_models.md` §"The column-family
-            // catalogue") — not a fold-family combiner at all (no
-            // target/delta combine, incoming row always wins), so it never
-            // enters a `FoldSpec`. A model whose non-key columns are ONLY
-            // `ANY_VALUE` calls derives an empty `add_columns` here (→
-            // `None` below), which `derive_new_data`'s `Grain::Key` arm
-            // reads as "no fold-family column over this source" — the
-            // snapshot-reconcile shape, not a refusal
-            // (`docs/plans/20260809-keyed-frontier.md` Phase 3).
-            if combiner == SqlFunction::AnyValue {
-                continue;
+        match item {
+            SelectItemKind::OtherAggregate { alias, expr, .. } => {
+                let func = expr.as_function_call()?;
+                let name = func.name()?;
+                let combiner = SqlFunction::from_name(&name.to_uppercase())?;
+                // `ANY_VALUE` is the plain-overwrite family
+                // (`docs/specs/incremental_models.md` §"The column-family
+                // catalogue") — not a fold-family combiner at all (no
+                // target/delta combine, incoming row always wins), so it never
+                // enters a `FoldSpec`. A model whose non-key columns are ONLY
+                // `ANY_VALUE` calls derives an empty `add_columns` here (→
+                // `None` below), which `derive_new_data`'s `Grain::Key` arm
+                // reads as "no fold-family column over this source" — the
+                // snapshot-reconcile shape, not a refusal
+                // (`docs/plans/20260809-keyed-frontier.md` Phase 3).
+                if combiner == SqlFunction::AnyValue {
+                    continue;
+                }
+                if matches!(combiner, SqlFunction::ArgMax | SqlFunction::ArgMin) {
+                    let args = func.arguments();
+                    let value_text = args.first()?.text().trim().to_string();
+                    let ordering_text = args.get(1)?.text().trim().to_string();
+                    let tracking_fn = if combiner == SqlFunction::ArgMax {
+                        "MAX"
+                    } else {
+                        "MIN"
+                    };
+                    order_monotone_companion(
+                        &items,
+                        alias,
+                        &value_text,
+                        &ordering_text,
+                        tracking_fn,
+                    )?;
+                }
+                add_columns.push((alias.clone(), combiner));
             }
-            if matches!(combiner, SqlFunction::ArgMax | SqlFunction::ArgMin) {
-                let args = func.arguments();
-                let value_text = args.first()?.text().trim().to_string();
-                let ordering_text = args.get(1)?.text().trim().to_string();
-                let tracking_fn = if combiner == SqlFunction::ArgMax {
-                    "MAX"
-                } else {
-                    "MIN"
-                };
-                order_monotone_companion(&items, alias, &value_text, &ordering_text, tracking_fn)?;
+            SelectItemKind::GroupByKey { text, alias, expr } => {
+                // The once-write family (`COALESCE`) is a non-aggregate
+                // scalar call, so it classifies as `GroupByKey`, not
+                // `OtherAggregate` — mirrors `classify_cumulative`'s own
+                // GroupByKey arm exactly.
+                match smelt_logical::rules::cumulative::classify_once_write(
+                    text,
+                    expr,
+                    &unique_key,
+                    &group_by_exprs,
+                    declared_functional_dependencies,
+                    vector.as_ref(),
+                ) {
+                    OnceWriteAdmission::Admitted => {
+                        add_columns.push((alias.clone(), SqlFunction::Coalesce));
+                    }
+                    // A once-write column whose provenance proof does not hold
+                    // refuses the WHOLE derivation, exactly like an
+                    // unrecognised combiner — dropping it would leave a
+                    // partial `FoldSpec` over the model's other columns, so
+                    // `smelt explain`/LSP would report a `KeyedFold`
+                    // admission the runtime classifier refuses with
+                    // `KeyedOnceWriteUnproven` (`CLAUDE.md` §"Fail-loud
+                    // discipline").
+                    OnceWriteAdmission::Unproven { .. } => return None,
+                    // Not a once-write projection at all (a plain key column,
+                    // a null-safe composite GROUP BY key): no fold column,
+                    // no refusal.
+                    OnceWriteAdmission::NotOnceWrite => {}
+                }
             }
-            add_columns.push((alias.clone(), combiner));
+            SelectItemKind::CountDistinct { .. } => {}
         }
     }
     if add_columns.is_empty() {
@@ -411,7 +475,7 @@ pub fn derive_model_maintenance_plan(
     let skeleton = skeleton_columns(sql, &[], partition_col.as_deref());
     let grouping = derive_column_groups(sql, sources, &skeleton);
     let fold = match grain {
-        ConfigGrain::Key => derive_fold_spec(sql),
+        ConfigGrain::Key => derive_fold_spec(sql, &metadata.functional_dependencies),
         _ => None,
     };
     let output = OutputSpec {
@@ -1152,14 +1216,15 @@ mod tests {
         // candidate — `derive_fold_spec` must return `None`, not fabricate
         // one, so the derivation's own admission refuses honestly.
         let sql = "SELECT user_id, amount FROM smelt.sources.payments";
-        assert!(derive_fold_spec(sql).is_none());
+        assert!(derive_fold_spec(sql, &[]).is_none());
     }
 
     #[test]
     fn grain_mismatch_detects_single_aggregate() {
         let sql =
             "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
-        let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("single SUM aggregate should be a fold candidate");
         assert_eq!(
             fold.add_columns,
             vec![("total".to_string(), SqlFunction::Sum)]
@@ -1171,7 +1236,7 @@ mod tests {
         let sql = "SELECT user_id, COUNT(*) AS n, MIN(event_ts) AS first_seen, \
                     MAX(event_ts) AS last_seen FROM smelt.sources.events GROUP BY user_id";
         let fold =
-            derive_fold_spec(sql).expect("multi-aggregate SELECT should be a fold candidate");
+            derive_fold_spec(sql, &[]).expect("multi-aggregate SELECT should be a fold candidate");
         assert_eq!(
             fold.add_columns,
             vec![
@@ -1188,7 +1253,8 @@ mod tests {
         // `FoldSpec` shape it did before multi-column folds were supported.
         let sql =
             "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
-        let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("single SUM aggregate should be a fold candidate");
         assert_eq!(fold.add_columns.len(), 1);
         assert_eq!(fold.add_columns[0], ("total".to_string(), SqlFunction::Sum));
     }
@@ -1205,7 +1271,7 @@ mod tests {
                     NOT_A_REAL_FUNCTION() OVER (ORDER BY amount) AS weird \
                     FROM smelt.sources.payments GROUP BY user_id";
         assert!(
-            derive_fold_spec(sql).is_none(),
+            derive_fold_spec(sql, &[]).is_none(),
             "an unresolvable aggregate/window item among the set must refuse the whole \
              derivation, not a partial fold"
         );
@@ -1267,7 +1333,8 @@ mod tests {
                     MIN(event_time) AS event_ts, MIN(event_date) AS first_seen_date, \
                     MIN(utm_campaign) AS utm_campaign, MIN(payload) AS payload \
                     FROM smelt.sources.raw.events GROUP BY event_id";
-        let fold = derive_fold_spec(sql).expect("six-column MIN fold should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("six-column MIN fold should be a fold candidate");
         assert_eq!(fold.add_columns.len(), 6);
         assert!(fold.add_columns.iter().all(|(_, c)| *c == SqlFunction::Min));
 

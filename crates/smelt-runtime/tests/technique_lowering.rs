@@ -1474,6 +1474,55 @@ fn max_by_merge_renders_incumbent_comparison() {
     );
 }
 
+/// Phase 4 (`docs/plans/20260809-keyed-frontier.md`): the once-write
+/// family's (`COALESCE`) rendered `MERGE` sets each column to
+/// `COALESCE(target.<col>, delta.<col>)` — the target's already-set value
+/// wins; the delta only ever fills a `NULL` target
+/// (`docs/specs/incremental_models.md` §"The column-family catalogue").
+#[test]
+fn once_write_renders_coalesce_target_first() {
+    use smelt_core::config::{Granularity, TimeseriesConfig};
+    use smelt_logical::{
+        AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
+    };
+    use smelt_runtime::cumulative::build_cumulative_merge_sql;
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["device_id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "signup_referrer".to_string(),
+            per_partition_agg: "COALESCE".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.events".to_string(),
+            timeseries: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+        },
+    };
+    let delta_sql = "SELECT device_id, COALESCE(MAX(signup_referrer)) AS \
+                      signup_referrer FROM events GROUP BY device_id";
+
+    let sql = build_cumulative_merge_sql(
+        "main",
+        "device_first_touch",
+        delta_sql,
+        &classification,
+        None,
+        &unconditional(),
+    );
+
+    assert!(
+        sql.contains("signup_referrer = COALESCE(target.signup_referrer, delta.signup_referrer)"),
+        "expected the target-first COALESCE merge, got: {sql}"
+    );
+}
+
 /// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): the snapshot-reconcile
 /// run shape's `MERGE` — a whole-source `USING` select (no window predicate
 /// injected into `delta_sql`, unlike the window-forward per-partition

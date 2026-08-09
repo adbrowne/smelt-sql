@@ -740,6 +740,11 @@ pub enum DiagnosticCode {
     KeyedMultipleDrivingSources,
     /// A `refresh: keyed` SELECT could not be parsed for classification.
     KeyedSqlNotParseable,
+    /// A `refresh: keyed` `COALESCE`-shaped once-write column has no
+    /// once-write provenance proof (`incremental_models.md` §"The
+    /// column-family catalogue"). Names the column and the three fixes:
+    /// key-derived form, declared functional dependency, or remodelling.
+    KeyedOnceWriteUnproven,
     /// A `refresh: keyed` model incorrectly declares a `timeseries:` block
     /// (key temporal locality is not established). The keyed output has no
     /// partition column by default; the rule reads it from the driving

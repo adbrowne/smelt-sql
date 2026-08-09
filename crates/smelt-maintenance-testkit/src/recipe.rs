@@ -1002,6 +1002,19 @@ pub enum KeyedCombiner {
     /// keeps no ledger at all (`incremental_models.md` §"The transactional
     /// merge ledger": "Snapshot-reconcile models keep no ledger").
     PlainOverwrite,
+    /// `COALESCE(MAX(val))` — the once-write family
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 4;
+    /// `incremental_models.md` §"The column-family catalogue"). Admitted
+    /// window-forward only under the once-write provenance proof — this
+    /// recipe declares a `functional_dependencies: [{key: [id], determines:
+    /// val}]` entry ([`render_keyed_model_file`]) so the FD-backed route
+    /// admits it. `Grade::Idempotent`: `COALESCE(target, delta)` re-merged
+    /// against an already-reflected delta is a no-op. Deliberately excluded
+    /// from [`arb_keyed_combiner`] — the once-write world-fact (the payload
+    /// column is a genuine per-key constant) does not hold for
+    /// [`arb_keyed_schedule`]'s deliberately key-re-touching, varying-value
+    /// generated data; a dedicated recipe/schedule is required instead.
+    OnceWrite,
 }
 
 impl KeyedCombiner {
@@ -1011,6 +1024,7 @@ impl KeyedCombiner {
             KeyedCombiner::Idempotent => "idempotent",
             KeyedCombiner::OrderMonotone => "order_monotone",
             KeyedCombiner::PlainOverwrite => "plain_overwrite",
+            KeyedCombiner::OnceWrite => "once_write",
         }
     }
 
@@ -1025,6 +1039,7 @@ impl KeyedCombiner {
             KeyedCombiner::Idempotent => ("MAX", "max_val"),
             KeyedCombiner::OrderMonotone => ("MAX_BY", "max_by_val"),
             KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
+            KeyedCombiner::OnceWrite => ("COALESCE", "once_val"),
         }
     }
 
@@ -1035,9 +1050,10 @@ impl KeyedCombiner {
     pub fn ordering_alias(self) -> Option<&'static str> {
         match self {
             KeyedCombiner::OrderMonotone => Some("max_by_ord"),
-            KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
-                None
-            }
+            KeyedCombiner::Additive
+            | KeyedCombiner::Idempotent
+            | KeyedCombiner::PlainOverwrite
+            | KeyedCombiner::OnceWrite => None,
         }
     }
 
@@ -1058,6 +1074,15 @@ impl KeyedCombiner {
                 }
                 None => unreachable!("OrderMonotone always carries an ordering alias"),
             },
+            KeyedCombiner::OnceWrite => {
+                // No fallback argument: a fallback would make the
+                // projection total, and the once-write merge
+                // (`COALESCE(target, delta)`) would then lock the default in
+                // for any key whose first window carried only NULL payloads
+                // — the shape the classifier refuses
+                // (`rules::cumulative::classify_once_write`).
+                format!("COALESCE(MAX({val})) AS {alias}")
+            }
             KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
                 format!("{agg}({val}) AS {alias}")
             }
@@ -1103,6 +1128,24 @@ impl KeyedRecipe {
             model_name: format!("recipe_keyed_snapshot_{}", combiner.kind_name()),
             source: SourceRecipe::mutable_dimension("keyed_snapshot_dim"),
             combiner,
+        }
+    }
+
+    /// The once-write family's dedicated recipe
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 4): window-forward,
+    /// clocked append-only `events` source, [`KeyedCombiner::OnceWrite`].
+    /// [`render_keyed_model_file`] additionally declares
+    /// `functional_dependencies: [{key: [id], determines: val}]` for this
+    /// combiner — the once-write provenance proof — so the classifier
+    /// admits the `COALESCE(MAX(val))` projection. Not drawn from
+    /// [`arb_keyed_combiner`]/[`arb_keyed_schedule`] — see
+    /// [`KeyedCombiner::OnceWrite`]'s own doc comment for why a generic
+    /// schedule would violate the once-write world-fact.
+    pub fn new_window_forward_once_write() -> Self {
+        Self {
+            model_name: "recipe_keyed_once_write".to_string(),
+            source: SourceRecipe::events(KeyShape::Single),
+            combiner: KeyedCombiner::OnceWrite,
         }
     }
 

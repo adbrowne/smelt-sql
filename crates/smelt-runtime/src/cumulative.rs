@@ -65,6 +65,16 @@ impl WindowedKeyedRule for CumulativeClassification {
                 // rather than falling into the `combiner_for` allowlist
                 // check below, which would spuriously refuse it.
                 CrossPartitionCombiner::PlainOverwrite => {}
+                // The once-write family (`COALESCE`) is likewise not a
+                // monoid `combiner_for` allowlists — its admission proof
+                // (key-derived, or a declared functional dependency over
+                // the coalesced value's source column, not structurally
+                // disproven by a fan-out join or a set-operation barrier)
+                // is already verified at
+                // classify time (`rules::cumulative::classify_once_write`),
+                // so this defense-in-depth pass has nothing further to
+                // check (`docs/plans/20260809-keyed-frontier.md` Phase 4).
+                CrossPartitionCombiner::OnceWrite => {}
                 _ => {
                     if combiner_for(&col.per_partition_agg).is_none() {
                         return Some(format!(
@@ -93,12 +103,14 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// combiner is `Sum` — an additive fold double-counts on a repeat merge
     /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). The remaining catalogued combiners
-    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`, and the
-    /// order-monotone overwrite family `OrderMonotone`) grade `Idempotent`:
-    /// re-merging the SAME already-reflected delta twice leaves the
-    /// incumbent-wins comparison unchanged (`delta.ord > target.ord` is
-    /// false the second time, since after the first merge
-    /// `target.ord == delta.ord`) — a re-run converges, it does not
+    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`, the
+    /// order-monotone overwrite family `OrderMonotone`, and the once-write
+    /// family `OnceWrite`) grade `Idempotent`: re-merging the SAME
+    /// already-reflected delta twice leaves the incumbent-wins comparison
+    /// unchanged (`delta.ord > target.ord` is false the second time, since
+    /// after the first merge `target.ord == delta.ord`; and
+    /// `COALESCE(target.c, delta.c)` is a no-op once `target.c` is set) —
+    /// a re-run converges, it does not
     /// double-count. Mixing an additive column with idempotent ones in the
     /// same cell still grades the whole cell `Additive` — conservative
     /// (never unsafe), per `WindowedKeyedRule::ledger_grade`'s doc comment.
@@ -177,10 +189,20 @@ pub async fn execute_cumulative_aggregate(
         .metadata
         .as_ref()
         .is_some_and(|m| m.timeseries.is_some());
+    let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+        .metadata
+        .as_ref()
+        .map(|m| m.functional_dependencies.as_slice())
+        .unwrap_or(&[]);
 
-    let classification =
-        classify_cumulative(&clean_sql, &refs, source_timeseries, model_has_timeseries)
-            .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
+    let classification = classify_cumulative(
+        &clean_sql,
+        &refs,
+        source_timeseries,
+        model_has_timeseries,
+        declared_fds,
+    )
+    .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
 
     let driving_source_name = classification.driving_source.name.clone();
     // This function is only reachable via the window-forward run shape —
@@ -561,10 +583,17 @@ pub fn classify_cumulative_sql(
     clean_sql: &str,
     source_timeseries: &SourceTimeseriesMap,
     model_has_timeseries: bool,
+    declared_functional_dependencies: &[smelt_core::config::FunctionalDependency],
 ) -> Result<CumulativeClassification> {
     let refs = collect_refs_from_sql(clean_sql);
-    classify_cumulative(clean_sql, &refs, source_timeseries, model_has_timeseries)
-        .map_err(|diags| format_classifier_error(model_name, &diags))
+    classify_cumulative(
+        clean_sql,
+        &refs,
+        source_timeseries,
+        model_has_timeseries,
+        declared_functional_dependencies,
+    )
+    .map_err(|diags| format_classifier_error(model_name, &diags))
 }
 
 /// Format classifier diagnostics into a single error message for the CLI.

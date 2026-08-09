@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use crate::recipe::{
-    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedRecipe, ModelEdit,
-    ModelRecipe, SourcePosture,
+    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedCombiner,
+    KeyedRecipe, ModelEdit, ModelRecipe, SourcePosture,
 };
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
@@ -543,8 +543,23 @@ pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
         ),
         SourcePosture::AppendOnly => String::new(),
     };
+    // The once-write family's provenance proof (`incremental_models.md`
+    // §"The column-family catalogue"): a declared `key -> <source payload
+    // column>` functional dependency. `determines` names the SOURCE column
+    // inside the `COALESCE(MAX(val))` reduction (`val`) — never the
+    // projection's output alias, which the model's own GROUP BY key
+    // determines by construction and which would therefore assert nothing
+    // (`rules::cumulative::classify_once_write`).
+    let fd_block = match recipe.combiner {
+        KeyedCombiner::OnceWrite => format!(
+            "functional_dependencies:\n  - key: [{key}]\n    determines: {value}\n",
+            key = recipe.source.key_column,
+            value = recipe.source.payload_column,
+        ),
+        _ => String::new(),
+    };
     format!(
-        "---\nrefresh: incremental\ngrain: key\n{scan_bounds}---\n{body}\n",
+        "---\nrefresh: incremental\ngrain: key\n{scan_bounds}{fd_block}---\n{body}\n",
         body = render_keyed_model_body(recipe),
     )
 }

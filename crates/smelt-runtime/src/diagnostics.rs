@@ -502,11 +502,17 @@ fn build_technique_statements(
                 .metadata
                 .as_ref()
                 .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
             let classification = classify_cumulative_sql(
                 &model.name,
                 &stripped_sql,
                 source_timeseries,
                 model_has_timeseries,
+                declared_fds,
             )
             .map_err(|e| format!("{e}"))?;
 

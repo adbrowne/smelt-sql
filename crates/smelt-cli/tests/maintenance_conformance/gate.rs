@@ -1351,6 +1351,269 @@ async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
     );
 }
 
+/// Phase 4 (`docs/plans/20260809-keyed-frontier.md`): the once-write family
+/// (`COALESCE(MAX(val))`, declared-FD-backed —
+/// [`KeyedRecipe::new_window_forward_once_write`]) upholds end-state
+/// equivalence across a genuine key-recurrence schedule (the shared key
+/// re-touched in a later window with the SAME value — the once-write
+/// provenance proof's own world-fact precondition, `incremental_models.md`
+/// §"The column-family catalogue": the declared functional dependency holds
+/// in staged data by construction) — reuses the same
+/// `drive_keyed_and_assert`/`STracker` oracle machinery every other keyed
+/// combiner family runs through.
+#[tokio::test]
+async fn once_write_pool_upholds_end_state_equivalence() {
+    let recipe = KeyedRecipe::new_window_forward_once_write();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage once-write keyed recipe");
+
+    let plan = classify_keyed(&project, &recipe).expect("classify once-write keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the once-write keyed recipe to admit at least one cell: {plan:#?}"
+    );
+    assert!(
+        plan.cells
+            .iter()
+            .any(|c| c.technique == Technique::KeyedFold),
+        "expected a KeyedFold cell for the declared-FD-backed once-write column: {plan:#?}"
+    );
+
+    let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
+    let schedule = KeyedSchedule(vec![
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d1,
+            end: d1 + chrono::Duration::days(1),
+            rows: vec![GenRow {
+                d: d1,
+                id: 1,
+                val: 7,
+            }],
+        },
+        // The shared key `1` recurs with the SAME value — the once-write
+        // world-fact holds by construction, so `COALESCE(target, delta)`'s
+        // first-write-wins merge equals the full-refresh oracle
+        // (`MAX(val)` over a single distinct value is that value).
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d2,
+            end: d2 + chrono::Duration::days(1),
+            rows: vec![
+                GenRow {
+                    d: d2,
+                    id: 1,
+                    val: 7,
+                },
+                GenRow {
+                    d: d2,
+                    id: 2,
+                    val: 42,
+                },
+            ],
+        },
+        // Late redelivery of the ALREADY-MERGED first window, replaying the
+        // same rows with the same values — the world-fact-preserving
+        // direction of "the first-written value survives". The oracle IS
+        // consulted here: `COALESCE(target, delta)` re-merged against an
+        // already-reflected delta is a no-op, so the maintained state must
+        // still equal the full-refresh oracle over the (now
+        // duplicate-carrying) source.
+        smelt_maintenance_testkit::recipe::KeyedRunWindow {
+            start: d1,
+            end: d1 + chrono::Duration::days(1),
+            rows: vec![GenRow {
+                d: d1,
+                id: 1,
+                val: 7,
+            }],
+        },
+    ]);
+
+    drive_keyed_and_assert(&project, &recipe, &schedule)
+        .await
+        .expect("once-write keyed schedule must uphold end-state equivalence");
+}
+
+/// The once-write family's NULL-payload direction — the case a total
+/// (fallback-carrying) projection would break. A key's first window carries
+/// ONLY a NULL payload; a later window delivers the real value. The
+/// first-non-null merge (`COALESCE(target, delta)`) must let the real value
+/// through, matching the full-refresh oracle. Had the projection carried a
+/// literal fallback (`COALESCE(MAX(val), -1)`), the first window would have
+/// written `-1` into the target and locked it in forever — the divergence
+/// the classifier's NULL-preservation obligation refuses
+/// (`incremental_models.md` §"Once-write columns").
+///
+/// Written as a targeted (non-generative) case rather than widened into the
+/// generated pool: `GenRow::val` is a non-nullable `i64` threaded through
+/// the schedule generators, the `STracker` oracle materializer, the feed
+/// replay, and the Spark twin's Arrow readers — making it nullable is a
+/// generator-wide change out of proportion to the one column family that
+/// anticipates NULLs. The oracle here is the same full-refresh body every
+/// other keyed case asserts against, evaluated over the physical source
+/// table: the schedule is insert-only and every inserted row precedes the
+/// run that processes it, so `S` after each run IS the whole source table.
+#[tokio::test]
+async fn once_write_null_payload_then_value_upholds_equivalence() {
+    let recipe = KeyedRecipe::new_window_forward_once_write();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage once-write keyed recipe");
+
+    let source_table = format!("main.sources_{}", recipe.source.name);
+    let oracle_sql = render::render_keyed_oracle_body_over(&recipe, &source_table);
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+
+    let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let d2 = chrono::NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date");
+
+    /// One staged row of the NULL-bearing schedule: `(key, payload)`, where
+    /// `None` stages a NULL payload — the direction `GenRow`'s non-nullable
+    /// `val` cannot express.
+    type NullableRow = (i64, Option<i64>);
+
+    // Each entry is one run window: the day it covers and the rows staged
+    // into the driving source before it runs.
+    let windows: Vec<(chrono::NaiveDate, Vec<NullableRow>)> =
+        vec![(d1, vec![(1, None)]), (d2, vec![(1, Some(7))])];
+
+    for (i, (day, rows)) in windows.iter().enumerate() {
+        {
+            let conn = project.connect().expect("connect");
+            for (id, val) in rows {
+                let val_sql = val.map_or_else(|| "NULL".to_string(), |v| v.to_string());
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {source_table} VALUES (DATE '{}', {id}, {val_sql})",
+                        day.format("%Y-%m-%d")
+                    ),
+                    [],
+                )
+                .expect("stage source row");
+            }
+        }
+
+        let mut request = base_request("dev");
+        request.start = Some(day.format("%Y-%m-%d").to_string());
+        request.end = Some(
+            (*day + chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string(),
+        );
+        project
+            .run_quiet(&format!("once-write-null-run-{i}"), request)
+            .await
+            .expect("run once-write window");
+
+        let backend = project.backend().await.expect("backend");
+        let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql)
+            .await
+            .expect("compare maintained state to the full-refresh oracle");
+        assert!(
+            equal,
+            "once-write NULL-payload equivalence violated after window {i}: maintained \
+             ({maintained_sql:?}) != oracle ({oracle_sql:?})"
+        );
+    }
+}
+
+/// The once-write family's own distinguishing mechanics
+/// (`docs/specs/incremental_models.md` §"The column-family catalogue" —
+/// `COALESCE(target, delta)`, "the target's value wins once set"): a later
+/// redelivery of an already-folded window carrying a DIFFERENT value for
+/// the same key must NOT overwrite the first-written value — unlike the
+/// extremal-fold family's `MAX`, which would take the greater of the two.
+/// This is a technique-mechanics probe (design doc §7 "plan-claim probes"),
+/// not an end-state-equivalence assertion: deliberately redelivering a
+/// DIFFERENT value violates the once-write provenance proof's own
+/// world-fact precondition (the declared FD asserts `val` is a genuine
+/// per-key constant), so the full-refresh oracle is not consulted here —
+/// [`once_write_pool_upholds_end_state_equivalence`] above covers the
+/// world-fact-preserving equivalence claim.
+#[tokio::test]
+async fn once_write_merge_keeps_first_value_despite_later_differing_redelivery() {
+    let recipe = KeyedRecipe::new_window_forward_once_write();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage once-write keyed recipe");
+
+    let plan = classify_keyed(&project, &recipe).expect("classify once-write keyed recipe");
+    assert!(
+        !plan.cells.is_empty(),
+        "expected the once-write keyed recipe to admit at least one cell: {plan:#?}"
+    );
+
+    let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 7 }).expect("insert first row");
+
+    let mut request = base_request("dev");
+    request.start = Some("2024-01-01".to_string());
+    request.end = Some("2024-01-02".to_string());
+    project
+        .run_quiet("keyed-once-write-1", request.clone())
+        .await
+        .expect("first fold of the window must succeed");
+
+    let once_val_after_first = once_write_stored_value(&project, &recipe, 1)
+        .await
+        .expect("id=1 present after first run");
+    assert_eq!(
+        once_val_after_first, 7,
+        "expected the first-written value to be stored"
+    );
+
+    // A late redelivery carrying a DIFFERENT (larger) value for the SAME
+    // key, within the SAME already-folded window.
+    insert_row_keyed(&project, &recipe, &GenRow { d, id: 1, val: 99 })
+        .expect("insert differing late row");
+
+    // Once-write grades `Grade::Idempotent` (no reprocessing ledger) — the
+    // redelivery must succeed, not refuse with `KeyedReprocessedWindow`.
+    project
+        .run_quiet("keyed-once-write-2", request)
+        .await
+        .expect(
+            "re-running an already-folded once-write keyed window must succeed — \
+             idempotent-graded cells carry no reprocessing ledger",
+        );
+
+    let once_val_after_redelivery = once_write_stored_value(&project, &recipe, 1)
+        .await
+        .expect("id=1 present after redelivery");
+    assert_eq!(
+        once_val_after_redelivery, 7,
+        "the once-write merge (COALESCE(target, delta)) must keep the FIRST-written value \
+         (7), never overwrite with the later-redelivered value (99) — unlike the \
+         extremal-fold family's MAX, which would take 99"
+    );
+}
+
+/// Read back the once-write recipe's stored `once_val` for one key —
+/// `once_write_merge_keeps_first_value_despite_later_differing_redelivery`'s
+/// own small helper (not reused elsewhere, kept local rather than added to
+/// the shared oracle/snapshot helpers above).
+async fn once_write_stored_value(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    id: i64,
+) -> anyhow::Result<i64> {
+    let backend = project.backend().await?;
+    let sql = format!(
+        "SELECT once_val FROM main.{} WHERE id = {id}",
+        recipe.model_name
+    );
+    let batches = backend.execute_sql(&sql).await?;
+    let mut value: Option<i64> = None;
+    for batch in &batches {
+        for row_idx in 0..batch.num_rows() {
+            let text = arrow::util::display::array_value_to_string(batch.column(0), row_idx)?;
+            value = Some(
+                text.parse()
+                    .map_err(|e| anyhow::anyhow!("once_val not an integer ({text:?}): {e}"))?,
+            );
+        }
+    }
+    value.ok_or_else(|| anyhow::anyhow!("no row for id={id} in {}", recipe.model_name))
+}
+
 // ---------------------------------------------------------------------
 // W10 Phase 5 (`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`):
 // the change-suppressed column-scoped `MERGE`'s generative conformance leg.

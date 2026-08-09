@@ -1096,6 +1096,27 @@ fn derive_new_data(
                     ..
                 } = faithful_fold(*combiner, false, &posture, discovery)
                 {
+                    // The once-write family (`COALESCE`,
+                    // `incremental_models.md` §"The column-family
+                    // catalogue") is not a commutative monoid and not
+                    // order-monotone either, so this ALGEBRA leg — and only
+                    // this leg — would fail-closed-refuse it. Its admission
+                    // rests on an INDEPENDENT proof already verified by the
+                    // SAME shared helper the runtime classifier uses
+                    // (`rules::cumulative::classify_once_write`:
+                    // key-derived, or a declared `key -> <source column>`
+                    // functional dependency not structurally disproven —
+                    // `smelt_db::queries::maintenance::derive_fold_spec`
+                    // only ever puts a `Coalesce` column into a `FoldSpec`
+                    // after that proof passes), so this stage does not
+                    // re-derive it. The waiver is scoped to the algebra
+                    // verdict: the source-posture / delta-discovery
+                    // condition is combiner-independent and already binds
+                    // above (the `representative` check), and the
+                    // snapshot-reconcile run-shape gate below binds too.
+                    if *combiner == SqlFunction::Coalesce {
+                        continue;
+                    }
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
                         trigger: format!("{trigger:?}"),
                         why: format!("combiner {combiner:?} for column '{column}' {reason}"),
