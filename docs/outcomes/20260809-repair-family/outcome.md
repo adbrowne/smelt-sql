@@ -46,7 +46,7 @@ reconciliation runs and idempotent re-runs.
 | 5 | Refusal narrowing in plan derivation: retraction paths route to a repair cell, unprovable obligations refuse by name; `diff_patch` delete-leg completeness premise | done |
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
-| 8 | Conformance recipes for repair + diff-patch families | pending |
+| 8 | Conformance recipes for repair + diff-patch families | planned |
 | 9 | Surface: `smelt explain` rendering, docs-site update | pending |
 
 ## Decision log
@@ -175,6 +175,17 @@ reconciliation runs and idempotent re-runs.
   is already `PerGroupRecompute`) — kept as defensive code, spec's Known Divergences entry
   reworded to say the region-`DeleteInsert` case is *unenforced*, not refused, until a future
   phase threads a write-pin check into a resolver that can actually reach it.
+
+- 2026-08-10 (plan 8): no reshape — phase 7 closed clean, phase 9 stands as written. Phase 8
+  decides: the repair/diff-patch cases enter the standing gate as typed testkit recipe *data*
+  (a new `RepairRecipe` + its renderer, clocked `mutable_snapshot` source with declared
+  `unique_key`, mirroring `repair_lowering.rs`'s fixture shape), not hand-written SQL in the
+  test — the rule `pinned.rs` already states; they live in a new `repair.rs` module reusing
+  `gate.rs`'s `pub` helpers rather than growing that 5.9k-line file. Each case asserts both
+  equivalence-vs-oracle *and* that the repair/diff-patch statements were actually executed, so a
+  silent full-refresh fallback cannot pass. Phase 7's unenforced-write-pin divergence stays where
+  it is (not a success criterion); a real oracle divergence, if any surfaces, becomes a registry
+  `KnownBug` entry rather than a weakened assertion.
 
 ## Blocked
 
