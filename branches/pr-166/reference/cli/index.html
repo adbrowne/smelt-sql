@@ -5309,7 +5309,7 @@
 <td></td>
 <td>string</td>
 <td></td>
-<td>Requires <code>--show-sql</code>. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts <code>delete_insert</code>, <code>keyed_fold</code>, <code>column_scoped_merge</code>, <code>in_place_update</code>, <code>recompute</code> (<code>recompute</code> and <code>delete_insert</code> both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect <code>--json</code>, whose <code>technique_previews</code> array always carries every technique regardless of this flag.</td>
+<td>Requires <code>--show-sql</code>. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts <code>delete_insert</code>, <code>keyed_fold</code>, <code>column_scoped_merge</code>, <code>in_place_update</code>, <code>per_group_recompute</code>, <code>recompute</code> (<code>recompute</code> and <code>delete_insert</code> both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect <code>--json</code>, whose <code>technique_previews</code> array always carries every technique regardless of this flag.</td>
 </tr>
 </tbody>
 </table>
