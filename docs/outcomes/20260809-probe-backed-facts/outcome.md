@@ -53,7 +53,7 @@ safe to grow (the contract lattice will grow it).
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
-| 7 | Conformance recipes: violated-fact scenarios caught by probes | pending |
+| 7 | Conformance recipes: violated-fact scenarios caught by probes | planned |
 | 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
 
 ## Decision log
@@ -193,6 +193,23 @@ safe to grow (the contract lattice will grow it).
   a property already checked independently by its S-restricted oracle, not probe-firing behaviour
   (which has its own dedicated coverage in `smelt-runtime`/`smelt-cli` tests). See
   `phases/06-summary.md`.
+
+- 2026-08-10: Phase 7 planned. No reshape — phase 6's summary surfaced nothing new that serves the
+  success criteria and is not already carried by a row (`ModelRunRecord.probes` population sits in
+  phase 8; the `mutation_profile.lateness`/frontier-gate interaction is already under "## Out of
+  scope" and recorded as a known divergence). Three decisions taken while planning: (a) the
+  fact-violation recipes land as a new module *inside* the standing `maintenance_conformance`
+  target rather than as more `e2e` binary tests — criterion 6 says the **conformance gate**
+  includes them, and in-process `execute_project` staging keeps six recipes affordable; (b) the
+  pool is pinned to the spec by a coverage assertion that parses the §"Probe obligation" registry
+  and fails when a `built` row has no recipe, so the pool cannot drift behind the registry the way
+  a hand-listed set would; (c) criterion 6's "caught by its probe, not by wrong output" is made
+  checkable by a third leg — the same violating data under `probes: {cadence: off}` must produce
+  output that *differs* from the full-refresh oracle — but only for recipes whose violation is
+  end-state observable, with the non-observable ones carrying an explicit printed skip reason
+  rather than being quietly omitted. Phase 6's `render_smelt_yml` `probes: {cadence: off}` default
+  does not leak into this pool: these recipes are hand-staged projects that declare `probes:`
+  explicitly per leg.
 
 ## Blocked
 
