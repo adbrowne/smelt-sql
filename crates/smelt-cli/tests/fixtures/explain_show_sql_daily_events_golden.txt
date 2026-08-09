@@ -8,7 +8,7 @@ Cells (2):
       region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
-      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
@@ -17,7 +17,7 @@ Cells (2):
       region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
-      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
 
 Refusals: (none)

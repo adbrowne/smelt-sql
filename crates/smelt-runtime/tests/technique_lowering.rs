@@ -2819,6 +2819,9 @@ mod write_pattern_registry_pin {
             ChosenTechnique::Admitted(_) => {
                 panic!("the pin must have resolved to RegionRecompute — asserted above")
             }
+            ChosenTechnique::DiffPatch { .. } => {
+                panic!("the pin must have resolved to RegionRecompute — asserted above")
+            }
         };
         assert_eq!(
             group.statements.len(),

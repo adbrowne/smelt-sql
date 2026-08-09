@@ -28,6 +28,7 @@ use smelt_core::config::{
 
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
+use super::diff_patch;
 use super::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 
 /// The technique the ladder resolves to for one cell.
@@ -40,6 +41,27 @@ pub enum ChosenTechnique {
     /// chosen either because it is the only resolvable member or because
     /// the ladder/cost-model preferred it.
     RegionRecompute,
+    /// The `diff_patch` write pattern (`incremental_models.md` §"The
+    /// write-pattern set is open"): `recompute` is the underlying
+    /// recompute-family technique the candidate is drawn from
+    /// (`Technique::DeleteInsert` or `Technique::PerGroupRecompute`, or
+    /// `DeleteInsert` as the region-recompute default when the trigger has
+    /// no admitted cell), and `delete_leg` is the delete-leg admission
+    /// verdict ([`diff_patch::DeleteLeg`]) — carried here rather than
+    /// re-resolved by every consumer, per `CLAUDE.md` §"Maintenance-plan
+    /// purity".
+    ///
+    /// **Known simplification (this phase's own scope boundary):**
+    /// `resolve_cell_choice` does not yet have a slice-completeness proof to
+    /// thread through — that wiring is routing/lowering's job (a later
+    /// phase), not this admission layer's. Until then this variant is only
+    /// ever produced with `delete_leg: DeleteLeg::Omitted { .. }`; the real
+    /// `Complete` verdict is [`diff_patch::admit_diff_patch`]'s to compute
+    /// once a caller can supply the completeness proof.
+    DiffPatch {
+        recompute: Technique,
+        delete_leg: diff_patch::DeleteLeg,
+    },
 }
 
 /// Which kind of hard pin a [`ChoiceRefusal`] names: the `cells[].technique`
@@ -230,6 +252,10 @@ fn admits_write_selection(
             admitted == Some(&Technique::ColumnScopedMerge) && backend_supports_column_scoped_merge
         }
         super::WriteSelection::Technique(t) => admitted == Some(&t),
+        super::WriteSelection::DiffPatch => matches!(
+            admitted,
+            None | Some(Technique::DeleteInsert) | Some(Technique::PerGroupRecompute)
+        ),
     }
 }
 
@@ -310,6 +336,30 @@ pub fn resolve_cell_choice(
                         "admits_write_selection already proved `admitted_technique` is \
                          Some for this pin",
                     )))
+                }
+                // `diff_patch` selects the diff-then-patch pattern over
+                // whichever recompute-family technique the cell admitted
+                // (or the region-recompute default when the trigger has no
+                // admitted cell at all — `admits_write_selection`'s own
+                // `None` arm). See `ChosenTechnique::DiffPatch`'s doc
+                // comment for why `delete_leg` is always `Omitted` here:
+                // threading the real slice-completeness proof through this
+                // admission layer is routing/lowering's job (a later
+                // phase), not this one's.
+                super::WriteSelection::DiffPatch => {
+                    let recompute = admitted_technique
+                        .copied()
+                        .unwrap_or(Technique::DeleteInsert);
+                    Ok(ChosenTechnique::DiffPatch {
+                        recompute,
+                        delete_leg: diff_patch::DeleteLeg::Omitted {
+                            why: "slice-completeness proof is not yet threaded through \
+                                  resolve_cell_choice — the real DeleteLeg verdict is computed \
+                                  by admit_diff_patch once routing/lowering wires it (a later \
+                                  phase's scope), rather than fabricating Complete here"
+                                .to_string(),
+                        },
+                    })
                 }
             }
         } else {
@@ -1447,6 +1497,68 @@ mod tests {
         )
         .expect("no pin + unadmitted cell must fall back safely, not error");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
+    }
+
+    #[test]
+    fn pin_diff_patch_resolves_to_a_diff_write() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+
+        // A `write: diff_patch` pin over a cell whose admitted technique is
+        // a recompute-family member (`DeleteInsert`) resolves to the
+        // diff-patch choice, carrying that technique as the recompute base.
+        let recompute_plan = admitted_plan("users", Technique::DeleteInsert, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            recompute_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a recompute-family cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { recompute, .. } => {
+                assert_eq!(recompute, Technique::DeleteInsert);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+
+        // Also admits a `PerGroupRecompute`-family cell.
+        let per_group_plan =
+            admitted_plan("users", Technique::PerGroupRecompute, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            per_group_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a per-group-recompute cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { recompute, .. } => {
+                assert_eq!(recompute, Technique::PerGroupRecompute);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+
+        // A `write: diff_patch` pin over a cell whose admitted technique is
+        // NOT a recompute-family member (`ColumnScopedMerge`) refuses with a
+        // `ChoiceRefusal` — never a silent downgrade to `RegionRecompute` or
+        // any other technique.
+        let non_recompute_plan =
+            admitted_plan("users", Technique::ColumnScopedMerge, Corner::ColumnMerge);
+        let err = resolve_cell_choice(
+            non_recompute_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect_err("diff_patch pin over a non-recompute-family cell must refuse");
+        assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
     }
 
     fn cell_cfg(

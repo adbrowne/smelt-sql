@@ -714,6 +714,19 @@ pub fn resolve_cell_technique_with_write_pin(
                  than silently substituting a different technique than the one pinned",
                 pattern.name
             ),
+            // `diff_patch` is not reachable through this dimension-merge
+            // resolver (only `ColumnScopedMerge` and the always-available
+            // region recompute are) — no live routing exists for it yet in
+            // any case (a later phase's scope), so this refuses the same
+            // way the `Technique(other)` arm above does rather than
+            // silently substituting a different technique.
+            WriteSelection::DiffPatch => bail!(
+                "MaintenanceUnboundedFootprint: write pin '{}' for {trigger:?} selects diff_patch, \
+                 which this dimension-merge resolver has no lowering for (only ColumnScopedMerge \
+                 and the always-available region recompute are reachable here) — refusing rather \
+                 than silently substituting a different technique than the one pinned",
+                pattern.name
+            ),
         };
     }
 

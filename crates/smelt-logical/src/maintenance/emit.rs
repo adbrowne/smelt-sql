@@ -22,6 +22,7 @@
 //! never author maintenance-statement text of their own
 //! (`docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 
+use super::diff_patch::DeleteLeg;
 use super::ScanClamp;
 
 /// One SQL statement a maintenance run executes.
@@ -883,6 +884,144 @@ pub fn emit_per_group_recompute(
             MaintenanceStatement::new(insert),
             MaintenanceStatement::new(drop),
         ],
+        transactional: true,
+    }
+}
+
+/// The `diff_patch` write pattern (`docs/specs/incremental_models.md`
+/// §"The write-pattern set is open" → "`diff_patch` — compute, diff, write
+/// only the difference"): stage the computed candidate slice, then patch
+/// stored state to match it — updating rows whose compared columns differ,
+/// inserting rows the stored slice is missing, and (only when the caller's
+/// [`DeleteLeg`] proves the candidate is complete over the slice) deleting
+/// stored rows the candidate no longer contains.
+///
+/// This is **one function with a conditional statement**, not two sibling
+/// emitters the way [`emit_staged_candidate_conditional`] /
+/// [`emit_staged_candidate_conditional_recompute`] split — that pair splits
+/// because their difference is a distinct, fixed caller population (a
+/// region-scoped caller versus the one full-recompute membership-sensitive
+/// caller); `diff_patch`'s delete-leg degradation is instead a per-call
+/// *runtime* fact (this call's own [`DeleteLeg`] verdict), so branching on
+/// it inside one function is the correct shape, not a second copy of the
+/// other four statements.
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0` —
+///    stage an empty relation shaped like the candidate rows.
+/// 2. `INSERT INTO <staged_relation> <candidate_select>` — populate it with
+///    this run's computed candidate rows (already slice-restricted by
+///    construction — the caller's `candidate_select` is the slice, not the
+///    whole table).
+/// 3. **Update leg** (always emitted): `DELETE FROM <table> USING
+///    <staged_relation> WHERE <key join> AND (<IS DISTINCT FROM over
+///    compared_columns>) AND <region predicate>` — remove exactly the
+///    stored rows, within the slice, whose staged candidate differs from
+///    what is stored. The slice restriction is load-bearing: without it a
+///    stored row outside the slice could spuriously match the key join
+///    against a staged row that does not actually correspond to it.
+/// 4. **Delete leg** (only when `delete_leg` is [`DeleteLeg::Complete`] —
+///    omitted entirely otherwise): `DELETE FROM <table> WHERE <region
+///    predicate> AND NOT EXISTS (<staged_relation> row for this key)` —
+///    remove stored rows, WITHIN THE SLICE, absent from the candidate. The
+///    outer region restriction is load-bearing here too, and for a
+///    different reason than step 3's: `diff_patch`'s candidate is only ever
+///    a slice of the table, never the full current state (unlike
+///    [`emit_staged_candidate_conditional_recompute`]'s full-recompute
+///    candidate) — a stored row's absence from the candidate says nothing
+///    about whether it departed when that row lies OUTSIDE the slice in the
+///    first place, so this delete must never reach past the slice boundary.
+/// 5. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — insert candidate
+///    rows the target does not yet have. No additional slice restriction is
+///    needed here: the candidate rows are already slice-restricted by
+///    construction (`candidate_select`).
+/// 6. `DROP TABLE <staged_relation>` — cleanup.
+///
+/// One transaction, same contract as every other staged-candidate emitter
+/// in this module (`StatementGroup::transactional`).
+///
+/// # Panics
+/// Panics if `key` or `compared_columns` is empty — mirrors
+/// [`emit_staged_candidate_conditional`]'s own contract: an identity-free or
+/// vacuous-compare call has no sound diff shape to emit.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_diff_patch(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    partition_col: &str,
+    region: &Region,
+    delete_leg: &DeleteLeg,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_diff_patch requires a non-empty row identity (key) for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_diff_patch requires a non-empty compared-column set for {table}"
+    );
+
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_table_s_departed = key
+        .iter()
+        .map(|k| format!("{table}.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete_changed = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression}) AND {}",
+        region.predicate(Some(table), partition_col)
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+
+    let mut statements = vec![
+        MaintenanceStatement::new(create),
+        MaintenanceStatement::new(insert_candidates),
+        MaintenanceStatement::new(delete_changed),
+    ];
+
+    if let DeleteLeg::Complete = delete_leg {
+        let delete_departed = format!(
+            "DELETE FROM {table} WHERE {} AND NOT EXISTS (SELECT 1 FROM {staged_relation} AS s \
+             WHERE {key_join_table_s_departed})",
+            region.predicate(None, partition_col)
+        );
+        statements.push(MaintenanceStatement::new(delete_departed));
+    }
+
+    statements.push(MaintenanceStatement::new(insert));
+    statements.push(MaintenanceStatement::new(drop));
+
+    StatementGroup {
+        statements,
         transactional: true,
     }
 }

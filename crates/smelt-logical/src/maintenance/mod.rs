@@ -27,6 +27,7 @@
 
 pub mod choice;
 pub mod derive;
+pub mod diff_patch;
 pub mod emit;
 pub mod granularity;
 pub mod grouping;
@@ -587,6 +588,13 @@ pub enum WriteSelection {
     /// must have admitted — the mechanism-within-the-technique choice stays
     /// [`choice::resolve_keyed_write_mechanism`]'s job.
     Technique(Technique),
+    /// `diff_patch` selects the diff-then-patch write pattern
+    /// (`incremental_models.md` §"The write-pattern set is open"): compute
+    /// the candidate slice, diff against stored state, write only the
+    /// difference. Its own admission ([`diff_patch::admit_diff_patch`]) is a
+    /// separate proof from any `Technique`'s admission — a selection-name
+    /// marker, no payload, matching `RegionRecompute`'s own shape.
+    DiffPatch,
 }
 
 impl WritePattern {
@@ -602,6 +610,7 @@ impl WritePattern {
             }
             "column" => WriteSelection::Technique(Technique::ColumnScopedMerge),
             "update" => WriteSelection::Technique(Technique::InPlaceUpdate),
+            "diff_patch" => WriteSelection::DiffPatch,
             other => unreachable!(
                 "write-pattern registry entry '{other}' has no WriteSelection mapping — extend \
                  WritePattern::selects when adding a new registry entry"
@@ -653,6 +662,11 @@ pub const WRITE_PATTERN_REGISTRY: &[WritePattern] = &[
     },
     WritePattern {
         name: "staged_candidate",
+        required_facts: &[ContractFact::Identity],
+        capability: WriteCapability::Always,
+    },
+    WritePattern {
+        name: "diff_patch",
         required_facts: &[ContractFact::Identity],
         capability: WriteCapability::Always,
     },
@@ -865,6 +879,7 @@ mod write_pattern_registry_tests {
             "full_rebuild",
             "keyed_conditional",
             "staged_candidate",
+            "diff_patch",
         ] {
             assert!(
                 names.contains(&expected),

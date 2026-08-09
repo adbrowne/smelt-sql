@@ -42,7 +42,7 @@ reconciliation runs and idempotent re-runs.
 | 1 | Spec: repair techniques — per-group recompute + diff-then-patch semantics, admission obligations, refusal narrowing | done |
 | 2 | Delta discovery names affected keys (retraction/mutation → key set, fail-closed) | done |
 | 3 | Per-group recompute technique: derivation, admission, emitter | done |
-| 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | planned |
+| 4 | `diff_patch` write pattern: registry entry, admission, pure emitter, structural no-authoring leg | done |
 | 5 | Wire refusal narrowing + runtime lowering: retraction paths route to repair, cells execute, executed-vs-emitted `statement_parity` legs for repair + `diff_patch` | pending |
 | 6 | Conformance recipes for repair + diff-patch families | pending |
 | 7 | Surface: `smelt explain` rendering, docs-site update | pending |
@@ -89,6 +89,18 @@ reconciliation runs and idempotent re-runs.
   the closed enum's namespace via a `WriteSelection::DiffPatch` arm plus a
   `ChosenTechnique::DiffPatch` variant carrying the underlying recompute technique and the
   delete-leg admission, so a pin can never silently degrade to a blanket delete+insert.
+
+- 2026-08-09 (implement 4): landed `diff_patch` as `WriteSelection::DiffPatch` +
+  `ChosenTechnique::DiffPatch { recompute: Technique, delete_leg: diff_patch::DeleteLeg }` (no new
+  `Technique` variant), `maintenance::diff_patch::admit_diff_patch` (identity via
+  `RowIdentity::Key`, comparability reused verbatim from `choice::resolve_write_suppression`,
+  slice completeness as a caller-supplied `Result<(), String>`), and `emit::emit_diff_patch` (one
+  function, conditional delete-leg statement, not two sibling emitters — the degradation is a
+  per-call runtime fact, not a distinct caller population). An incomparable/unproven compared
+  column refuses the whole pattern rather than degrading to an unconditional update leg (that
+  would just be delete+insert with extra steps). `resolve_cell_choice`'s new `DiffPatch` arm
+  always resolves `DeleteLeg::Omitted` today — the real completeness proof is phase 5's to thread
+  through.
 
 ## Blocked
 
