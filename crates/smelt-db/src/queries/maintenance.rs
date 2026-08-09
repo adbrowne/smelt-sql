@@ -33,7 +33,7 @@ use smelt_logical::maintenance::{
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
-    order_monotone_companion, OnceWriteAdmission,
+    OnceWriteAdmission,
 };
 use smelt_types::SqlFunction;
 
@@ -147,17 +147,15 @@ pub fn effective_scan_bounds(
 /// refuses the *whole* derivation (`None`), never a partial fold over just
 /// the columns that did resolve.
 ///
-/// An `ArgMax`/`ArgMin` (`MAX_BY`/`MIN_BY`) column additionally requires
-/// the same companion-projection proof the runtime classifier
+/// An `ArgMax`/`ArgMin` (`MAX_BY`/`MIN_BY`) column decomposes to hidden
+/// `(v, o)` state (`docs/outcomes/20260809-rung2-state-shapes` row 5) — no
+/// companion projection is required. The runtime classifier
 /// (`smelt_logical::rules::cumulative::classify_order_monotone_column`)
-/// enforces, via the single shared helper
-/// [`smelt_logical::rules::cumulative::order_monotone_companion`] — either
-/// the value expression textually equals the ordering expression
-/// (`MAX_BY(x, x)`, trivially its own companion) or another projection in
-/// the same SELECT list runs `MAX(<ordering>)`/`MIN(<ordering>)`. Absent
-/// that proof, the whole derivation refuses (`None`) the same way an
-/// unrecognised combiner does — this keeps `smelt explain`/LSP diagnostics
-/// from reporting a `KeyedFold` admission the runtime then refuses with
+/// admits identically off the same arity check, so the two layers never
+/// diverge; only the wrong-arity shape (not exactly 2 arguments) still
+/// refuses the whole derivation (`None`), the same way an unrecognised
+/// combiner does — this keeps `smelt explain`/LSP diagnostics from
+/// reporting a `KeyedFold` admission the runtime then refuses with
 /// `KeyedUnknownCombiner` (`CLAUDE.md` §"Fail-loud discipline").
 ///
 /// `declared_functional_dependencies` is the model's own declared
@@ -209,21 +207,13 @@ pub fn derive_fold_spec(
                     continue;
                 }
                 if matches!(combiner, SqlFunction::ArgMax | SqlFunction::ArgMin) {
+                    // Exact-2-argument requirement, mirroring the runtime
+                    // classifier's own arity check — the wrong-arity shape
+                    // still refuses the whole derivation.
                     let args = func.arguments();
-                    let value_text = args.first()?.text().trim().to_string();
-                    let ordering_text = args.get(1)?.text().trim().to_string();
-                    let tracking_fn = if combiner == SqlFunction::ArgMax {
-                        "MAX"
-                    } else {
-                        "MIN"
-                    };
-                    order_monotone_companion(
-                        &items,
-                        alias,
-                        &value_text,
-                        &ordering_text,
-                        tracking_fn,
-                    )?;
+                    if args.len() != 2 {
+                        return None;
+                    }
                 }
                 add_columns.push((alias.clone(), combiner));
             }

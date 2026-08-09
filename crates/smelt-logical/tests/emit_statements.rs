@@ -5,6 +5,7 @@
 //! (byte-parity against production text is asserted from the execution side
 //! in `crates/smelt-runtime/tests/statement_parity.rs`).
 
+use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_in_place_update,
@@ -13,8 +14,8 @@ use smelt_logical::maintenance::emit::{
     state_augmented_projection, MaintenanceDialect, PresentationRefusal, Region,
     StateAugmentRefusal,
 };
-use smelt_logical::CrossPartitionCombiner;
-use std::collections::BTreeMap;
+use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
+use std::collections::{BTreeMap, HashMap};
 
 #[test]
 fn delete_insert_group_is_transactional_and_matches_production_shape() {
@@ -619,6 +620,80 @@ fn keyed_fold_over_state_projects_and_folds_state_columns() {
          avg_amount = (target.avg_amount__sum + delta.avg_amount__sum) / \
          (target.avg_amount__count + delta.avg_amount__count) \
          WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// The same state-bearing fold assertion, but driven from real SQL via
+/// `classify_cumulative` (`docs/outcomes/20260809-rung2-state-shapes` row
+/// 5) rather than a hand-built classification: `MAX_BY` folds through
+/// hidden `(v, o)` ordering state — `status__o` by `GREATEST`, `status__v`
+/// gated on `delta.status__o > target.status__o` — plus the presented
+/// `status` recomputed from the merged state.
+#[test]
+fn keyed_merge_folds_max_by_through_hidden_ordering_state() {
+    let sql = "SELECT device_id, MAX_BY(status, updated_at) AS status \
+               FROM smelt.silver.events_parsed GROUP BY device_id";
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let mut source_timeseries: SourceTimeseriesMap = HashMap::new();
+    source_timeseries.insert(
+        "smelt.silver.events_parsed".to_string(),
+        TimeseriesConfig {
+            event_time_column: "event_date".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        },
+    );
+    let classification =
+        classify_cumulative(sql, &refs, &source_timeseries, false, &[]).expect("must classify");
+    let status_col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "status")
+        .expect("status column present");
+    let state = status_col.state.as_ref().expect("state must be present");
+
+    // Mirror `smelt-runtime::cumulative::expand_aggregator_column_folds`'s
+    // fold expansion by hand — this crate does not depend on smelt-runtime.
+    // `decompose_arg_by`'s presentation expression is the bare `v` state
+    // column name, so the presented column is exactly that column's own
+    // merged expression, parenthesised.
+    assert_eq!(state.presentation_expr, "status__v");
+    let mut folds: Vec<(String, String)> = Vec::new();
+    for state_col in &state.state_columns {
+        let target_col = format!("target.{}", state_col.name);
+        let delta_col = format!("delta.{}", state_col.name);
+        let merged = state_col.combiner.render(&target_col, &delta_col);
+        folds.push((state_col.name.clone(), merged));
+    }
+    let v_merged = folds[0].1.clone();
+    folds.push((status_col.output_name.clone(), format!("({v_merged})")));
+
+    let group = emit_keyed_fold(
+        "main.devices",
+        &classification.unique_key,
+        &folds,
+        "SELECT device_id, ARG_MAX(status, updated_at) AS status__v, MAX(updated_at) AS \
+         status__o FROM events GROUP BY 1",
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+    let sql = &group.statements[0].sql;
+    assert!(
+        sql.contains("status__o = GREATEST(target.status__o, delta.status__o)"),
+        "expected the o state column to fold by GREATEST: {sql}"
+    );
+    assert!(
+        sql.contains(
+            "status__v = CASE WHEN delta.status__o > target.status__o THEN delta.status__v \
+             ELSE target.status__v END"
+        ),
+        "expected the v state column gated on the raw ordering comparison: {sql}"
+    );
+    assert!(
+        sql.contains("status = (CASE WHEN delta.status__o > target.status__o THEN delta.status__v ELSE target.status__v END)"),
+        "expected the presented column recomputed from the merged v state: {sql}"
     );
 }
 

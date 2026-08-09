@@ -1038,6 +1038,43 @@ pub fn classify_keyed(
     }
 }
 
+/// The maintained table's PRESENTED columns only, as `SELECT col1, col2,
+/// ... FROM main.<model_name>` — excludes any physical column whose name
+/// contains the reserved `__` decomposed-state marker
+/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// models"). A state-bearing model's physical table carries its hidden
+/// state columns alongside the presented ones (`MAX_BY`/`MIN_BY`, row 5);
+/// a bare `SELECT *` against the live table — unlike a `ref()`-mediated
+/// read through smelt's own compiler, which the `presentation_projection`
+/// mechanism already rewrites — would leak them into an oracle comparison
+/// with a different column count. Column names/order come off
+/// `information_schema.columns`, mirroring `probes::read_full_output_as_text`.
+fn presented_columns_select(project: &LinkCProject, model_name: &str) -> String {
+    let conn = project
+        .connect()
+        .expect("connect for presented-column listing");
+    let columns: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = 'main' AND table_name = '{model_name}' \
+                 AND column_name NOT LIKE '%\\_\\_%' ESCAPE '\\' \
+                 ORDER BY ordinal_position",
+            ))
+            .expect("prepare presented-column listing");
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .expect("query presented-column listing")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect presented-column listing")
+    };
+    assert!(
+        !columns.is_empty(),
+        "model {model_name:?} reported zero presented columns via information_schema — \
+         staging bug or an over-eager state-column filter"
+    );
+    format!("SELECT {} FROM main.{model_name}", columns.join(", "))
+}
+
 /// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
 /// "Keyed-grain carve-outs"; `incremental_models.md` §"End-state equivalence"):
 /// materialize `S_k` (the union, across every run so far, of that run's own
@@ -1055,7 +1092,7 @@ pub async fn assert_keyed_equivalence(
 ) -> anyhow::Result<()> {
     let backend = project.backend().await?;
     tracker.materialize_s(backend.as_ref(), k).await?;
-    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let maintained_sql = presented_columns_select(project, &recipe.model_name);
     let oracle_sql =
         render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
     let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;

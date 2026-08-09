@@ -48,7 +48,7 @@ success criteria above.
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
 | 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | done |
-| 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | planned |
+| 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | done |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
 | 7 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end; ledger grading audit | pending |
 | 8 | Surface cleanup: delete the residual once-write/decomposed-fold obligations from spec + docs-site; `smelt explain` state rendering | pending |
@@ -179,6 +179,17 @@ success criteria above.
   `MAX_BY` models, so phase 5 gets an end-to-end DuckDB witness for free — those recipes will
   execute with materialised `(v, o)` state and must still match the full-refresh oracle. Row 7
   still owns the *new* decomposed-state recipes and the downstream `SELECT *` consumers.
+
+- 2026-08-09 (implement 5): `MAX_BY`/`MIN_BY` admit on hidden `(v, o)` state with no companion
+  projection required — single admission path, `order_monotone_companion` deleted. Caught and
+  fixed two latent bugs surfaced by the first real end-to-end state-bearing execution:
+  `expand_aggregator_column_folds`'s sequential identifier substitution corrupted the presented
+  column when one state column's merged expression named a sibling column (fixed with a single
+  simultaneous-pass substitution); `state_augmented_projection` was applied to the compiled,
+  cast-wrapped SQL instead of the raw pre-compile SQL, so a state expression needing raw source
+  columns couldn't resolve them (fixed by augmenting before compiling in both keyed executors).
+  `maintenance_conformance`'s `assert_keyed_equivalence` needed a presented-columns-only SELECT
+  helper since the physical table now carries hidden state columns the oracle doesn't produce.
 
 ## Blocked
 

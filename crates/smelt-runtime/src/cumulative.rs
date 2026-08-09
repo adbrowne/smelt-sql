@@ -371,33 +371,41 @@ pub async fn execute_cumulative_aggregate(
             );
             let pushed = inject_source_filters(&clean_sql, &bound_map, &step.range);
 
-            let compiled = compiler
-                .get(target)
-                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
-                .with_context(|| format!("Failed to compile model: {}", model_name))?;
-
-            let augmented_sql = smelt_logical::maintenance::emit::state_augmented_projection(
-                &compiled.sql,
+            // State augmentation happens on this RAW, pre-compile SQL, not
+            // the compiled/cast-wrapped output: the state columns' own
+            // `per_partition_expr`s (e.g. `ARG_MAX(val, d)`) reference the
+            // model's own source columns, which are only in scope at this
+            // select level — the compiler's `_smelt_typed` cast wrapper
+            // exposes only the model's already-declared presented columns,
+            // not the raw columns a state expression needs
+            // (`docs/outcomes/20260809-rung2-state-shapes` row 5).
+            let pushed = smelt_logical::maintenance::emit::state_augmented_projection(
+                &pushed,
                 &state_columns,
             )
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Failed to append decomposed-state columns to model '{}': its compiled SELECT \
-                     could not be parsed",
+                    "Failed to append decomposed-state columns to model '{}': its SELECT could \
+                     not be parsed",
                     model_name
                 )
             })?;
+
+            let compiled = compiler
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
+                .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
             if verbose {
                 tracing::debug!(
                     "-- {} (partition {})\n{}",
                     model_name,
                     step.partition_value,
-                    augmented_sql
+                    compiled.sql
                 );
             }
 
-            Ok(augmented_sql)
+            Ok(compiled.sql)
         },
         retry,
     )
@@ -437,11 +445,11 @@ pub async fn execute_snapshot_reconcile(
     let start = std::time::Instant::now();
 
     let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
-    let compiled = compiler
-        .get(target)
-        .compile_with_sql_and_ephemerals(model, schema, &clean_sql, resolver)
-        .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
+    // State augmentation happens on this RAW, pre-compile SQL — see the
+    // matching comment in `execute_windowed_keyed` for why (the state
+    // expressions need the model's own source columns, only in scope
+    // before the compiler's `_smelt_typed` cast wrapper).
     let state_columns: Vec<smelt_logical::analysis::decomposed_state::StateColumn> = classification
         .aggregator_columns
         .iter()
@@ -449,14 +457,19 @@ pub async fn execute_snapshot_reconcile(
         .flat_map(|s| s.state_columns.clone())
         .collect();
     let augmented_sql =
-        smelt_logical::maintenance::emit::state_augmented_projection(&compiled.sql, &state_columns)
+        smelt_logical::maintenance::emit::state_augmented_projection(&clean_sql, &state_columns)
             .map_err(|_| {
                 anyhow::anyhow!(
-            "Failed to append decomposed-state columns to model '{}': its compiled SELECT could \
-             not be parsed",
-            model_name
-        )
+                    "Failed to append decomposed-state columns to model '{}': its SELECT could \
+                     not be parsed",
+                    model_name
+                )
             })?;
+
+    let compiled = compiler
+        .get(target)
+        .compile_with_sql_and_ephemerals(model, schema, &augmented_sql, resolver)
+        .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
     let table_exists = backend
         .table_exists(schema, db_table_name)
@@ -465,7 +478,7 @@ pub async fn execute_snapshot_reconcile(
 
     if !table_exists {
         backend
-            .create_table_as(schema, db_table_name, &augmented_sql)
+            .create_table_as(schema, db_table_name, &compiled.sql)
             .await
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
@@ -473,7 +486,7 @@ pub async fn execute_snapshot_reconcile(
         let merge_sql = build_cumulative_merge_sql(
             schema,
             db_table_name,
-            &augmented_sql,
+            &compiled.sql,
             classification,
             None,
             &suppression,
@@ -591,27 +604,40 @@ fn expand_aggregator_column_folds(col: &AggregatorColumn) -> Vec<(String, String
     };
 
     let mut folds: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len() + 1);
-    let mut presentation_expr = state.presentation_expr.clone();
+    let mut merged_by_name: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len());
     for state_col in &state.state_columns {
         let target_col = format!("target.{}", state_col.name);
         let delta_col = format!("delta.{}", state_col.name);
         let merged = state_col.combiner.render(&target_col, &delta_col);
-        presentation_expr =
-            substitute_identifier(&presentation_expr, &state_col.name, &format!("({merged})"));
+        merged_by_name.push((state_col.name.clone(), merged.clone()));
         folds.push((state_col.name.clone(), merged));
     }
+    // One simultaneous pass over the ORIGINAL presentation expression, not a
+    // chain of dependent substitutions — a state column's own merged
+    // expression can embed another state column's qualified name (the
+    // order-monotone `v` column's fold text names its sibling `o` column,
+    // e.g. `target.status__o`), and re-scanning already-substituted text for
+    // the next name would corrupt it (`docs/outcomes/
+    // 20260809-rung2-state-shapes` row 5).
+    let presentation_expr = substitute_identifiers(&state.presentation_expr, &merged_by_name);
     folds.push((col.output_name.clone(), presentation_expr));
     folds
 }
 
-/// Replace every whole-identifier occurrence of `name` in `text` with
-/// `replacement` — a match must not be preceded or followed by another
+/// Replace every whole-identifier occurrence of each `(name, replacement)`
+/// pair in `text`, in one simultaneous left-to-right pass over the
+/// ORIGINAL `text` — a match must not be preceded or followed by another
 /// identifier character (`[A-Za-z0-9_]`), so `avg_amount__sum` is not
-/// matched inside `avg_amount__sum_2`. Used to rewrite a `DecomposedState`
-/// presentation expression's state-column references onto their merged
-/// fold expressions (`expand_aggregator_column_folds`) — plain string
-/// substitution over SQL identifiers, not general SQL rewriting.
-fn substitute_identifier(text: &str, name: &str, replacement: &str) -> String {
+/// matched inside `avg_amount__sum_2`. A single pass (rather than N
+/// sequential single-name substitutions) matters: a replacement text can
+/// itself contain another pair's `name` as a substring (a state column's
+/// merged fold expression naming a sibling state column), and re-scanning
+/// already-substituted output for the next name would corrupt it. Used to
+/// rewrite a `DecomposedState` presentation expression's state-column
+/// references onto their merged fold expressions
+/// (`expand_aggregator_column_folds`) — plain string substitution over SQL
+/// identifiers, not general SQL rewriting.
+fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> String {
     fn is_ident_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '_'
     }
@@ -623,15 +649,20 @@ fn substitute_identifier(text: &str, name: &str, replacement: &str) -> String {
         if i < skip_until {
             continue;
         }
-        if text[i..].starts_with(name) {
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
-            let after = i + name.len();
-            let after_ok = after >= bytes.len() || !is_ident_char(bytes[after] as char);
-            if before_ok && after_ok {
-                result.push_str(replacement);
-                skip_until = after;
-                continue;
-            }
+        let matched = replacements.iter().find(|(name, _)| {
+            text[i..].starts_with(name.as_str())
+                && (i == 0 || !is_ident_char(bytes[i - 1] as char))
+                && {
+                    let after = i + name.len();
+                    after >= bytes.len() || !is_ident_char(bytes[after] as char)
+                }
+        });
+        if let Some((name, replacement)) = matched {
+            result.push('(');
+            result.push_str(replacement);
+            result.push(')');
+            skip_until = i + name.len();
+            continue;
         }
         result.push(ch);
     }

@@ -54,9 +54,10 @@ pub struct AggregatorColumn {
     /// The hidden decomposed state this column folds through instead of
     /// folding its own presented value directly (`docs/specs/
     /// incremental_models.md` §"Decomposed state (rung 2) in keyed
-    /// models"). `None` for every column family admitted before this
-    /// mechanism existed — admission is not yet widened onto it
-    /// (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6).
+    /// models"). `Some` for the order-monotone overwrite family
+    /// (`MAX_BY`/`MIN_BY`, row 5); `None` for every other column family —
+    /// admission has not yet widened onto the mechanism for them
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 6).
     pub state: Option<crate::analysis::decomposed_state::DecomposedState>,
 }
 
@@ -84,14 +85,12 @@ pub enum CrossPartitionCombiner {
     /// `incremental_models.md` §"The column-family catalogue"): the delta's
     /// value wins iff its ordering value strictly beats the target's stored
     /// ordering value — incumbent wins on a tie (§"Ordering ties"). Storage
-    /// decision (Phase 1, `docs/plans/20260809-keyed-frontier.md`): the
-    /// ordering value is never a hidden shadow column — `ordering_column` is
-    /// the output name of another column in the *same* projection that
-    /// tracks the running `MAX`/`MIN` of the ordering expression (a plain
-    /// extremal-fold `AggregatorColumn`), so target/delta values for the
-    /// comparison always come from that column's own `target.<name>` /
-    /// `delta.<name>` refs — no decomposed/hidden state
-    /// (`docs/specs/incremental_models.md` §Known Divergences).
+    /// decision (`docs/outcomes/20260809-rung2-state-shapes` row 5):
+    /// `ordering_column` names the hidden `<alias>__o` state column derived
+    /// by `analysis::decomposed_state::decompose_arg_by` — never a
+    /// user-visible companion projection — so target/delta values for the
+    /// comparison come from that hidden state column's own
+    /// `target.<name>` / `delta.<name>` refs.
     OrderMonotone {
         ordering_column: String,
         /// `true` for `MAX_BY`/`ArgMax` (the delta wins iff its ordering
@@ -681,12 +680,11 @@ impl std::fmt::Display for KeyedDiagnostic {
 
 /// Pure detector for `KeyedStateColumnCollision`: which of `aggregator_columns`'
 /// own hidden decomposed-state columns collide with another projection's
-/// output name in the same classification. Every column family admitted
-/// before the decomposed-state mechanism existed classifies with `state:
-/// None` (`docs/outcomes/20260809-rung2-state-shapes` rows 5-6 have not yet
-/// widened admission onto it), so this is unreachable via
-/// [`classify_cumulative`] today — wired in now so a future admission widen
-/// inherits the check for free, never a second place deciding it.
+/// output name in the same classification. Reachable via
+/// [`classify_cumulative`] for the order-monotone overwrite family
+/// (`MAX_BY`/`MIN_BY`, `docs/outcomes/20260809-rung2-state-shapes` row 5);
+/// every other column family still classifies with `state: None` until row
+/// 6 widens admission onto them too.
 pub fn diagnose_state_column_collisions(
     aggregator_columns: &[AggregatorColumn],
 ) -> Vec<KeyedDiagnostic> {
@@ -1131,7 +1129,6 @@ pub fn classify_cumulative(
                         });
                     } else {
                         classify_order_monotone_column(
-                            &analysis,
                             text,
                             alias,
                             expr,
@@ -1275,21 +1272,19 @@ pub fn classify_cumulative(
 /// overwrite family (`incremental_models.md` §"The column-family
 /// catalogue").
 ///
-/// **Storage decision.** The cross-window combiner needs the
-/// *stored* ordering value to compare a new delta's ordering against — but
-/// this classifier has no decomposed/hidden-state mechanism (that is
-/// rung-2 ladder territory, out of scope here). The only honest option
-/// without one is to require the ordering value to already be a genuine
-/// output column: this function requires the SELECT list to *also* project
-/// `MAX(<ordering>)` (for `MAX_BY`) or `MIN(<ordering>)` (for `MIN_BY`) —
-/// the running extremal fold of the exact same ordering expression, which
-/// is provably equal to the ordering of MAX_BY/MIN_BY's own winning row by
-/// construction. Absent that companion column, the model is refused
-/// (`KeyedUnknownCombiner`, naming the missing companion projection) rather
-/// than silently deriving a hidden state column.
-#[allow(clippy::too_many_arguments)]
+/// **Storage decision** (`docs/outcomes/20260809-rung2-state-shapes` row 5).
+/// The cross-window combiner needs the *stored* ordering value to compare a
+/// new delta's ordering against. Rather than require the SELECT to already
+/// project a `MAX(<ordering>)`/`MIN(<ordering>)` companion column, this
+/// classifier decomposes the column to hidden `(v, o)` state
+/// (`analysis::decomposed_state::decompose_to_state`) — the ordering value
+/// lives in a state column invisible to consumers, never a user-facing
+/// companion projection. Every `MAX_BY`/`MIN_BY` call of the right arity
+/// admits this way; there is no stateless fast path even when the SELECT
+/// happens to already project a matching companion (that companion, if
+/// present, is classified separately as an ordinary extremal-fold output
+/// column — it just no longer participates in this column's proof).
 fn classify_order_monotone_column(
-    analysis: &crate::analysis::SelectAnalysis,
     text: &str,
     alias: &str,
     expr: &smelt_parser::Expr,
@@ -1326,20 +1321,15 @@ fn classify_order_monotone_column(
     }
     let value_text = args[0].text().trim().to_string();
     let ordering_text = args[1].text().trim().to_string();
-    let tracking_fn = if sql_fn == SqlFunction::ArgMax {
-        "MAX"
-    } else {
-        "MIN"
-    };
 
-    match order_monotone_companion(
-        &analysis.items,
+    match crate::analysis::decomposed_state::decompose_to_state(
+        sql_fn,
+        false,
+        &[&value_text, &ordering_text],
         alias,
-        &value_text,
-        &ordering_text,
-        tracking_fn,
     ) {
-        Some(ordering_column) => {
+        Ok(state) => {
+            let ordering_column = format!("{alias}__o");
             aggregator_columns.push(AggregatorColumn {
                 output_name: alias.to_string(),
                 per_partition_agg: agg_upper.to_string(),
@@ -1347,83 +1337,19 @@ fn classify_order_monotone_column(
                     ordering_column,
                     prefer_greater: sql_fn == SqlFunction::ArgMax,
                 },
-                state: None,
+                state: Some(state),
             });
         }
-        None => {
+        Err(refusal) => {
             diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                 projection: alias.to_string(),
                 offending: format!(
-                    "{agg_upper}'s ordering expression `{ordering_text}` must also be \
-                     projected as `{tracking_fn}({ordering_text})` — the classifier stores no \
-                     hidden ordering state, only what the SELECT already projects"
+                    "{agg_upper}({value_text}, {ordering_text}) could not be decomposed to \
+                     hidden state: {refusal:?}"
                 ),
             });
         }
     }
-}
-
-/// Whether an order-monotone (`MAX_BY`/`MIN_BY`, `ArgMax`/`ArgMin`)
-/// projection's ordering value is provably trustworthy under the storage
-/// decision documented on [`CrossPartitionCombiner::OrderMonotone`] — the
-/// cross-window combiner has no decomposed/hidden state, so it can only
-/// compare the *stored output* of some column in the same projection
-/// against the delta's. Two shapes prove that:
-///
-/// 1. **Self-companion**: the value expression is textually identical to
-///    the ordering expression (`MAX_BY(x, x)` ≡ `MAX(x)`) — the projected
-///    value already *is* the running extremal of the ordering expression,
-///    by construction, so the column is trivially its own companion.
-/// 2. **Explicit companion**: another projection in the same SELECT list
-///    is a direct `<tracking_fn>(<ordering_text>)` call — the running
-///    extremal fold of the exact same ordering expression.
-///
-/// Returns the alias of the column whose `target.<alias>`/`delta.<alias>`
-/// the cross-partition merge should compare (the projection's own `alias`
-/// in the self-companion case, the companion projection's alias
-/// otherwise). `None` means neither shape is provable from the SELECT's
-/// own projections — the projection must be refused, not admitted with a
-/// hidden ordering column.
-///
-/// **Single ownership** (`CLAUDE.md` §"Fail-loud discipline"): both the
-/// runtime classifier ([`classify_order_monotone_column`], which
-/// admits/refuses at execution time with `KeyedUnknownCombiner`) and the
-/// plan-derivation layer (`smelt_db::queries::maintenance::derive_fold_spec`,
-/// which decides whether an `ArgMax`/`ArgMin` column enters a `FoldSpec` at
-/// all) call this one helper, so `smelt explain`/LSP diagnostics never
-/// report a fold admission the runtime then refuses.
-pub fn order_monotone_companion(
-    items: &[SelectItemKind],
-    alias: &str,
-    value_text: &str,
-    ordering_text: &str,
-    tracking_fn: &str,
-) -> Option<String> {
-    if value_text.trim() == ordering_text.trim() {
-        return Some(alias.to_string());
-    }
-    for item in items {
-        let SelectItemKind::OtherAggregate {
-            text, alias, expr, ..
-        } = item
-        else {
-            continue;
-        };
-        if !is_direct_function_call(text, tracking_fn) {
-            continue;
-        }
-        let Some(fc) = expr.as_function_call() else {
-            continue;
-        };
-        let args = fc.arguments();
-        if args.len() != 1 {
-            continue;
-        }
-        if args[0].text().trim() == ordering_text {
-            return Some(alias.clone());
-        }
-    }
-    None
 }
 
 /// The `(family name, refusal reason)` the admission matrix

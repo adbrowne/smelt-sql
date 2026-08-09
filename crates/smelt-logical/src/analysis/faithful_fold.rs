@@ -22,12 +22,13 @@
 //!    — a semilattice fold, not a commutative monoid) when the plan layer's
 //!    `FoldSpec` already carries the column: `smelt_db::queries::maintenance
 //!    ::derive_fold_spec` only ever puts an `ArgMax`/`ArgMin` column into a
-//!    `FoldSpec` after proving the same companion-projection condition the
-//!    runtime classifier (`smelt_logical::rules::cumulative::
-//!    classify_order_monotone_column`) enforces, via the single shared
-//!    helper `smelt_logical::rules::cumulative::order_monotone_companion`
-//!    — so this stage never re-derives that proof itself. A decomposable
-//!    non-monoid outside that family (`AVG`) is still not admitted here.
+//!    `FoldSpec` after the same exact-arity check the runtime classifier
+//!    (`smelt_logical::rules::cumulative::classify_order_monotone_column`)
+//!    enforces — both layers decompose the column to hidden `(v, o)` state
+//!    (`smelt_logical::analysis::decomposed_state::decompose_to_state`)
+//!    rather than requiring a companion projection, so this stage never
+//!    re-derives that proof itself. A decomposable non-monoid outside that
+//!    family (`AVG`) is still not admitted here.
 //!
 //! Both conditions must hold for a fold technique to be admissible; either
 //! failing alone refuses, and each is reported independently — the spec's

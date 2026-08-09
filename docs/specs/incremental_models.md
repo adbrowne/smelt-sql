@@ -313,8 +313,10 @@ Any other aggregate, any non-aggregate non-key expression, and any composite exp
 The order-monotone overwrite family needs no companion projection: the ordering expression's
 value is carried as hidden state (§"Decomposed state (rung 2) in keyed models"), so the
 cross-window combiner compares the *stored* state's ordering value against the delta's without
-the modeller projecting it themselves. A `MAX_BY(x, x)` is its own degenerate case — value and
-ordering coincide, so the hidden state duplicates rather than adds a column.
+the modeller projecting it themselves. A `MAX_BY(x, x)` materialises the same uniform two-column
+`(v, o)` state as any other call — value and ordering coincide, so the ordering state column
+repeats the value expression rather than introducing a new one; there is no one-column special
+case.
 
 The once-write family admits four spellings, and no others:
 
@@ -2369,15 +2371,6 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **The order-monotone overwrite family's ordering value still has no decomposed-state storage
-  wired in.** §"The column-family catalogue" no longer requires a companion `MAX`/`MIN`
-  projection — the ordering value is hidden `(v, o)` state (§"Decomposed state (rung 2) in keyed
-  models") — but the classifier has not yet been updated to derive that state, so a
-  `MAX_BY`/`MIN_BY` column whose ordering expression is not independently projected still refuses
-  `KeyedUnknownCombiner` naming the (no-longer-required) companion projection as the workaround.
-  The degenerate `MAX_BY(x, x)` case is unaffected either way. Tracking:
-  `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
-  `docs/plans/20260809-keyed-frontier.md`.
 - **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional merge ledger"
   gives every window-forward model a ledger, refusal-bearing for additive folds and
   detection/bookkeeping-bearing for the idempotent families; the runtime only ever creates the
@@ -2447,13 +2440,16 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   a change feed with delete events. Tombstones, opt-in hard delete, and the observer contract
   for the refused matrix cells are deferred
   (`docs/research/20260705-keyed-collapse-application.md` §5).
-- **Ladder rung 2 is specified but not yet wired into the keyed profile's admission and
-  storage.** §"Decomposed state (rung 2) in keyed models" fixes the state shapes, physical
-  layout, and presentation projection; deriving the concrete state per model
-  (`crates/smelt-logical/src/analysis/decomposed_state.rs` encodes only `AVG`'s `(sum, count)`
-  shape today), storing the state columns in the stored table, and widening the once-write and
-  order-monotone admission classifiers to consume it are the two once-write entries and the
-  ordering-value entry above. Tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
+- **Ladder rung 2 is specified but only partially wired into the keyed profile's admission.**
+  §"Decomposed state (rung 2) in keyed models" fixes the state shapes, physical layout, and
+  presentation projection; the state shapes are derived
+  (`crates/smelt-logical/src/analysis/decomposed_state.rs` encodes `AVG`, the variance/stddev
+  family, and the order-monotone overwrite family's `(v, o)` shape), the state columns are
+  materialised in the stored table and folded through the keyed merge, and the order-monotone
+  overwrite family's admission consumes it (§"The column-family catalogue"). The once-write
+  family's fallback-bearing and multi-candidate spellings, and `AVG`/`STDDEV_*`/`VAR_*` folding
+  at keyed grain, still refuse rather than consume the mechanism — the two once-write entries
+  above. Tracking: `docs/outcomes/20260809-rung2-state-shapes/outcome.md`.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them.** Group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the
   rung-2 work above; rung 3 additionally depends on the change-feed consumption design — no

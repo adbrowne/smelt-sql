@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use smelt_core::config::{FunctionalDependency, Granularity, TimeseriesConfig};
+use smelt_logical::analysis::decomposed_state::StateColumn;
 use smelt_logical::{
     classify_cumulative, CrossPartitionCombiner, KeyedDiagnostic, SourceTimeseriesMap,
 };
@@ -27,17 +28,17 @@ fn events_source_map() -> SourceTimeseriesMap {
     m
 }
 
-/// A `MAX_BY(value, ordering)` projection classifies as the order-monotone
-/// overwrite family — no `KeyedUnknownCombiner` — as long as the ordering
-/// expression is also projected via its own running `MAX(...)` column (the
-/// classifier's storage decision: `rules/cumulative.rs`
-/// `classify_order_monotone_column`'s doc comment).
+/// A `MAX_BY(value, ordering)` projection admits without any companion
+/// `MAX(ordering)` projection — the classifier decomposes it to hidden
+/// `(v, o)` state (`analysis::decomposed_state::decompose_arg_by`,
+/// `docs/outcomes/20260809-rung2-state-shapes` row 5): the presented value
+/// lives in `status__v`, the ordering value in the hidden `status__o` state
+/// column, never a user-visible companion column.
 #[test]
-fn max_by_classifies_as_order_monotone_overwrite() {
+fn max_by_without_companion_admits_with_hidden_state() {
     let sql = r#"SELECT
     device_id,
-    MAX_BY(status, updated_at) AS status,
-    MAX(updated_at) AS updated_at
+    MAX_BY(status, updated_at) AS status
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
     let refs = vec!["smelt.silver.events_parsed".to_string()];
@@ -56,32 +57,29 @@ GROUP BY device_id"#;
             ordering_column,
             prefer_greater,
         } => {
-            assert_eq!(ordering_column, "updated_at");
-            let _ = prefer_greater;
+            assert_eq!(ordering_column, "status__o");
+            assert!(prefer_greater);
         }
         other => panic!("expected OrderMonotone combiner, got {other:?}"),
     }
 
-    // The companion tracking column is an ordinary extremal-fold column.
-    let ord_col = classification
-        .aggregator_columns
+    let state = status_col.state.as_ref().expect("state must be present");
+    let state_names: Vec<&str> = state
+        .state_columns
         .iter()
-        .find(|c| c.output_name == "updated_at")
-        .expect("updated_at tracking column present");
-    assert_eq!(ord_col.per_partition_agg, "MAX");
-    assert_eq!(
-        ord_col.cross_partition_combiner,
-        CrossPartitionCombiner::Max
-    );
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(state_names, vec!["status__v", "status__o"]);
+    assert_eq!(state.presentation_expr, "status__v");
 }
 
-/// `MIN_BY` is the mirror family, tracked by a companion `MIN(...)` column.
+/// `MIN_BY` is the mirror family: `status__o` folds with `Min`, `status__v`
+/// folds `OrderMonotone { prefer_greater: false }`.
 #[test]
-fn min_by_classifies_as_order_monotone_overwrite() {
+fn min_by_without_companion_admits_with_hidden_state() {
     let sql = r#"SELECT
     device_id,
-    MIN_BY(status, updated_at) AS status,
-    MIN(updated_at) AS updated_at
+    MIN_BY(status, updated_at) AS status
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
     let refs = vec!["smelt.silver.events_parsed".to_string()];
@@ -98,16 +96,164 @@ GROUP BY device_id"#;
             ordering_column,
             prefer_greater,
         } => {
-            assert_eq!(ordering_column, "updated_at");
-            let _ = prefer_greater;
+            assert_eq!(ordering_column, "status__o");
+            assert!(!prefer_greater);
         }
         other => panic!("expected OrderMonotone combiner, got {other:?}"),
     }
+
+    let state = status_col.state.as_ref().expect("state must be present");
+    let v_col = state
+        .state_columns
+        .iter()
+        .find(|c| c.name == "status__v")
+        .expect("status__v present");
+    assert_eq!(
+        v_col.combiner,
+        CrossPartitionCombiner::OrderMonotone {
+            ordering_column: "status__o".to_string(),
+            prefer_greater: false,
+        }
+    );
+    let o_col = state
+        .state_columns
+        .iter()
+        .find(|c| c.name == "status__o")
+        .expect("status__o present");
+    assert_eq!(o_col.combiner, CrossPartitionCombiner::Min);
 }
 
-/// Mixed-family projections fold column-wise: `SUM` + `MAX_BY` (with its
-/// companion tracking column) + `MIN` in one model, three families, no
-/// whole-model refusal.
+/// The degenerate self-companion shape (`MAX_BY(x, x)`) still admits and
+/// produces the same uniform two-column `(v, o)` state — the ordering state
+/// column repeats the value expression rather than introducing a new one,
+/// no one-column special case.
+#[test]
+fn max_by_self_companion_admits_with_uniform_state() {
+    let sql = r#"SELECT
+    device_id,
+    MAX_BY(updated_at, updated_at) AS updated_at
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let classification =
+        classify_cumulative(sql, &refs, &events_source_map(), false, &[]).expect("must classify");
+
+    let col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "updated_at")
+        .expect("updated_at column present");
+    let state = col.state.as_ref().expect("state must be present");
+    let state_names: Vec<&str> = state
+        .state_columns
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(state_names, vec!["updated_at__v", "updated_at__o"]);
+    let StateColumn {
+        per_partition_expr, ..
+    } = &state.state_columns[0];
+    assert_eq!(per_partition_expr, "ARG_MAX(updated_at, updated_at)");
+}
+
+/// A SELECT that ALSO happens to project a redundant `MAX(ordering)`
+/// companion still admits `MAX_BY` on hidden state — the companion column
+/// classifies independently as an ordinary extremal-fold output, it no
+/// longer participates in `MAX_BY`'s own proof.
+#[test]
+fn max_by_with_redundant_max_projection_still_admits() {
+    let sql = r#"SELECT
+    device_id,
+    MAX_BY(status, updated_at) AS status,
+    MAX(updated_at) AS updated_at
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let classification =
+        classify_cumulative(sql, &refs, &events_source_map(), false, &[]).expect("must classify");
+
+    let status_col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "status")
+        .expect("status column present");
+    assert_eq!(status_col.per_partition_agg, "MAX_BY");
+    assert!(
+        status_col.state.is_some(),
+        "MAX_BY must be state-bearing regardless of a redundant companion projection"
+    );
+    match &status_col.cross_partition_combiner {
+        CrossPartitionCombiner::OrderMonotone {
+            ordering_column, ..
+        } => {
+            assert_eq!(ordering_column, "status__o");
+        }
+        other => panic!("expected OrderMonotone combiner, got {other:?}"),
+    }
+
+    // The redundant companion column is an ordinary extremal-fold column.
+    let ord_col = classification
+        .aggregator_columns
+        .iter()
+        .find(|c| c.output_name == "updated_at")
+        .expect("updated_at tracking column present");
+    assert_eq!(ord_col.per_partition_agg, "MAX");
+    assert_eq!(
+        ord_col.cross_partition_combiner,
+        CrossPartitionCombiner::Max
+    );
+}
+
+/// A `MAX_BY`/`MIN_BY` call of the wrong arity still refuses
+/// `KeyedUnknownCombiner` — fail-closed survives the admission widen.
+#[test]
+fn max_by_wrong_arity_refuses_unknown_combiner() {
+    let sql = r#"SELECT
+    device_id,
+    MAX_BY(status) AS status
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
+                if offending.contains("requires exactly 2 arguments")
+        )),
+        "diagnostics: {:?}",
+        err
+    );
+}
+
+/// A SELECT projecting both `MAX_BY(status, updated_at) AS status` (which
+/// derives hidden state `status__v`/`status__o`) and a real column aliased
+/// `status__o` refuses `KeyedStateColumnCollision` — the first reachable
+/// exercise of the collision detector from real SQL.
+#[test]
+fn max_by_state_column_colliding_with_user_column_refuses() {
+    let sql = r#"SELECT
+    device_id,
+    MAX_BY(status, updated_at) AS status,
+    MAX(other_col) AS status__o
+FROM smelt.silver.events_parsed
+GROUP BY device_id"#;
+    let refs = vec!["smelt.silver.events_parsed".to_string()];
+    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
+    assert!(
+        err.iter().any(|d| matches!(
+            d,
+            KeyedDiagnostic::KeyedStateColumnCollision { state_column, user_column }
+                if state_column == "status__o" && user_column == "status__o"
+        )),
+        "diagnostics: {:?}",
+        err
+    );
+}
+
+/// Mixed-family projections fold column-wise: `SUM` + `MAX_BY` (with a
+/// redundant `MAX(...)` tracking column) + `MIN` in one model, three
+/// families, no whole-model refusal.
 #[test]
 fn mixed_family_projection_classifies_columnwise() {
     let sql = r#"SELECT
@@ -163,29 +309,6 @@ GROUP BY device_id"#;
     assert!(
         err.iter()
             .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
-        "diagnostics: {:?}",
-        err
-    );
-}
-
-/// `MAX_BY` whose ordering expression is NOT also projected as a running
-/// `MAX(...)` column refuses `KeyedUnknownCombiner` — the classifier stores
-/// no hidden ordering state (Phase 1's storage decision).
-#[test]
-fn max_by_without_tracking_column_refuses_unknown_combiner() {
-    let sql = r#"SELECT
-    device_id,
-    MAX_BY(status, updated_at) AS status
-FROM smelt.silver.events_parsed
-GROUP BY device_id"#;
-    let refs = vec!["smelt.silver.events_parsed".to_string()];
-    let err = classify_cumulative(sql, &refs, &events_source_map(), false, &[]).unwrap_err();
-    assert!(
-        err.iter().any(|d| matches!(
-            d,
-            KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
-                if offending.contains("updated_at")
-        )),
         "diagnostics: {:?}",
         err
     );
