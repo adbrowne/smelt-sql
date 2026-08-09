@@ -47,10 +47,10 @@ success criteria above.
 | 1 | Spec: decomposed-state semantics — state shapes, presentation projection, widened admissions, obligations to delete | done |
 | 2 | Derive concrete state shapes in `smelt-logical` for the decomposable catalogue (`decomposed_state.rs` stops refusing); widen `π` purity to the new shapes; pure state/user column collision detector | done |
 | 3 | Storage + emitters: state columns materialised in the stored table, keyed fold over state, `KeyedStateColumnCollision` diagnostic wiring | done |
-| 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | pending |
+| 4 | Presentation projection: state columns invisible to `ref()` expansion, `SELECT *`, declared-schema checks, downstream type inference | planned |
 | 5 | Admission: `MAX_BY`/`MIN_BY` without the companion projection | pending |
 | 6 | Admission: classify the once-write fallback/multi-candidate spellings onto the derived `(value, written)` state; admit `AVG`/`stddev`-class folds | pending |
-| 7 | Conformance-gate recipes for decomposed-state families; ledger grading audit | pending |
+| 7 | Conformance-gate recipes for decomposed-state families, each with a downstream `SELECT *` consumer asserting state columns stay hidden end-to-end; ledger grading audit | pending |
 | 8 | Surface cleanup: delete superseded obligations from spec + docs-site; `smelt explain` state rendering | pending |
 
 ## Decision log
@@ -121,6 +121,23 @@ success criteria above.
   `MIN_BY` (`prefer_greater: bool` added, all call sites updated). Spec cell corrected
   (once-write "Combiner over state": last-write-wins → `COALESCE(target.value, delta.value)`).
   No admission widened; `maintenance_conformance`'s 47 tests stayed green unchanged.
+
+- 2026-08-09 (plan 4, reshape): row 7 sharpened — the decomposed-state conformance recipes must
+  each carry a downstream `SELECT *` consumer, because admission is still closed in row 4 and
+  criterion 4 therefore has no end-to-end witness until admission widens. The hiding mechanism is
+  unit-tested in row 4; row 7 is where it gets proven against a real DuckDB. No work left the
+  outcome.
+- 2026-08-09 (plan 4): the `SELECT *` leak is real and lives at the *execution* layer only — the
+  analysis layer derives a model's schema from its own select list (`smelt-db`'s `model_schema`),
+  so state columns, appended by phase 3's `state_augmented_projection` emitter, never enter the
+  public schema. Phase 4 therefore rewrites wildcards at compile time into the presented column
+  list. Rejected: `SELECT * EXCLUDE (...)` (dialect-specific), resolving `ref()` to a presenting
+  derived table (breaks `FROM x AS y` and qualified column references), and a companion
+  presentation view (already rejected by the phase-1 physical-layout decision).
+- 2026-08-09 (plan 4): the unexpandable-wildcard case is a hard compile error following
+  `check_native_ivm_gate`'s precedent, not a new diagnostic code — it arises on the build path
+  where no `KeyedDiagnostic` is being collected, and inventing a code there would split the
+  fail-loud surface for one unreachable-until-row-5 condition.
 
 ## Blocked
 
