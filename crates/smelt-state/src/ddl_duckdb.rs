@@ -679,6 +679,34 @@ pub fn generate_fingerprint_sidecar_stale_check_sql(
     )
 }
 
+/// Existence check for ANY row in the sidecar's `(source_address,
+/// projection_identity)` partition, regardless of stamp — the repair
+/// family's group-grain discovery (`docs/specs/incremental_models.md`
+/// §"The repair family" — "Obligation 7 over a `mutable_snapshot` source")
+/// uses this to distinguish "no comparandum has ever been stored" from "a
+/// comparandum exists but is stale"
+/// ([`generate_fingerprint_sidecar_stale_check_sql`]): the diff query's own
+/// `FULL OUTER JOIN` already treats an absent partition as "every observed
+/// row changed" with no extra signal needed, but the repair family's
+/// stored-output-key over-approximation (`docs/specs/sources.md` §"The
+/// fingerprint sidecar" — "Partition grain") additionally needs to know a
+/// partition is (or was) untrustworthy at all, which a changed-key COUNT
+/// alone cannot distinguish from "trustworthy and simply empty".
+pub fn generate_fingerprint_sidecar_partition_exists_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+) -> String {
+    format!(
+        "SELECT 1 FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
+         projection_identity = '{projection_identity}' LIMIT 1",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+    )
+}
+
 /// GC a sidecar partition's keys that no longer appear in the source
 /// (`docs/specs/sources.md` §"The fingerprint sidecar" — "GC": "A key's
 /// disappearance from the source is itself a change ... and drops its
@@ -1378,6 +1406,33 @@ mod tests {
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
         assert!(sql.contains("stamp <> 'stamp''s'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_partition_exists_sql_checks_source_address_and_projection() {
+        let sql = generate_fingerprint_sidecar_partition_exists_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "repair:group=customer_id:digest=amount",
+        );
+        assert!(sql.contains("SELECT 1 FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'repair:group=customer_id:digest=amount'"));
+        assert!(
+            !sql.contains("stamp"),
+            "existence must not filter on stamp — a stale-stamped row still proves the \
+             partition is not absent: {sql}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_sidecar_partition_exists_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_partition_exists_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
     }
 
     #[test]

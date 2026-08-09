@@ -35,13 +35,14 @@ use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
     emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
     emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
+    emit_repair_group_digest_select, emit_repair_group_sidecar_diff,
     emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
     MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, ScanClamp, SkeletonSourceClosure,
-    SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    MaintenancePlan, MutationProfile, PartitionLocal, PlanCell, RowIdentity, ScanClamp,
+    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -1388,11 +1389,39 @@ pub enum RepairWrite {
     },
 }
 
+/// How a live `Technique::PerGroupRecompute` cell discovers its affected-key
+/// relation (P9, `docs/specs/incremental_models.md` §"The repair family" —
+/// "Obligation 7 over a `mutable_snapshot` source"): the append-only clamped
+/// rescan, or — for a [`MutationProfile::MutableSnapshot`] source with no
+/// native change feed — the group-grain fingerprint sidecar diff, the only
+/// route that can witness a group whose entire window contribution departed
+/// the source (a vanished group leaves no row for a clamped scan to select,
+/// but the sidecar keeps a stored comparandum for it).
+#[derive(Debug, Clone)]
+pub enum RepairDiscovery {
+    /// The append-only widened-scan `SELECT DISTINCT`
+    /// ([`repair_affected_keys_select`]).
+    ClampedScan,
+    /// The group-grain sidecar diff ([`diff_repair_group_sidecar_changed_keys`]).
+    /// `digest_columns` is the P4 fingerprint projection's column set for
+    /// this source, read straight off the cell's own derived
+    /// `fingerprint_projections` — never re-derived.
+    SidecarDiff { digest_columns: Vec<String> },
+}
+
 /// A live repair cell as [`resolve_live_per_group_recompute_cell`] returns
 /// it: the trigger's source name, the cell itself, its proven
-/// `RowIdentity::Key`, the cell's own derived bounded read slice, and the
-/// resolved write leg ([`RepairWrite`]).
-pub type LiveRepairCell = (String, PlanCell, Vec<String>, ScanClamp, RepairWrite);
+/// `RowIdentity::Key`, the cell's own derived bounded read slice, the
+/// resolved write leg ([`RepairWrite`]), and how its affected-key relation
+/// is discovered ([`RepairDiscovery`]).
+pub type LiveRepairCell = (
+    String,
+    PlanCell,
+    Vec<String>,
+    ScanClamp,
+    RepairWrite,
+    RepairDiscovery,
+);
 
 /// Resolve a `Technique::PerGroupRecompute` cell's already-chosen
 /// [`ChosenTechnique`] (`resolve_cell_choice`'s output — the override ladder
@@ -1515,8 +1544,17 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
 /// ([`repair_cell_key`] — a `WholeRow` identity is a fail-loud `bail!`,
 /// never a skip) and the cell's own derived [`ScanClamp`] (the bounded
 /// per-group read slice `repair::admit_per_group_recompute` proved as
-/// obligation 4). The plan is derived exactly once here (maintenance-plan
-/// purity, root `CLAUDE.md`); nothing downstream re-derives admission.
+/// obligation 4), and how its affected-key relation is discovered
+/// ([`RepairDiscovery`]). The plan is derived exactly once here
+/// (maintenance-plan purity, root `CLAUDE.md`); nothing downstream
+/// re-derives admission.
+///
+/// `dialect` gates [`RepairDiscovery::SidecarDiff`]: a
+/// [`MutationProfile::MutableSnapshot`] source routes to the group-grain
+/// sidecar diff, which is DuckDB-only (matching the per-row sidecar's own
+/// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
+/// fails loud here, before any backend call, rather than silently falling
+/// back to the unsound current-source scan.
 pub fn resolve_live_per_group_recompute_cell(
     sql: &str,
     table: &str,
@@ -1524,6 +1562,7 @@ pub fn resolve_live_per_group_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
 ) -> Result<Option<LiveRepairCell>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -1680,12 +1719,49 @@ pub fn resolve_live_per_group_recompute_cell(
                         facts.name,
                     );
                 };
+                // P9 (`docs/specs/incremental_models.md` §"The repair
+                // family" — "Obligation 7 over a `mutable_snapshot`
+                // source"): a source with no native change feed and no
+                // tombstone/change history needs the group-grain sidecar
+                // diff to witness a wholly-deleted group; every other
+                // posture keeps the ordinary clamped current-source scan.
+                let discovery = if facts.mutation == MutationProfile::MutableSnapshot {
+                    if dialect != SqlDialect::DuckDB {
+                        return Err(BackendError::unsupported(
+                            dialect.name(),
+                            "group-grain fingerprint-sidecar affected-key discovery for a \
+                             mutable_snapshot repair source (P9)",
+                        )
+                        .into());
+                    }
+                    let digest_columns: Vec<String> =
+                        match cell.fingerprint_projections.get(&facts.name) {
+                            Some(FingerprintProjection::Columns(cols)) => {
+                                cols.iter().cloned().collect()
+                            }
+                            _ => Vec::new(),
+                        };
+                    if digest_columns.is_empty() {
+                        bail!(
+                            "MaintenanceRepairDigestColumnsMissing: a Technique::PerGroupRecompute \
+                             cell for group '{}' resolved a MutableSnapshot delta posture on \
+                             source '{}' with no P4 fingerprint projection columns — the \
+                             group-grain sidecar digest has nothing to hash",
+                            cell.group,
+                            facts.name,
+                        );
+                    }
+                    RepairDiscovery::SidecarDiff { digest_columns }
+                } else {
+                    RepairDiscovery::ClampedScan
+                };
                 return Ok(Some((
                     facts.name.clone(),
                     cell.clone(),
                     key,
                     slice.clone(),
                     write,
+                    discovery,
                 )));
             }
         }
@@ -1694,7 +1770,16 @@ pub fn resolve_live_per_group_recompute_cell(
 }
 
 /// The affected-key relation a repair reads: the distinct group keys present
-/// in the mutated source over the cell's own bounded slice.
+/// in the mutated source over the cell's own bounded slice, projected as a
+/// single canonical `delta_key` column — the same expression
+/// ([`smelt_logical::maintenance::emit::key_expr_for_columns`])
+/// [`emit_fingerprint_sidecar_diff`]/[`emit_repair_group_sidecar_diff`]
+/// project, so the append-only clamped-scan path and the `mutable_snapshot`
+/// group-grain sidecar-diff path ([`diff_repair_group_sidecar_changed_keys`] +
+/// [`repair_keys_literal_select`])
+/// yield the SAME one-column relation shape — [`emit_per_group_recompute`]
+/// joins against it by key EXPRESSION, never by raw key columns, because a
+/// deleted group's typed column values are unrecoverable by construction.
 ///
 /// Pure string builder, per this module's "callers resolve strings, emitters
 /// assemble" contract — [`emit_per_group_recompute`] consumes this as opaque
@@ -1714,41 +1799,62 @@ pub fn repair_affected_keys_select(
     clamp: Option<&ScanClamp>,
     region: &Region,
 ) -> String {
-    let key_list = key.join(", ");
+    let key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(key);
     match clamp {
         Some(clamp) => format!(
-            "SELECT DISTINCT {key_list} FROM {source_table} WHERE {}",
+            "SELECT DISTINCT {key_expr} AS delta_key FROM {source_table} WHERE {}",
             widened_scan_predicate(clamp, region)
         ),
-        None => format!("SELECT DISTINCT {key_list} FROM {source_table}"),
+        None => format!("SELECT DISTINCT {key_expr} AS delta_key FROM {source_table}"),
     }
 }
 
 /// The candidate relation a repair stages: the model's **full** (unwindowed)
-/// recompiled SQL, semi-joined to `affected_keys_select`.
+/// recompiled SQL, semi-joined to `affected_keys_select`'s single-column
+/// `delta_key` relation.
 ///
 /// Full, not windowed, because the repair family's promise is that an
 /// affected group's stored value equals a full refresh of that group — a
 /// non-invertible combiner (`MAX`) over a retracted contribution cannot be
 /// fixed from a window's rows alone. The semi-join is what keeps the
-/// recompute *bounded*: only the groups the clamped affected-keys read named
-/// are recomputed. `EXISTS` rather than a row-value `IN`, so a composite key
-/// lowers identically across dialects.
+/// recompute *bounded*: only the groups the affected-keys read named are
+/// recomputed. `EXISTS` rather than a row-value `IN`, so a composite key
+/// lowers identically across dialects. The join compares
+/// [`repair_affected_keys_select`]'s own canonical key expression over the
+/// candidate's key columns against `delta_key`, mirroring
+/// [`repair_slice_predicate`]'s and `emit_per_group_recompute`'s identical
+/// shape.
 pub fn repair_candidate_select(
     full_model_sql: &str,
     key: &[String],
     affected_keys_select: &str,
 ) -> String {
-    let join = key
+    let candidate_key_columns: Vec<String> = key
         .iter()
-        .map(|k| format!("__smelt_repair_candidate.{k} = __smelt_repair_keys.{k}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+        .map(|k| format!("__smelt_repair_candidate.{k}"))
+        .collect();
+    let candidate_key_expr =
+        smelt_logical::maintenance::emit::key_expr_for_columns(&candidate_key_columns);
     format!(
         "SELECT __smelt_repair_candidate.* FROM ({full_model_sql}) AS __smelt_repair_candidate \
          WHERE EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
-         {join})"
+         {candidate_key_expr} = __smelt_repair_keys.delta_key)"
     )
+}
+
+/// Inputs to refresh the group-grain fingerprint sidecar transactionally
+/// with a repair write (P9, `docs/outcomes/20260809-repair-family/phases/
+/// 09-plan.md` task 6) — passed to [`execute_per_group_recompute`]/
+/// [`execute_diff_patch`] only when the live cell's discovery is
+/// [`RepairDiscovery::SidecarDiff`]; `None` for the ordinary clamped-scan
+/// path, which has no sidecar partition to refresh.
+pub struct RepairSidecarRefresh<'a> {
+    pub schema: &'a str,
+    pub source_address: &'a str,
+    pub source_table: &'a str,
+    pub group_key: &'a [String],
+    pub digest_columns: &'a [String],
+    pub model_sql: &'a str,
 }
 
 /// Execute a live `Technique::PerGroupRecompute` cell
@@ -1759,6 +1865,16 @@ pub fn repair_candidate_select(
 /// [`execute_staged_membership_recompute`] uses, so the executed text is
 /// exactly the single owner's output (`docs/specs/incremental_models.md`
 /// §"Statement emission (single owner)").
+///
+/// `sidecar_refresh: Some(..)` (a [`RepairDiscovery::SidecarDiff`] cell)
+/// routes the SAME emitted [`StatementGroup`] through
+/// [`refresh_repair_group_sidecar`] instead of a bare
+/// [`Backend::execute_statement_group`] call — the group-grain sidecar
+/// partition refreshes in the SAME backend transaction as this write
+/// (mirroring [`refresh_fingerprint_sidecar`]'s own transactional shape),
+/// so a failed write leaves the sidecar untouched rather than
+/// half-committed.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_per_group_recompute(
     backend: &dyn Backend,
     schema: &str,
@@ -1767,6 +1883,7 @@ pub async fn execute_per_group_recompute(
     affected_keys_select: &str,
     candidate_select: &str,
     retry: &crate::execute::RetryPolicy<'_>,
+    sidecar_refresh: Option<&RepairSidecarRefresh<'_>>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -1780,9 +1897,36 @@ pub async fn execute_per_group_recompute(
         candidate_select,
         dialect,
     );
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
-        .await
-        .map_err(|e| anyhow::anyhow!("per-group recompute failed for '{full_table}': {e}"))?;
+    match sidecar_refresh {
+        None => {
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("per-group recompute failed for '{full_table}': {e}")
+                })?;
+        }
+        Some(refresh) => {
+            crate::execute::retry_backend_call(retry, || {
+                refresh_repair_group_sidecar(
+                    backend,
+                    refresh.schema,
+                    refresh.source_address,
+                    refresh.source_table,
+                    refresh.group_key,
+                    refresh.digest_columns,
+                    refresh.model_sql,
+                    &group,
+                )
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "per-group recompute (with group-grain sidecar refresh) failed for \
+                     '{full_table}': {e}"
+                )
+            })?;
+        }
+    }
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),
@@ -1808,17 +1952,19 @@ pub fn diff_patch_staged_relation(table: &str) -> String {
 
 /// The `diff_patch` slice restriction for a repair cell: the candidate's own
 /// slice is the affected-key set, not a partition region
-/// ([`emit_diff_patch`]'s doc comment) — an `EXISTS` over the clamped
-/// affected-keys read, `table`-qualified on every key column so it composes
-/// unambiguously into both the update-leg and delete-leg `DELETE`s
+/// ([`emit_diff_patch`]'s doc comment) — an `EXISTS` over the affected-keys
+/// read's single-column `delta_key` relation, `table`-qualified on every key
+/// column (via the same canonical key expression
+/// [`repair_affected_keys_select`]/[`repair_candidate_select`] use) so it
+/// composes unambiguously into both the update-leg and delete-leg `DELETE`s
 /// `emit_diff_patch` builds.
 pub fn repair_slice_predicate(table: &str, key: &[String], affected_keys_select: &str) -> String {
-    let join = key
-        .iter()
-        .map(|k| format!("{table}.{k} = __smelt_repair_keys.{k}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    format!("EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE {join})")
+    let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
+    let table_key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(&table_key_columns);
+    format!(
+        "EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
+         {table_key_expr} = __smelt_repair_keys.delta_key)"
+    )
 }
 
 /// Execute a `write: diff_patch` pin over a live `Technique::PerGroupRecompute`
@@ -1826,7 +1972,8 @@ pub fn repair_slice_predicate(table: &str, key: &[String], affected_keys_select:
 /// same emitter → `retry_backend_call` → [`Backend::execute_statement_group`]
 /// shape [`execute_per_group_recompute`] uses, so the executed text is
 /// exactly the single owner's output (`docs/specs/incremental_models.md`
-/// §"Statement emission (single owner)").
+/// §"Statement emission (single owner)"). `sidecar_refresh` carries the same
+/// meaning as [`execute_per_group_recompute`]'s own parameter.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_diff_patch(
     backend: &dyn Backend,
@@ -1838,6 +1985,7 @@ pub async fn execute_diff_patch(
     slice_predicate: &str,
     delete_leg: &smelt_logical::maintenance::diff_patch::DeleteLeg,
     retry: &crate::execute::RetryPolicy<'_>,
+    sidecar_refresh: Option<&RepairSidecarRefresh<'_>>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -1853,9 +2001,34 @@ pub async fn execute_diff_patch(
         delete_leg,
         dialect,
     );
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
-        .await
-        .map_err(|e| anyhow::anyhow!("diff_patch write failed for '{full_table}': {e}"))?;
+    match sidecar_refresh {
+        None => {
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
+                .map_err(|e| anyhow::anyhow!("diff_patch write failed for '{full_table}': {e}"))?;
+        }
+        Some(refresh) => {
+            crate::execute::retry_backend_call(retry, || {
+                refresh_repair_group_sidecar(
+                    backend,
+                    refresh.schema,
+                    refresh.source_address,
+                    refresh.source_table,
+                    refresh.group_key,
+                    refresh.digest_columns,
+                    refresh.model_sql,
+                    &group,
+                )
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "diff_patch write (with group-grain sidecar refresh) failed for \
+                     '{full_table}': {e}"
+                )
+            })?;
+        }
+    }
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),
@@ -2344,8 +2517,17 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         dialect,
     );
     let batches = backend.execute_sql(&diff_sql).await?;
+    Ok(extract_delta_keys(&batches))
+}
+
+/// Extract every non-NULL `delta_key` value from a query's result batches —
+/// shared by [`diff_fingerprint_sidecar_changed_keys`],
+/// [`diff_repair_group_sidecar_changed_keys`], and the stored-output-key
+/// read that function's degenerate-comparandum leg falls back to, so the
+/// arrow-array downcast lives in exactly one place.
+fn extract_delta_keys(batches: &[arrow::record_batch::RecordBatch]) -> Vec<String> {
     let mut keys = Vec::new();
-    for batch in &batches {
+    for batch in batches {
         let Some(col) = batch.column_by_name("delta_key") else {
             continue;
         };
@@ -2358,7 +2540,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
             }
         }
     }
-    Ok(keys)
+    keys
 }
 
 /// Write-side: refresh the fingerprint sidecar to match `source_table`'s
@@ -2408,6 +2590,224 @@ pub async fn refresh_fingerprint_sidecar(
     let dialect = maintenance_dialect(backend.dialect());
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, &digest_columns, dialect);
+    let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+        schema,
+        source_address,
+        &identity,
+        &stamp,
+        &digest_select,
+    );
+    let gc_sql = ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+        schema,
+        source_address,
+        &identity,
+        &digest_select,
+    );
+    backend
+        .execute_write_and_refresh_fingerprint_sidecar(
+            &ensure_sql,
+            write_group,
+            &refresh_sql,
+            &gc_sql,
+        )
+        .await
+}
+
+// ── P9: group-grain fingerprint sidecar (the repair family) ────────────
+// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`;
+// `docs/specs/sources.md` §"The fingerprint sidecar" — "Partition grain";
+// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+// over a `mutable_snapshot` source")
+//
+// Same sidecar table, same stamp/invalidation machinery as the per-row
+// grain above — only the partition identity and what one sidecar row
+// represents differ. A group-grain partition never collides with a P4
+// per-row partition: `repair_group_partition_identity`'s `repair:group=...`
+// text can never equal `fingerprint::projection_identity`'s own `cols:...`/
+// `full_row` shapes.
+
+/// The repair-scoped sidecar partition identity for a group-grain digest:
+/// `model` (via the caller's own `source_address`, unchanged — the
+/// partition key stays `(source_address, projection_identity, source_key)`)
+/// plus the group-key and digest-column sets, so two different repair cells
+/// over the SAME source (a different group key, or a different digest
+/// column set) land in different, non-colliding partitions, and neither
+/// collides with the per-row [`fingerprint::projection_identity`] partition
+/// a P4-driven consumer of the same source might also hold (that always
+/// starts `cols:` or is exactly `full_row`; this always starts `repair:`).
+fn repair_group_partition_identity(group_key: &[String], digest_columns: &[String]) -> String {
+    format!(
+        "repair:group={}:digest={}",
+        group_key.join(","),
+        digest_columns.join(",")
+    )
+}
+
+/// Build a single-column `delta_key` relation (the same shape
+/// [`repair_affected_keys_select`] and the sidecar-diff emitters project)
+/// from an already-resolved list of literal key values — the bridge between
+/// [`diff_repair_group_sidecar_changed_keys`]'s resolved `Vec<String>` (an
+/// executed read, not opaque SQL text) and every downstream repair builder
+/// ([`repair_candidate_select`], [`repair_slice_predicate`],
+/// [`emit_per_group_recompute`]), which all consume `affected_keys_select`
+/// as SQL text regardless of which discovery route produced it.
+///
+/// An empty `keys` list yields a well-typed EMPTY relation (`WHERE FALSE`),
+/// never an invalid `VALUES ()` — a repair with no affected keys this run is
+/// a legitimate (if unusual) outcome, not an error.
+pub fn repair_keys_literal_select(keys: &[String]) -> String {
+    if keys.is_empty() {
+        return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
+    }
+    let values = keys
+        .iter()
+        .map(|k| format!("('{}')", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT * FROM (VALUES {values}) AS __smelt_repair_group_keys(delta_key)")
+}
+
+/// Read-side: the repair family's group-grain affected-key set for a
+/// `MutationProfile::MutableSnapshot` source with no native change feed
+/// (P9). Mirrors [`diff_fingerprint_sidecar_changed_keys`]'s shape (ensure
+/// the sidecar table, detect staleness, run the emitter-authored diff), but
+/// over [`emit_repair_group_sidecar_diff`]'s group-grain digest and a
+/// repair-scoped partition identity ([`repair_group_partition_identity`]),
+/// and with one further obligation the per-row read has no analogue for:
+/// **an absent or stale-stamped comparandum cannot distinguish "a group
+/// that vanished" from "a group that never existed"**
+/// (`docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"), so for such a run the returned set
+/// additionally unions every key currently present in the stored
+/// `output_table` — a sound over-approximation that degenerates to a
+/// whole-table repair for that one run and self-heals once
+/// [`refresh_repair_group_sidecar`] populates a trustworthy comparandum.
+///
+/// DuckDB-only, matching every other sidecar consumer in this module — a
+/// non-DuckDB backend fails loud (`BackendError::unsupported`) rather than
+/// silently falling back to the unsound current-source scan.
+#[allow(clippy::too_many_arguments)]
+pub async fn diff_repair_group_sidecar_changed_keys(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    output_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    model_sql: &str,
+) -> std::result::Result<Vec<String>, BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    backend.execute_sql(&ensure_sql).await?;
+
+    let identity = repair_group_partition_identity(group_key, digest_columns);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
+
+    let exists_sql = ddl_duckdb::generate_fingerprint_sidecar_partition_exists_sql(
+        schema,
+        source_address,
+        &identity,
+    );
+    let exists_rows = backend.execute_sql(&exists_sql).await?;
+    let partition_absent = !exists_rows.iter().any(|batch| batch.num_rows() > 0);
+
+    let stale_check_sql = ddl_duckdb::generate_fingerprint_sidecar_stale_check_sql(
+        schema,
+        source_address,
+        &identity,
+        &stamp,
+    );
+    let stale_rows = backend.execute_sql(&stale_check_sql).await?;
+    let has_stale = stale_rows.iter().any(|batch| batch.num_rows() > 0);
+    if has_stale {
+        tracing::warn!(
+            source_address,
+            projection_identity = %identity,
+            "group-grain fingerprint sidecar stamp mismatch detected (model definition or \
+             digest inputs changed, or the stored stamp was corrupted); treating the stale \
+             partition as absent and widening the affected set to every currently-observed \
+             group plus every stored output group"
+        );
+    }
+
+    let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
+    let dialect = maintenance_dialect(backend.dialect());
+    let diff_sql = emit_repair_group_sidecar_diff(
+        source_table,
+        group_key,
+        digest_columns,
+        &sidecar_table,
+        source_address,
+        &identity,
+        &stamp,
+        dialect,
+    );
+    let batches = backend.execute_sql(&diff_sql).await?;
+    let mut keys = extract_delta_keys(&batches);
+
+    if partition_absent || has_stale {
+        let output_key_columns: Vec<String> = group_key
+            .iter()
+            .map(|k| format!("{output_table}.{k}"))
+            .collect();
+        let output_key_expr =
+            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns);
+        let stored_keys_sql = format!("SELECT {output_key_expr} AS delta_key FROM {output_table}");
+        let stored_batches = backend.execute_sql(&stored_keys_sql).await?;
+        keys.extend(extract_delta_keys(&stored_batches));
+        keys.sort();
+        keys.dedup();
+    }
+
+    Ok(keys)
+}
+
+/// Write-side: refresh the group-grain sidecar partition to match
+/// `source_table`'s CURRENT group-grain digests, riding in the SAME backend
+/// transaction as `write_group` — the repair's own write. Mirrors
+/// [`refresh_fingerprint_sidecar`]'s shape and transactional contract
+/// exactly (call AFTER [`diff_repair_group_sidecar_changed_keys`] has
+/// already read the affected set this refresh's write is about to
+/// consume), reusing the SAME DDL/DML the per-row sidecar uses
+/// (`generate_fingerprint_sidecar_table_ddl`,
+/// `generate_fingerprint_sidecar_refresh_sql`,
+/// `generate_fingerprint_sidecar_gc_sql`) — only the digest select and
+/// partition identity differ.
+///
+/// Populating this on the create/full-refresh path (in addition to every
+/// live repair run) is what keeps a model's FIRST incremental repair from
+/// taking the absent-comparandum degradation every single time: without an
+/// initial populate, every run would find no partition, union in the whole
+/// stored output, and never build a trustworthy baseline.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_repair_group_sidecar(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    model_sql: &str,
+    write_group: &StatementGroup,
+) -> std::result::Result<(), BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "group-grain fingerprint-sidecar refresh for a mutable_snapshot repair source (P9)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    let identity = repair_group_partition_identity(group_key, digest_columns);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
+    let dialect = maintenance_dialect(backend.dialect());
+    let digest_select =
+        emit_repair_group_digest_select(source_table, group_key, digest_columns, dialect);
     let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
         schema,
         source_address,

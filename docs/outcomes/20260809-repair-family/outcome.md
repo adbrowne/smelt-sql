@@ -47,7 +47,7 @@ reconciliation runs and idempotent re-runs.
 | 6 | Runtime lowering: per-group recompute cells execute; executed-vs-emitted `statement_parity` leg for the repair family | done |
 | 7 | Runtime routing for the `diff_patch` write pin (`ChosenTechnique::DiffPatch` → emitter) + its executed-vs-emitted `statement_parity` leg | done |
 | 8 | Conformance recipes for repair + diff-patch families | done |
-| 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | planned |
+| 9 | Delete-aware affected-key discovery: a full-group deletion in a `mutable_snapshot` source is repaired (obligation 7 soundness) | done |
 | 10 | Repair over a decomposed combiner: the candidate/insert supplies the fold's hidden state columns | pending |
 | 11 | Surface: `smelt explain` rendering, docs-site update | pending |
 
@@ -218,6 +218,21 @@ reconciliation runs and idempotent re-runs.
   source degrading to a full read), and the affected-key relation becomes a single canonical
   `delta_key` column joined by key *expression* rather than by columns, uniformly on both paths,
   because a deleted group's typed column values are unrecoverable by construction.
+
+- 2026-08-10 (implement 9): landed group-grain fingerprint-sidecar discovery for the
+  `mutable_snapshot` posture — the existing per-row sidecar machinery reused at a distinct
+  `projection_identity` text (`repair:group=<cols>:digest=<cols>`, same table, never collides with
+  the per-row scheme), digest columns sourced from the cell's own already-derived
+  `fingerprint_projections` rather than re-deriving. `emit_per_group_recompute`'s DELETE/INSERT
+  joins moved from per-column key joins to the single canonical `delta_key` expression, since a
+  vanished group's typed column values are unrecoverable by construction — both the clamped-scan
+  and sidecar-diff discovery paths now produce the same one-column relation shape.
+  `resolve_live_per_group_recompute_cell` gained a `dialect` parameter and a `RepairDiscovery`
+  verdict (`ClampedScan` for append-only, `SidecarDiff` for `MutableSnapshot`, `Err` on non-DuckDB).
+  Absent/stale comparandum unions the currently-observed keys with every stored output key (a sound
+  over-approximation, self-healing on refresh). Creation runs now seed the sidecar's initial
+  comparandum so the first live repair doesn't take the absent-comparandum degradation every time.
+  All standing gates green.
 
 ## Blocked
 

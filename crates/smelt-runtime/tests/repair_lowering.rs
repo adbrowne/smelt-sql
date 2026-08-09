@@ -87,13 +87,14 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
     let (metadata, sql) = metadata_and_sql(&text);
     let (sources, explicitly_mutable) = mutable_orders();
 
-    let (source, cell, key, slice, write) = resolve_live_per_group_recompute_cell(
+    let (source, cell, key, slice, write, _discovery) = resolve_live_per_group_recompute_cell(
         &sql,
         "customer_max_amount",
         &metadata,
         &sources,
         &explicitly_mutable,
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error")
     .expect("a live per-group-recompute cell must resolve for raw.orders");
@@ -118,6 +119,83 @@ fn resolve_live_per_group_recompute_cell_finds_the_admitted_repair_cell() {
     );
 }
 
+// ── P9 test 3 ────────────────────────────────────────────────────────────
+/// A `MutationProfile::MutableSnapshot` delta posture routes discovery to
+/// the group-grain sidecar diff (`RepairDiscovery::SidecarDiff`), never the
+/// clamped `SELECT DISTINCT` (`docs/specs/incremental_models.md` §"The
+/// repair family" — "Obligation 7 over a `mutable_snapshot` source"). The
+/// append-only posture's own `ClampedScan` shape is unchanged — proven
+/// directly by `affected_keys_select_bounds_the_read_with_the_cells_scan_clamp`
+/// (test 4), since an append-only source never admits a repair cell at all
+/// in this fixture (its fold succeeds, so there is nothing to narrow).
+#[test]
+fn snapshot_source_discovery_uses_the_sidecar_diff() {
+    let text = format!("{REPAIR_MODEL_FILE}{REPAIR_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let (sources, explicitly_mutable) = mutable_orders();
+
+    let (_source, _cell, _key, _slice, _write, discovery) = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        smelt_dialect::SqlDialect::DuckDB,
+    )
+    .expect("resolver must not error")
+    .expect("a live per-group-recompute cell must resolve for raw.orders");
+
+    match discovery {
+        smelt_runtime::maintenance_driver::RepairDiscovery::SidecarDiff { digest_columns } => {
+            assert!(
+                !digest_columns.is_empty(),
+                "a MutableSnapshot source's discovery must carry non-empty P4-projection digest \
+                 columns"
+            );
+        }
+        other => panic!(
+            "expected RepairDiscovery::SidecarDiff for a MutableSnapshot source, got {other:?}"
+        ),
+    }
+}
+
+// ── P9 test 4 ────────────────────────────────────────────────────────────
+/// A non-DuckDB backend must fail loud rather than silently falling back to
+/// the unsound current-source scan (mirrors
+/// `diff_fingerprint_sidecar_changed_keys`'s own precedent).
+#[test]
+fn snapshot_discovery_fails_loud_on_a_non_duckdb_backend() {
+    let text = format!("{REPAIR_MODEL_FILE}{REPAIR_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let (sources, explicitly_mutable) = mutable_orders();
+
+    let err = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        smelt_dialect::SqlDialect::SparkSQL,
+    )
+    .expect_err(
+        "a MutableSnapshot source's sidecar-diff discovery must fail loud on a non-DuckDB \
+         backend, never silently use the unsound current-source scan",
+    );
+
+    let backend_err = err
+        .downcast_ref::<smelt_backend::BackendError>()
+        .unwrap_or_else(|| panic!("expected a BackendError::unsupported, got: {err}"));
+    assert!(
+        matches!(
+            backend_err,
+            smelt_backend::BackendError::UnsupportedFeature { .. }
+        ),
+        "expected BackendError::UnsupportedFeature, got: {backend_err:?}"
+    );
+}
+
 // ── 1b ───────────────────────────────────────────────────────────────────
 #[test]
 fn diff_patch_pin_over_a_repair_cell_resolves_a_diff_patch_write() {
@@ -137,13 +215,14 @@ fn diff_patch_pin_over_a_repair_cell_resolves_a_diff_patch_write() {
     let (metadata, sql) = metadata_and_sql(&text);
     let (sources, explicitly_mutable) = mutable_orders();
 
-    let (_source, _cell, _key, _slice, write) = resolve_live_per_group_recompute_cell(
+    let (_source, _cell, _key, _slice, write, _discovery) = resolve_live_per_group_recompute_cell(
         &sql,
         "customer_max_amount",
         &metadata,
         &sources,
         &explicitly_mutable,
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error")
     .expect("a live per-group-recompute cell must resolve for raw.orders");
@@ -201,6 +280,7 @@ fn resolve_live_per_group_recompute_cell_ignores_a_pin_with_no_repair_cell_to_ad
         &sources,
         &HashSet::new(),
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error");
     assert!(
@@ -298,6 +378,7 @@ fn resolve_live_per_group_recompute_cell_none_for_an_append_only_model() {
         &sources,
         &HashSet::new(),
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error");
 
@@ -366,12 +447,22 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         after: Seconds::ZERO,
     };
 
+    // The affected-key relation is a single canonical `delta_key` column
+    // (P9, `docs/outcomes/20260809-repair-family/phases/09-plan.md` task 3)
+    // — the SAME `key_expr_for_columns` shape `emit_fingerprint_digest_select`
+    // uses, never raw key columns, since a deleted group's typed column
+    // values are unrecoverable by construction.
+    let delta_key_expr = "COALESCE(CAST(customer_id AS VARCHAR), '\u{2}NULL\u{2}')";
+
     let clamped =
         repair_affected_keys_select("main.sources_raw_orders", &key, Some(&clamp), &region);
     assert_eq!(
         clamped,
-        "SELECT DISTINCT customer_id FROM main.sources_raw_orders WHERE order_date >= \
-         '2025-01-12' - INTERVAL '86400 seconds' AND order_date < '2025-01-13'",
+        format!(
+            "SELECT DISTINCT {delta_key_expr} AS delta_key FROM main.sources_raw_orders WHERE \
+             order_date >= '2025-01-12' - INTERVAL '86400 seconds' AND order_date < \
+             '2025-01-13'"
+        ),
         "the affected-keys read must carry the cell's own derived clamp predicate"
     );
 
@@ -381,7 +472,7 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
     let unclamped = repair_affected_keys_select("main.sources_raw_orders", &key, None, &region);
     assert_eq!(
         unclamped,
-        "SELECT DISTINCT customer_id FROM main.sources_raw_orders"
+        format!("SELECT DISTINCT {delta_key_expr} AS delta_key FROM main.sources_raw_orders")
     );
 
     // The candidate carries NO clamp of its own — the group is recomputed
@@ -396,6 +487,11 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         candidate.contains("EXISTS") && candidate.contains("SELECT customer_id, 1 AS v"),
         "the candidate is the model's own full SQL semi-joined to the affected keys: {candidate}"
     );
+    assert!(
+        candidate.contains("__smelt_repair_keys.delta_key"),
+        "the candidate joins the affected-keys relation by its canonical `delta_key` column: \
+         {candidate}"
+    );
 
     // The `diff_patch` slice restriction is the SAME affected-key read,
     // wrapped as an EXISTS predicate, table-qualified on every key column —
@@ -409,7 +505,8 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         slice_predicate,
         format!(
             "EXISTS (SELECT 1 FROM ({clamped}) AS __smelt_repair_keys WHERE \
-             main.customer_max_amount.customer_id = __smelt_repair_keys.customer_id)"
+             COALESCE(CAST(main.customer_max_amount.customer_id AS VARCHAR), \
+             '\u{2}NULL\u{2}') = __smelt_repair_keys.delta_key)"
         )
     );
 }
@@ -847,6 +944,289 @@ async fn diff_patch_execution_sends_the_emitted_group() {
         .await,
         "the incremental state after a diff_patch repair must equal a full refresh over the \
          same inputs"
+    );
+}
+
+// ── P9 test 5 ────────────────────────────────────────────────────────────
+/// The gap phase 9 closes (`docs/specs/incremental_models.md` §"The repair
+/// family" — "Obligation 7 over a `mutable_snapshot` source"): a key whose
+/// ENTIRE window contribution is deleted from a `mutable_snapshot` source
+/// leaves no row for a clamped current-source scan to select at all — the
+/// group-grain fingerprint sidecar diff is what still discovers it, via its
+/// own stored comparandum.
+#[tokio::test]
+async fn repair_fixes_a_key_whose_entire_window_contribution_was_deleted() {
+    use smelt_backend::Backend;
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("run.duckdb");
+
+    stage_repair_project(&project_dir);
+    let config = Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_orders (order_id INTEGER, customer_id INTEGER, \
+                 amount DECIMAL(10,2), order_date TIMESTAMP)",
+            )
+            .await
+            .expect("create orders source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_orders VALUES \
+                 (1, 1, 100.00, TIMESTAMP '2025-01-13 10:00:00'), \
+                 (2, 1, 50.00, TIMESTAMP '2025-01-13 11:00:00'), \
+                 (3, 2, 70.00, TIMESTAMP '2025-01-13 12:00:00')",
+            )
+            .await
+            .expect("seed orders — customer 2's only row lies inside run 2's affected-key window");
+    }
+
+    // Run 1: creation.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        smelt_runtime::execute_project(
+            "repair-vanish-run-1".to_string(),
+            select_request("dev", "customer_max_amount", "2025-01-11", "2025-01-14"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.to_path_buf(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let count = scalar_text(
+            &backend,
+            "SELECT COUNT(*) FROM main.customer_max_amount WHERE customer_id = 2",
+        )
+        .await;
+        assert_eq!(count, "1", "customer 2 must exist after creation");
+    }
+
+    // Run 2 with NO source change: forces a live per-group-recompute pass
+    // over the sidecar partition populated by run 1's own creation (task
+    // 6) — its refresh re-stamps both customers' current digests, which is
+    // the steady state the vanished-group leg below needs to actually
+    // exercise the sidecar diff (P9 test 6 exercises the absent-comparandum
+    // fallback directly, instead).
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        smelt_runtime::execute_project(
+            "repair-vanish-run-2-populate".to_string(),
+            select_request("dev", "customer_max_amount", "2025-01-16", "2025-01-17"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.to_path_buf(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("second run (steady-state sidecar refresh) must succeed");
+    }
+
+    // Delete customer 2's ENTIRE window contribution. No row survives for
+    // ANY scan (clamped or not) to select — the sidecar's own stored
+    // comparandum is the only thing left that can witness this.
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("DELETE FROM main.sources_raw_orders WHERE customer_id = 2")
+            .await
+            .expect("delete customer 2 entirely");
+    }
+
+    // Run 3: sidecar discovery is unbounded by the cell's clamp (P9) —
+    // customer 2's vanished group must still be repaired away.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let outcome = smelt_runtime::execute_project(
+        "repair-vanish-run-3".to_string(),
+        select_request("dev", "customer_max_amount", "2025-01-16", "2025-01-17"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.to_path_buf(),
+        },
+        &smelt_runtime::NoOpReporter,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("third run (per-group recompute over the vanished group) must succeed");
+
+    let record = outcome
+        .models
+        .get("customer_max_amount")
+        .expect("customer_max_amount ran");
+    assert_eq!(
+        record.strategy, "per_group_recompute",
+        "the run must dispatch the repair family"
+    );
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    let remaining = scalar_text(
+        &backend,
+        "SELECT COUNT(*) FROM main.customer_max_amount WHERE customer_id = 2",
+    )
+    .await;
+    assert_eq!(
+        remaining, "0",
+        "customer 2's stale output row must be repaired away — its entire window contribution \
+         was deleted from the source, invisible to any current-source scan"
+    );
+
+    let untouched = scalar_text(
+        &backend,
+        "SELECT max_amount FROM main.customer_max_amount WHERE customer_id = 1",
+    )
+    .await;
+    assert_eq!(
+        untouched, "100.00",
+        "customer 1's group is untouched — no retraction happened for it"
+    );
+}
+
+// ── P9 test 6 ────────────────────────────────────────────────────────────
+/// Absent-comparandum degradation (P9 task 7,
+/// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): with the sidecar partition dropped
+/// outright, the affected set widens to every currently-observed group
+/// PLUS every stored output group — a sound over-approximation that still
+/// reaches a key that vanished while the comparandum was missing.
+#[tokio::test]
+async fn repair_covers_stored_output_keys_when_the_sidecar_is_absent() {
+    use smelt_backend::Backend;
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("run.duckdb");
+
+    stage_repair_project(&project_dir);
+    let config = Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_orders (order_id INTEGER, customer_id INTEGER, \
+                 amount DECIMAL(10,2), order_date TIMESTAMP)",
+            )
+            .await
+            .expect("create orders source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_orders VALUES \
+                 (1, 1, 100.00, TIMESTAMP '2025-01-13 10:00:00'), \
+                 (2, 1, 50.00, TIMESTAMP '2025-01-13 11:00:00'), \
+                 (3, 2, 70.00, TIMESTAMP '2025-01-13 12:00:00')",
+            )
+            .await
+            .expect("seed orders");
+    }
+
+    // Run 1: creation. Task 6 populates the sidecar as a byproduct — drop
+    // it below to force the absent-comparandum leg, not merely a stale one.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        smelt_runtime::execute_project(
+            "repair-absent-run-1".to_string(),
+            select_request("dev", "customer_max_amount", "2025-01-11", "2025-01-14"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.to_path_buf(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Delete customer 2 entirely, THEN drop the sidecar partition outright
+    // — the comparandum is missing, not merely stale.
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("DELETE FROM main.sources_raw_orders WHERE customer_id = 2")
+            .await
+            .expect("delete customer 2 entirely");
+        backend
+            .execute_sql("DELETE FROM main._smelt_fingerprint_sidecar")
+            .await
+            .expect("drop the sidecar partition entirely");
+    }
+
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let outcome = smelt_runtime::execute_project(
+        "repair-absent-run-2".to_string(),
+        select_request("dev", "customer_max_amount", "2025-01-16", "2025-01-17"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.to_path_buf(),
+        },
+        &smelt_runtime::NoOpReporter,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("second run (absent-comparandum repair) must succeed");
+
+    let record = outcome
+        .models
+        .get("customer_max_amount")
+        .expect("customer_max_amount ran");
+    assert_eq!(
+        record.strategy, "per_group_recompute",
+        "the run must dispatch the repair family"
+    );
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    let remaining = scalar_text(
+        &backend,
+        "SELECT COUNT(*) FROM main.customer_max_amount WHERE customer_id = 2",
+    )
+    .await;
+    assert_eq!(
+        remaining, "0",
+        "even with the sidecar comparandum entirely missing, the run must still reach customer \
+         2's vanished group via the stored-output-key over-approximation"
     );
 }
 

@@ -812,14 +812,27 @@ pub fn emit_staged_candidate_conditional_recompute(
 /// `candidate_select`'s read by the runtime transformer, mirroring every
 /// other emitter's "caller-clamped body" contract).
 ///
+/// `affected_keys_select` is a **single-column `delta_key` relation** — the
+/// same canonical shape [`key_expr_for_columns`] builds, whether the caller
+/// sourced it from the append-only clamped scan
+/// (`smelt_runtime::maintenance_driver::repair_affected_keys_select`) or the
+/// `mutable_snapshot` group-grain sidecar diff ([`emit_repair_group_sidecar_diff`]).
+/// One shape for both paths, joined here by KEY EXPRESSION rather than by
+/// raw key columns (`table.k1 = __smelt_affected.k1 AND ...`): a deleted
+/// group's typed column values are unrecoverable by construction — the
+/// sidecar diff's "vanished" leg has nothing but the group's own
+/// `delta_key` text to offer — so a column-shaped join could never serve
+/// that path, and the append-only path adopts the same shape rather than
+/// carrying two joins.
+///
 /// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
 /// 2. `INSERT INTO <staged_relation> <candidate_select>`
-/// 3. `DELETE FROM <table> USING (<affected_keys_select>) WHERE <key join>`
-///    — every stored row whose key is in the affected-key relation, so a
-///    group that vanished entirely from the recompute (its key no longer
-///    appears in `candidate_select`) is still removed.
+/// 3. `DELETE FROM <table> USING (<affected_keys_select>) WHERE <key-expr
+///    join>` — every stored row whose key expression is in the affected-key
+///    relation, so a group that vanished entirely from the recompute (its
+///    key no longer appears in `candidate_select`) is still removed.
 /// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s JOIN
-///    (<affected_keys_select>) ON <key join>` — restricted to the SAME
+///    (<affected_keys_select>) ON <key-expr join>` — restricted to the SAME
 ///    affected-key relation as step 3, so both write statements are
 ///    predicated on the named key set; no statement touches `table`
 ///    unrestricted.
@@ -845,9 +858,8 @@ pub fn emit_per_group_recompute(
         "emit_per_group_recompute requires a non-empty row identity (key) for {table}"
     );
 
-    let key_list = key.join(", ");
     let affected_relation = format!(
-        "(SELECT DISTINCT {key_list} FROM ({affected_keys_select}) AS __smelt_affected_src) AS \
+        "(SELECT DISTINCT delta_key FROM ({affected_keys_select}) AS __smelt_affected_src) AS \
          __smelt_affected"
     );
 
@@ -857,21 +869,18 @@ pub fn emit_per_group_recompute(
     );
     let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
 
-    let delete_join = key
-        .iter()
-        .map(|k| format!("{table}.{k} = __smelt_affected.{k}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    let delete = format!("DELETE FROM {table} USING {affected_relation} WHERE {delete_join}");
+    let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
+    let table_key_expr = key_expr_for_columns(&table_key_columns);
+    let delete = format!(
+        "DELETE FROM {table} USING {affected_relation} WHERE {table_key_expr} = \
+         __smelt_affected.delta_key"
+    );
 
-    let insert_join = key
-        .iter()
-        .map(|k| format!("s.{k} = __smelt_affected.{k}"))
-        .collect::<Vec<_>>()
-        .join(" AND ");
+    let staged_key_columns: Vec<String> = key.iter().map(|k| format!("s.{k}")).collect();
+    let staged_key_expr = key_expr_for_columns(&staged_key_columns);
     let insert = format!(
         "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s JOIN {affected_relation} ON \
-         {insert_join}"
+         {staged_key_expr} = __smelt_affected.delta_key"
     );
 
     let drop = format!("DROP TABLE {staged_relation}");
@@ -1780,7 +1789,15 @@ const KEY_NULL_SENTINEL: &str = "\u{2}NULL\u{2}";
 /// contract to preserve, and the composite-key collision the review flagged
 /// (two distinct real composite keys silently overwriting the same sidecar
 /// row because their old-scheme joined text collided) is worth closing.
-fn key_expr_for_columns(columns: &[String]) -> String {
+///
+/// `pub`, not module-private: the repair family's runtime driver
+/// (`smelt_runtime::maintenance_driver`) builds the SAME canonical
+/// `delta_key` expression over the model's own group-key columns, for the
+/// affected-key relation and its `emit_per_group_recompute` joins
+/// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`) — one shape,
+/// shared by both the sidecar diff and the append-only clamped-scan path,
+/// never a second, independently-typed key expression.
+pub fn key_expr_for_columns(columns: &[String]) -> String {
     if columns.len() == 1 {
         format!(
             "COALESCE(CAST({} AS VARCHAR), '{KEY_NULL_SENTINEL}')",
@@ -1891,6 +1908,31 @@ pub fn emit_fingerprint_sidecar_diff(
 ) -> String {
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, digest_columns, dialect);
+    sidecar_diff_over_digest_select(
+        &digest_select,
+        sidecar_table,
+        source_address,
+        projection_identity,
+        stamp,
+    )
+}
+
+/// Shared `FULL OUTER JOIN` shape both [`emit_fingerprint_sidecar_diff`]
+/// (per-row grain) and [`emit_repair_group_sidecar_diff`] (group grain, P9)
+/// build over their own `digest_select` — the comparison logic (three-way
+/// new/deleted/changed classification, the stamp filter) is identical at
+/// either grain; only what `digest_select` projects one `delta_key`/
+/// `delta_digest` pair PER (a source row, or a source-derived output group)
+/// differs. See [`emit_fingerprint_sidecar_diff`]'s own doc comment for the
+/// full rationale — this helper exists purely to keep that rationale in one
+/// place rather than duplicated across two near-identical `format!` bodies.
+fn sidecar_diff_over_digest_select(
+    digest_select: &str,
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+) -> String {
     let source_address_lit = source_address.replace('\'', "''");
     let projection_identity_lit = projection_identity.replace('\'', "''");
     let stamp_lit = stamp.replace('\'', "''");
@@ -1904,6 +1946,92 @@ pub fn emit_fingerprint_sidecar_diff(
          WHERE __smelt_sidecar.source_key IS NULL \
          OR __smelt_src.delta_key IS NULL \
          OR __smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"
+    )
+}
+
+/// The repair family's group-grain digest `SELECT`
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "Partition grain";
+/// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): one row per `group_key` value,
+/// projecting the same canonical `delta_key` expression
+/// [`emit_fingerprint_digest_select`] builds ([`key_expr_for_columns`] over
+/// `group_key`), paired with an **order-insensitive** digest over that
+/// group's own contributing source rows.
+///
+/// Each contributing row is hashed independently first, via the same
+/// tagged, NULL-safe, fixed-length per-row digest [`concat_varchar_expr`]
+/// builds for the per-row sidecar (`sha256(...)` over `digest_columns`);
+/// `hash(...)` (DuckDB's scalar hash, `UBIGINT`) turns that fixed-length
+/// hex digest into an integer, and `bit_xor(...)` combines every row's
+/// integer digest within the group — XOR is commutative and associative, so
+/// the group's digest does not depend on the order its rows are read in
+/// (the same content in a different row order digests identically), while
+/// removing, adding, or changing any one row's content still flips bits in
+/// the combined result (a collision needs two DISTINCT per-row digest sets
+/// to XOR to the same value, no likelier than the per-row sidecar's own
+/// assumed SHA-256 collision-soundness invariant `sources.md` §"The
+/// fingerprint sidecar" — "Digest" already relies on).
+///
+/// `dialect` is accepted for signature symmetry with
+/// [`emit_fingerprint_digest_select`]; only the DuckDB shape (`sha256`,
+/// `hash`, `bit_xor` are all DuckDB built-ins) is built today, matching this
+/// phase's DuckDB-only scope.
+///
+/// # Panics
+/// Panics if `group_key` or `digest_columns` is empty — mirrors
+/// [`emit_fingerprint_digest_select`]'s own contract.
+pub fn emit_repair_group_digest_select(
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !group_key.is_empty(),
+        "emit_repair_group_digest_select requires a non-empty group key for {source_table}"
+    );
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_repair_group_digest_select requires a non-empty digest column set for \
+         {source_table}"
+    );
+    let key_expr = key_expr_for_columns(group_key);
+    let group_by_list = group_key.join(", ");
+    let row_digest_expr = concat_varchar_expr(digest_columns);
+    format!(
+        "SELECT {key_expr} AS delta_key, CAST(bit_xor(hash(sha256({row_digest_expr}))) AS \
+         VARCHAR) AS delta_digest FROM {source_table} GROUP BY {group_by_list}"
+    )
+}
+
+/// The repair family's group-grain counterpart of
+/// [`emit_fingerprint_sidecar_diff`] (P9,
+/// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): the same `FULL OUTER JOIN` diff
+/// shape, over [`emit_repair_group_digest_select`]'s group-grain digest
+/// instead of the per-row one — so a group whose entire contribution
+/// departed the source still surfaces via the diff's "sidecar row with no
+/// matching source key" leg (`__smelt_src.delta_key IS NULL`), even though
+/// no source row survives to name it.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_repair_group_sidecar_diff(
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let digest_select =
+        emit_repair_group_digest_select(source_table, group_key, digest_columns, dialect);
+    sidecar_diff_over_digest_select(
+        &digest_select,
+        sidecar_table,
+        source_address,
+        projection_identity,
+        stamp,
     )
 }
 
@@ -2267,6 +2395,132 @@ mod fingerprint_sidecar_tests {
             "WHERE source_address = 'smelt.sources.dim_users' AND projection_identity = \
              'cols:name' AND stamp = 'v2:cols:name:sha256:newhash'"
         ));
+    }
+
+    /// Run [`emit_repair_group_digest_select`] over `source_table` (a
+    /// derived-table expression) against a real DuckDB and return the
+    /// `(delta_key, delta_digest)` pairs it produces, sorted by key — used
+    /// by the group-digest order-insensitivity and vanished-group tests
+    /// below to prove the FIX's actual SQL output against real DuckDB
+    /// semantics, not merely string-literal expectations.
+    fn group_digests(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        group_key: &[String],
+        digest_columns: &[String],
+    ) -> Vec<(String, String)> {
+        let sql = emit_repair_group_digest_select(
+            source_table,
+            group_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        let mut stmt = conn.prepare(&sql).expect("prepare group digest select");
+        let mut rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query group digest select")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect group digest rows");
+        rows.sort();
+        rows
+    }
+
+    /// P9 test 1 (`docs/outcomes/20260809-repair-family/phases/09-plan.md`):
+    /// the group digest is an order-insensitive aggregate — inserting the
+    /// same group's rows in a different order must not change its digest —
+    /// while removing one of the group's rows must.
+    #[test]
+    fn repair_group_digest_select_is_order_insensitive() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let group_key = vec!["customer_id".to_string()];
+        let digest_columns = vec!["amount".to_string()];
+
+        let forward = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 10), (1, 20), (1, 30)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        let shuffled = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 30), (1, 10), (1, 20)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        assert_eq!(
+            forward, shuffled,
+            "the same group's rows in a different order must digest identically"
+        );
+
+        let one_row_deleted = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 10), (1, 20)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        assert_ne!(
+            forward, one_row_deleted,
+            "deleting one of the group's rows must change its digest"
+        );
+    }
+
+    /// P9 test 2: the group-grain sidecar diff over a group-grain partition
+    /// reports a group present in the sidecar and absent from the source —
+    /// the `__smelt_src.delta_key IS NULL` leg — with the vanished group's
+    /// key value intact, proving a wholly-deleted group is still
+    /// discoverable via the stored comparandum.
+    #[test]
+    fn repair_group_digest_diff_reports_a_vanished_group() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_table = "(SELECT * FROM (VALUES (1, 10)) AS t(customer_id, amount))";
+        let group_key = vec!["customer_id".to_string()];
+        let digest_columns = vec!["amount".to_string()];
+
+        // Customer 1's digest under the CURRENT source content — seeded
+        // into the sidecar as an already-matching comparandum, so it must
+        // NOT surface as changed; only customer 2 (present in the sidecar,
+        // absent from the source) should.
+        let customer_1_digest = group_digests(&conn, source_table, &group_key, &digest_columns)
+            .into_iter()
+            .find(|(key, _)| key == "1")
+            .expect("customer 1's digest")
+            .1;
+        conn.execute_batch(&format!(
+            "CREATE TABLE sidecar (source_address VARCHAR, projection_identity VARCHAR, \
+             source_key VARCHAR, digest VARCHAR, stamp VARCHAR); \
+             INSERT INTO sidecar VALUES \
+             ('src', 'repair:group=customer_id:digest=amount', '1', '{customer_1_digest}', \
+             'stamp1'), \
+             ('src', 'repair:group=customer_id:digest=amount', '2', \
+             'stale-digest-for-vanished-group', 'stamp1');"
+        ))
+        .expect("seed sidecar: customer 1 matches current content, customer 2 has vanished");
+
+        let sql = emit_repair_group_sidecar_diff(
+            source_table,
+            &group_key,
+            &digest_columns,
+            "sidecar",
+            "src",
+            "repair:group=customer_id:digest=amount",
+            "stamp1",
+            MaintenanceDialect::DuckDb,
+        );
+        let mut stmt = conn.prepare(&sql).expect("prepare group sidecar diff");
+        let keys: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query group sidecar diff")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect diff keys");
+        assert_eq!(
+            keys,
+            vec!["2".to_string()],
+            "customer 2's group vanished entirely from the source — the diff must still report \
+             it, sourced from the sidecar's own stored comparandum, while customer 1's unchanged \
+             group must not surface: {keys:?}"
+        );
     }
 }
 

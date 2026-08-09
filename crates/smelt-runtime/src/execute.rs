@@ -1696,6 +1696,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         &request.technique_overrides,
+                        backend.dialect(),
                     )?
                 }
                 None => None,
@@ -1761,7 +1762,7 @@ pub async fn execute_project(
                         .as_ref()
                         .filter(|_| table_exists_before_run)
                     {
-                        Some((source, _cell, key, slice, write)) => {
+                        Some((source, _cell, key, slice, write, discovery)) => {
                             // A cell that resolved live but whose emitter
                             // inputs cannot be built errors by name — never
                             // a silent fall-through to the fold.
@@ -1786,25 +1787,76 @@ pub async fn execute_project(
                                 })?;
                             let source_table =
                                 source_info.db_name_for_target(model_target, schema);
-                            // Typed literals, unlike the bare quoted strings
-                            // every other `Region` construction in this file
-                            // uses: the repair's affected-key read is the
-                            // one place a region endpoint is an *operand*
-                            // (`widened_scan_predicate` subtracts the
-                            // clamp's margin from it), and a bare string
-                            // literal minus an INTERVAL is ambiguous to the
-                            // binder rather than implicitly a timestamp.
-                            let region = smelt_logical::maintenance::emit::Region {
-                                start: format!("TIMESTAMP '{}'", s.format("%Y-%m-%d")),
-                                end: format!("TIMESTAMP '{}'", e.format("%Y-%m-%d")),
+                            // Declared here (not inside the `discovery`
+                            // match arm below) purely so it outlives the
+                            // `RepairSidecarRefresh` borrow the SidecarDiff
+                            // leg constructs — the format is only ever
+                            // consumed on that leg.
+                            let source_address = format!("smelt.sources.{source}");
+                            // P9 (`docs/specs/incremental_models.md` §"The
+                            // repair family" — "Obligation 7 over a
+                            // `mutable_snapshot` source"): a
+                            // `RepairDiscovery::SidecarDiff` cell reads the
+                            // group-grain sidecar diff instead of the
+                            // clamped current-source scan — unbounded by
+                            // `slice`, per that section's own rationale —
+                            // and its result is turned into the SAME
+                            // one-column `delta_key` relation shape every
+                            // downstream repair builder expects.
+                            let (affected_keys_select, sidecar_refresh) = match discovery {
+                                crate::maintenance_driver::RepairDiscovery::ClampedScan => {
+                                    // Typed literals, unlike the bare quoted
+                                    // strings every other `Region`
+                                    // construction in this file uses: the
+                                    // repair's affected-key read is the one
+                                    // place a region endpoint is an
+                                    // *operand* (`widened_scan_predicate`
+                                    // subtracts the clamp's margin from
+                                    // it), and a bare string literal minus
+                                    // an INTERVAL is ambiguous to the
+                                    // binder rather than implicitly a
+                                    // timestamp.
+                                    let region = smelt_logical::maintenance::emit::Region {
+                                        start: format!("TIMESTAMP '{}'", s.format("%Y-%m-%d")),
+                                        end: format!("TIMESTAMP '{}'", e.format("%Y-%m-%d")),
+                                    };
+                                    let select =
+                                        crate::maintenance_driver::repair_affected_keys_select(
+                                            &source_table,
+                                            key,
+                                            Some(slice),
+                                            &region,
+                                        );
+                                    (select, None)
+                                }
+                                crate::maintenance_driver::RepairDiscovery::SidecarDiff {
+                                    digest_columns,
+                                } => {
+                                    let output_table = format!("{schema}.{db_table_name}");
+                                    let keys =
+                                        crate::maintenance_driver::diff_repair_group_sidecar_changed_keys(
+                                            backend,
+                                            schema,
+                                            &source_address,
+                                            &source_table,
+                                            &output_table,
+                                            key,
+                                            digest_columns,
+                                            &clean_sql_for_merge,
+                                        )
+                                        .await?;
+                                    let select = crate::maintenance_driver::repair_keys_literal_select(&keys);
+                                    let refresh = crate::maintenance_driver::RepairSidecarRefresh {
+                                        schema,
+                                        source_address: &source_address,
+                                        source_table: &source_table,
+                                        group_key: key,
+                                        digest_columns,
+                                        model_sql: &clean_sql_for_merge,
+                                    };
+                                    (select, Some(refresh))
+                                }
                             };
-                            let affected_keys_select =
-                                crate::maintenance_driver::repair_affected_keys_select(
-                                    &source_table,
-                                    key,
-                                    Some(slice),
-                                    &region,
-                                );
                             // The model's own FULL, unwindowed recompute —
                             // the same `clean_sql_for_merge` the
                             // membership-recompute dispatch below compiles,
@@ -1833,6 +1885,7 @@ pub async fn execute_project(
                                         &affected_keys_select,
                                         &candidate_select,
                                         &retry_policy,
+                                        sidecar_refresh.as_ref(),
                                     )
                                     .await
                                 }
@@ -1857,6 +1910,7 @@ pub async fn execute_project(
                                         &slice_predicate,
                                         delete_leg,
                                         &retry_policy,
+                                        sidecar_refresh.as_ref(),
                                     )
                                     .await
                                 }
@@ -1942,6 +1996,55 @@ pub async fn execute_project(
                     return Err(e);
                 }
             };
+
+            // P9 task 6 (`docs/outcomes/20260809-repair-family/phases/
+            // 09-plan.md`): seed the group-grain fingerprint sidecar's
+            // initial comparandum on THIS run's own creation
+            // (`!table_exists_before_run` — the fold above just
+            // materialized the table). Without this, the first live repair
+            // after creation would find no partition at all and take the
+            // absent-comparandum degradation (task 7) on every run rather
+            // than just the very first one. `write_group` is an empty,
+            // non-transactional group — there is no consuming write to ride
+            // alongside here, only a baseline populate.
+            if !table_exists_before_run {
+                if let Some((
+                    source,
+                    _cell,
+                    group_key,
+                    _slice,
+                    _write,
+                    crate::maintenance_driver::RepairDiscovery::SidecarDiff { digest_columns },
+                )) = per_group_recompute_cell.as_ref()
+                {
+                    if let Some(source_info) = source_infos.iter().find(|info| {
+                        let segs = &info.address_segments;
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        &bare == source
+                    }) {
+                        let source_table = source_info.db_name_for_target(model_target, schema);
+                        let source_address = format!("smelt.sources.{source}");
+                        let empty_group = smelt_logical::maintenance::emit::StatementGroup {
+                            statements: vec![],
+                            transactional: false,
+                        };
+                        crate::maintenance_driver::refresh_repair_group_sidecar(
+                            backend,
+                            schema,
+                            &source_address,
+                            &source_table,
+                            group_key,
+                            digest_columns,
+                            &clean_sql_for_merge,
+                            &empty_group,
+                        )
+                        .await?;
+                    }
+                }
+            }
 
             // W10 Phase 4: dispatch the live `UpstreamMutation` cell
             // resolved above, alongside the cumulative fold that just ran —

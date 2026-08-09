@@ -874,6 +874,29 @@ All three are fail-closed: any one unprovable refuses the repair family by name 
 it never widens to a whole-table repair, and the refusal always names which obligation failed
 (§Diagnostics, `MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`).
 
+**Obligation 7 over a `mutable_snapshot` source.** A `mutable_snapshot` source keeps no tombstone
+or change history, so a key whose *entire* window contribution was deleted between runs leaves no
+row for a current-source scan to select — a scan-based affected-key read alone cannot witness that
+key at all, which is exactly the under-approximation obligation 7 forbids. For this source posture
+the affected-key relation is instead the **group-grain fingerprint sidecar diff**
+(`sources.md` §"The fingerprint sidecar" — "Partition grain"): the sidecar keeps one row per output
+group key, so a vanished group still has a stored comparandum and surfaces on the diff's "sidecar
+row with no matching source key" leg even though no source row survives to name it. This discovery
+read is **unbounded by the cell's `ScanClamp`** — a clamped rescan compared against the sidecar's
+full stored digests would flag every group outside the clamp as spuriously changed, degrading to a
+whole-table repair on every run rather than only when the comparandum is missing — while the
+per-group *recompute* itself stays bounded by the discovered key set exactly as obligation 4
+requires. An **absent or stale-stamped comparandum** (no prior sidecar partition, or one whose
+identity stamp no longer matches — `sources.md` §"The fingerprint sidecar" — "Invalidation") cannot
+distinguish a group that vanished from one that never existed, so for that run the affected set
+widens further, to every currently-observed group *plus* every group already present in the stored
+output — a sound over-approximation, distinct from the obligation's own "never widens to a
+whole-table repair" rule above (that rule is about *admission* refusing an unprovable obligation;
+this is a runtime comparandum being absent). It degenerates to a whole-table repair for that one
+run and self-heals once the sidecar is refreshed. An append-only source (or any other posture with
+no native deletion) keeps the ordinary clamped current-source scan — the group-grain sidecar is
+scoped to the one posture that needs it.
+
 **Ledger grading and re-run safety.** Per-group recompute is graded **Idempotent** for the keys in
 its slice, exactly like a region recompute (§"The transactional merge ledger"): re-running it
 reproduces the same state, and it resets any additive ledger record for those keys rather than
@@ -2256,17 +2279,6 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   falling through to a plain write, but no caller today reaches that resolver for the
   `DeleteInsert` recompute, so the pin is presently unenforced for that case rather than refused.
   Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
-- **Affected-key discovery for the repair family under-approximates a full-group deletion from
-  a `mutable_snapshot` source.** The runtime affected-key read (`repair_affected_keys_select`)
-  derives the affected-key set by scanning the CURRENT physical source table within the run's
-  window; a key whose entire window contribution was deleted between runs (a `mutable_snapshot`
-  source keeps no tombstone or change history) no longer appears in that scan, so its stale
-  output row is never repaired — an under-approximation the admission obligation forbids
-  (§"The repair family" obligation 7: "an under-approximation is never admissible, because a
-  missed key would leave stale state for a group the retraction actually touched"). Discovered
-  by the conformance gate's repair-family recipe pool
-  (`crates/smelt-cli/tests/maintenance_conformance/repair.rs`). Tracked:
-  `docs/outcomes/20260809-repair-family/outcome.md`.
 - **The repair family's affected-key recompute ignores a decomposed combiner's hidden state.**
   `repair_candidate_select` wraps the model's plain PRESENTED projection with no widening for a
   decomposed combiner's hidden state (e.g. the order-monotone family's `(v, o)` pair, §"The

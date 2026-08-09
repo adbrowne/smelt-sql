@@ -381,6 +381,33 @@ async fn multiset_equal(backend: &dyn Backend, left_sql: &str, right_sql: &str) 
         && except_all_count(backend, right_sql, left_sql).await == 0
 }
 
+/// Recover the `affected_keys_select` sub-`SELECT`
+/// [`smelt_runtime::maintenance_driver::repair_candidate_select`] embeds
+/// verbatim inside its own `EXISTS (SELECT 1 FROM (<here>) AS
+/// __smelt_repair_keys WHERE ...)` wrapper — the repair-family parity tests
+/// below use this to recover the LIVE run's own discovered affected-key
+/// relation rather than independently rebuilding it: for a
+/// `MutationProfile::MutableSnapshot` source (P9,
+/// `docs/specs/incremental_models.md` §"The repair family") the relation is
+/// a backend-state-dependent `VALUES (...)` literal a test cannot
+/// reconstruct without duplicating the live sidecar-diff read, so this
+/// instead proves internal consistency: the SAME relation text
+/// `repair_candidate_select` embedded is the one `emit_per_group_recompute`/
+/// `emit_diff_patch` joins against.
+fn extract_affected_keys_select(candidate_select: &str) -> String {
+    let marker = "WHERE EXISTS (SELECT 1 FROM (";
+    let start = candidate_select
+        .find(marker)
+        .expect("candidate_select must embed an EXISTS-wrapped affected-keys read")
+        + marker.len();
+    let suffix = ") AS __smelt_repair_keys WHERE ";
+    let end = candidate_select[start..]
+        .rfind(suffix)
+        .expect("candidate_select must close the affected-keys read with __smelt_repair_keys")
+        + start;
+    candidate_select[start..end].to_string()
+}
+
 fn write_model(project_dir: &Path, name: &str, content: &str) {
     let path = project_dir.join("models").join(format!("{}.sql", name));
     std::fs::write(path, content).expect("write model file");
@@ -2244,30 +2271,17 @@ mutation_profile:
     );
     let candidate_select = &insert_sql[candidate_prefix.len()..];
 
-    // The batch's own affected-key read, rebuilt from the same pure builder
-    // the run uses over the cell's derived clamp (`before = 3 days`, the
-    // model's own Form B band) and this run's `[start, end)` region.
+    // This is a `MutationProfile::MutableSnapshot` source, so the affected-
+    // key relation is the group-grain sidecar diff (P9), not the append-only
+    // clamped scan — a backend-state-dependent `VALUES (...)` literal
+    // recovered straight from the executed candidate, per
+    // `extract_affected_keys_select`'s own doc comment.
     let key = vec!["customer_id".to_string()];
-    let clamp = smelt_logical::maintenance::ScanClamp {
-        source: "raw.orders".to_string(),
-        column: "order_date".to_string(),
-        before: smelt_logical::analysis::source_bounds::Seconds::days(3),
-        after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
-    };
-    let region = Region {
-        start: "TIMESTAMP '2025-01-16'".to_string(),
-        end: "TIMESTAMP '2025-01-17'".to_string(),
-    };
-    let affected_keys_select = smelt_runtime::maintenance_driver::repair_affected_keys_select(
-        "main.sources_raw_orders",
-        &key,
-        Some(&clamp),
-        &region,
-    );
+    let affected_keys_select = extract_affected_keys_select(candidate_select);
     assert!(
-        candidate_select.contains(&affected_keys_select),
-        "the executed candidate must semi-join the clamped affected-key read:\n  \
-         candidate: {candidate_select}\n  affected: {affected_keys_select}"
+        affected_keys_select.contains("__smelt_repair_group_keys(delta_key)"),
+        "a MutableSnapshot source's affected-key relation must be the sidecar-diff-derived \
+         literal keys relation: {affected_keys_select}"
     );
 
     let expected = emit_per_group_recompute(
@@ -2487,30 +2501,17 @@ mutation_profile:
     );
     let candidate_select = &insert_sql[candidate_prefix.len()..];
 
-    // The batch's own affected-key read, rebuilt from the same pure builder
-    // the run uses over the cell's derived clamp (`before = 3 days`, the
-    // model's own Form B band) and this run's `[start, end)` region.
+    // This is a `MutationProfile::MutableSnapshot` source, so the affected-
+    // key relation is the group-grain sidecar diff (P9), not the append-only
+    // clamped scan — a backend-state-dependent `VALUES (...)` literal
+    // recovered straight from the executed candidate, per
+    // `extract_affected_keys_select`'s own doc comment.
     let key = vec!["customer_id".to_string()];
-    let clamp = smelt_logical::maintenance::ScanClamp {
-        source: "raw.orders".to_string(),
-        column: "order_date".to_string(),
-        before: smelt_logical::analysis::source_bounds::Seconds::days(3),
-        after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
-    };
-    let region = Region {
-        start: "TIMESTAMP '2025-01-16'".to_string(),
-        end: "TIMESTAMP '2025-01-17'".to_string(),
-    };
-    let affected_keys_select = smelt_runtime::maintenance_driver::repair_affected_keys_select(
-        "main.sources_raw_orders",
-        &key,
-        Some(&clamp),
-        &region,
-    );
+    let affected_keys_select = extract_affected_keys_select(candidate_select);
     assert!(
-        candidate_select.contains(&affected_keys_select),
-        "the executed candidate must semi-join the clamped affected-key read:\n  \
-         candidate: {candidate_select}\n  affected: {affected_keys_select}"
+        affected_keys_select.contains("__smelt_repair_group_keys(delta_key)"),
+        "a MutableSnapshot source's affected-key relation must be the sidecar-diff-derived \
+         literal keys relation: {affected_keys_select}"
     );
 
     let slice_predicate = smelt_runtime::maintenance_driver::repair_slice_predicate(

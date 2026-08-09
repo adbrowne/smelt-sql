@@ -217,6 +217,19 @@ separate "clear the stale partition" step. Invalidation is scoped to the changed
 partition; a sibling consumer's differently-identified partition, or one whose model definition did
 not change, is unaffected.
 
+**Partition grain.** The sidecar's partition grain is the *digested unit*, not necessarily one
+source row: most consumers digest per source row (above), but a repair-family consumer
+(`incremental_models.md` §"The repair family") partitions at **group** grain instead — one sidecar
+row per output group key, its digest an order-insensitive aggregate over that group's contributing
+source rows, so that adding, removing, or reordering a row within the group changes the group's
+digest but the digest itself does not depend on the order the group's rows are read in. Same table,
+same namespacing, stamp, and invalidation rules as the per-row grain; only what one sidecar row
+represents differs. A group-grain partition is what makes a group's *disappearance* observable: a
+row deleted from the source leaves nothing for a current-source scan to select, but the sidecar
+still holds a stored comparandum for the group that row belonged to, so the group surfaces on the
+next diff's "sidecar row with no matching source key" leg even though no source row survives to
+name it.
+
 ### Source with `timeseries:` declaration
 
 A source declaring a time dimension opts in to being a pushdown target for downstream planner rules — incremental models reading the source receive source-filter pushdown based on the declared partition column. Declaring `timeseries:` does not change how the source is loaded — sources remain externally managed. It only declares the partition shape downstream consumers may rely on.

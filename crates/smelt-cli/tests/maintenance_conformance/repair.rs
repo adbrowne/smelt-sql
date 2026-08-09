@@ -358,16 +358,17 @@ async fn repair_pool_upholds_equivalence_under_retraction() {
             .unwrap_or_else(|e| panic!("update run {combiner:?}: {e}"));
         assert_repair_equivalence(&project, &recipe).await;
 
-        // Delete: order_id=2 (customer 1's second seeded row) departs,
-        // leaving order_id=1 (customer 1's now-retracted row) as the
-        // group's only survivor — customer 1 still has a row in the
-        // window, so it still appears in the runtime affected-key scan
-        // (`repair_affected_keys_select` scans the CURRENT source table; a
-        // key whose ENTIRE window contribution is deleted instead falls
-        // out of that scan entirely — a known gap, registered as
-        // `known_bug_repair_affected_key_discovery_misses_full_group_deletion`
-        // in `registry.rs` rather than exercised by this equivalence gate).
-        delete_repair_row(&project, &recipe, 2)
+        // Delete: order_id=4 (customer 3's ONLY row, seeded by the insert
+        // step above) departs entirely — customer 3's whole window
+        // contribution is gone, leaving no row for ANY current-source scan
+        // to select (P9, `docs/specs/incremental_models.md` §"The repair
+        // family" — "Obligation 7 over a `mutable_snapshot` source"). The
+        // group-grain fingerprint sidecar diff is what still discovers it,
+        // via its own stored comparandum — this is the gap case the
+        // conformance gate previously dodged (see git history for the
+        // now-removed `known_bug_repair_affected_key_discovery_misses_
+        // full_group_deletion` workaround this replaces).
+        delete_repair_row(&project, &recipe, 4)
             .unwrap_or_else(|e| panic!("delete {combiner:?}: {e}"));
         run_repair_window(&project, "repair-pool-delete")
             .await
