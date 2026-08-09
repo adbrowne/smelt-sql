@@ -55,6 +55,8 @@ relaxation is declared, validated, probe-checked, and printed by
 
 ## Decision log
 
+- 2026-08-09 — **Oracle home settled** (rethink §6 open question 2, settled with Andrew): a lattice point is admissible only as a complete single-owner definition in `smelt-logical` — (declaration schema, pure oracle transform, probe emitter). The conformance gate consumes the oracle transform rather than encoding its own comparator; runtime probes emit from the same definition. This makes the admission rule ("what does the oracle become, and what probe checks it") structural, mirroring the statement-emission single-owner rule. Harness-local comparators (drift risk) and ad-hoc probes (reopens declared-but-unchecked) were rejected.
+
 <!-- Dated one-liners appended by plan/implement steps. -->
 
 ## Blocked

@@ -38,6 +38,9 @@ way (timeless-oracle rule), at substantially reduced length.
 - New behaviour. This outcome is descriptive consolidation; any behaviour gap
   it uncovers becomes a queued outcome, not a phase here (parser/config
   fossil *removal* in criterion 2 is the one sanctioned behaviour change).
+- Kernel externalisation: no verbs/kinds/plan-cell API surface is published
+  here or in any phase this outcome's plans reshape (see Decision log
+  2026-08-09) — externalisation is a separate post-redraft outcome.
 
 ## Phases
 
