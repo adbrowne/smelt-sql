@@ -1,7 +1,7 @@
 # Outcome: Probe-backed world-facts
 
 **Created:** 2026-08-09
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260809-incremental-rethink.md` §2 P-C, §6 step 3
 **Spec anchors:** `docs/specs/model_properties.md` (model-scoped declarations), `docs/specs/incremental_models.md` (declared contract facts)
 
@@ -41,7 +41,7 @@ safe to grow (the contract lattice will grow it).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | pending |
+| 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | planned |
 | 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | pending |
 | 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | pending |
 | 4 | Runtime wiring: cadence control, firing → named diagnostic + cell remedy marking | pending |
@@ -51,6 +51,8 @@ safe to grow (the contract lattice will grow it).
 ## Decision log
 
 <!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-08-10: Outcome activated. Phase table kept as scaffolded (no prior summary to reshape from). Phase 1 plans the probe registry as a spec-parsed standing gate (`crates/smelt-logical/tests/probe_obligation.rs`) so later phases flip Status cells from `not-yet` to `built` under test, rather than the table drifting from the emitters.
 
 ## Blocked
 
