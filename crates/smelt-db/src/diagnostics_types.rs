@@ -923,6 +923,15 @@ pub enum DiagnosticCode {
     /// by `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`.
     /// Anchored at the top of the file (line 0, column 0).
     ContractFrozenHorizonInvalid,
+    /// A `contract.deferral` (model-level or `contract.cells[].deferral`) is
+    /// unparseable or negative, or declared with no interval-representable
+    /// clock to measure lag against (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractDeferralInvalid`) and the clock-admissibility check made by
+    /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
+    /// the top of the file (line 0, column 0).
+    ContractDeferralInvalid,
 }
 
 /// Structured metadata attached to diagnostics for code actions

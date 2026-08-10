@@ -211,12 +211,17 @@ contract:
   a key-grain model (which has no write-eligibility clamp, §"Windowed maintenance and the
   horizon") is a configuration error, `ContractFrozenHorizonInvalid`. An unparseable or negative
   interval is the same error.
-- `deferral: '<interval>'` is admitted on either grain, model-level or per cell.
+- `deferral: '<interval>'` is admitted on either grain, model-level or per cell, but only where
+  there is a clock to measure lag against: a model-level `deferral` requires the model to carry a
+  `timeseries:` clock, and a `cells[]` entry's `deferral` requires its `on:` trigger to be a
+  clocked, interval-representable source. `on: backfill`, an unclocked source, and a
+  `mutable_snapshot` source each have no frontier to measure lag against and each raise
+  `ContractDeferralInvalid`.
 - Model-level values are the default for every cell; a `cells[]` entry — addressed the same way
   as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is
   model-level only (it clamps the model's write eligibility, not a single cell's).
-- An unparseable or negative `deferral`, or a `deferral` on a cell with no clock to measure lag
-  against, is `ContractDeferralInvalid`.
+- An unparseable or negative `deferral`, or a `deferral` on a model or cell with no clock to
+  measure lag against, is `ContractDeferralInvalid`.
 - Absent `contract:` (the common case) is the default point: strict equivalence, no relaxation.
 - The effective contract per cell — default or relaxed, with the relaxation's parameters — is
   always printed by `smelt explain`; a relaxation is never silent (§"CLI").
@@ -557,9 +562,11 @@ skipping**, when a run's entire pending input set is within `D` of arrival (noth
 window is left unfolded, so skipping the run cannot violate the oracle); and **work
 subsumption**, when a pending small run's input set is a subset of a larger run already scheduled
 within `D` (the ledger proves the subset relationship before the smaller run is dropped). The
-probe is ledger-derived: it compares the cell's maintained frontier against the input frontier
-and raises `ContractDeferralExceeded`, naming the cell and the measured lag, whenever lag exceeds
-the declared `D`.
+probe is ledger-derived: both frontiers are event-time, read from state the run already writes —
+the maintained frontier is the cell's own latest recorded interval end, the input frontier is the
+latest covered end across its clocked inputs' recorded landings — and the probe compares them,
+raising `ContractDeferralExceeded`, naming the cell and the measured lag, whenever lag exceeds the
+declared `D`.
 
 Both points compose with the shape facts already in play (`grain`, the column-family catalogue,
 `maintenance:` overrides) without introducing a new mode: a relaxed cell still resolves a
@@ -2448,19 +2455,21 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **`deferral`, the parameterised conformance oracle, and the `explain` surface remain
-  unimplemented for the contract lattice.** §"The contract lattice" and §"Contract relaxations
-  (`contract:`)" define the default point and the two v1 relaxations (`frozen_horizon`,
-  `deferral`), each as a declaration-schema + oracle-transform + probe-emitter triple.
-  `frozen_horizon` is fully landed: the loader accepts a `contract:` block with `frozen_horizon`
-  (`deferral` and per-cell `cells:` refinement are refused, fail-loud, until they are wired),
-  `smelt-logical` validates grain admissibility
-  (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`), narrows the
-  partition-grain write range to `end - H`, and the baseline-comparative late-arrival probe
-  (`ContractLateArrivalOutsideHorizon`) raises on a genuine late arrival outside `H`. Still
-  missing: the `deferral` point entirely, `maintenance_conformance` parameterisation per lattice
-  point (every recipe today is checked against the default point's strict oracle only), and
-  `smelt explain` rendering the effective contract per cell. Tracked:
+- **The parameterised conformance oracle and the `explain` surface remain unimplemented for the
+  contract lattice; `deferral`'s declaration and probe are landed but not yet a licensed
+  capability.** §"The contract lattice" and §"Contract relaxations (`contract:`)" define the
+  default point and the two v1 relaxations (`frozen_horizon`, `deferral`), each as a
+  declaration-schema + oracle-transform + probe-emitter triple. Both triples are landed: the
+  loader accepts a `contract:` block with `frozen_horizon`, `deferral`, and `cells:`;
+  `smelt-logical` validates grain admissibility (`frozen_horizon`) and clock admissibility
+  (`deferral`); the partition-grain write range narrows to `end - H`; the baseline-comparative
+  late-arrival probe (`ContractLateArrivalOutsideHorizon`) raises on a genuine late arrival
+  outside `H`; and the ledger-derived lag probe (`ContractDeferralExceeded`) raises when a cell's
+  measured lag exceeds its declared `D`. Still missing: `deferral`'s two licensed capabilities
+  (run skipping, work subsumption — declaring `deferral` today only gets the probe, not the
+  scheduling change it licenses), `maintenance_conformance` parameterisation per lattice point
+  (every recipe today is checked against the default point's strict oracle only), and `smelt
+  explain` rendering the effective contract per cell. Tracked:
   `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")

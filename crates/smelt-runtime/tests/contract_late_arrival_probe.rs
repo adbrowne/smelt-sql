@@ -81,6 +81,7 @@ fn frozen_horizon_metadata(days: u32) -> ModelMetadata {
     ModelMetadata {
         contract: Some(ContractConfig {
             frozen_horizon: smelt_core::config::DataLatency::parse(&format!("{days} days")),
+            ..Default::default()
         }),
         ..Default::default()
     }

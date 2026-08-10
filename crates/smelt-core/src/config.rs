@@ -800,11 +800,7 @@ pub struct MaintenanceConfig {
 /// The `contract:` block (`incremental_models.md` §"Contract relaxations
 /// (`contract:`)"): a declared relaxation of the equivalence invariant — the
 /// default point in the contract lattice. Absent means the default point
-/// (strict equivalence); `frozen_horizon` is the only accepted key this
-/// phase. `deferral` and per-cell `cells:` refinement are deliberately
-/// refused (`deny_unknown_fields`) until the phase that validates and
-/// enforces them lands — an accepted-but-unenforced relaxation key would be
-/// exactly the silent weakening the lattice exists to prevent.
+/// (strict equivalence).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContractConfig {
@@ -818,6 +814,40 @@ pub struct ContractConfig {
     /// YAML parse error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_horizon: Option<DataLatency>,
+    /// Model-level default deferral window `D`: the maintained state may lag
+    /// its inputs by up to `D`, licensing run skipping and work subsumption
+    /// (`incremental_models.md` §"The contract lattice"). Admitted only when
+    /// the model carries a `timeseries:` clock (checked by
+    /// `smelt_logical::contract::deferral::validate_deferral`, which needs
+    /// the parsed `ModelMetadata` this pure serde shape does not have).
+    /// Format validity is checked at frontmatter-parse time, raising
+    /// `MetadataError::ContractDeferralInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<DataLatency>,
+    /// Per-cell refinement, addressed like `maintenance.cells[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<ContractCellConfig>,
+}
+
+/// One `contract.cells[]` entry: a per-`(columns × trigger)` `deferral`
+/// override, addressed the same way as `maintenance.cells[]`
+/// (`incremental_models.md` §"Contract relaxations (`contract:`)").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractCellConfig {
+    /// Names any member of the derived column group this cell addresses.
+    pub columns: Vec<String>,
+    /// The trigger this cell handles: a `<source-address>` or the literal
+    /// `backfill`.
+    pub on: String,
+    /// This cell's deferral window `D`, overriding the model-level default.
+    /// Admitted only when `on:` addresses a clocked, interval-representable
+    /// source — `on: backfill`, an unclocked source, and a
+    /// `mutable_snapshot` source each raise
+    /// `MetadataError::ContractDeferralInvalid` /
+    /// `DiagnosticCode::ContractDeferralInvalid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<DataLatency>,
 }
 
 /// `maintenance.defaults` — the per-model soft technique bias.

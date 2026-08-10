@@ -1,6 +1,7 @@
 //! Phase 2 (`docs/outcomes/20260809-contract-lattice-v1/phases/02-plan.md`):
-//! `contract.frozen_horizon` frontmatter parsing — format validity and the
-//! fail-loud staging of `deferral` until phase 4.
+//! `contract.frozen_horizon` frontmatter parsing — format validity.
+//! `deferral`/`cells:` parsing is covered by `contract_deferral.rs` (phase
+//! 4, `docs/outcomes/20260809-contract-lattice-v1/phases/04-plan.md`).
 
 use smelt_core::metadata::{extract_file_metadata, FileMetadata, MetadataError};
 
@@ -25,17 +26,5 @@ fn unparseable_frozen_horizon_is_a_metadata_error() {
     assert!(
         matches!(err, MetadataError::ContractFrozenHorizonInvalid { .. }),
         "expected ContractFrozenHorizonInvalid, got {err:?}"
-    );
-}
-
-#[test]
-fn deferral_key_is_refused_until_wired() {
-    let sql = "---\ncontract:\n  deferral: '6 hours'\n---\nSELECT 1";
-    let err =
-        extract_file_metadata(sql).expect_err("deferral must be refused, not silently accepted");
-    let message = err.to_string();
-    assert!(
-        message.contains("deferral"),
-        "unknown-key error must name `deferral`, got: {message}"
     );
 }

@@ -234,6 +234,33 @@ fn frozen_horizon_triple_is_complete() {
 }
 
 #[test]
+fn deferral_triple_is_complete() {
+    let module = read("crates/smelt-logical/src/contract/deferral.rs");
+    assert!(
+        module.contains("pub fn validate_deferral"),
+        "the declaration-schema validator leg must be present"
+    );
+    assert!(
+        module.contains("pub fn measure_lag"),
+        "the oracle-transform (lag) leg must be present"
+    );
+    assert!(
+        module.contains("pub fn deferral_violations"),
+        "the probe-emitter leg (the comparison the runtime dispatch consumes) must be present"
+    );
+
+    let mod_doc = read("crates/smelt-logical/src/contract/mod.rs");
+    assert!(
+        !mod_doc.contains("unbuilt"),
+        "contract/mod.rs's landing-status doc must be updated once the deferral triple lands"
+    );
+    assert!(
+        mod_doc.contains("`deferral`: the complete triple has landed"),
+        "contract/mod.rs must state that the deferral triple has landed"
+    );
+}
+
+#[test]
 fn known_divergence_tracks_the_unimplemented_lattice() {
     let spec = read("docs/specs/incremental_models.md");
     let section = h2_section_body(&spec, "## Known Divergences / Open Questions");

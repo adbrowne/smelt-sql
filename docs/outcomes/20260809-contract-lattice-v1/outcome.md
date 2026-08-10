@@ -49,7 +49,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | done |
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
-| 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | planned |
+| 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
 | 5 | Deferral-licensed run skipping and ledger-proven work subsumption | pending |
 | 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
 | 7 | Surface: explain contract rendering, docs-site update | pending |
@@ -112,6 +112,17 @@ relaxation is declared, validated, probe-checked, and printed by
   `LandedDeltaStore`'s per-source max covered end — both already written by `execute.rs`. No new
   state file and no wall-clock arrival record is introduced; the spec's "ledger-derived" probe is
   literally a comparison of two frontiers the ledger already holds.
+
+- 2026-08-10 — Phase 4 done: the `deferral` triple is complete —
+  `contract.deferral`/`contract.cells[]` parse and fail-loud validate
+  (`ContractDeferralInvalid`, disambiguated from `ContractFrozenHorizonInvalid` by walking the raw
+  YAML mapping rather than the error text), the pure lag oracle and probe comparison land in
+  `smelt-logical::contract::deferral`, and `smelt-runtime::contract_probes::evaluate_deferral`
+  dispatches at the same pre-write site as `frozen_horizon`'s probe, reading two already-recorded
+  ledger frontiers (`IntervalStore`, `LandedDeltaStore`) rather than executing SQL. Model-level
+  granularity only this phase — cell-level `deferral` validates but is not yet probed;
+  `contract.cells[].deferral`'s own probe/scheduling is phase 5 (`docs/outcomes/
+  20260809-contract-lattice-v1/phases/04-summary.md`).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

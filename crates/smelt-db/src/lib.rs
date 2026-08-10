@@ -159,6 +159,17 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
             code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
             data: None,
         }),
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation,
+        // the same site and pattern as `ContractFrozenHorizonInvalid` above —
+        // disambiguated by `smelt_core::metadata`'s own field-level check
+        // rather than by this mapper.
+        MetadataError::ContractDeferralInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractDeferralInvalid),
+            data: None,
+        }),
     }
 }
 
@@ -2250,6 +2261,71 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         data: None,
                     })
                     .accumulate(db);
+                }
+            }
+        }
+
+        // Contract-lattice `deferral` clock-admissibility check
+        // (`docs/specs/incremental_models.md` §"Contract relaxations
+        // (`contract:`)"). Format validity was already checked at
+        // frontmatter-parse time (`MetadataError::ContractDeferralInvalid`,
+        // handled above); this check resolves whether the declaration has an
+        // interval-representable clock to measure lag against — the model's
+        // own `timeseries:` clock for a model-level `deferral`, or the
+        // resolved source behind a `cells[].on` trigger for a cell-level
+        // one — and shares the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.deferral.is_some() {
+                let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+                if let Err(why) = smelt_logical::validate_deferral(
+                    metadata.timeseries.is_some(),
+                    &format!("model '{model_name}'"),
+                ) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractDeferralInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractDeferralInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+            if contract.cells.iter().any(|c| c.deferral.is_some()) {
+                let refs = smelt_logical::collect_path_refs(sql_body);
+                for cell in contract.cells.iter().filter(|c| c.deferral.is_some()) {
+                    let has_clock = cell.on != "backfill"
+                        && refs
+                            .iter()
+                            .filter_map(|r| {
+                                let stripped = r.strip_prefix("smelt.")?;
+                                let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+                                if bare != cell.on {
+                                    return None;
+                                }
+                                ref_source_info(db, workspace, project, r)
+                            })
+                            .next()
+                            .is_some_and(|info| {
+                                info.timeseries.is_some()
+                                    && info.mutation_profile.as_ref().is_some_and(|m| {
+                                        m.kind == smelt_core::sources::MutationProfile::AppendOnly
+                                    })
+                            });
+                    if let Err(why) = smelt_logical::validate_deferral(
+                        has_clock,
+                        &format!("cell on '{}'", cell.on),
+                    ) {
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("ContractDeferralInvalid: {why}"),
+                            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                            code: Some(DiagnosticCode::ContractDeferralInvalid),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
                 }
             }
         }

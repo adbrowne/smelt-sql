@@ -15,8 +15,11 @@
 //! - `frozen_horizon`: the complete triple has landed — grain-admissibility
 //!   validation, the write-range clamp, and the late-arrival probe emitter
 //!   all live in the `frozen_horizon` module.
-//! - `deferral`: unbuilt — declaration is refused fail-loud
-//!   (`smelt_core::config::ContractConfig` is `deny_unknown_fields`) until
-//!   it is wired.
+//! - `deferral`: the complete triple has landed — clock-admissibility
+//!   validation, the lag oracle, and the deferral-exceeded probe comparison
+//!   all live in the `deferral` module. The two capabilities the point
+//!   licenses (run skipping, work subsumption) are separate, later work
+//!   (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5).
 
+pub mod deferral;
 pub mod frozen_horizon;

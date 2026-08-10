@@ -25,11 +25,14 @@ use smelt_backend::{Backend, BackendError, MaintenanceDialect};
 use smelt_core::metadata::ModelMetadata;
 use smelt_core::sources::SourceInfo;
 use smelt_core::ModelFile;
+use smelt_logical::contract::deferral::deferral_violations;
 use smelt_logical::contract::frozen_horizon::{
     emit_frozen_band_snapshot, frozen_band_before, late_arrivals, PartitionCount,
 };
 use smelt_logical::maintenance::{should_dispatch, ProbeDispatch};
 use smelt_state::frozen_band_baselines::{FrozenBandBaselineStore, FrozenBandPartition};
+use smelt_state::intervals::IntervalStore;
+use smelt_state::landed_deltas::LandedDeltaStore;
 use smelt_state::{ProbeRecord, ProbeRecordOutcome};
 
 use crate::probes::{probe_violation_suffix, ProbeContext, ProbePolicy};
@@ -292,4 +295,130 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
         records,
         violations,
     })
+}
+
+/// One declared `contract.deferral` probe, built pure from a model's
+/// metadata — model-level granularity only this phase (the two capabilities
+/// `deferral` licenses, run skipping and work subsumption, are per-cell
+/// scheduling work deferred to
+/// `docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5; the
+/// triple this phase lands operates at the same model granularity
+/// `frozen_horizon`'s probe already does).
+pub struct DeclaredDeferralProbe {
+    pub ctx: ProbeContext,
+    pub d_days: i64,
+}
+
+/// Build the declared `deferral` probe set for `model_name`'s run — pure, no
+/// I/O. Returns an empty set when the model has no `contract.deferral`
+/// declaration (the probe is opt-in only, mirroring
+/// [`frozen_horizon_probes`]).
+pub fn deferral_probes(
+    model_name: &str,
+    cell: &str,
+    metadata: Option<&ModelMetadata>,
+) -> Vec<DeclaredDeferralProbe> {
+    let Some(d_days) = metadata
+        .and_then(|m| m.contract.as_ref())
+        .and_then(|c| c.deferral.as_ref())
+        .map(|d| d.to_days() as i64)
+    else {
+        return Vec::new();
+    };
+
+    vec![DeclaredDeferralProbe {
+        ctx: ProbeContext {
+            probe_code: "ContractDeferralExceeded".to_string(),
+            fact: "contract.deferral".to_string(),
+            model: model_name.to_string(),
+            cell: cell.to_string(),
+            remedy: "the lag is genuine — let the run catch up, or widen `deferral` if this lag \
+                     is expected"
+                .to_string(),
+        },
+        d_days,
+    }]
+}
+
+/// One genuine deferral-exceeded violation, carrying the message a caller
+/// should fail the run with.
+#[derive(Debug, Clone)]
+pub struct DeferralExceededViolation {
+    pub message: String,
+}
+
+/// Evaluate every probe in `probes` against the ledger's own recorded
+/// frontiers — `interval_store`'s per-model latest recorded interval end
+/// (the maintained frontier) and the latest covered interval end across
+/// `clocked_source_addresses` in `landed_deltas` (the input frontier). Pure
+/// beyond reading the two already-in-memory stores the caller loaded; no
+/// backend I/O, unlike `frozen_horizon`'s probe (`contract::deferral`'s
+/// module doc: the probe emits no SQL, both frontiers are already-recorded
+/// ledger state). Cadence-gated the same way as every other declared-fact
+/// probe.
+pub fn evaluate_deferral(
+    policy: &ProbePolicy,
+    probes: &[DeclaredDeferralProbe],
+    model_name: &str,
+    clocked_source_addresses: &[String],
+    interval_store: &IntervalStore,
+    landed_deltas: &LandedDeltaStore,
+) -> (Vec<ProbeRecord>, Vec<DeferralExceededViolation>) {
+    let mut records = Vec::with_capacity(probes.len());
+    let mut violations = Vec::new();
+
+    let maintained_frontier = interval_store
+        .get(model_name)
+        .and_then(|mi| mi.latest_date())
+        .map(|d| d.num_days_from_ce() as i64);
+    let input_frontier = clocked_source_addresses
+        .iter()
+        .filter_map(|addr| landed_deltas.get(addr))
+        .filter_map(|landing| landing.covered_intervals.last())
+        .filter_map(|iv| NaiveDate::parse_from_str(&iv.end, "%Y-%m-%d").ok())
+        .map(|d| d.num_days_from_ce() as i64)
+        .max();
+
+    for probe in probes {
+        match should_dispatch(policy.cadence, policy.run_ordinal) {
+            ProbeDispatch::Skip(_) => {
+                records.push(ProbeRecord {
+                    fact: probe.ctx.fact.clone(),
+                    probe: probe.ctx.probe_code.clone(),
+                    outcome: ProbeRecordOutcome::Skipped,
+                });
+                continue;
+            }
+            ProbeDispatch::Dispatch => {}
+        }
+
+        records.push(ProbeRecord {
+            fact: probe.ctx.fact.clone(),
+            probe: probe.ctx.probe_code.clone(),
+            outcome: ProbeRecordOutcome::Dispatched,
+        });
+
+        if let Some(violation) = deferral_violations(
+            &probe.ctx.cell,
+            maintained_frontier,
+            input_frontier,
+            probe.d_days,
+        ) {
+            violations.push(DeferralExceededViolation {
+                message: format!(
+                    "{}: cell '{}' (model '{}') declares `{}`, but the measured lag ({} day(s)) \
+                     exceeds the declared D ({} day(s)).{}",
+                    probe.ctx.probe_code,
+                    violation.cell,
+                    probe.ctx.model,
+                    probe.ctx.fact,
+                    violation.lag,
+                    violation.d,
+                    probe_violation_suffix(&probe.ctx)
+                ),
+            });
+        }
+    }
+
+    (records, violations)
 }

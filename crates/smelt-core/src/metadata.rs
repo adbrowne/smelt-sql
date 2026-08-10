@@ -660,6 +660,69 @@ pub enum MetadataError {
         "ContractFrozenHorizonInvalid: contract.frozen_horizon is not a valid interval — {why}"
     )]
     ContractFrozenHorizonInvalid { why: String },
+
+    /// A `contract.deferral` value (model-level or a `contract.cells[]`
+    /// entry's `deferral`) fails `DataLatency::parse` — unparseable interval
+    /// syntax (`docs/specs/incremental_models.md` §"Contract relaxations
+    /// (`contract:`)"). Raised at frontmatter-parse time by
+    /// `extract_single_model`'s strict pre-validation, the same pattern as
+    /// `ContractFrozenHorizonInvalid`. Clock-admissibility (declared with no
+    /// interval-representable clock to measure lag against) is a distinct
+    /// check made downstream by
+    /// `smelt_logical::contract::deferral::validate_deferral` (needs the
+    /// parsed `ModelMetadata`/resolved source facts, unavailable to this pure
+    /// parse) — both surface under the same `ContractDeferralInvalid`
+    /// diagnostic code.
+    #[error("ContractDeferralInvalid: contract.deferral is not a valid interval — {why}")]
+    ContractDeferralInvalid { why: String },
+}
+
+/// Disambiguates a `contract:` block's `"invalid data_latency"` deserialize
+/// failure by which key's raw value is itself unparseable — `frozen_horizon`
+/// vs `deferral`/`cells[].deferral` — rather than by the error text, which
+/// carries no field path at this struct depth (`ContractConfig` fails as a
+/// whole; serde_yaml's custom-error message from `DataLatency`'s
+/// `Deserialize` impl is just the bare "invalid data_latency '…'" string).
+/// Walks the still-unvalidated YAML mapping directly, re-parsing each
+/// candidate field's raw string with `DataLatency::parse` to find the
+/// offender. Falls back to `ContractFrozenHorizonInvalid` if no candidate
+/// field is individually unparseable (defensive — should not happen given
+/// the caller only reaches here on an "invalid data_latency" failure).
+fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) -> MetadataError {
+    let is_bad_latency = |v: &serde_yaml::Value| -> bool {
+        v.as_str()
+            .is_some_and(|s| crate::config::DataLatency::parse(s).is_none())
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return MetadataError::ContractFrozenHorizonInvalid { why };
+    };
+    if mapping
+        .get(serde_yaml::Value::String("frozen_horizon".to_string()))
+        .is_some_and(is_bad_latency)
+    {
+        return MetadataError::ContractFrozenHorizonInvalid { why };
+    }
+    if mapping
+        .get(serde_yaml::Value::String("deferral".to_string()))
+        .is_some_and(is_bad_latency)
+    {
+        return MetadataError::ContractDeferralInvalid { why };
+    }
+    let cells_bad = mapping
+        .get(serde_yaml::Value::String("cells".to_string()))
+        .and_then(|c| c.as_sequence())
+        .is_some_and(|cells| {
+            cells.iter().any(|cell| {
+                cell.as_mapping().is_some_and(|cm| {
+                    cm.get(serde_yaml::Value::String("deferral".to_string()))
+                        .is_some_and(&is_bad_latency)
+                })
+            })
+        });
+    if cells_bad {
+        return MetadataError::ContractDeferralInvalid { why };
+    }
+    MetadataError::ContractFrozenHorizonInvalid { why }
 }
 
 /// Build the fix-it message for a refused `batched:` sub-block, naming each
@@ -1580,18 +1643,21 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     batched_subblock_fixit_message(value),
                 )));
             // `contract:` is strictly pre-validated: an unparseable
-            // `frozen_horizon` is a dedicated `ContractFrozenHorizonInvalid`
-            // error (never a generic YAML error), and an unrecognised key
-            // (`deferral`, `cells`) is a loud unknown-field parse error —
-            // both fail-loud rather than silently stripped (fail-loud
-            // discipline; the lattice's single-owner rule).
+            // `frozen_horizon` or `deferral` (model-level or
+            // `cells[].deferral`) is a dedicated `ContractFrozenHorizonInvalid`
+            // / `ContractDeferralInvalid` error (never a generic YAML error),
+            // disambiguated by which key's raw value fails to parse rather
+            // than by the error text (serde_yaml's custom-error message
+            // carries no field path at this struct depth) — both fail-loud
+            // rather than silently stripped (fail-loud discipline; the
+            // lattice's single-owner rule).
             } else if key_str == "contract" {
                 if let Err(e) =
                     serde_yaml::from_value::<crate::config::ContractConfig>(value.clone())
                 {
                     let msg = e.to_string();
                     if msg.contains("invalid data_latency") {
-                        return Err(MetadataError::ContractFrozenHorizonInvalid { why: msg });
+                        return Err(classify_contract_data_latency_error(value, msg));
                     }
                     return Err(MetadataError::YamlParseError(e));
                 }

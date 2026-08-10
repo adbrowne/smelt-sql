@@ -2994,6 +2994,60 @@ pub async fn execute_project(
                         }
                     }
 
+                    // Live dispatch of the contract-lattice `deferral` probe
+                    // (`docs/specs/incremental_models.md` §"The contract
+                    // lattice") before this batch's write — opt-in only
+                    // (empty probe set absent a `contract.deferral`
+                    // declaration). Unlike `frozen_horizon`'s probe, this
+                    // one emits no SQL: both frontiers it compares are
+                    // already-recorded ledger state
+                    // (`IntervalStore`/`LandedDeltaStore`), so it only reads
+                    // state the run already writes elsewhere, under the same
+                    // `state_io_lock` critical section.
+                    {
+                        let clocked_source_addresses: Vec<String> = maint_source_facts
+                            .iter()
+                            .filter(|sf| {
+                                sf.partition_col.is_some()
+                                    && sf.mutation
+                                        == smelt_logical::maintenance::MutationProfile::AppendOnly
+                            })
+                            .map(|sf| sf.name.clone())
+                            .collect();
+                        let deferral_probes = crate::contract_probes::deferral_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            plan.model_file.metadata.as_deref(),
+                        );
+                        if !deferral_probes.is_empty() {
+                            let _io_guard = state_io_lock.lock().await;
+                            let interval_store = file_store
+                                .load_intervals()
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            let landed_deltas = file_store
+                                .load_landed_deltas()
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            let (records, violations) = crate::contract_probes::evaluate_deferral(
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &deferral_probes,
+                                &plan.name,
+                                &clocked_source_addresses,
+                                &interval_store,
+                                &landed_deltas,
+                            );
+                            model_probe_records.extend(records);
+                            if let Some(violation) = violations.first() {
+                                return Err(anyhow::anyhow!("{}", violation.message));
+                            }
+                        }
+                    }
+
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
                     // (`docs/specs/model_transforms.md` §Constraints — "Write window
