@@ -190,6 +190,37 @@ maintenance:
 - `scan_bounds` is **check-only**: it never modifies a clamp; it only refuses (or warns) when the derived plan exceeds the stated expectation. A project-level default in `smelt.yml` sets the baseline; per-model blocks refine it.
 - A sibling **top-level** frontmatter key, `horizon_ceiling: '<interval>'` (partition grain only), declares a ceiling on the derived horizon — a compile-time warning threshold, never a clamp modification (§"Windowed maintenance and the horizon").
 
+### Contract relaxations (`contract:`)
+
+`contract:` is a sibling top-level frontmatter block to `maintenance:`, opting a model into one or
+both v1 lattice points (§"The contract lattice"). Where `maintenance:` steers *choice among
+proven-equivalent techniques* and never widens what admission allows, `contract:` does the
+opposite: it names a bounded, checked relaxation of the equivalence invariant itself.
+
+```yaml
+contract:
+  frozen_horizon: '90 days'      # partition grain only
+  deferral: '6 hours'
+  cells:                          # optional per-cell refinement, addressed like maintenance.cells
+    - columns: [<col>, ...]
+      on: <source-address> | backfill
+      deferral: '1 day'
+```
+
+- `frozen_horizon: '<interval>'` is admitted **only on a partition-grain model**; declaring it on
+  a key-grain model (which has no write-eligibility clamp, §"Windowed maintenance and the
+  horizon") is a configuration error, `ContractFrozenHorizonInvalid`. An unparseable or negative
+  interval is the same error.
+- `deferral: '<interval>'` is admitted on either grain, model-level or per cell.
+- Model-level values are the default for every cell; a `cells[]` entry — addressed the same way
+  as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is
+  model-level only (it clamps the model's write eligibility, not a single cell's).
+- An unparseable or negative `deferral`, or a `deferral` on a cell with no clock to measure lag
+  against, is `ContractDeferralInvalid`.
+- Absent `contract:` (the common case) is the default point: strict equivalence, no relaxation.
+- The effective contract per cell — default or relaxed, with the relaxation's parameters — is
+  always printed by `smelt explain`; a relaxation is never silent (§"CLI").
+
 ### Partition-grain declaration (`grain: partition`)
 
 Opt-in: `refresh: incremental` plus a `timeseries:` clock and **no declared identity**. The stored `table` is implied. `daily_revenue` from the running example:
@@ -400,6 +431,15 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `KeyedReprocessedWindow` | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change; names the failing repair obligation and points at `--full-refresh` (§"Reprocessing", §"The repair family"). |
 | `KeyedRecurrenceBoundViolated` | Runtime, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice. The run's transaction rolls back; reports the violation count and sample keys (§"Key temporal locality"). |
 
+**Contract-lattice codes.**
+
+| Code | Fires when |
+|---|---|
+| `ContractFrozenHorizonInvalid` | A `contract.frozen_horizon` is unparseable or negative, or declared on a non-partition-grain model (§"Contract relaxations"). |
+| `ContractLateArrivalOutsideHorizon` | Runtime probe, frozen-horizon point only: a scanned row's natural partition falls outside the declared `H`; names the partition and `H` (§"The contract lattice"). |
+| `ContractDeferralInvalid` | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against (§"Contract relaxations"). |
+| `ContractDeferralExceeded` | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag (§"The contract lattice"). |
+
 ## Semantics
 
 The shared machinery comes first — the invariant every maintained model upholds, the plan that
@@ -469,6 +509,55 @@ in `model_transforms.md` is licensed because it preserves it. For the smelt-driv
 invariant is discharged by the generative equivalence oracle (§References — the family's
 regression net); for `refresh: materialized_view` it is discharged by the **engine's** native
 incremental view maintenance, and smelt runs no combiner (`materialized_view.md`).
+
+### The contract lattice
+
+The equivalence invariant stated above is the **default point** of a small declared lattice: a
+modeller may opt a model or cell into a named **relaxation** that trades a bounded, checked
+amount of equivalence for a capability the default point cannot offer (skipping stale-window
+recompute, licensing a bounded write clamp). A relaxation is never ambient — it is declared,
+validated, probe-checked at runtime, and always printed by `smelt explain` (§"The graph layer"),
+never a silent weaker default.
+
+**A lattice point is admissible only as a complete triple, single-owned in `smelt-logical`:** a
+declaration schema (the frontmatter shape and its validation), a pure oracle transform (what
+`incremental_state(S) == full_refresh(...)` becomes at this point, restated below per point), and
+a probe emitter (the runtime check that catches a live violation of that restated oracle). The
+conformance gate (`maintenance_conformance`, root `CLAUDE.md` §"Architectural invariants")
+consumes the oracle transform directly rather than encoding its own comparator, and runtime
+probes emit from the same definition — mirroring the statement-emission single-owner rule
+(§"Statement emission (single owner)"). Users pick and parameterise a point; they never define
+one. v1 ships exactly two relaxations, chosen for having the clearest oracles and probes:
+
+**Frozen horizon (`H`), partition grain only.** The oracle over the frozen-horizon window
+`S_H = { i ∈ S : partition(i) is within H of the run that scanned i }` is strict equivalence:
+`incremental_state(S_H) == full_refresh(source | input ∈ S_H)`. Declaring `frozen_horizon: H`
+clamps writes **by contract** to partitions within `H` of the current run — narrowing (never
+widening) the derived horizon clamp described in §"Windowed maintenance and the horizon"; a
+partition older than `H` is never revisited even if the model's own reach would otherwise cover
+it. Because the clamp is now a declared contract rather than only a derived reach bound, a
+genuinely late arrival landing outside `H` is a checked condition, not an unscanned row: the
+probe counts scanned rows whose natural partition falls outside `H` and raises
+`ContractLateArrivalOutsideHorizon`, naming the partition and the declared `H` — this closes the
+one accepted silent-data behaviour of the default point (§"Windowed maintenance and the
+horizon") for every model that opts in.
+
+**Deferral (`D`).** The oracle licenses lag: `∃ S' ⊆ S` such that every input in `S \ S'` arrived
+within the last `D`, and `incremental_state(S) == full_refresh(source | input ∈ S')` — the
+maintained state may omit inputs no older than `D`, so long as it exactly reflects everything
+older. Declaring `deferral: D` licenses two capabilities the default point forbids: **run
+skipping**, when a run's entire pending input set is within `D` of arrival (nothing outside the
+window is left unfolded, so skipping the run cannot violate the oracle); and **work
+subsumption**, when a pending small run's input set is a subset of a larger run already scheduled
+within `D` (the ledger proves the subset relationship before the smaller run is dropped). The
+probe is ledger-derived: it compares the cell's maintained frontier against the input frontier
+and raises `ContractDeferralExceeded`, naming the cell and the measured lag, whenever lag exceeds
+the declared `D`.
+
+Both points compose with the shape facts already in play (`grain`, the column-family catalogue,
+`maintenance:` overrides) without introducing a new mode: a relaxed cell still resolves a
+technique via the same per-cell admission rule (§"Per-cell admission"), just checked against its
+point's restated oracle rather than the default.
 
 ### The algebraic maintenance ladder
 
@@ -945,12 +1034,15 @@ that should have been rewritten. A modeller may declare a horizon *ceiling*
 exceed it, and the clamp always uses the derived value.
 
 Because the derived clamp *is* the model's SQL, a genuinely late arrival — one landing after its
-natural partition passed the horizon — is **silently excluded** from the maintenance run, not
-diagnosed: smelt cannot fail loud on a row it never scans, and rows outside the scan window are
-outside "inputs processed so far" by construction. **Surfacing lateness is a model-author
-concern, not a maintenance guarantee.** The available pattern: fold the late row into the
-current partition (re-stamping its partition time) carrying a lateness/validity flag, so the
-data still flows, and let a data-quality check raise on the flagged rows.
+natural partition passed the horizon — is **silently excluded** from the maintenance run at the
+**default point**, not diagnosed: smelt cannot fail loud on a row it never scans, and rows
+outside the scan window are outside "inputs processed so far" by construction. **Surfacing
+lateness is a model-author concern, not a maintenance guarantee**, unless the model opts into the
+**frozen horizon** contract-lattice point (§"The contract lattice"), which turns this into a
+checked, diagnosed condition (`ContractLateArrivalOutsideHorizon`) instead. The available pattern
+for the default point: fold the late row into the current partition (re-stamping its partition
+time) carrying a lateness/validity flag, so the data still flows, and let a data-quality check
+raise on the flagged rows.
 
 **The key grain has no write-eligibility clamp.** A `grain: key` run merges **every** delta row
 it scans, into whatever key it names, however old (§"No write-eligibility clamp"). A derived
@@ -2150,8 +2242,14 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
 - Maintenance is **windowed by default** where the model is clocked; a full scan is a surfaced
   fallback, never the silent baseline. Always `scan window ⊇ write window`.
 - The **horizon is derived**; a declared `horizon_ceiling` is a warning threshold only and never
-  relaxes the clamp. Late arrivals beyond the derived reach are silently excluded — surfacing
-  them is a model-author + data-check concern.
+  relaxes the clamp. At the default point, late arrivals beyond the derived reach are silently
+  excluded — surfacing them is a model-author + data-check concern, unless the model opts into
+  the frozen-horizon contract-lattice point (below).
+- **A contract-lattice point is admissible only as a complete triple, single-owned in
+  `smelt-logical`**: a declaration schema, a pure oracle transform, and a probe emitter
+  (§"The contract lattice"). The conformance gate consumes the oracle transform rather than
+  encoding its own comparator; runtime probes emit from the same definition. This mirrors the
+  statement-emission single-owner rule; a lattice point is never defined ad hoc by a caller.
 - **One home per capability and per rule.** The invariant, ladder, plan, and graph layer are
   owned here; properties in `model_properties.md`, transforms in `model_transforms.md`, the
   declaration law and litmus rule in `models.md`. No spec re-specifies another's content.
@@ -2343,6 +2441,14 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
+- **The contract lattice is specified and unimplemented.** §"The contract lattice" and
+  §"Contract relaxations (`contract:`)" define the default point and the two v1 relaxations
+  (`frozen_horizon`, `deferral`), each as a declaration-schema + oracle-transform + probe-emitter
+  triple, but no part of the triple exists yet: the loader accepts no `contract:` block, no
+  oracle transform is derived in `smelt-logical`, no probe emitter runs, and
+  `maintenance_conformance` is not parameterised per lattice point — every recipe today is
+  checked against the default point's strict oracle only. Tracked:
+  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")
   executes via its emitter, with the executed-vs-emitted `statement_parity` leg proven for that

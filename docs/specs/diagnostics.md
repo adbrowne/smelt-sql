@@ -500,6 +500,17 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceRepairKeysNotDiscoverable` | Error | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set (`incremental_models.md` §"The repair family" obligation (c)). Names the changed input and why the delta yields no key set. |
 | `MaintenanceRepairSliceUnbounded` | Error | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked (`incremental_models.md` §"The repair family" obligation (b)). Names the source and the unbounded reach. |
 
+### Contract lattice
+
+Owned by `docs/specs/incremental_models.md` §"The contract lattice".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `ContractFrozenHorizonInvalid` | Error | A `contract.frozen_horizon` is unparseable or negative, or declared on a non-partition-grain model. |
+| `ContractLateArrivalOutsideHorizon` | Error | Runtime probe, frozen-horizon point only: a scanned row's natural partition falls outside the declared horizon `H`; names the partition and `H`. |
+| `ContractDeferralInvalid` | Error | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against. |
+| `ContractDeferralExceeded` | Error | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag. |
+
 ---
 
 ## Known divergences
@@ -508,6 +519,7 @@ Owned by `docs/specs/incremental_models.md`.
 - **`SourceCountPreservationViolated` is raised as a named runtime failure, not a `DiagnosticCode` variant.** `smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction` dispatches the count-preservation probe before trusting a declared-`referential_integrity` route's restriction and fails the run (`BackendError::ExecutionFailed`, naming the source, the touched region, and the counts) on a violation, matching `KeyedRecurrenceBoundViolated`'s own shape — a run-time transactional failure surfaced through the backend error path, not a pre-run LSP/CLI diagnostic. Landing: `docs/outcomes/20260809-probe-backed-facts/outcome.md`, `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Three probe-obligation codes are specified and unimplemented.** `DeclaredMonotonicityViolated`, `DeclaredFunctionalDependencyViolated`, and `DeclaredBoundedDomainExceeded` (`model_properties.md` §"Probe obligation") have no `DiagnosticCode` variant yet, though their probe emitters (`emit_monotonicity_probe`, `emit_functional_dependency_probe`, `emit_bounded_domain_probe`) now exist in `crates/smelt-logical/src/maintenance/emit.rs`, proven against a real DuckDB — the coverage gate only asserts enum → catalogue coverage, so a catalogue row may precede its variant, the same posture as the `Maintenance*` rows above. No live run dispatches any of the three yet. Landing the variants and run-driver dispatch is `docs/outcomes/20260809-probe-backed-facts/outcome.md` phases 3-4. The append-only posture's probe (`emit_append_only_posture_probe`, also now built) reuses the already-catalogued `SourceMutationProfileViolated` rather than a new code.
 - **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
+- **All four contract-lattice codes are specified and unimplemented.** `ContractFrozenHorizonInvalid`, `ContractLateArrivalOutsideHorizon`, `ContractDeferralInvalid`, and `ContractDeferralExceeded` (`incremental_models.md` §"The contract lattice") have no `DiagnosticCode` variant, loader acceptance, oracle transform, or probe emitter yet — the entire lattice-point triple is unbuilt. Landing: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 
 ## Open questions
 
