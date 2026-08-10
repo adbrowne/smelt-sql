@@ -59,11 +59,12 @@ enum DivergenceStatus {
     /// `known_bug_repair_candidate_select_ignores_decomposed_state`, closed
     /// by widening the repair candidate/insert with the fold's own hidden
     /// state columns (`docs/outcomes/20260809-repair-family/phases/
-    /// 10-plan.md`). No entry currently holds this status — kept alive
-    /// (`#[allow(dead_code)]`) as the governance machinery
-    /// (`known_bug_still_reproduces`, the staleness-report match arm) for
-    /// whichever production gap this suite discovers next.
-    #[allow(dead_code)]
+    /// 10-plan.md`). Currently holds one member —
+    /// `known_bug_keyed_upstream_partition_downstream_no_live_dispatch`
+    /// (`docs/outcomes/20260809-output-delta-typing/phases/08-plan.md`) —
+    /// kept alive as the governance machinery (`known_bug_still_reproduces`,
+    /// the staleness-report match arm) for that and whichever production
+    /// gap this suite discovers next.
     KnownBug,
 }
 
@@ -109,6 +110,15 @@ fn registry() -> Vec<DivergenceEntry> {
                 column cannot populate a Bounded scan window — NotDerivable, not an approximate \
                 fixed-day guess (model_properties.md interval-literal parsing note).",
             status: DivergenceStatus::Documented,
+        },
+        DivergenceEntry {
+            id: "known_bug_keyed_upstream_partition_downstream_no_live_dispatch",
+            description: "a KeyedUpsert upstream feeding a grain: partition downstream has no \
+                live key-addressed dispatch — the run loop's resolution/execution of that cell \
+                is wired only inside the grain: key branch of smelt-runtime/src/execute.rs, so a \
+                grain: partition downstream never reaches it (incremental_models.md §Known \
+                Divergences).",
+            status: DivergenceStatus::KnownBug,
         },
     ]
 }
@@ -168,6 +178,17 @@ fn known_bug_still_reproduces(id: &str) -> bool {
             // site in the incremental branch.
             let src = include_str!("../../../smelt-runtime/src/execute.rs");
             src.matches("save_deployed_schema").count() == 1
+        }
+        "known_bug_keyed_upstream_partition_downstream_no_live_dispatch" => {
+            // `resolve_live_key_addressed_model_edge_cell` is consulted
+            // from exactly one call site in `execute.rs`, inside the
+            // `grain: key` (`plan_is_keyed`) branch — the moment a second
+            // call site wires it into the `grain: partition` branch too,
+            // this count changes and the entry goes stale.
+            let src = include_str!("../../../smelt-runtime/src/execute.rs");
+            src.matches("resolve_live_key_addressed_model_edge_cell")
+                .count()
+                == 1
         }
         other => panic!("known_bug_still_reproduces: unhandled id {other:?}"),
     }

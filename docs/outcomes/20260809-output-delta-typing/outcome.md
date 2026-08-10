@@ -56,7 +56,7 @@ the addressing of one delta type, not the universal currency.
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
-| 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | planned |
+| 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
 | 9 | Surface: explain edge rendering, docs-site update | pending |
 
 ## Decision log
@@ -218,6 +218,23 @@ the addressing of one delta type, not the universal currency.
   deliberately did not fix yet", auto-stale the moment dispatch widens). The
   `skeleton_closure.rs` `sources.`-only breadcrumb gap stays untouched and unregistered: still
   latent, still no fixture reaching it, and speculative fixes were already ruled out in phase 7.
+
+- 2026-08-10 — Phase 8 implemented: `keyed_chain_dag()`/`keyed_partition_sink_dag()` (new
+  generated fixtures, `smelt-maintenance-testkit::dag`) and 4 new `crates/smelt-cli/tests/
+  maintenance_conformance/dags.rs` tests lift phase 7's hand-typed proof into the standing
+  generative gate — a real two-model clockless keyed chain folds end-to-end against a
+  full-refresh oracle, touching only the changed keys, and the flagged inert-cell combination
+  (`KeyedUpsert` upstream → `grain: partition` downstream) is pinned correct-but-non-incremental.
+  A `KnownBug` registry entry + spec §Known Divergences entry track the gap. In-phase discovery
+  (not this phase's own scope, flagged for phase 9): `smelt-db::lib.rs`'s own model-edge
+  construction hard-codes `output_shape: None` unconditionally, so `smelt explain`/diagnostics
+  never see a `KeyedUpsert` edge at all — three independent model-edge constructions exist today
+  (`smelt-runtime::propagation.rs`, `smelt-runtime::execute.rs::model_edges_for`, both correct;
+  `smelt-db::lib.rs`, a stub), a materially bigger gap than phase 9's plan (written before this
+  discovery) may have assumed. No phase-table reshape — phase 8's scope matched the plan, with
+  the divergence wording narrowed to what's directly verifiable (run-loop dispatch gating, not
+  an unverifiable "plan admits a cell" claim — see `phases/08-summary.md` "For the next
+  planner").
 
 ## Blocked
 

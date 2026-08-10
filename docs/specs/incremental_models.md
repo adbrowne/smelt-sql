@@ -2380,6 +2380,22 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   (statement emission, driver dispatch) lowers and runs the cell (§"Upstream model edges"), but
   `smelt explain`'s edge rendering does not yet name the affected-key discovery route or the
   upstream sidecar it reads. Tracked: `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+- **A `KeyedUpsert` upstream feeding a `grain: partition` downstream has no live key-addressed
+  dispatch.** §"Upstream model edges" describes the key-addressed route in terms of the plan
+  layer's own admission rule (an edge whose upstream output-delta shape is `KeyedUpsert` and
+  whose clock-based route does not apply); the run loop's live resolution and dispatch of that
+  cell (`resolve_live_key_addressed_model_edge_cell` /
+  `execute_key_addressed_model_edge_cell`, `smelt-runtime/src/execute.rs`), however, is wired
+  only inside the `grain: key` run branch. A clockless `KeyedUpsert` upstream feeding a `grain:
+  partition` downstream therefore never reaches that dispatch regardless of what the plan layer
+  would otherwise admit for the edge — the downstream instead maintains via its ordinary run
+  route (a full window-forward run when derivable, a whole-table rebuild when it is not, since
+  the upstream carries no clock to bound a scan against). This is a correctness-preserving gap,
+  not a soundness one: the downstream's output is still exactly the full-refresh oracle's output
+  after every run, only never incrementally folded through this particular edge shape. Tracked:
+  `docs/outcomes/20260809-output-delta-typing/outcome.md` (phase 8's conformance recipe
+  `keyed_upstream_partition_downstream_matches_oracle`,
+  `crates/smelt-cli/tests/maintenance_conformance/dags.rs`).
 - **The definition-change backfill's atomicity is conditional on the schema-evolution gate
   actually running this run.** The fold described in §"The definition-change trigger" only
   happens inside `schema_evolution`'s migration call; a model whose `schema_evolution:

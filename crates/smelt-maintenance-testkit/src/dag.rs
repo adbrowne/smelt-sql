@@ -72,20 +72,52 @@ pub enum DagBody {
     /// (`GROUP BY`) in the downstream body, rather than staying a payload.
     /// `SELECT d, val, COUNT(*) AS cnt FROM <upstream> GROUP BY d, val`.
     GroupByPayload,
+    /// `SELECT id, ANY_VALUE(total) AS total FROM <upstream> GROUP BY id` —
+    /// a clockless keyed downstream folding another keyed model's
+    /// `KeyedUpsert`-shaped output (`docs/outcomes/20260809-output-delta-
+    /// typing/phases/08-plan.md`'s `keyed_chain_dag`).
+    KeyedFold,
+    /// `SELECT DATE '2024-01-01' AS d, id, ANY_VALUE(total) AS total FROM
+    /// <upstream> GROUP BY d, id` — a `grain: partition` downstream reading
+    /// a clockless `KeyedUpsert` upstream directly by its key column
+    /// (`keyed_partition_sink_dag`): the combination phase 7 flagged as
+    /// deriving a key-addressed model-edge cell the run loop never
+    /// dispatches (`docs/specs/incremental_models.md` §"Known
+    /// Divergences"). The partition column is a constant and the `GROUP
+    /// BY` is a structural no-op (the upstream is already one row per
+    /// `id`) — this body exists only to PROVE the downstream's own row
+    /// identity includes `id` (via the walk, not a declared `unique_key`:
+    /// a declared `unique_key: id` alongside `grain: partition` trips the
+    /// `GrainAssertionMismatch` diagnostic, since a declared key alone
+    /// reads as key-grain shape facts) so `admit_key_addressed_recompute`'s
+    /// grain proof resolves through `id`, exercising plan derivation and
+    /// the full-refresh fallback correctness rather than pinning a real
+    /// time axis.
+    PartitionOverKeyedId,
 }
 
 /// A node's declared output grain. [`NodeGrain::Partition`] is every node in
-/// [`chain_dag`]/[`diamond_dag`]/[`leak_dag`]; [`NodeGrain::Key`] exists only
-/// in [`keyed_sink_dag`].
+/// [`chain_dag`]/[`diamond_dag`]/[`leak_dag`]/[`keyed_partition_sink_dag`]'s
+/// `dag_kpart_b`; [`NodeGrain::Key`] is every node in [`keyed_sink_dag`] and
+/// [`keyed_chain_dag`].
 #[derive(Debug, Clone)]
 pub enum NodeGrain {
     /// `refresh: incremental` + `grain: partition`, with the given declared
-    /// `batched.unique_key`.
+    /// `batched.unique_key`. Never renders a top-level `unique_key:` line —
+    /// see [`render_node_file`]'s own note: a declared `unique_key:`
+    /// alongside `grain: partition` trips `GrainAssertionMismatch`, so a
+    /// partition-grain node that needs its row identity to include a
+    /// non-partition column (`keyed_partition_sink_dag`'s `dag_kpart_b`)
+    /// proves it via the body's own `GROUP BY` instead
+    /// ([`DagBody::PartitionOverKeyedId`]).
     Partition { unique_key: Vec<String> },
-    /// `refresh: incremental` + `grain: key` — no `timeseries:` block, no
-    /// `unique_key` (`incremental_models.md` §Known Divergences "The key grain": "every
+    /// `refresh: incremental` + `grain: key` — no `timeseries:` block
+    /// (`incremental_models.md` §Known Divergences "The key grain": "every
     /// `timeseries:` block on a keyed model is refused unconditionally").
-    Key,
+    /// `unique_key` is rendered as a top-level `unique_key:` line when
+    /// non-empty; every `Key` node this module ships leaves it empty and
+    /// relies on the walk to prove grain from the body's own `GROUP BY`.
+    Key { unique_key: Vec<String> },
 }
 
 /// One node in a [`DagRecipe`]: a model name, its upstream ref(s), body
@@ -230,7 +262,76 @@ pub fn keyed_sink_dag() -> DagRecipe {
                 name: "dag_keyed_sink".to_string(),
                 upstreams: vec![Upstream::Node(0)],
                 body: DagBody::KeyedAgg,
-                grain: NodeGrain::Key,
+                grain: NodeGrain::Key { unique_key: vec![] },
+            },
+        ],
+    }
+}
+
+/// The clockless keyed chain: `dag_kchain_a` (`KeyedAgg`, `NodeGrain::Key`)
+/// aggregates the source by `id` — a `KeyedUpsert`-shaped output — into
+/// `dag_kchain_b` (`KeyedFold`, `NodeGrain::Key`), which folds it
+/// (`docs/outcomes/20260809-output-delta-typing/phases/08-plan.md`'s
+/// `keyed_chain_dag`, mirroring phase 7's hand-typed `agg` -> `downstream`
+/// fixture, `crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs`).
+/// Both nodes are grain-key with no `timeseries:` block — `dag_kchain_a`
+/// proves its own `id` grain from its `GROUP BY`.
+pub fn keyed_chain_dag() -> DagRecipe {
+    DagRecipe {
+        source: SourceRecipe::events(crate::recipe::KeyShape::Single),
+        nodes: vec![
+            DagNode {
+                name: "dag_kchain_a".to_string(),
+                upstreams: vec![Upstream::Source],
+                body: DagBody::KeyedAgg,
+                grain: NodeGrain::Key { unique_key: vec![] },
+            },
+            DagNode {
+                name: "dag_kchain_b".to_string(),
+                upstreams: vec![Upstream::Node(0)],
+                body: DagBody::KeyedFold,
+                grain: NodeGrain::Key { unique_key: vec![] },
+            },
+        ],
+    }
+}
+
+/// The flagged inert-cell combination (phase 7's "for the next planner"
+/// note): `dag_kpart_a` (`KeyedAgg`, `NodeGrain::Key`) aggregates the
+/// source by `id` into `dag_kpart_b` (`PartitionOverKeyedId`,
+/// `NodeGrain::Partition`) — a `grain: partition` downstream whose body
+/// `GROUP BY`s its own constant partition column AND the upstream's key
+/// column (`id`), so the walk PROVES its row identity includes `id`
+/// without a declared `unique_key` (a declared `unique_key: id` alongside
+/// `grain: partition` trips `GrainAssertionMismatch` — see
+/// `DagBody::PartitionOverKeyedId`'s own doc comment), letting
+/// `admit_key_addressed_recompute`'s grain proof resolve through `id` (the
+/// edge's own key) even though the model's declared partition axis (`d`,
+/// a constant) is a different column entirely. Plan derivation admits a
+/// key-addressed `PerGroupRecompute` cell for this edge (the clock-based
+/// route never applies — `dag_kpart_a` has no clock to derive), but the
+/// run loop's key-addressed dispatch lives entirely inside the `grain:
+/// key` branch (`smelt-runtime/src/execute.rs`), so a `grain: partition`
+/// downstream like this one never reaches it — the admitted cell is
+/// inert, and the model instead maintains via its ordinary (here:
+/// always-widens-to-whole, since the upstream carries no clock) window
+/// route. `keyed_upstream_partition_downstream_matches_oracle` pins that
+/// this divergence is still CORRECT, only non-incremental.
+pub fn keyed_partition_sink_dag() -> DagRecipe {
+    DagRecipe {
+        source: SourceRecipe::events(crate::recipe::KeyShape::Single),
+        nodes: vec![
+            DagNode {
+                name: "dag_kpart_a".to_string(),
+                upstreams: vec![Upstream::Source],
+                body: DagBody::KeyedAgg,
+                grain: NodeGrain::Key { unique_key: vec![] },
+            },
+            DagNode {
+                name: "dag_kpart_b".to_string(),
+                upstreams: vec![Upstream::Node(0)],
+                body: DagBody::PartitionOverKeyedId,
+                grain: NodeGrain::Partition { unique_key: vec![] },
             },
         ],
     }
@@ -256,6 +357,8 @@ pub fn node_output_columns(dag: &DagRecipe, node: &DagNode) -> Vec<String> {
         DagBody::AdditiveAgg => vec![d, "total".to_string()],
         DagBody::KeyedAgg => vec![id, "total".to_string()],
         DagBody::GroupByPayload => vec![d, val, "cnt".to_string()],
+        DagBody::KeyedFold => vec![id, "total".to_string()],
+        DagBody::PartitionOverKeyedId => vec![d, id, "total".to_string()],
     }
 }
 
@@ -298,6 +401,17 @@ pub fn render_node_body(dag: &DagRecipe, idx: usize) -> String {
             let src = upstream_ref(dag, node.upstreams[0]);
             format!("SELECT {d}, {val}, COUNT(*) AS cnt FROM {src} GROUP BY {d}, {val}")
         }
+        DagBody::KeyedFold => {
+            let src = upstream_ref(dag, node.upstreams[0]);
+            format!("SELECT {id}, ANY_VALUE(total) AS total FROM {src} GROUP BY {id}")
+        }
+        DagBody::PartitionOverKeyedId => {
+            let src = upstream_ref(dag, node.upstreams[0]);
+            format!(
+                "SELECT DATE '2024-01-01' AS {d}, {id}, ANY_VALUE(total) AS total FROM {src} \
+                 GROUP BY {d}, {id}"
+            )
+        }
     }
 }
 
@@ -319,9 +433,25 @@ pub fn render_node_file(dag: &DagRecipe, idx: usize) -> String {
                 "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n"
             )
         }
-        NodeGrain::Key => {
-            format!("---\nrefresh: incremental\ngrain: key\n---\n{body}\n")
+        NodeGrain::Key { unique_key } => {
+            let uk = render_unique_key_line(unique_key);
+            format!("---\nrefresh: incremental\ngrain: key\n{uk}---\n{body}\n")
         }
+    }
+}
+
+/// A top-level `unique_key:` frontmatter line for `keys`, empty for no
+/// declared key — used by [`NodeGrain::Key`] (`grain: partition` nodes
+/// never render one, per [`render_node_file`]'s own note: a declared
+/// `unique_key:` alongside `grain: partition` trips
+/// `GrainAssertionMismatch`, so a partition-grain node that needs its row
+/// identity to include a non-partition column proves it via the body's own
+/// `GROUP BY` instead — see `DagBody::PartitionOverKeyedId`).
+fn render_unique_key_line(keys: &[String]) -> String {
+    if keys.is_empty() {
+        String::new()
+    } else {
+        format!("unique_key: {}\n", keys.join(", "))
     }
 }
 
@@ -672,7 +802,14 @@ mod tests {
     /// topological execution order).
     #[test]
     fn every_shipped_dag_is_topologically_ordered() {
-        for dag in [chain_dag(), diamond_dag(), leak_dag(), keyed_sink_dag()] {
+        for dag in [
+            chain_dag(),
+            diamond_dag(),
+            leak_dag(),
+            keyed_sink_dag(),
+            keyed_chain_dag(),
+            keyed_partition_sink_dag(),
+        ] {
             for (i, node) in dag.nodes.iter().enumerate() {
                 for &up in &node.upstreams {
                     if let Upstream::Node(j) = up {
@@ -692,7 +829,14 @@ mod tests {
     /// actually renders without panicking.
     #[test]
     fn every_shipped_dag_renders_every_node() {
-        for dag in [chain_dag(), diamond_dag(), leak_dag(), keyed_sink_dag()] {
+        for dag in [
+            chain_dag(),
+            diamond_dag(),
+            leak_dag(),
+            keyed_sink_dag(),
+            keyed_chain_dag(),
+            keyed_partition_sink_dag(),
+        ] {
             for idx in 0..dag.nodes.len() {
                 let file = render_node_file(&dag, idx);
                 assert!(
