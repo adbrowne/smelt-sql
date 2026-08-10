@@ -1,7 +1,7 @@
 # Outcome: Output-delta typing — compositional incrementality across the DAG
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §2 P-B/P-E, §3 T-C, §4.1, §6 step 4
 **Spec anchors:** `docs/specs/incremental_models.md` (graph layer, input-delta discovery), `docs/specs/model_properties.md` (delta-shape lattice)
 
@@ -323,6 +323,35 @@ the addressing of one delta type, not the universal currency.
   planned tests plus the full standing-gate list green; no phase-table reshape — this was the
   last row in the table, so the next planner should check whether outcome success criteria 1
   and 3 are now satisfiable end-to-end before marking the outcome `done`.
+
+- 2026-08-10 — **Outcome complete.** Every phase row is `done`; all 6 success criteria judged met
+  against the phase summaries, with the standing gates re-run green at `54b2f3bb` on a clean tree
+  (`verify-phase.sh` ALL GREEN; `walk_coverage` 7, `output_delta_spec` 4, `output_delta_workspace`
+  4, `smelt-db typed_model_edge` 6, `explain_maintenance` 17, `maintenance_conformance` 67,
+  `execute_parity` 23, `statement_parity` 4 — all passing). Evidence per criterion:
+  **(1)** `analysis/output_delta.rs` — `OutputDelta` lattice + `OutputDeltaTransfer` over the
+  shared walk, one registered rule per transfer-table row, fail-closed default naming the
+  construct; per-`ColumnGroup` folding via `derive_output_delta` (phases 2, 11).
+  **(2)** `maintenance::edge_type::type_edge` emits one `EdgeComponent` (shape × addressing ×
+  columns) per upstream column group onto `propagate::Edge`; interval math unchanged and the
+  adjoint property re-pinned (phase 3).
+  **(3)** `keyed_chain_dag()` in the generative `maintenance_conformance` gate drives a real
+  clockless keyed upstream → consuming model chain through `execute_project` against DuckDB,
+  folding the upstream's upsert delta over only the changed keys and matching the full-refresh
+  oracle after each run step; lowering proven separately by
+  `key_addressed_model_edge_lowering.rs` (phases 7, 8).
+  **(4)** `classify_keyed_edges` replaced `refuse_keyed_nodes`, admitting a keyed endpoint through
+  the additive `Propagation::{per_edge_keys, keyed_dirty}` channel when a component carries
+  `Addressing::Keyed`; the refusal survives narrowed for `General`, including
+  `smelt-runtime::refuse_bare_keyed_origins` (phase 5).
+  **(5)** `build_maintenance_plan_report` renders a `delta type:` row per inbound edge with the
+  degrading operator/source named in the reason, fed by `ModelEdge.output_shape` (derived for
+  real in `smelt-db` since phase 9) and `seed_shape_for_source` (phases 9, 10).
+  **(6)** gate list above; `walk_coverage` covers the new transfer rules.
+  One registered `KnownBug` remains — a `KeyedUpsert` upstream into a `grain: partition`
+  downstream is correct but non-incremental (run-loop dispatch gap), tracked in
+  `docs/specs/incremental_models.md` §Known Divergences and auto-stale when dispatch widens. No
+  success criterion depends on it.
 
 ## Blocked
 
