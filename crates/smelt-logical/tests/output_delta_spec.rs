@@ -142,13 +142,44 @@ fn surface_row_exists_for_output_delta() {
     let model_properties = read("docs/specs/model_properties.md");
     let section = section_body(&model_properties, "### Derived proofs");
     let rows = table_rows(section);
-    let has_row = rows.iter().any(|row| {
+    let row = rows.iter().find(|row| {
         row.first()
             .is_some_and(|c| c.contains("Output-delta shape"))
     });
+    let row = row.expect("§Surface → Derived proofs must have a row named \"Output-delta shape\"");
+    let maturity = row.last().expect("row has a maturity cell");
+    assert_eq!(
+        maturity, "partial (derived; not yet consumed by edge typing)",
+        "§Surface → Derived proofs \"Output-delta shape\" row must carry phase 2's maturity: \
+         derived by the walk, not yet consumed by edge typing"
+    );
+}
+
+#[test]
+fn leaf_seeding_row_is_present() {
+    let model_properties = read("docs/specs/model_properties.md");
+    let section = section_body(&model_properties, "### Output-delta shape");
+    let rows = table_rows(section);
+    let leaf_row = rows
+        .iter()
+        .find(|row| row.first().is_some_and(|c| c.contains("Base relation")))
+        .expect(
+            "§\"Output-delta shape\" transfer-rule table must have a leaf row for a base \
+             relation (source/table reference)",
+        );
+    let output_cell = leaf_row.last().expect("leaf row has an output-shape cell");
+    for outcome in ["AppendOnlyWindow", "KeyedUpsert", "General"] {
+        assert!(
+            output_cell.contains(outcome),
+            "the leaf row must name all three profile outcomes, missing `{outcome}` in \
+             {output_cell:?}"
+        );
+    }
+
     assert!(
-        has_row,
-        "§Surface → Derived proofs must have a row named \"Output-delta shape\""
+        section.contains("model reference") && section.contains("otherwise `General`"),
+        "§\"Output-delta shape\" must state that a model-reference leaf takes the referenced \
+         model's own derived verdict where available, otherwise `General`"
     );
 }
 

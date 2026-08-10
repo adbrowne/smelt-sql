@@ -2268,8 +2268,10 @@ impl Transfer for PropertyTransfer<'_> {
 }
 
 /// Resolve `qualifier` (or the sole input when unqualified) to its lowercased
-/// alias key in `cx.aliases`.
-fn resolve_alias_source(cx: &NodeCx, qualifier: Option<&str>) -> Option<String> {
+/// alias key in `cx.aliases`. `pub(crate)`: reused by [`super::output_delta`]
+/// to resolve a select-item's embedded column references the same way
+/// [`PropertyTransfer`]'s own determinism/comparability reduction does.
+pub(crate) fn resolve_alias_source(cx: &NodeCx, qualifier: Option<&str>) -> Option<String> {
     match qualifier {
         Some(q) => {
             let key = q.to_ascii_lowercase();

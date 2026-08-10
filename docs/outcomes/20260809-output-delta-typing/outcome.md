@@ -45,7 +45,7 @@ the addressing of one delta type, not the universal currency.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
-| 2 | Walk transfer rules for the output-delta verdict per column group | planned |
+| 2 | Walk transfer rules for the output-delta verdict per column group | done |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | pending |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
@@ -68,6 +68,20 @@ the addressing of one delta type, not the universal currency.
   `AppendOnlyWindow`, change_feed+`delta_identity` ⇒ `KeyedUpsert`, everything else ⇒ `General`),
   mirroring `input_delta_discovery`'s fail-closed default. A model-reference leaf takes the
   referenced model's own verdict — the hook phase 4's consumer fold reads.
+
+- 2026-08-10 — Phase 2 implemented: `crates/smelt-logical/src/analysis/output_delta.rs` builds
+  `OutputDelta` (the three-level lattice + degrade-only `meet`) and `OutputDeltaTransfer` (a
+  `Transfer` impl over the shared walk) covering every transfer-rule-table row — leaf seeding
+  from declared mutation profile, selection/projection pass-through, `UNION ALL` meet, `GROUP
+  BY`/`DISTINCT` keyed-upsert promotion, join meet + `OneToMany` degrade (reusing
+  `join_shape::fan_out`), window-column isolation, fail-closed default naming the construct — plus
+  `derive_output_delta`, which folds per-column verdicts to one per `ColumnGroup` by reusing the
+  existing `maintenance::grouping::derive_column_groups`. Resolution is per column *reference*
+  (each embedded column ref chased and meet-folded independently), not per whole scope, which is
+  what lets two differently-shaped column groups coexist inside one joined scope. No
+  phase-table reshape — phase 3 (edge typing) is unblocked with a working entry point; the
+  `SourceFacts`-from-declared-sources adapter and the model-reference cross-model wiring are both
+  still open, flagged for phase 3/4 in `phases/02-summary.md`.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
