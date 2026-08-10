@@ -51,7 +51,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
-| 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
+| 6 | Rewrite Known Divergences (both specs) as genuine gap lists | planned |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
 | 8 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
@@ -179,6 +179,15 @@ way (timeless-oracle rule), at substantially reduced length.
   `no_split_code_spans` checks scoped to phase 5's own six ranges rather than whole-file (whole-
   file surfaced pre-existing dangling refs in `## Semantics`/`## Known Divergences`, which this
   phase's own plan forbids crossing into); row 8 still owns the whole-file sweep.
+
+- 2026-08-11 — Phase 6 planned with no table reshape: the phase-5 summary's three "for the next
+  planner" items are all already owned (row 6 owns the K3 label per the 2026-08-11 (b) reshape,
+  row 8 the ~15 dangling whole-file citations, row 7 the fossils), and nothing criterion-serving
+  is ownerless. Phase 6's plan restates those as do-not-cross boundaries so rows 6/7/8 don't
+  collide. Section budgets set at ≤ 150 lines (from 340) for `incremental_models.md` §Known
+  Divergences and ≤ 8,000 chars (from 27.7k) for `model_properties.md`'s, with a per-bullet
+  ceiling of 1,200 chars — the checkable form of criterion 3's "the 3,000-char bullets are
+  dissolved".
 
 ## Blocked
 
