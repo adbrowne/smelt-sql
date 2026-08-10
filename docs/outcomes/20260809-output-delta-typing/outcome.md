@@ -55,7 +55,7 @@ the addressing of one delta type, not the universal currency.
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
-| 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | pending |
+| 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | planned |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | pending |
 | 9 | Surface: explain edge rendering, docs-site update | pending |
 
@@ -173,6 +173,24 @@ the addressing of one delta type, not the universal currency.
   reshape — phase 6's scope matched the plan; `smelt-db`'s `smelt explain` surface and phase 7's
   lowering are unaffected and remain their own rows' scope (see `phases/06-summary.md` "For the
   next planner").
+
+- 2026-08-10 — Phase 7 planned; no phase-table reshape. Phase 6's three "for the next planner"
+  items are all placed without deferring anything: the lowering *is* this phase, `execute.rs`'s
+  `model_edges_for` `output_shape: None` wiring is a phase-7 task (without it the driver can never
+  see a cell it derives), and the `smelt explain` `ref_model_edge` rendering stays phase 9's own
+  surface row. Two design calls taken in-plan rather than blocked: (a) a key-addressed model
+  edge discovers its affected key set from the **group-grain fingerprint sidecar over the
+  upstream's output table** at the upstream's key grain — phase 5's keyed dirt channel is
+  symbolic, not value-level, and `repair_affected_keys_select`'s clamp-less form would scan every
+  key and degenerate to a full refresh, which success criterion 3 forbids; the sidecar is the
+  existing mechanism for exactly this posture (a clockless keyed upstream is a mutable snapshot
+  from the consumer's view) and works when the upstream did not run this invocation. DuckDB-only,
+  failing loud, matching the sidecar's existing posture. (b) The upstream's changed keys are
+  projected through the upstream relation onto the downstream key columns `KeyScope::keys` names;
+  a `key_scope` key the upstream relation does not carry is a fail-loud refusal, never a widening.
+  The latent `skeleton_closure.rs` breadcrumb gap phase 6 flagged stays a **conditional,
+  red-test-first task inside phase 7** (fixed only if a fixture trips it), not a speculative fix
+  and not a deferral.
 
 ## Blocked
 
