@@ -3132,9 +3132,9 @@
 <td>Time granularity for partitioning</td>
 </tr>
 <tr>
-<td><code>batched.unique_key</code></td>
+<td><code>merge_key</code></td>
 <td>string[]</td>
-<td>Columns for row-level merge (optional, <code>grain: partition</code> only)</td>
+<td>The write/dedup key a column-scoped MERGE technique writes on — never identity-conferring (optional). See <a href="../../reference/smelt-yml/#incremental-fields">smelt.yml reference — Incremental Fields</a>.</td>
 </tr>
 <tr>
 <td><code>safety_overrides</code></td>
