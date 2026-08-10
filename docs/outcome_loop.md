@@ -96,6 +96,17 @@ no `bash .*outcome-loop` process is already running.
 
 ## Design notes
 
+- **Synchronous execution only.** Each step is a single-shot `claude --print`
+  invocation — `ScheduleWakeup` and `Monitor` are disallowed on the CLI
+  (`--disallowedTools`), and the prompts (`.claude/outcome-implement-prompt.txt`,
+  `.claude/outcome-plan-prompt.txt`) explicitly forbid `run_in_background` for
+  anything the step needs the result of, since there is no later turn to
+  deliver a background-task notification into. Backgrounding a gate and
+  ending the turn to "wait for it" strands the step with no sentinel — the
+  wrapper pauses on a contract violation and any completed-but-uncommitted
+  work sits in the working tree until someone finds and commits it (this
+  repeated five times in a row on 2026-08-10 before landing; the fix is the
+  explicit foreground-only wording in both prompt files).
 - The planner step owns the phase list; the implement step owns one phase.
   Scope control happens at every phase boundary instead of once upfront —
   that is the point of the process.
