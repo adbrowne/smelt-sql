@@ -1,7 +1,7 @@
 # Outcome: Contract lattice v1 — frozen horizons and deferral
 
 **Created:** 2026-08-09
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260809-incremental-rethink.md` §4.2, §6 step 5; `docs/research/20260726-beyond-ivm-differentiation.md` §5.2/§5.3
 **Spec anchors:** `docs/specs/incremental_models.md` (the equivalence invariant)
 
@@ -46,7 +46,7 @@ relaxation is declared, validated, probe-checked, and printed by
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | pending |
+| 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | planned |
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | pending |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | pending |
 | 4 | `deferral:` declaration + run skipping; ledger-proven work subsumption | pending |
@@ -56,6 +56,9 @@ relaxation is declared, validated, probe-checked, and printed by
 ## Decision log
 
 - 2026-08-09 — **Oracle home settled** (rethink §6 open question 2, settled with Andrew): a lattice point is admissible only as a complete single-owner definition in `smelt-logical` — (declaration schema, pure oracle transform, probe emitter). The conformance gate consumes the oracle transform rather than encoding its own comparator; runtime probes emit from the same definition. This makes the admission rule ("what does the oracle become, and what probe checks it") structural, mirroring the statement-emission single-owner rule. Harness-local comparators (drift risk) and ad-hoc probes (reopens declared-but-unchecked) were rejected.
+
+- 2026-08-10 — **Relaxation surface is a top-level `contract:` block**, not an extension of `maintenance:` (phase 1 plan): `maintenance:` is specified as never widening what admission allows, and a lattice point does exactly that; `contract:` carries model-level `frozen_horizon:`/`deferral:` plus optional per-cell refinement addressed like `maintenance.cells`. `horizon_ceiling:` is untouched and stays a warning threshold on the derived horizon.
+- 2026-08-10 — Phase table unchanged (no prior phase summary to reshape against; phase 1 is the outcome's first phase).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
