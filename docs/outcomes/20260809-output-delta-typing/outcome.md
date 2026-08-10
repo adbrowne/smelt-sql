@@ -39,6 +39,11 @@ the addressing of one delta type, not the universal currency.
 - Streaming/micro-batch lowering of typed deltas (later kind over the kernel).
 - Engine-native change feeds (CDC ingestion) — smelt-derived deltas only.
 - Column-scoped dirt beyond what edge typing gives directly.
+- Disambiguating same-named consumer-read columns across two upstream groups
+  (`referenced_column_names` is name-only): a coarseness that only ever widens, and no success
+  criterion depends on the finer resolution.
+- Scaling `derive_workspace_output_deltas` below its `O(models^2)` worst case: performance work,
+  not correctness; flag only if a real workspace shows it as a hot path.
 
 ## Phases
 
@@ -48,7 +53,7 @@ the addressing of one delta type, not the universal currency.
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
-| 5 | Keyed dirt-set propagation for admitted shapes | pending |
+| 5 | Keyed dirt-set propagation for admitted shapes | planned |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
 | 7 | Surface: explain edge rendering, docs-site update | pending |
 
@@ -116,7 +121,15 @@ the addressing of one delta type, not the universal currency.
   skeleton-column group so `type_edge`'s window-axis carriage check can find a declared
   `timeseries.partition_column`. No phase-table reshape — phase 4's scope matched the plan.
 
-<!-- Dated one-liners appended by plan/implement steps. -->
+- 2026-08-10 — Phase 5 planned; no phase-table reshape. Phase 4's two flagged items are neither
+  success-criteria work nor bugs, so they are recorded under Out of scope rather than given rows:
+  `referenced_column_names`'s name-only read-column filter (same-named columns from two upstream
+  groups undisambiguated) and `derive_workspace_output_deltas`'s unconditional `O(models^2)`
+  worst-case fold. Phase 5's shape decision taken in-plan: the keyed dirt-set is an **additive
+  symbolic channel** on `Propagation` (key columns + provenance) alongside the existing interval
+  maps, not a rewrite of dirt into a sum type — the value-level affected-key set stays with the
+  run-time discovery mechanism, and a keyed-addressed edge into a *clocked* consumer still emits
+  `DayInterval::WHOLE` so widen-never-narrow holds without inventing an axis.
 
 ## Blocked
 
