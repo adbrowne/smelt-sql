@@ -3657,7 +3657,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 </code></pre></div>
 <div class="admonition note">
 <p class="admonition-title"><code>batched:</code> is <code>smelt.yml</code>-only</p>
-<p>The <code>.sql</code> frontmatter <code>batched:</code> sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (<code>unique_key</code> → top-level <code>unique_key:</code>, <code>safety_overrides</code> → top-level <code>safety_overrides:</code>, <code>nondeterministic_columns</code> → <code>columns.&lt;c&gt;.contract: plausible</code>). Declaring the <em>identity</em> fact this way makes the output key-shaped (see <a href="../../guide/incremental-models/">Incremental models</a>), which a row-shaped model with no <code>GROUP BY</code> cannot become. <code>smelt.yml</code>'s <code>models.&lt;name&gt;.batched:</code> block above is a <strong>separate, still-supported</strong> mechanism carrying a MERGE-dedup-only <code>unique_key</code> (and <code>nondeterministic_columns</code>, since per-column <code>contract:</code> is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.</p>
+<p>The <code>.sql</code> frontmatter <code>batched:</code> sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (<code>unique_key</code> → top-level <code>unique_key:</code>, <code>safety_overrides</code> → top-level <code>safety_overrides:</code>, <code>nondeterministic_columns</code> → <code>columns.&lt;c&gt;.contract: plausible</code>). Declaring the <em>identity</em> fact this way makes the output key-shaped (see <a href="../../guide/incremental-models/">Incremental models</a>), which a row-shaped model with no <code>GROUP BY</code> cannot become. <code>smelt.yml</code>'s <code>models.&lt;name&gt;.batched:</code> block above is a <strong>separate, still-supported</strong> mechanism carrying a MERGE-dedup-only <code>unique_key</code> for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed. Its <code>nondeterministic_columns</code> key is retired the same way: <code>columns.&lt;c&gt;.contract: plausible</code> is SQL-frontmatter-only, with no <code>smelt.yml</code> spelling.</p>
 </div>
 <h4 id="incremental-fields">Incremental Fields<a class="headerlink" href="#incremental-fields" title="Permanent link">&para;</a></h4>
 <table>
@@ -3677,13 +3677,6 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>no</td>
 <td><code>[]</code></td>
 <td>A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level <code>unique_key:</code> is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell.</td>
-</tr>
-<tr>
-<td><code>nondeterministic_columns</code> (under <code>batched:</code>)</td>
-<td>string[]</td>
-<td>no</td>
-<td><code>[]</code></td>
-<td>Output columns exempt from the determinism requirement (e.g. <code>inserted_at = NOW()</code>). See <a href="../../guide/incremental-models/#non-deterministic-columns">Non-deterministic columns</a>.</td>
 </tr>
 </tbody>
 </table>
