@@ -452,212 +452,109 @@ organises its maintenance, and the graph layer built on the plan — then one pr
 shape. A profile section owns only what is meaningful inside that shape; everything else it
 composes by name (§"Shape profiles").
 
-### The equivalence invariant
+### Typed deltas and the algebraic ladder
+
+A cell's technique, correctness, and physical state shape are all fixed by one thing: what its output
+columns' **typed deltas** — the combiner algebra a column's aggregate licenses over a change in its
+inputs (owned by `model_properties.md` §"Output-delta shape") — permit. The four subsections below are
+one story: the invariant every maintained model upholds, the ladder grading which typed deltas smelt
+maintains itself, the physical state a decomposed one needs, and the rule that the machinery only ever
+validates a declared shape against what those deltas support.
+
+#### The equivalence invariant
 
 Every maintained (non-`full`) model upholds **one** invariant, stated over an abstract
-**processed-input set** `S`: an incremental run produces the result a full refresh would,
-restricted to the inputs processed so far.
+**processed-input set** `S`: an incremental run produces the result a full refresh would, restricted
+to the inputs processed so far.
 
 ```
 incremental_state(S) == full_refresh(source | input ∈ S)
 ```
 
-`S` is a set of *source rows or partitions the runs have scanned* — not necessarily
-clock-addressed. The **partition-set form** (`source | partition_col ∈ S`), used throughout the
-rest of this spec, is the **clocked specialisation**, available whenever the driving source
-carries a `timeseries:` clock. An unclocked (snapshot) source has no partition set to slice by;
-its specialisation is stated per shape profile (the key grain states it over "keys present in
-the current snapshot" — §"End-state equivalence: the SQL is the oracle").
+`S` is a set of *source rows or partitions the runs have scanned* — not necessarily clock-addressed.
+The **partition-set form** (`source | partition_col ∈ S`), used throughout this spec, is the **clocked
+specialisation**, available whenever the driving source carries a `timeseries:` clock; an unclocked
+(snapshot) source has no partition set to slice by, and its specialisation is stated per shape profile
+(the key grain states it over "keys present in the current snapshot" — §"End-state equivalence: the
+SQL is the oracle"). The right-hand side depends only on the *set* `S`, so **order/set-determinacy is
+a corollary for every shape** — trivially so for the partition grain's disjoint-union combiner, but
+present nonetheless.
 
-**Order/set-determinacy is a corollary, for every shape.** The right-hand side depends only on
-the *set* `S`, never the order it was processed in, so every conforming profile is
-order-independent. This is not special to the key-addressed shapes: a partition-grain model's
-partitions are disjoint, so its combiner is disjoint union and the property is trivial — but it
-is present.
+**Strengthenings, not peer contracts.** Where an output slice depends only on its own bounded input
+slice, the invariant is additionally checkable slice-by-slice: **per-partition equivalence** (the
+partition grain, §"Per-partition equivalence") and **per-slice equivalence** (the keyed analogue, once
+key temporal locality is established, §"Key temporal locality") — both strengthenings of the one
+invariant, never a second one. What actually distinguishes the shapes is how their writes **address
+rows**, a per-cell fact (§"Per-cell write addressing"); key-addressed shapes discharge the *same*
+invariant because their writes reach stored rows by key, wherever they live.
 
-**Strengthenings.** Where an output slice depends only on its own bounded input slice, the
-invariant is additionally checkable slice-by-slice:
+**The replayability split.** Full equivalence — an executable `full_refresh` oracle a test can run —
+holds only for **replayable inputs**: a set `S` the model can re-evaluate its own SQL over (a clocked
+source's processed partitions; a snapshot's currently-present keys), exactly what the admission matrix
+enforces per column (§"Admission matrix"). Non-replayable combinations (a non-replayable input under a
+partitioned output; a fold needing unreplayable history) are not admitted; they could one day get a
+weaker, never-smuggled-in **observer / prefix-consistency contract** (§Future Extensions) instead.
 
-- **per-partition equivalence** — the partition grain's strengthening: each output partition
-  equals the full refresh restricted to that partition (§"Per-partition equivalence");
-- **per-slice equivalence** — the keyed analogue, available when key temporal locality is
-  established (§"Key temporal locality").
+**Two named carve-outs**, both consequences of the executable-oracle requirement rather than gaps in
+it: **retained departed keys** under snapshot-reconcile (a key present in stored state but absent from
+the current snapshot is retained, not deleted — §"The two run shapes"), and **ordering-key ties** on
+an order-monotone overwrite column (equivalence holds up to ties, since ordering-key uniqueness is not
+statically provable — §"Ordering ties"). Every `model_properties.md` property and
+`model_transforms.md` transform is proven/licensed in service of this invariant: the smelt-driven
+shapes discharge it via the generative equivalence oracle (§References); `refresh: materialized_view`
+discharges it via the **engine's** native IVM, with no smelt combiner (`materialized_view.md`).
 
-These are strengthenings of the one invariant, not peer contracts. What actually distinguishes
-the shapes is how their writes **address rows** — a per-cell fact (§"Per-cell write
-addressing"), not a second invariant. The key-addressed shapes discharge the *same* invariant on
-their end-state because their writes reach stored rows by key, wherever they live.
-
-**The replayability split.** Full equivalence — an executable `full_refresh` oracle a test can
-run — holds only for **replayable inputs**: a set `S` the model can re-evaluate its own SQL over
-(a clocked source's processed partitions; a snapshot's currently-present keys). Only
-combinations whose oracle is executable this way are admitted — this is exactly what the
-admission matrix enforces per column (§"Admission matrix"). For the combinations that are not
-admitted (a non-replayable input under a partitioned output; a fold family that would need
-history it cannot replay), a different, weaker **observer / prefix-consistency contract** — a
-property of the observation sequence, not a re-runnable refresh — could one day be stated and
-opted into explicitly (§Future Extensions). It is never smuggled in under the executable-oracle
-invariant stated here.
-
-**Two named carve-outs.** Every admitted keyed model's executable oracle carries exactly two,
-both consequences of the executable-oracle requirement rather than gaps in it:
-
-- **Retained departed keys** under snapshot-reconcile: a key present in the stored state but
-  absent from the current snapshot is retained, not deleted, so the stored table is *the
-  oracle's rows plus retained departed keys* (§"The two run shapes").
-- **Ordering-key ties** on an order-monotone overwrite column: equivalence holds up to ties on
-  the ordering expression, because ordering-key uniqueness is not statically provable
-  (§"Ordering ties").
-
-Every property in `model_properties.md` is proven in service of this invariant; every transform
-in `model_transforms.md` is licensed because it preserves it. For the smelt-driven shapes the
-invariant is discharged by the generative equivalence oracle (§References — the family's
-regression net); for `refresh: materialized_view` it is discharged by the **engine's** native
-incremental view maintenance, and smelt runs no combiner (`materialized_view.md`).
-
-### The contract lattice
-
-The equivalence invariant stated above is the **default point** of a small declared lattice: a
-modeller may opt a model or cell into a named **relaxation** that trades a bounded, checked
-amount of equivalence for a capability the default point cannot offer (skipping stale-window
-recompute, licensing a bounded write clamp). A relaxation is never ambient — it is declared,
-validated, probe-checked at runtime, and always printed by `smelt explain` (§"The graph layer"),
-never a silent weaker default.
-
-**A lattice point is admissible only as a complete triple, single-owned in `smelt-logical`:** a
-declaration schema (the frontmatter shape and its validation), a pure oracle transform (what
-`incremental_state(S) == full_refresh(...)` becomes at this point, restated below per point), and
-a probe emitter (the runtime check that catches a live violation of that restated oracle). The
-conformance gate (`maintenance_conformance`, root `CLAUDE.md` §"Architectural invariants")
-consumes the oracle transform directly rather than encoding its own comparator, and runtime
-probes emit from the same definition — mirroring the statement-emission single-owner rule
-(§"Statement emission (single owner)"). Users pick and parameterise a point; they never define
-one. v1 ships exactly two relaxations, chosen for having the clearest oracles and probes:
-
-**Frozen horizon (`H`), partition grain only.** The oracle over the frozen-horizon window
-`S_H = { i ∈ S : partition(i) is within H of the run that scanned i }` is strict equivalence:
-`incremental_state(S_H) == full_refresh(source | input ∈ S_H)`. Declaring `frozen_horizon: H`
-clamps writes **by contract** to partitions within `H` of the current run — narrowing (never
-widening) the derived horizon clamp described in §"Windowed maintenance and the horizon"; a
-partition older than `H` is never revisited even if the model's own reach would otherwise cover
-it. Because the clamp is now a declared contract rather than only a derived reach bound, a
-genuinely late arrival landing outside `H` is a checked condition, not an unscanned row — but a
-partition-filtered scan never reads a row whose partition is already frozen, so the probe cannot
-observe lateness by scanning either; it is baseline-comparative instead. Each run of a
-`frozen_horizon` model snapshots a per-partition row-count baseline of its clocked sources
-restricted to their frozen band (partitions strictly before `end − H`); the next run compares the
-recorded baseline against the sources' current frozen-band state. A frozen-band partition whose
-row count increased, or that is present now but absent from the baseline, is a genuine late
-arrival, and the probe raises `ContractLateArrivalOutsideHorizon`, naming the partition, the added
-row count, and the declared `H` — this closes the one accepted silent-data behaviour of the
-default point (§"Windowed maintenance and the horizon") for every model that opts in. The first
-run of a `frozen_horizon` model has nothing recorded to compare against, so it establishes the
-baseline and verifies nothing.
-
-**Deferral (`D`).** The oracle licenses lag: `∃ S' ⊆ S` such that every input in `S \ S'` arrived
-within the last `D`, and `incremental_state(S) == full_refresh(source | input ∈ S')` — the
-maintained state may omit inputs no older than `D`, so long as it exactly reflects everything
-older. Declaring `deferral: D` licenses two capabilities the default point forbids: **run
-skipping**, when a run's entire pending input set is within `D` of arrival (nothing outside the
-window is left unfolded, so skipping the run cannot violate the oracle); and **work
-subsumption**, when a pending small run's input set is a subset of a larger run already scheduled
-within `D` (the ledger proves the subset relationship before the smaller run is dropped). The
-probe is ledger-derived: both frontiers are event-time, read from state the run already writes —
-the maintained frontier is the cell's own latest recorded interval end, the input frontier is the
-latest covered end across its clocked inputs' recorded landings — and the probe compares them,
-raising `ContractDeferralExceeded`, naming the cell and the measured lag, whenever lag exceeds the
-declared `D`.
-
-Operationally, the same two ledger frontiers the probe compares also drive the scheduling
-decision: measured `lag = input_frontier − maintained_frontier`. When `0 < lag ≤ D`, the run is
-licensed to skip — recorded on the run manifest as `skipped_deferral` (never silently omitted,
-the same posture as every other manifest-recorded skip reason), leaving the target table and the
-interval ledger untouched. `lag ≤ 0` (nothing pending) or an unresolved frontier (the cell's first
-run) always falls through to the normal path — skipping is a licensed relaxation, never the
-fallback, and it is never available past `D`: once `lag > D`, the run proceeds and the probe's own
-`ContractDeferralExceeded` check applies as described above. A deferral skip propagates to every
-selected dependent of the skipped cell, recorded `skipped_deferral_upstream` — a dependent that
-ran while its upstream was deferred would record interval coverage for a window its upstream never
-folded, and would never revisit it, the exact silent hole the default point forbids. Work
-subsumption is proven from two ledger facts, never inferred from range coverage alone: a prior run
-manifest recorded `skipped_deferral` for this cell, **and** the current run's own write range
-covers that cell's pending window (`(maintained_frontier, input_frontier]`, computed from the same
-two frontiers). When both hold, the covering run's manifest entry records the subsumed window
-alongside its normal `success` outcome.
-
-Both points compose with the shape facts already in play (`grain`, the column-family catalogue,
-`maintenance:` overrides) without introducing a new mode: a relaxed cell still resolves a
-technique via the same per-cell admission rule (§"Per-cell admission"), just checked against its
-point's restated oracle rather than the default.
-
-### The algebraic maintenance ladder
+#### The algebraic maintenance ladder
 
 What a key-addressed model can maintain is fixed by the **algebra of its combiners**, not by any
-backend feature. The ladder's ordering criterion is invertibility → maintainability, which is
-why it lives here with the invariant: the raw *discriminants* it reads (is-monoid, needs-inverse,
-decomposable, value-vs-order-monotone) are properties of the SQL owned by `model_properties.md`;
-the ladder — the ordering and the maintainable-vs-delegated cutoff — is the maintenance
-consequence and is owned here. The equivalence invariant holds unconditionally on every rung;
-only the state representation and its size change, never the fidelity of the user value.
+backend feature. The ordering criterion is invertibility → maintainability: the raw *discriminants*
+(is-monoid, needs-inverse, decomposable, value-vs-order-monotone) are properties of the SQL owned by
+`model_properties.md`; the ordering and the maintainable-vs-delegated cutoff are the maintenance
+consequence, owned here. The invariant holds on every rung — only state representation and size
+change, never the fidelity of the user value.
 
 1. **Direct monoid.** The stored column *is* the answer; the combiner is a commutative monoid
-   (associative, commutative, identity = empty partition): `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX`
-   (±∞), `BOOL_*`, `BIT_*`.
+   (associative, commutative, identity = empty partition): `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX` (±∞),
+   `BOOL_*`, `BIT_*`.
 2. **Decomposed monoid.** The user value is `π(state)` for a richer monoid element and a pure
-   presentation map `π`: `AVG` = `(sum, count)` presented `sum/count`; variance = a Welford
-   triple; approximate distinct = an HLL register vector. Kept in a state table, exposed through
-   a presentation view.
+   presentation map `π`: `AVG` = `(sum, count)` presented `sum/count`; variance = a Welford triple;
+   approximate distinct = an HLL register vector (§"Decomposed state (rung 2) in keyed models").
 3. **Group.** When inputs can change (corrections, reprocessing, deletes) the combiner must be
    **invertible** — a commutative group (`SUM`, `COUNT`, `BIT_XOR`). Monoids that are not groups
-   (`MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR`) cannot un-see a contribution and so cannot be
-   reprocessed without a full refresh.
+   (`MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR`) cannot un-see a contribution and so cannot be reprocessed
+   without a full refresh.
 4. **Opt-in bounded-domain multiset.** Holistic aggregates needing all rows (exact
-   `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, `DISTINCT`-modified
-   aggregates) are maintained by storing the per-key value→count multiset (a bounded-domain
-   Z-set); its signed form makes retraction free even for the otherwise-irreversible `MIN`/`MAX`.
-   **Opt-in and fail-loud**: state is `O(active domain)`, so an unbounded-state aggregate is
-   refused by default (suggesting the approximate form or `refresh: full`) unless the modeller
-   supplies a bounded-domain budget, and the runtime caps the multiset with a full-refresh
-   fallback.
+   `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, `DISTINCT`-modified aggregates)
+   are maintained by storing the per-key value→count multiset (a bounded-domain Z-set, whose signed
+   form makes retraction free even for the otherwise-irreversible `MIN`/`MAX`). **Opt-in and
+   fail-loud**: state is `O(active domain)`, so an unbounded-state aggregate is refused by default
+   (suggesting the approximate form or `refresh: full`) unless the modeller supplies a bounded-domain
+   budget, and the runtime caps the multiset with a full-refresh fallback.
 
-The ladder is the boundary: rungs 1–4 are what smelt maintains itself (a `merge_into` loop,
-optionally with a presentation view). Beyond it — general-operator retraction over joins,
-unbounded non-additive state — is delegated to the engine's native incremental view maintenance
-via `refresh: materialized_view`.
+Rungs 1–4 are the boundary of what smelt maintains itself, via a `merge_into` loop (optionally with a
+presentation view for decomposed state); general-operator retraction over joins and unbounded
+non-additive state delegate to `refresh: materialized_view`'s engine-native IVM.
 
-### Decomposed state (rung 2) in keyed models
+#### Decomposed state (rung 2) in keyed models
 
-Ladder rung 2 (above) says the user value can be `π(state)` for a richer monoid element. This
-section fixes where that state physically lives for the key grain, which column families it
-licenses, and how it stays invisible to consumers — the missing piece every decomposed-state
-admission in §"The column-family catalogue" cites by name.
+Ladder rung 2 says the user value can be `π(state)` for a richer monoid element. This section fixes
+where that state physically lives for the key grain, which column families it licenses, and how it
+stays invisible to consumers — the missing piece every decomposed-state admission in §"The
+column-family catalogue" cites by name. **Physical layout:** state columns live in the *same* stored
+table as the presented columns, named `<output>__<part>` (e.g. `total_spend__sum`,
+`total_spend__count`); the presented column is materialised alongside them at merge time, computed by
+`π` from that row's own state (§Design — the rejected separate-table alternative).
 
-**Physical layout.** State columns live in the *same* stored table as the presented columns,
-named `<output>__<part>` (e.g. `total_spend__sum`, `total_spend__count`). The presented column
-is materialised alongside them at merge time, computed by the presentation map `π` from that
-row's own state. Rejected alternative: a separate `<model>__state` table plus a presentation
-*view*. A second relation would make `ref()` sometimes resolve to a table and sometimes to a
-view, add a second relation to every backend's DDL and atomic-swap path, and buy nothing — `π`
-is a per-row pure function of the same row's state, so nothing about it needs a second query.
+**Presentation projection.** State columns are excluded from the model's public schema (`smelt.ref()`
+expansion, `SELECT *`, declared-schema checks, downstream type inference); a collision with a declared
+or projected user column is a fail-loud `KeyedStateColumnCollision` (§Diagnostics), never a silent
+rename. A wildcard reading a state-bearing model is rewritten at compile time to its presented columns
+(sibling relations keep their own `<rel>.*`); a hand-written `__part` name is an ordinary
+unresolved-column diagnostic, and an unresolvable wildcard while a state-bearing model is in scope
+fails loud, naming the model and the wildcard.
 
-**Presentation projection.** State columns are excluded from the model's public schema:
-`smelt.ref()` expansion, `SELECT *`, declared-schema checks, and downstream type inference see
-only presented columns. A state column name colliding with a declared or projected user column
-is a fail-loud refusal (`KeyedStateColumnCollision`, §Diagnostics), never a silent rename —
-smelt does not guess which of the two a consumer meant.
-
-Because state columns share the stored table, a wildcard in a consumer that reads a state-bearing
-model is rewritten at compile time to that model's presented columns (sibling relations in the
-same `FROM` keep their own `<rel>.*`); explicit column references are untouched, and a `__part`
-name written by hand is an ordinary unresolved-column diagnostic, since it is not in the model's
-public schema. If a wildcard's relations cannot be resolved while a state-bearing model is in
-scope, the compile fails loud with the model and the unresolvable wildcard named — never a
-pass-through that would leak state columns into the consumer's schema.
-
-**The state-shape catalogue.** Each decomposable family has one fixed, hand-encoded state shape
-and presentation map; there is no general decomposition procedure, matching rung 2's own
-"kept in a state table, exposed through a presentation view" framing (above) with a concrete
-per-family shape:
+**The state-shape catalogue.** Each decomposable family has one fixed, hand-encoded state shape and
+presentation map; there is no general decomposition procedure:
 
 | Family | State columns (`__` suffix) | Combiner over state | Presentation map `π` |
 |---|---|---|---|
@@ -666,76 +563,114 @@ per-family shape:
 | `MAX_BY(v, o)` / `MIN_BY(v, o)` | `v`, `o` (the hidden ordering value) | keep the pair whose `o` is greater (`MAX_BY`) / lesser (`MIN_BY`); on equality the incumbent wins, matching §"Ordering ties" | `v` — `o` is never presented |
 | once-write | `value`, `written` (boolean) | `written` is `OR`; `value` is `COALESCE(target.value, delta.value)` — the incumbent's value survives once written, the delta only ever fills a state row that was never written | family-specific, below |
 
-`AVG`'s and `STDDEV_*`/`VAR_*`'s state combiners are commutative monoids over their state tuples
-(component-wise `SUM`, itself a monoid), so the equivalence invariant and the order/set-determinacy
-corollary (§"The equivalence invariant") hold over the state with no exception — they are graded
-**additive** in the transactional frontier write (§"The transactional frontier write (merge
-ledger)"), the same as
-`SUM`/`COUNT`, since their state components are `SUM`-shaped. `MAX_BY`/`MIN_BY`'s state combiner
-carries the same ordering-key-tie carve-out its rung-1 form already had (§"Two named carve-outs",
-§"Ordering ties") — moving the ordering value into hidden state changes nothing about that
-exception, only who tracks the ordering column. Once-write's state combiner is fully
-order-independent given its provenance proof, exactly as its rung-1 `COALESCE(target, delta)`
-form is: a per-key-constant value produces the same result regardless of which window's delta
-supplies it first. `MAX_BY`/`MIN_BY` and once-write keep the idempotent grade their rung-1 form
-already carries — replacing a hand-written companion column or a spelling restriction with
-hidden state changes nothing about re-run safety.
+Each family's state combiner keeps the grade its rung-1 form carried, in the transactional frontier
+write (§"The transactional frontier write (merge ledger)"): `AVG`'s and `STDDEV_*`/`VAR_*`'s
+`SUM`-shaped state tuples grade **additive**, like `SUM`/`COUNT` itself; `MAX_BY`/`MIN_BY` keeps its
+ordering-key-tie carve-out (§"Two named carve-outs", §"Ordering ties"); `MAX_BY`/`MIN_BY` and
+once-write (order-independent given its provenance proof) keep the **idempotent** grade.
 
-**Once-write's `π` widens what the family admits**, because the state now separates the *raw*
-per-key reduction from the presented value: the raw reduction is never fallback-tainted, so a
-fallback or a preference order can be applied fresh on every read instead of being baked into
-the merged value once and then re-merged incorrectly by a later window (§"The column-family
-catalogue" states which spellings this newly admits). Concretely:
+**Once-write's `π` widens what the family admits**: separating the *raw* reduction from the presented
+value means the reduction is never fallback-tainted, so a fallback or preference order applies fresh
+on every read instead of being baked in and re-merged incorrectly by a later window (§"The
+column-family catalogue" enumerates the admitted spellings and their functional dependencies). The
+fallback-bearing and multi-candidate spellings each get one `(value, written)` state pair per
+candidate, `written = (value IS NOT NULL)`, folded independently; `π` returns the first written
+candidate in declared preference order, else the fallback — a pure function of state, so merge order
+cannot leak into which candidate wins. The bare key-derived spelling needs no decomposed state: a key
+column is already non-null by construction, so plain `COALESCE(target, delta)` already computes the
+presented value. `smelt explain` renders state columns as internal state, distinct from the public
+schema (§Surface "CLI").
 
-- **Fallback-bearing single reduction** (`COALESCE(MAX(<col>), <fallback>)`): one state pair
-  `(value, written)` over the bare reduction `MAX(<col>)`/`MIN(<col>)`, with `written = (value IS
-  NOT NULL)`. `π = value` if `written`, else `<fallback>`.
-- **Multi-candidate reduction** (`COALESCE(MAX(a), MAX(b))`): one `(value, written)` pair per
-  candidate, each folded independently exactly as the single-reduction case above. `π` applies
-  the arguments' declared preference order over the candidates whose `written` is true — a pure
-  function of that row's state, so the order the source's windows happened to merge in can no
-  longer leak into which candidate wins.
-- The bare key-derived spelling (`COALESCE(<unique_key column>, …)`) needs no decomposed state:
-  a key column is already non-null by construction, so the plain `COALESCE(target, delta)`
-  combiner (§"The column-family catalogue") already computes the presented value directly.
+#### Validator, not chooser
 
-`smelt explain` renders state columns as internal state, distinct from the model's public
-schema — see §Surface "CLI".
+The machinery **validates** the declared shape — the `refresh:` value plus the shape-defining facts,
+and any check-only `grain:` or `write:` assertion — against the derived properties, and rejects
+fail-loud when the SQL cannot uphold the shape's contract. It **never chooses or silently switches**
+the shape or the addressing. A full refresh is the honest fallback surfaced as a diagnostic, never an
+automatic downgrade. Per-cell technique choice among proven-interchangeable techniques (§"Per-cell
+admission") stays inside this rule: it may change freshness, never observable bits at a fixed
+processed-input set.
 
-### Validator, not chooser
+### The contract lattice
 
-The machinery **validates** the declared shape — the `refresh:` value plus the shape-defining
-facts, and any check-only `grain:` or `write:` assertion — against the derived properties, and
-rejects fail-loud when the SQL cannot uphold the shape's contract. It **never chooses or
-silently switches** the shape or the addressing. A full refresh is the honest fallback surfaced
-as a diagnostic, never an automatic downgrade. Per-cell technique choice among
-proven-interchangeable techniques (§"Per-cell admission") operates strictly inside this rule: it
-may change freshness, never observable bits at a fixed processed-input set.
+The equivalence invariant stated above is the **default point** of a small declared lattice: a
+modeller may opt a model or cell into a named **relaxation** that trades a bounded, checked amount of
+equivalence for a capability the default point cannot offer (skipping stale-window recompute,
+licensing a bounded write clamp). A relaxation is never ambient — it is declared, validated,
+probe-checked at runtime, and always printed by `smelt explain` (§"The graph layer"), never a silent
+weaker default.
+
+**A lattice point is admissible only as a complete triple, single-owned in `smelt-logical`:** a
+declaration schema, a pure oracle transform (what `incremental_state(S) == full_refresh(...)` becomes
+at this point, restated below per point), and a probe emitter. The conformance gate
+(`maintenance_conformance`, root `CLAUDE.md` §"Architectural invariants") consumes the oracle
+transform directly rather than encoding its own comparator, and runtime probes emit from the same
+definition — mirroring the statement-emission single-owner rule (§"Statement emission (single
+owner)"). Users pick and parameterise a point; they never define one. v1 ships exactly two
+relaxations, chosen for having the clearest oracles and probes:
+
+**Frozen horizon (`H`), partition grain only.** The oracle over the frozen-horizon window
+`S_H = { i ∈ S : partition(i) is within H of the run that scanned i }` is strict equivalence:
+`incremental_state(S_H) == full_refresh(source | input ∈ S_H)`. Declaring `frozen_horizon: H` clamps
+writes **by contract** to partitions within `H` of the current run — narrowing (never widening) the
+derived horizon clamp (§"Windowed maintenance and the horizon"); a partition older than `H` is never
+revisited even if the model's own reach would otherwise cover it. The clamp is now a declared contract
+rather than only a derived reach bound, so a genuinely late arrival landing outside `H` is a checked
+condition — but a partition-filtered scan never reads a row whose partition is already frozen, so the
+probe is **baseline-comparative**, not scan-based: each run snapshots a per-partition row-count
+baseline over the frozen band (partitions strictly before `end − H`), and the next run compares it
+against current state. A frozen-band partition whose row count increased, or that is new since the
+baseline, is a genuine late arrival, and the probe raises `ContractLateArrivalOutsideHorizon`, naming
+the partition, the added row count, and `H` — closing the one accepted silent-data behaviour of the
+default point for every model that opts in. The first run has nothing to compare against, so it only
+establishes the baseline.
+
+**Deferral (`D`).** The oracle licenses lag: `∃ S' ⊆ S` such that every input in `S \ S'` arrived
+within the last `D`, and `incremental_state(S) == full_refresh(source | input ∈ S')` — the maintained
+state may omit inputs no older than `D`, so long as it exactly reflects everything older. Declaring
+`deferral: D` licenses two capabilities the default point forbids: **run skipping**, when a run's
+entire pending input set is within `D` of arrival (nothing outside the window is left unfolded, so
+skipping cannot violate the oracle); and **work subsumption**, when a pending small run's input set is
+a subset of a larger run already scheduled within `D` (the ledger proves the subset relationship
+before the smaller run is dropped). The probe is ledger-derived — the maintained frontier is the
+cell's own latest recorded interval end, the input frontier the latest covered end across its clocked
+inputs' recorded landings — and raises `ContractDeferralExceeded`, naming the cell and the measured
+lag, whenever `lag = input_frontier − maintained_frontier` exceeds `D`.
+
+The same two frontiers drive scheduling: `0 < lag ≤ D` licenses a skip, recorded on the run manifest
+as `skipped_deferral` (never silently omitted), leaving the target table and interval ledger
+untouched. `lag ≤ 0` or an unresolved frontier (the cell's first run) always falls through to the
+normal path — skipping is a licensed relaxation, never the fallback, and never available past `D`. A
+deferral skip propagates to every selected dependent, recorded `skipped_deferral_upstream` — a
+dependent that ran while its upstream was deferred would record coverage for a window its upstream
+never folded and never revisit it, the exact silent hole the default point forbids. Work subsumption
+is proven from two ledger facts, never inferred from range coverage alone: a prior manifest recorded
+`skipped_deferral` for this cell, **and** the current run's write range covers that cell's pending
+window (`(maintained_frontier, input_frontier]`); when both hold, the covering run's manifest records
+the subsumed window alongside its normal `success` outcome.
+
+Both points compose with `grain`, column families, and `maintenance:` overrides without a new mode: a
+relaxed cell resolves technique via the same admission rule (§"Per-cell admission"), checked against
+its restated oracle.
 
 ### The plan matrix
 
 Every maintained model has a **maintenance plan**: pure data, derived once, consumed everywhere
-(§Constraints). Its cells are keyed by `(output-column-group × trigger × changed-input)`.
+(§Constraints), cells keyed by `(output-column-group × trigger × changed-input)`.
 
-**Column groups.** The plan factors the output columns into groups by shared
-mutation-sensitivity (`model_properties.md` §"Per-column mutation-sensitivity / column
-provenance" owns the proof and its degenerate-collapse rule; this spec consumes the groups).
-Creation is shared by every column — all columns of a new row are computed together; mutation is
-what partitions them.
-
-Sensitivity carries its kind into the cell. A **value-sensitive** group's mutation cell may be
-repaired column-scoped (a `MERGE` that rewrites the group's columns in place). A
-**membership-sensitive** group — one governed by a mutable source read in row-admission
-position (`model_properties.md` §"Per-column mutation-sensitivity / column provenance") — must
-be repaired by a technique that can create and delete rows: the recompute family
-(delete+insert, change-suppressed where the staged candidate is comparable), never a
-column-scoped merge, which cannot fix which rows exist. A mutable join partner never read in
-any select item still produces mutation cells through membership sensitivity; its absence from
-every value-sensitivity set is not admissibility for cheaper repair. The one admissible
-pruning is a proof, not a default: an enrichment join whose skeleton-source closure is proven
-`Closed` over a provably outer join contributes no membership sensitivity — the closure
-establishes its deltas cannot change which rows exist, so only its value sensitivity remains
-(`model_properties.md` §"Per-column mutation-sensitivity / column provenance").
+**Column groups.** The plan factors the output columns into groups by shared mutation-sensitivity
+(`model_properties.md` §"Per-column mutation-sensitivity / column provenance" owns the proof and
+degenerate-collapse rule; this spec consumes the groups). Creation is shared by every column — a new
+row's columns are computed together; mutation is what partitions them. Sensitivity carries its kind
+into the cell. A **value-sensitive** group's mutation cell may be repaired column-scoped (a `MERGE`
+rewriting the group's columns in place). A **membership-sensitive** group — governed by a mutable
+source read in row-admission position (`model_properties.md` §"Per-column mutation-sensitivity /
+column provenance") — must be repaired by a row-creating/deleting technique: the recompute family
+(delete+insert, change-suppressed where comparable), never a column-scoped merge, which cannot fix
+which rows exist. A mutable join partner never read in any select item still produces membership
+sensitivity — absence from every value-sensitivity set is not admissibility for cheaper repair. The
+one admissible pruning is a proof: an enrichment join whose skeleton-source closure is proven `Closed`
+over a provably outer join contributes none, since its deltas provably cannot change which rows exist.
 
 **Triggers.** Four trigger classes index the plan:
 
@@ -744,92 +679,75 @@ establishes its deltas cannot change which rows exist, so only its value sensiti
 - **definition change** — the model gained output fields while sources stood still;
 - **backfill** — an explicit region recompute from replayable input.
 
-Each trigger is paired with the **changed input** it fires for — the specific source, upstream
-model, self-edge, or definition diff whose delta drives the cell. This third axis is what makes
-"what runs when *this* input changes" a first-class, per-input answer (the model's **scope
-maps**), surfaced by `smelt explain`: the driving source's delta engages the windowed fold; a
-mutable dimension's delta engages the delta-driven probe and horizon-bounded merge; a self-edge
-engages ordered execution; a definition diff engages the targeted column backfill (all
-`model_transforms.md`). The same column group under the same trigger class can derive
-*different* physical write addressing for different changed inputs (§"Per-cell write
-addressing").
+Each trigger pairs with the **changed input** it fires for — the source, upstream model, self-edge, or
+definition diff whose delta drives the cell — making "what runs when *this* input changes" a
+first-class, per-input answer (the model's **scope maps**, surfaced by `smelt explain`): a driving
+source's delta engages the windowed fold; a mutable dimension's delta the delta-driven probe and
+horizon-bounded merge; a self-edge ordered execution; a definition diff targeted column backfill (all
+`model_transforms.md`). The same column group under the same trigger class can derive *different*
+write addressing for different changed inputs (§"Per-cell write addressing").
 
-**Each cell carries:**
+**Each cell carries:** its **corner** of the read-scope × write-scope 2×2 (below); its **technique**,
+from the open write-pattern registry (§"The repair family"); its **write mechanism** — the
+available-addressings rule, or a validated `write:` pin (§"Per-cell write addressing"); its **derived
+scan clamps** per read source (§"Windowed maintenance and the horizon"); its **partition-locality
+verdict** per source (§"Partition-local maintenance"); and its **obligations** and **traded
+guarantees** (per-column: equivalence contract × settle bound).
 
-- its **corner** of the read-scope × write-scope 2×2 (below);
-- the **technique** that realizes it, drawn from the open write-pattern registry (which includes
-  the repair family, §"The repair family");
-- the **write mechanism** admitted for it — derived by the available-addressings rule, or a
-  validated user `write:` pin (§"Per-cell write addressing");
-- the **derived scan clamps** — per read source, the `(partition_col, before, after)` window the
-  cell reads, anchored to the output region (§"Windowed maintenance and the horizon");
-- the **partition-locality verdict** per source (§"Partition-local maintenance");
-- its **obligations** and any **traded guarantees** (per-column, two-dimensional: equivalence
-  contract × settle bound).
-
-**The 2×2.** Each cell occupies a corner of **read scope** (delta+state vs the region's full
-upstream input) × **write scope** — the cell's physical write addressing (targeted addresses vs
-region overwrite):
+**The 2×2.** Each cell occupies a corner of **read scope** (delta+state vs the region's full upstream
+input) × **write scope** — the cell's physical write addressing (targeted addresses vs region
+overwrite):
 
 |              | write: targeted (keyed addressing) | write: region-overwrite (partition addressing) |
 |---|---|---|
 | **read: delta+state** | fold-a-delta | read-modify-write region |
 | **read: full-input** | column-scoped re-derivation | recompute-a-region |
 
-Recompute-a-region is contract-agnostic and unconditionally valid over replayable input; the
-fold corner is contract-specific (it needs a combiner algebra — §"The algebraic maintenance
-ladder"). The repair family (§"The repair family") is recompute-a-region's targeted-write
-refinement: it lands in the **column-scoped re-derivation** corner — full-input read, targeted
-write — scoped to a provably finite key slice rather than a whole region, and it inherits
-recompute-a-region's contract-agnostic correctness argument rather than needing one of its own. Where the interchangeability conditions hold (§"Per-cell admission"), a recompute of a
-region **supersedes and resets** what folds had written there. "Unconditionally valid" is a
-correctness claim, not an admission or cost claim: it holds even when no partition bound exists and the
-region is the whole table — whether that degenerate recompute is *admitted* is gated separately
-by the partition-locality guardrail (§"Partition-local maintenance").
+Recompute-a-region is contract-agnostic and unconditionally valid over replayable input; the fold
+corner is contract-specific (needs a combiner algebra — §"The algebraic maintenance ladder"). The
+repair family (§"The repair family") is recompute-a-region's targeted-write refinement: the
+**column-scoped re-derivation** corner, scoped to a finite key slice, inheriting recompute-a-region's
+correctness argument rather than needing its own. Where interchangeability holds (§"Per-cell
+admission"), a region recompute **supersedes and resets** what folds had written. "Unconditionally
+valid" is correctness, not admission or cost: it holds even for a whole-table region, whose admission
+is gated separately by the partition-locality guardrail (§"Partition-local maintenance").
 
-The plan is **derived, never declared**. What stays declared is the model's shape-defining
-facts, validated against the plan — an error on mismatch, never a silent flip. `smelt explain`
-prints the plan: every cell, its addressing, clamps and locality verdicts, the per-column
-guarantee ledger, and the model's inbound edges.
+The plan is **derived, never declared** — the model's shape-defining facts are validated against it,
+an error on mismatch, never a silent flip. `smelt explain` prints every cell, its addressing, clamps
+and locality verdicts, the per-column guarantee ledger, and the model's inbound edges.
 
-### Per-cell admission
+#### Per-cell admission
 
-A technique enters a cell's plan space only when all of its obligations discharge (fail-closed;
-an unrecognised construct refuses, never defaults). The obligations, each with its owner:
+A technique enters a cell's plan space only when all of its obligations discharge (fail-closed; an
+unrecognised construct refuses, never defaults). The obligations, each with its owner:
 
-1. **Replayable input** (recompute family) — the source is re-readable at its current processed
-   set; declared posture, `sources.md`.
-2. **Faithful fold** (fold family) — the fold's two independent conditions (source posture ×
-   combiner algebra) hold (`model_properties.md` §"Faithful-fold conditions"); a replayable feed
-   carrying retractions into a non-invertible combiner passes the first condition and fails the
-   second, and either failure alone refuses the fold family for this cell.
-3. **Combiner algebra class** — derived, fail-closed (`model_properties.md` discriminants); a
-   holistic or unrecognised combiner leaves only the recompute family.
-4. **Bounded reach** — the cell's scan bound `(clock_col, before, after)` per source is derived
-   (`model_properties.md` §"Unified bound / reach derivation") or declared-and-checked; absent
-   both, full-input techniques only (`MaintenanceReachNotDerivable` when the trigger requires a
-   bound).
-5. **Bounded footprint** (targeted writes) — the write-scope reflection of the scan bound is
-   bounded (`model_properties.md` §"Footprint reflection / bounded write footprint"); a
-   trajectory column's unbounded forward footprint fails this (`MaintenanceUnboundedFootprint`).
-6. **Well-defined groups** — the mutation-sensitivity partition is computable
-   (`model_properties.md`); degenerate collapse is surfaced, never silent.
-7. **Affected-key discovery** (repair family only) — a changed input's delta resolves to a finite
-   output key set, a sound over-approximation admitted (`model_properties.md` §"Affected-key
-   discovery"); an unresolvable delta shape refuses the repair family by name
-   (`MaintenanceRepairKeysNotDiscoverable`, §"The repair family").
+1. **Replayable input** (recompute family) — the source is re-readable at its current processed set;
+   declared posture, `sources.md`.
+2. **Faithful fold** (fold family) — source posture × combiner algebra both hold
+   (`model_properties.md` §"Faithful-fold conditions"); either alone failing (e.g. retractions into a
+   non-invertible combiner) refuses the fold family.
+3. **Combiner algebra class** — derived, fail-closed (`model_properties.md` discriminants); a holistic
+   or unrecognised combiner leaves only the recompute family.
+4. **Bounded reach** — the scan bound `(clock_col, before, after)` per source is derived
+   (`model_properties.md` §"Unified bound / reach derivation") or declared-and-checked; absent both,
+   full-input only (`MaintenanceReachNotDerivable` when the trigger requires a bound).
+5. **Bounded footprint** (targeted writes) — the write-scope reflection of the scan bound is bounded
+   (`model_properties.md` §"Footprint reflection / bounded write footprint"); a trajectory column's
+   unbounded forward footprint fails this (`MaintenanceUnboundedFootprint`).
+6. **Well-defined groups** — the mutation-sensitivity partition is computable (`model_properties.md`);
+   degenerate collapse is surfaced, never silent.
+7. **Affected-key discovery** (repair family only) — a changed input's delta resolves to a finite,
+   soundly over-approximated output key set (`model_properties.md` §"Affected-key discovery"); an
+   unresolvable delta shape refuses the repair family by name
+   (`MaintenanceRepairKeysNotDiscoverable`).
 
-**Interchangeability and choice.** Two techniques may serve one cell interchangeably iff, at a
-fixed processed-input set `S`, they produce identical state on the columns that decide which
-rows exist — the `S`-indexed refinement of the equivalence invariant, where `S` is a
-**per-input vector** once the plan factors. For faithful idempotent columns the choice is
-bit-preserving; for additive columns it is state-preserving **modulo the ledger**, whose real
-obligation is *never fold a delta already reflected in the state*: fold-then-recompute is safe
-(the recompute resets the region's ledger), recompute-then-refold double-counts. Technique
-choice among proven-interchangeable techniques belongs to the cost model or the operator
-(`prefer`/`technique`); it may change only *which `S` is reflected* (freshness), never
-observable bits at a fixed `S` — which is how per-cell choice stays inside
-§"Validator, not chooser".
+**Interchangeability and choice.** Two techniques serve one cell interchangeably iff, at a fixed `S`,
+they produce identical state on the columns deciding which rows exist — the `S`-indexed refinement of
+the equivalence invariant, `S` a **per-input vector** once the plan factors: bit-preserving for
+faithful idempotent columns, state-preserving **modulo the ledger** for additive ones (never fold a
+delta already reflected in state — fold-then-recompute is safe, recompute-then-refold double-counts).
+Choice among interchangeable techniques belongs to the cost model or operator (`prefer`/`technique`),
+governed throughout by §"Validator, not chooser".
 
 ### Per-cell write addressing
 
@@ -2039,6 +1957,15 @@ correction is keyed — it targets specific rows across many partitions — whil
 creation cell is region-addressed. A *declared model-wide* addressing token was rejected — the
 per-cell plan already knows better.
 (`docs/research/20260716-relation-contract-and-per-cell-addressing.md`.)
+
+**Decomposed state lives in the presented table, not a second relation.** A rung-2 typed delta
+(§"Decomposed state (rung 2) in keyed models") needs somewhere to keep state richer than its
+presented value. A separate `<model>__state` table plus a presentation view was rejected: it
+would make `ref()` sometimes resolve to a table and sometimes to a view, add a second relation to
+every backend's DDL and atomic-swap path, and buy nothing — the presentation map `π` is a per-row
+pure function of the same row's own state, so nothing about it needs a second query. State
+columns live in the same stored table instead, under a reserved `__` suffix excluded from the
+public schema.
 
 **The two write mechanisms stay binary per cell; locality is a refinement, not a third pole.**
 Region-overwrite vs keyed-merge is the write-scope corner; which concrete pattern realizes a

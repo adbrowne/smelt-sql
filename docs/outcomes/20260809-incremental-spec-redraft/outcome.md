@@ -47,7 +47,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
-| 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | planned |
+| 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | pending |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
 | 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
@@ -89,6 +89,14 @@ way (timeless-oracle rule), at substantially reduced length.
   than disappearing. `rg` shows these heading names are cited by ~100 `§"…"` references across
   sibling specs, root `CLAUDE.md`, and six production crates; the craft doc treats a heading
   rename as a symbol rename, and the corpus sweep is not work this outcome's criteria ask for.
+
+- 2026-08-11 — Phase 2 done: §Semantics lines 448–833 (386 lines) redrafted into `### Typed deltas
+  and the algebraic ladder` + `### The contract lattice` + `### The plan matrix` at 297 lines (23%
+  reduction), all seven heading strings preserved verbatim. 51-claim inventory
+  (`phases/02-claims.md`) graded 51/51 preserved by an independent adversarial-verify subagent
+  after one fix (the `merge_into` loop mechanism detail). `phases/02-check.sh` (structure,
+  orphan-refs, claims fixture, diagnostic codes, ≤300-line budget, timeless grep) all green;
+  `verify-phase.sh` full gate green.
 
 ## Blocked
 
