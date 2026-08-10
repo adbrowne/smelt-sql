@@ -15,6 +15,7 @@
 //! `gate.rs`).
 
 mod dags;
+mod fact_violations;
 mod gate;
 mod harness_self_check;
 mod pinned;

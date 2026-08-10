@@ -53,7 +53,7 @@ safe to grow (the contract lattice will grow it).
 | 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
-| 7 | Conformance recipes: violated-fact scenarios caught by probes | planned |
+| 7 | Conformance recipes: violated-fact scenarios caught by probes | done |
 | 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
 
 ## Decision log
@@ -210,6 +210,22 @@ safe to grow (the contract lattice will grow it).
   rather than being quietly omitted. Phase 6's `render_smelt_yml` `probes: {cadence: off}` default
   does not leak into this pool: these recipes are hand-staged projects that declare `probes:`
   explicitly per leg.
+
+- 2026-08-10: Phase 7 done. `crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs`
+  lands a six-recipe pool (one per `built` registry row) inside the standing
+  `maintenance_conformance` target, with a spec-registry coverage parse pinning the pool to the
+  registry. Four recipes (`functional_dependencies`, `bounded_domain`, `append_only`,
+  `assert_monotonic`) are not end-state observable in their staged full-refresh/unconditional
+  shapes — each reason is recorded and printed as an explicit skip, never silently omitted; the
+  two narrowing-technique recipes (`referential_integrity`, `key_recurrence`) are, and their
+  `probes: {cadence: off}` legs show a real, silent divergence from the full-refresh oracle.
+  `referential_integrity`'s recipe drives `execute_delete_insert_with_delta_restriction` directly
+  (its only live production dispatch site, per phase 3's "Out of scope" note), not a staged
+  project — the same accommodation `key_recurrence`'s recipe (mirroring
+  `locality_route3_recurrence_check.rs`) already needed. A production finding surfaced and is
+  recorded, not fixed: `crates/smelt-runtime/tests/model_probes.rs`'s existing
+  `monotonicity_probe_fires_named_diagnostic` test passes for the wrong reason (a DuckDB binder
+  error's wrapped text happens to contain the diagnostic string). See `phases/07-summary.md`.
 
 ## Blocked
 
