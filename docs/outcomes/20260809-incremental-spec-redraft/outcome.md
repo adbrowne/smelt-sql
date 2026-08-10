@@ -52,8 +52,10 @@ way (timeless-oracle rule), at substantially reduced length.
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
-| 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
-| 8 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
+| 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | planned |
+| 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | pending |
+| 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | pending |
+| 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
 ## Decision log
 
@@ -199,6 +201,23 @@ way (timeless-oracle rule), at substantially reduced length.
   `Edge.components`) inside the dissolved "keyed dirt-set is symbolic" gap bullet — kept as
   legitimate "why it's not unsound" context rather than editing the test. `verify-phase.sh` ALL
   GREEN.
+
+- 2026-08-11 — Phase 7 reshape: the single "Remove parser/config fossils" row is split into three
+  (7, 8, 9), with the old row 8 becoming row 10. No item removed, none deferred out. Rationale: the
+  phase-1 outline's deletion list assigns *four* independent removals to this one row, and code
+  reconnaissance shows each is its own surface change with its own blast radius — the
+  `nondeterministic_columns` retirement alone requires rewiring the payload rule
+  (`smelt-logical/src/rules/incremental.rs:895`) to read `columns.<c>.contract: plausible` and
+  porting the skeleton-position bar (`smelt-core/src/metadata.rs:1064-1092`), which is not enforced
+  on the contract surface at all today. One phase covering all four would have been three to four
+  times any prior phase in this outcome. Ordering note: 7 before 9 because
+  `nondeterministic_columns` is a *field of* the `batched:` block row 9 retires, so removing it
+  first leaves row 9 the two keys that need a top-level replacement decision.
+- 2026-08-11 — Phase 7's replacement surface is SQL-frontmatter-only by design, not by omission:
+  `columns.<c>.contract` has no `smelt.yml` spelling (`docs-site/docs/reference/smelt-yml.md:248`),
+  so the retirement diagnostic for `models.<name>.batched.nondeterministic_columns` directs the
+  caller to declare the contract in the model's `.sql` frontmatter. Adding a `columns:` block to
+  `smelt.yml` would be new behaviour (§Out of scope) and is not required by criterion 2.
 
 ## Blocked
 
