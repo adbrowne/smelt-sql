@@ -54,7 +54,7 @@ safe to grow (the contract lattice will grow it).
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | done |
-| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | pending |
+| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | planned |
 
 ## Decision log
 
@@ -226,6 +226,20 @@ safe to grow (the contract lattice will grow it).
   recorded, not fixed: `crates/smelt-runtime/tests/model_probes.rs`'s existing
   `monotonicity_probe_fires_named_diagnostic` test passes for the wrong reason (a DuckDB binder
   error's wrapped text happens to contain the diagnostic string). See `phases/07-summary.md`.
+
+- 2026-08-10: Phase 8 planned (the outcome's last row). No new rows: phase 7's one loose finding —
+  `smelt-runtime/tests/model_probes.rs::monotonicity_probe_fires_named_diagnostic` passes for the
+  wrong reason (a DuckDB binder error's wrapped text contains the diagnostic name) — is folded in
+  as a task rather than deferred, because criterion 6's "caught by its probe" evidence rests on
+  that test actually exercising the detection path. Three decisions taken while planning: (a)
+  `smelt explain` stays **offline** — probe SQL is built and rendered, never executed, so the
+  cost line is a static "+1 query per consuming run" statement, not a measurement; (b) the
+  explain-side probe list is a new `smelt-runtime::probe_plan` that **calls the dispatch owners**
+  (`model_probes::declared_model_probes` with a symbolic scope select, `source_probes`'s
+  eligibility predicate) rather than re-deriving which declaration yields which probe — dual
+  ownership of that mapping is what the probe-obligation registry exists to prevent; (c) the
+  cumulative-arm `ModelRunRecord` stays `probes: Vec::new()` with a comment, since no probe
+  dispatches on that arm today — an empty array there is accurate, not a gap.
 
 ## Blocked
 
