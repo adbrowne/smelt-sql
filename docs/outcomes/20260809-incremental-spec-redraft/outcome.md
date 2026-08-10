@@ -1,7 +1,7 @@
 # Outcome: Incremental-models spec redraft
 
 **Created:** 2026-08-09
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260809-incremental-rethink.md` §5, §6 step 6
 **Spec anchors:** `docs/specs/incremental_models.md`, `docs/specs/model_properties.md`
 
@@ -46,16 +46,25 @@ way (timeless-oracle rule), at substantially reduced length.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | pending |
+| 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | planned |
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | pending |
 | 3 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
-| 4 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
-| 5 | Remove parser/config fossils with fail-loud diagnostics | pending |
-| 6 | docs-site terminology sync; validate + timeless greps clean | pending |
+| 4 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
+| 5 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
+| 6 | Remove parser/config fossils with fail-loud diagnostics | pending |
+| 7 | docs-site terminology sync; validate + timeless greps clean | pending |
 
 ## Decision log
 
-<!-- Dated one-liners appended by plan/implement steps. -->
+- 2026-08-10 — Phase table reshaped: added a phase (now #4) owning the Overview,
+  Design, Constraints & Invariants, Limitations and References sections. The original
+  six rows assigned no owner to those sections, yet criterion 2 (anti-exclusivity
+  polemics) and criterion 4 (plan-vocabulary leaks such as "seven proofs") live largely
+  there; leaving them unowned would have deferred criterion work out of the outcome.
+  Later rows shifted by one; no row removed.
+- 2026-08-10 — Phase 1 scoped to *land* the frontier unification (criterion 1) rather
+  than only describe it, so the terminology is fixed in the spec before phases 2–3
+  rewrite sections that reference it, and the phase has a checkable artifact.
 
 ## Blocked
 
