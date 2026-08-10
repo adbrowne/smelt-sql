@@ -50,10 +50,10 @@ way (timeless-oracle rule), at substantially reduced length.
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
-| 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
+| 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | planned |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
-| 8 | docs-site terminology sync; validate + timeless greps clean | pending |
+| 8 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
 ## Decision log
 
@@ -144,6 +144,26 @@ way (timeless-oracle rule), at substantially reduced length.
   `§"Key temporal locality (the time-partitioned output)"`. `phases/04-check.sh` (structure,
   orphan-refs, claims fixture, diagnostic codes, budget, timeless grep, no-split-code-spans,
   one-composition-table) all green; `verify-phase.sh` full gate green.
+
+- 2026-08-11 — Phase 5 reshape (four edits, no row added or removed):
+  (a) `## Future Extensions` was owned by no row — the phase-1 outline budgets it (47 → 30 lines)
+  but rows 5 and 6 named Overview/Design/Constraints/Limitations/References and Known Divergences
+  respectively, leaving it unswept for plan vocabulary (criterion 4). Folded into row 5's title.
+  (b) The deletion list's "ratified decision K3" item (`model_properties.md:350`, outline owning
+  phase 4 → row 5 after the row-3 insertion) is reassigned to row 6: it is a `§Known Divergences`
+  bullet row 6 rewrites wholesale, so fixing the label in row 5 and rewriting the bullet in row 6
+  is duplicate work.
+  (c) Row 8 gains the whole-file `§"…"`-citation sweep the phase-4 summary recommended after
+  finding six dangling citations to a heading absorbed inside phase 4's own range. Phase 5's
+  check script already runs the sweep whole-file rather than range-scoped; row 8 re-runs it once
+  every section has landed.
+  (d) The phase-1 outline's ≤ 1,800-line total is recorded as unreachable and no longer treated as
+  a target: the file is 2,627 lines, phase 5 cuts its 793 in-scope lines to ≤ 500 and row 6 cuts
+  §Known Divergences' ~340 to ~120, landing near 2,100. Phases 2–4 each demonstrated that the
+  binding constraint is claims preservation (every diagnostic code, heading string and normative
+  rule survives verbatim), not a line count — and no success criterion names one. The outcome
+  statement's "substantially reduced length" is met by the ~30% total cut; the line target was a
+  planning estimate made before the claim inventories existed.
 
 ## Blocked
 
