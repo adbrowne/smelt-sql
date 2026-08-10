@@ -307,6 +307,62 @@ SELECT event_id, event_date FROM smelt.silver_events
     );
 }
 
+/// A 3-model chain (`a` keyed leaf -> `b` pass-through -> `gold_events`,
+/// the query file) written entirely with bare `smelt.<addr>` refs (the form
+/// every fixture and the dag generator emit) composes end-to-end: the
+/// direct `gold_events -> b` edge is `KeyedUpsert`, not `General`
+/// (`docs/outcomes/20260809-output-delta-typing/phases/11-plan.md`). Before
+/// the model-reference-leaf fix, `b`'s own SQL resolving its bare `smelt.a`
+/// ref never consulted `model_verdicts` at all, so this edge fell closed to
+/// `General`/`None`.
+#[test]
+fn three_hop_bare_ref_chain_edge_is_keyed() {
+    let a = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT user_id, SUM(event_id) AS n FROM smelt.sources.events GROUP BY user_id
+"#;
+    let b = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [user_id]
+---
+SELECT user_id, n FROM smelt.a
+"#;
+    let downstream = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [user_id]
+---
+SELECT user_id, n FROM smelt.b
+"#;
+
+    let edges = model_edges_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/events.yml", EVENTS_SOURCE),
+            ("models/a.sql", a),
+            ("models/b.sql", b),
+            ("models/gold_events.sql", downstream),
+        ],
+        "gold_events",
+    );
+
+    let edge = edges
+        .iter()
+        .find(|e| e.name == "b")
+        .unwrap_or_else(|| panic!("expected a ModelEdge for 'b'; edges: {edges:?}"));
+    assert!(
+        matches!(edge.output_shape, Some(OutputDelta::KeyedUpsert { .. })),
+        "expected output_shape KeyedUpsert composed through the bare smelt.a ref, got {:?}",
+        edge.output_shape
+    );
+}
+
 /// Two models referencing each other terminate — no hang, no panic — pinning
 /// the bounded-pass property of `model_delta_inputs`' address-deduplicated
 /// assembly (never a per-model-reference recursive Salsa query, which could

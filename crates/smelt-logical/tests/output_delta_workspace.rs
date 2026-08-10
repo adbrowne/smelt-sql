@@ -122,3 +122,38 @@ fn unknown_or_cyclic_model_ref_is_general_and_terminates() {
         other => panic!("expected General for a cyclic model ref, got {other:?}"),
     }
 }
+
+#[test]
+fn three_hop_chain_with_bare_refs_composes() {
+    // source(change_feed, delta_identity) -> a (keyed leaf) -> b (bare ref,
+    // pass-through) -> c (bare ref, keyed aggregation) — every model-to-model
+    // hop is spelled `smelt.<addr>`, the form every fixture and the dag
+    // generator emit (`docs/outcomes/20260809-output-delta-typing/phases/
+    // 11-plan.md`).
+    let mut cf = source("events", MutationProfile::ChangeFeed, None);
+    cf.delta_identity = Some(vec!["id".to_string()]);
+    let inputs = vec![
+        model("a", "SELECT id, amount FROM smelt.sources.events", vec![cf]),
+        model("b", "SELECT id, amount FROM smelt.a", Vec::new()),
+        model(
+            "c",
+            "SELECT id, SUM(amount) AS total FROM smelt.b GROUP BY id",
+            Vec::new(),
+        ),
+    ];
+    let verdicts = derive_workspace_output_deltas(&inputs);
+    assert_eq!(
+        *shape_of(&verdicts, "b", "id"),
+        OutputDelta::KeyedUpsert {
+            keys: vec!["id".to_string()]
+        },
+        "bare ref must compose through the first hop, not fail closed to General"
+    );
+    assert_eq!(
+        *shape_of(&verdicts, "c", "id"),
+        OutputDelta::KeyedUpsert {
+            keys: vec!["id".to_string()]
+        },
+        "bare ref must compose end-to-end through a 3-hop chain"
+    );
+}

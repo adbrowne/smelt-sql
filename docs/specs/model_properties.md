@@ -214,7 +214,10 @@ scan, via a table of **transfer rules** keyed on operator family:
 
 A **model reference** leaf takes the referenced model's own derived output-delta verdict where
 available, otherwise `General` — the hook a consuming model's fold over an upstream verdict reads
-(`incremental_models.md` §"The graph layer").
+(`incremental_models.md` §"The graph layer"). This resolution holds regardless of whether the
+reference is spelled with the `models.` breadcrumb (`smelt.models.<addr>` and `smelt.<addr>` name
+the same model); for a bare (unprefixed) name, a declared source of that name takes precedence over
+a same-named model verdict, and a name matching neither is `General{reason}` naming both misses.
 
 Fail-closure matches every other proof in this spec: an unregistered or unnormalizable operator
 yields `General`, naming that operator, rather than an optimistic default. Widening is never

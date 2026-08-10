@@ -162,6 +162,34 @@ pub struct OutputDeltaTransfer<'a> {
 /// function (not a method) so a caller with only a source's [`SourceFacts`]
 /// in hand — no SQL to walk, e.g. a raw `sources.*` propagation-edge
 /// upstream — can seed its shape directly.
+/// Normalizes a model-reference name to the `model_verdicts` key: lowercase,
+/// with an optional leading `models.` breadcrumb stripped (mirrors the
+/// breadcrumb handling in `analysis::fingerprint::relation_matches_source`)
+/// — applied on both the insert side ([`derive_workspace_output_deltas`])
+/// and the lookup side ([`OutputDeltaTransfer::seed_for_leaf_name`] /
+/// [`OutputDeltaTransfer::seed_for_model_column`]) so a `smelt-db`-built key
+/// of `models.<addr>` and a runtime-built bare `<addr>` key land on the same
+/// entry regardless of which side of the fold spells the breadcrumb.
+fn normalize_model_key(name: &str) -> String {
+    name.strip_prefix("models.")
+        .unwrap_or(name)
+        .to_ascii_lowercase()
+}
+
+/// The fail-closed reason for a bare (unprefixed) relation reference that
+/// matches neither a declared source nor a model verdict — names both
+/// misses rather than guessing which one the author intended
+/// (`model_properties.md` §"Output-delta shape", model-reference-leaf
+/// paragraph).
+fn bare_relation_miss(bare: &str) -> OutputDelta {
+    OutputDelta::General {
+        reason: format!(
+            "relation '{bare}' has no declared mutation profile and no derived model \
+             output-delta verdict"
+        ),
+    }
+}
+
 pub fn seed_shape_for_source(facts: &SourceFacts) -> OutputDelta {
     match &facts.mutation_profile {
         Some(MutationProfile::ChangeFeed) => match &facts.delta_identity {
@@ -217,32 +245,66 @@ impl OutputDeltaTransfer<'_> {
     /// `sources.<name>`, `models.<name>`, or a bare table name) to its
     /// seeded [`OutputDelta`] — the whole-relation shape (a source's
     /// uniform shape, or the meet across a referenced model's own derived
-    /// column shapes). Used by [`Transfer::leaf`], which has no single
-    /// column to resolve against; per-column resolution against a
-    /// referenced model's facts is [`Self::seed_for_model_column`], used by
-    /// [`Self::resolve_column_ref_shape`] instead.
+    /// column shapes). A bare name (neither breadcrumb) resolves against a
+    /// declared source first, then a model verdict — the same precedence
+    /// [`Self::resolve_column_ref_shape`]'s bare-table arm applies, so the
+    /// two paths cannot drift (`model_properties.md` §"Output-delta shape",
+    /// model-reference-leaf paragraph). Used by [`Transfer::leaf`], which
+    /// has no single column to resolve against; per-column resolution
+    /// against a referenced model's facts is [`Self::seed_for_model_column`].
     fn seed_for_leaf_name(&self, name: &str) -> OutputDelta {
         if let Some(bare) = name.strip_prefix("sources.") {
             return self.seed_for_source_name(bare);
         }
         if let Some(bare) = name.strip_prefix("models.") {
-            return match self.model_verdicts.get(&bare.to_ascii_lowercase()) {
-                Some(facts) if !facts.columns.is_empty() => facts
-                    .columns
-                    .iter()
-                    .map(|(_, shape)| shape.clone())
-                    .reduce(OutputDelta::meet)
-                    .unwrap_or_else(|| OutputDelta::General {
-                        reason: format!("referenced model '{bare}' has no output columns"),
-                    }),
-                _ => OutputDelta::General {
+            return self
+                .model_whole_shape(bare)
+                .unwrap_or_else(|| OutputDelta::General {
                     reason: format!(
                         "referenced model '{bare}' has no derived output-delta verdict available"
                     ),
-                },
-            };
+                });
         }
-        self.seed_for_source_name(name)
+        if let Some(facts) = self
+            .sources
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+        {
+            return seed_shape_for_source(facts);
+        }
+        self.model_whole_shape(name)
+            .unwrap_or_else(|| bare_relation_miss(name))
+    }
+
+    /// Looks up `bare` in `model_verdicts` breadcrumb-insensitively on BOTH
+    /// sides: the map itself may be keyed either bare (`smelt-runtime`'s
+    /// `ModelFile::canonical_path()`) or breadcrumbed (`smelt-db`'s
+    /// `model_delta_inputs`, keyed by the ref path as literally spelled) —
+    /// [`derive_workspace_output_deltas`] normalizes its own inserts, but a
+    /// caller-supplied map (e.g. a test double, or a future producer) is not
+    /// guaranteed to. Tries the normalized key first, then the same key with
+    /// a `models.` breadcrumb.
+    fn lookup_model_verdicts(&self, bare: &str) -> Option<&OutputDeltaFacts> {
+        let key = normalize_model_key(bare);
+        self.model_verdicts
+            .get(&key)
+            .or_else(|| self.model_verdicts.get(&format!("models.{key}")))
+    }
+
+    /// The meet across a referenced model's own derived per-column shapes —
+    /// `None` when no verdict is available for `bare` at all (the caller
+    /// supplies its own not-found reason, since an explicit
+    /// `models.`-prefixed miss and a bare-fallback miss name the failure
+    /// differently).
+    fn model_whole_shape(&self, bare: &str) -> Option<OutputDelta> {
+        let facts = self.lookup_model_verdicts(bare)?;
+        let mut shapes = facts.columns.iter().map(|(_, shape)| shape.clone());
+        Some(match shapes.next() {
+            None => OutputDelta::General {
+                reason: format!("referenced model '{bare}' has no output columns"),
+            },
+            Some(first) => shapes.fold(first, OutputDelta::meet),
+        })
     }
 
     /// Per-column resolution of a `models.<name>` reference
@@ -251,7 +313,7 @@ impl OutputDeltaTransfer<'_> {
     /// fail closed to `General`, naming what was missing — never an
     /// optimistic guess.
     fn seed_for_model_column(&self, bare: &str, column: &str) -> OutputDelta {
-        match self.model_verdicts.get(&bare.to_ascii_lowercase()) {
+        match self.lookup_model_verdicts(bare) {
             Some(facts) => facts
                 .columns
                 .iter()
@@ -268,6 +330,34 @@ impl OutputDeltaTransfer<'_> {
                     "referenced model '{bare}' has no derived output-delta verdict available"
                 ),
             },
+        }
+    }
+
+    /// Bare-name per-column resolution (neither `sources.` nor `models.`
+    /// breadcrumb): a declared source wins over a same-named model verdict
+    /// (mirrors [`Self::seed_for_leaf_name`]'s precedence); a name matching
+    /// neither fails closed naming both misses.
+    fn resolve_bare_table_column_shape(&self, bare: &str, column: &str) -> OutputDelta {
+        if let Some(facts) = self
+            .sources
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(bare))
+        {
+            return seed_shape_for_source(facts);
+        }
+        match self.lookup_model_verdicts(bare) {
+            Some(facts) => facts
+                .columns
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(column))
+                .map(|(_, shape)| shape.clone())
+                .unwrap_or_else(|| OutputDelta::General {
+                    reason: format!(
+                        "referenced model '{bare}' has no derived output-delta shape for \
+                         column '{column}'"
+                    ),
+                }),
+            None => bare_relation_miss(bare),
         }
     }
 
@@ -402,7 +492,10 @@ impl OutputDeltaTransfer<'_> {
         match cx.aliases.get(&source_key) {
             Some(RelationSource::Table(name)) => match name.strip_prefix("models.") {
                 Some(bare) => self.seed_for_model_column(bare, cref.name()),
-                None => self.seed_for_leaf_name(name),
+                None => match name.strip_prefix("sources.") {
+                    Some(bare) => self.seed_for_source_name(bare),
+                    None => self.resolve_bare_table_column_shape(name, cref.name()),
+                },
             },
             _ => OutputDelta::General {
                 reason: format!(
@@ -759,7 +852,7 @@ pub fn derive_workspace_output_deltas(
             let facts =
                 derive_output_delta_facts(&input.sql, &input.ctx, &input.sources, &verdicts)
                     .unwrap_or_default();
-            next.insert(input.address.to_ascii_lowercase(), facts);
+            next.insert(normalize_model_key(&input.address), facts);
         }
         verdicts = next;
     }
@@ -1318,6 +1411,189 @@ mod tests {
                 assert!(reason.contains("missing_col"));
             }
             other => panic!("expected General naming model + column, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_model_reference_leaf_resolves_through_model_verdicts() {
+        let ctx = JoinContext::new();
+        let mut model_verdicts = BTreeMap::new();
+        model_verdicts.insert(
+            "upstream".to_string(),
+            OutputDeltaFacts {
+                columns: vec![
+                    (
+                        "id".to_string(),
+                        OutputDelta::KeyedUpsert {
+                            keys: vec!["id".to_string()],
+                        },
+                    ),
+                    (
+                        "amount".to_string(),
+                        OutputDelta::AppendOnlyWindow {
+                            axis: "event_date".to_string(),
+                        },
+                    ),
+                ],
+            },
+        );
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &model_verdicts,
+        };
+        let tree = QueryTree::from_sql("SELECT id, amount FROM smelt.upstream")
+            .expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        assert_eq!(
+            *shape_of(&facts, "id"),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()]
+            },
+            "bare ref must resolve the per-column path, not fail closed"
+        );
+        assert_eq!(
+            *shape_of(&facts, "amount"),
+            OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string()
+            }
+        );
+
+        // Whole-leaf path (`SELECT *`-shaped leaf seeding) resolves the same way.
+        let whole_leaf = transfer.seed_for_leaf_name("upstream");
+        assert_ne!(
+            whole_leaf,
+            OutputDelta::General {
+                reason: "unused".to_string()
+            },
+            "whole-leaf resolution must not be a General placeholder"
+        );
+        assert!(
+            !matches!(whole_leaf, OutputDelta::General { .. }),
+            "bare whole-leaf reference must resolve through model_verdicts, got {whole_leaf:?}"
+        );
+    }
+
+    #[test]
+    fn model_key_lookup_is_breadcrumb_insensitive() {
+        let ctx = JoinContext::new();
+
+        // smelt-db key form (`models.<addr>`) resolves for a bare SQL spelling.
+        let mut breadcrumbed = BTreeMap::new();
+        breadcrumbed.insert(
+            "models.upstream".to_string(),
+            OutputDeltaFacts {
+                columns: vec![(
+                    "a".to_string(),
+                    OutputDelta::KeyedUpsert {
+                        keys: vec!["id".to_string()],
+                    },
+                )],
+            },
+        );
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &breadcrumbed,
+        };
+        let tree =
+            QueryTree::from_sql("SELECT a FROM smelt.upstream").expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        assert_eq!(
+            *shape_of(&facts, "a"),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()]
+            }
+        );
+
+        // Runtime key form (bare `<addr>`) resolves for a breadcrumbed SQL spelling.
+        let mut bare = BTreeMap::new();
+        bare.insert(
+            "upstream".to_string(),
+            OutputDeltaFacts {
+                columns: vec![(
+                    "a".to_string(),
+                    OutputDelta::KeyedUpsert {
+                        keys: vec!["id".to_string()],
+                    },
+                )],
+            },
+        );
+        let transfer2 = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &bare,
+        };
+        let tree2 = QueryTree::from_sql("SELECT a FROM smelt.models.upstream")
+            .expect("sql parses to a SELECT");
+        let facts2 = walk(&tree2, &transfer2);
+        assert_eq!(
+            *shape_of(&facts2, "a"),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn declared_source_wins_over_same_named_model_for_bare_ref() {
+        let ctx = JoinContext::new();
+        let src = source(
+            "shared_name",
+            Some(MutationProfile::AppendOnly),
+            Some("event_date"),
+            None,
+        );
+        let mut model_verdicts = BTreeMap::new();
+        model_verdicts.insert(
+            "shared_name".to_string(),
+            OutputDeltaFacts {
+                columns: vec![(
+                    "a".to_string(),
+                    OutputDelta::KeyedUpsert {
+                        keys: vec!["id".to_string()],
+                    },
+                )],
+            },
+        );
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[src],
+            model_verdicts: &model_verdicts,
+        };
+        let tree =
+            QueryTree::from_sql("SELECT a FROM smelt.shared_name").expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        assert_eq!(
+            *shape_of(&facts, "a"),
+            OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string()
+            },
+            "a declared source must win over a same-named model verdict for a bare ref"
+        );
+    }
+
+    #[test]
+    fn bare_ref_matching_neither_names_both_misses() {
+        let ctx = JoinContext::new();
+        let model_verdicts = BTreeMap::new();
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &model_verdicts,
+        };
+        let tree =
+            QueryTree::from_sql("SELECT a FROM smelt.nowhere").expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        match shape_of(&facts, "a") {
+            OutputDelta::General { reason } => {
+                assert!(reason.contains("nowhere"), "reason: {reason}");
+                assert!(
+                    reason.contains("mutation profile") && reason.contains("model"),
+                    "reason must name both misses: {reason}"
+                );
+            }
+            other => panic!("expected General naming both misses, got {other:?}"),
         }
     }
 }

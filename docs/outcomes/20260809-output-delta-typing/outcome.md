@@ -59,7 +59,7 @@ the addressing of one delta type, not the universal currency.
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
 | 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | done |
 | 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | done |
-| 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | planned |
+| 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | done |
 
 ## Decision log
 
@@ -311,6 +311,18 @@ the addressing of one delta type, not the universal currency.
   declared source wins — it preserves every existing behaviour exactly (only names that
   currently fail-close to `General` change) and a source's declared mutation profile is the
   more specific fact; the precedence is pinned by its own test and stated in the spec.
+
+- 2026-08-10 — Phase 11 implemented: `normalize_model_key` (breadcrumb-stripping, lowercasing)
+  applied on the insert side (`derive_workspace_output_deltas`), and a new
+  `lookup_model_verdicts` helper — tried normalized-key-first, then the same key with a
+  `models.` breadcrumb — applied on every lookup site, so resolution is robust even when a
+  caller hands `OutputDeltaTransfer` a raw un-normalized map directly (not only through
+  `derive_workspace_output_deltas`, which the in-plan design call hadn't fully covered). Bare
+  names now check a declared source, then `model_verdicts`, else fail closed naming both
+  misses. Spec delta landed in `docs/specs/model_properties.md` §"Output-delta shape". All 6
+  planned tests plus the full standing-gate list green; no phase-table reshape — this was the
+  last row in the table, so the next planner should check whether outcome success criteria 1
+  and 3 are now satisfiable end-to-end before marking the outcome `done`.
 
 ## Blocked
 
