@@ -49,7 +49,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
-| 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
+| 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | planned |
 | 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
@@ -112,6 +112,20 @@ way (timeless-oracle rule), at substantially reduced length.
   10 restored and re-verified present. `phases/03-check.sh` (structure, orphan-refs, claims
   fixture, diagnostic codes, ≤280-line budget, timeless grep, no-split-code-span) all green;
   `verify-phase.sh` full gate green.
+
+- 2026-08-11 — Phase 4 planned with no table reshape: the phase-3 summary reports no criterion-
+  serving work without an owner in phase 4/5 territory, and the range's two deletion-list items
+  (dead `IncrementalStrategy` variants, `grain: key_per_partition`) are already owned by row 7.
+  Phase 4's plan states them as explicit do-not-cross boundaries so the two phases don't collide.
+
+- 2026-08-11 — Phase 4's line budget set at ≤ 330 for spec lines 1195–1851, deviating from
+  `phases/01-outline.md`'s 305 (intro 15 + partition 130 + key 150 + interactions 10). Rationale:
+  the outline's budgets are planning targets, and 657 → 305 is a 54% cut where phases 2 and 3 each
+  sustained 23% under the same claims-preservation discipline; 330 is still a ~50% cut, which the
+  range's genuine duplication (three overlapping composed-corner sections → one table; emitter-
+  derivable execution-model detail) can carry without dropping claims. Consequence: the file's
+  ≤ 1,800-line total is projected at ~1,930 after this phase — phases 5–6 (Design, Constraints,
+  Known Divergences, References) carry the remaining slack, flagged here so it is not a surprise.
 
 ## Blocked
 
