@@ -55,6 +55,17 @@ pub fn measure_lag(maintained_frontier: i64, input_frontier: i64) -> DeferralLag
     }
 }
 
+/// The settled cutoff `d` licenses: `input_frontier - d`, in the caller's
+/// unit (days). Event time strictly before this cutoff must be fully
+/// reflected by the maintained state — the exact boundary a licensed skip
+/// (`run_license`) never crosses, since a skip only fires while
+/// `lag <= d`, i.e. while `maintained_frontier >= input_frontier - d`
+/// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`: "the
+/// conformance gate consumes the oracle transform").
+pub fn settled_cutoff(input_frontier: i64, d: i64) -> i64 {
+    input_frontier - d
+}
+
 /// Whether `lag` is admitted by the declared deferral window `d`: lag up to
 /// and including `d` is within the licensed window; lag exceeding `d`
 /// disproves the oracle.
@@ -213,6 +224,19 @@ mod tests {
         );
 
         assert!(validate_deferral(true, "model 'daily_revenue'").is_ok());
+    }
+
+    #[test]
+    fn settled_cutoff_drops_the_trailing_window() {
+        assert_eq!(settled_cutoff(110, 6), 104);
+        assert_eq!(settled_cutoff(100, 0), 100);
+        // Matches `maintained_frontier` exactly at the boundary case
+        // (`lag == d`) — a licensed skip's maintained state already covers
+        // exactly up to this cutoff, never less.
+        assert_eq!(
+            settled_cutoff(/* input_frontier */ 106, /* d */ 6),
+            /* maintained_frontier at the boundary */ 100
+        );
     }
 
     #[test]

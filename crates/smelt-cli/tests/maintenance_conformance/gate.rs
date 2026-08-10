@@ -8,12 +8,15 @@ use proptest::test_runner::TestRunner;
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
+use smelt_logical::contract::{oracle_obligation, ContractPoint, OracleObligation};
 use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{Corner, MutationProfile, SourceFacts, Technique, Trigger};
 use smelt_maintenance_testkit::feed::{self, FeedSourcePosture};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
-use smelt_maintenance_testkit::oracle::multiset_equal_via_backend;
+use smelt_maintenance_testkit::oracle::{
+    except_all_row_count_via_backend, multiset_equal_via_backend,
+};
 use smelt_maintenance_testkit::oracle_modes::{
     keyed_end_state_with_retained_departed_keys, KeyedOracleRow, OracleMode,
 };
@@ -239,7 +242,111 @@ pub async fn assert_equivalence(
     tracker: &STracker,
     k: usize,
 ) -> anyhow::Result<()> {
-    assert_equivalence_with_edit(project, recipe, tracker, k, None).await
+    assert_equivalence_at_point(project, recipe, tracker, k, &ContractPoint::Default).await
+}
+
+/// [`assert_equivalence`] parameterised by contract-lattice point
+/// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`):
+/// dispatches on `smelt_logical::contract::oracle_obligation(point)` rather
+/// than re-deriving a per-point comparator — [`OracleObligation::Exact`]
+/// and [`OracleObligation::ExactOverRestrictedS`] are the same both-
+/// direction `multiset_equal_via_backend` check
+/// [`assert_equivalence_with_edit`] already performs, evaluated against
+/// `tracker.s_at_for_point(k, point)` instead of the unrestricted `s_at(k)`;
+/// [`OracleObligation::Bracketed`] (`deferral`) asserts
+/// `full_refresh(S_settled) ⊆ maintained ⊆ full_refresh(S)`, one `EXCEPT
+/// ALL` direction per leg. `input_frontier` is only consulted for the
+/// bracketed obligation — every other point ignores it.
+pub async fn assert_equivalence_at_point(
+    project: &LinkCProject,
+    recipe: &ModelRecipe,
+    tracker: &STracker,
+    k: usize,
+    point: &ContractPoint,
+) -> anyhow::Result<()> {
+    assert_equivalence_at_point_with_frontier(project, recipe, tracker, k, point, None).await
+}
+
+/// [`assert_equivalence_at_point`] with an explicit `input_frontier`
+/// (days-from-CE) for the [`OracleObligation::Bracketed`] leg — required
+/// whenever `point` is [`ContractPoint::Deferral`]; ignored otherwise.
+pub async fn assert_equivalence_at_point_with_frontier(
+    project: &LinkCProject,
+    recipe: &ModelRecipe,
+    tracker: &STracker,
+    k: usize,
+    point: &ContractPoint,
+    input_frontier: Option<i64>,
+) -> anyhow::Result<()> {
+    let backend = project.backend().await?;
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+
+    match oracle_obligation(point) {
+        OracleObligation::Exact | OracleObligation::ExactOverRestrictedS => {
+            tracker
+                .materialize_s_for_point(backend.as_ref(), k, point)
+                .await?;
+            let oracle_sql = tracker.s_restricted_oracle_sql(recipe);
+            let equal =
+                multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
+            if !equal {
+                anyhow::bail!(
+                    "equivalence violated for model {:?} at run {k} under point {point:?}: \
+                     maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})",
+                    recipe.model_name
+                );
+            }
+            Ok(())
+        }
+        OracleObligation::Bracketed => {
+            let input_frontier = input_frontier.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "point {point:?} has a Bracketed oracle obligation but no input_frontier \
+                     was supplied"
+                )
+            })?;
+
+            // Leg 1: maintained ⊆ full_refresh(S).
+            tracker
+                .materialize_s_for_point(backend.as_ref(), k, point)
+                .await?;
+            let full_oracle_sql = tracker.s_restricted_oracle_sql(recipe);
+            let maintained_minus_full = except_all_row_count_via_backend(
+                backend.as_ref(),
+                &maintained_sql,
+                &full_oracle_sql,
+            )
+            .await?;
+            if maintained_minus_full != 0 {
+                anyhow::bail!(
+                    "bracketed equivalence violated for model {:?} at run {k}: maintained has \
+                     {maintained_minus_full} row(s) not in full_refresh(S) ({full_oracle_sql:?})",
+                    recipe.model_name
+                );
+            }
+
+            // Leg 2: full_refresh(S_settled) ⊆ maintained.
+            tracker
+                .materialize_s_settled(backend.as_ref(), k, point, input_frontier)
+                .await?;
+            let settled_oracle_sql = tracker.s_restricted_oracle_sql(recipe);
+            let settled_minus_maintained = except_all_row_count_via_backend(
+                backend.as_ref(),
+                &settled_oracle_sql,
+                &maintained_sql,
+            )
+            .await?;
+            if settled_minus_maintained != 0 {
+                anyhow::bail!(
+                    "bracketed equivalence violated for model {:?} at run {k}: \
+                     full_refresh(S_settled) ({settled_oracle_sql:?}) has \
+                     {settled_minus_maintained} row(s) not in maintained",
+                    recipe.model_name
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 /// [`assert_equivalence`] generalised over an optional post-`RewriteModel`

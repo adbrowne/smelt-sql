@@ -308,6 +308,86 @@ fn deferral_capabilities_are_single_owned() {
 }
 
 #[test]
+fn conformance_gate_consumes_the_oracle_transform() {
+    // Phase 6 (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`):
+    // the conformance gate must dispatch on `smelt_logical::contract`'s pure
+    // transforms (`oracle_obligation`, `restrict_run_window`,
+    // `settled_cutoff`) rather than re-deriving a lattice point's
+    // restriction locally — mirrors `deferral_capabilities_are_single_owned`
+    // above, scoped to the two crates the conformance gate's own oracle
+    // machinery lives in.
+    let dirs = [
+        "crates/smelt-maintenance-testkit/src",
+        "crates/smelt-cli/tests/maintenance_conformance",
+    ];
+
+    let mut calls_oracle_obligation = false;
+    let mut calls_restrict_run_window = false;
+    let mut calls_settled_cutoff = false;
+
+    for dir in dirs {
+        let dir = repo_root().join(dir);
+        for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir:?}: {e}")) {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).unwrap_or_default();
+
+            if contents.contains("contract::oracle_obligation") {
+                calls_oracle_obligation = true;
+            }
+            if contents.contains("contract::restrict_run_window") {
+                calls_restrict_run_window = true;
+            }
+            if contents.contains("contract::settled_cutoff") {
+                calls_settled_cutoff = true;
+            }
+
+            // Guard against a parallel reimplementation of the per-point
+            // restriction arithmetic instead of calling the shared
+            // transforms above — scanned over CODE lines only (comments and
+            // doc comments narrating the concept in prose are expected and
+            // are not a reimplementation).
+            for line in contents.lines() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                assert!(
+                    !code.contains("end - h") && !code.contains("end-h"),
+                    "{}: reimplements the frozen-horizon window restriction instead of calling \
+                     smelt_logical::contract::restrict_run_window: {line:?}",
+                    path.display()
+                );
+                assert!(
+                    !code.contains("input_frontier - d") && !code.contains("frontier - d"),
+                    "{}: reimplements the deferral settled-cutoff arithmetic instead of calling \
+                     smelt_logical::contract::settled_cutoff: {line:?}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    assert!(
+        calls_oracle_obligation,
+        "the conformance gate must dispatch on smelt_logical::contract::oracle_obligation"
+    );
+    assert!(
+        calls_restrict_run_window,
+        "the S-tracker must restrict recorded run windows via \
+         smelt_logical::contract::restrict_run_window, not a local formula"
+    );
+    assert!(
+        calls_settled_cutoff,
+        "the deferral bracket's settled leg must call \
+         smelt_logical::contract::settled_cutoff, not a local formula"
+    );
+}
+
+#[test]
 fn known_divergence_tracks_the_unimplemented_lattice() {
     let spec = read("docs/specs/incremental_models.md");
     let section = h2_section_body(&spec, "## Known Divergences / Open Questions");

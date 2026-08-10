@@ -420,6 +420,17 @@ fn applicable_evolutions(construct: BodyConstruct) -> Vec<ModelEdit> {
     }
 }
 
+/// A `contract:` declaration to render onto a [`ModelRecipe`]'s model file —
+/// day-valued `frozen_horizon`/`deferral` windows, mirroring
+/// `smelt_core::config::ContractConfig`'s own shape but confined to the
+/// single-relaxation-per-recipe fixtures the conformance gate needs
+/// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractDecl {
+    FrozenHorizon { days: i64 },
+    Deferral { days: i64 },
+}
+
 /// A fully-typed model recipe: one source, one body construct, one grain
 /// declaration, ready for [`crate::render`] to turn into SQL/YAML text.
 #[derive(Debug, Clone)]
@@ -431,6 +442,11 @@ pub struct ModelRecipe {
     /// The [`ModelEdit`]s a `RewriteModel` schedule step may apply to this
     /// recipe (Phase 9) — empty for constructs with no meaningful edit.
     pub evolution: Vec<ModelEdit>,
+    /// An optional `contract:` relaxation to render onto this recipe's model
+    /// file (phase 6) — `None` for every recipe [`arb_recipe`] draws, so
+    /// every existing recipe renders byte-identically to before this field
+    /// was added.
+    pub contract: Option<ContractDecl>,
 }
 
 impl ModelRecipe {
@@ -449,6 +465,7 @@ impl ModelRecipe {
             grain,
             construct,
             evolution: applicable_evolutions(construct),
+            contract: None,
         }
     }
 }

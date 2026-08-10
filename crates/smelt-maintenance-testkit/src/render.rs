@@ -18,9 +18,9 @@
 use std::path::Path;
 
 use crate::recipe::{
-    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedCombiner,
-    KeyedRecipe, ModelEdit, ModelRecipe, RepairRecipe, RepairWriteMode, SourcePosture,
-    REPAIR_BAND_ANCHOR,
+    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, ContractDecl,
+    KeyedCombiner, KeyedRecipe, ModelEdit, ModelRecipe, RepairRecipe, RepairWriteMode,
+    SourcePosture, REPAIR_BAND_ANCHOR,
 };
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
@@ -159,12 +159,29 @@ pub fn rewritten_unique_key(recipe: &ModelRecipe, edit: ModelEdit) -> Vec<String
 /// being re-embedded in frontmatter.
 pub fn render_model_file_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n{contract}---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
+        contract = render_contract_block(recipe),
         body = render_model_body_with_edit(recipe, edit),
     )
+}
+
+/// The `contract:` frontmatter block for `recipe.contract`, or the empty
+/// string when no relaxation is declared (phase 6) — every recipe
+/// [`arb_recipe`] draws has `contract: None`, so this renders byte-
+/// identically to before the field was added.
+fn render_contract_block(recipe: &ModelRecipe) -> String {
+    match recipe.contract {
+        None => String::new(),
+        Some(ContractDecl::FrozenHorizon { days }) => {
+            format!("contract:\n  frozen_horizon: '{days} days'\n")
+        }
+        Some(ContractDecl::Deferral { days }) => {
+            format!("contract:\n  deferral: '{days} days'\n")
+        }
+    }
 }
 
 /// The rewritten oracle query (Phase 9) — [`render_model_body_with_edit`]
@@ -187,10 +204,11 @@ pub fn render_oracle_sql_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> Str
 /// `Grain::Partition`), so dropping it changes no derived maintenance plan.
 pub fn render_model_file(recipe: &ModelRecipe) -> String {
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n{contract}---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
+        contract = render_contract_block(recipe),
         body = render_model_body(recipe),
     )
 }

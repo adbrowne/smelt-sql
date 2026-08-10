@@ -14,6 +14,7 @@
 //! small default case count (`SMELT_CONFORMANCE_CASES` env override — see
 //! `gate.rs`).
 
+mod contract_points;
 mod dags;
 mod fact_violations;
 mod gate;

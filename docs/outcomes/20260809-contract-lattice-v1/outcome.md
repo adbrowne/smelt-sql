@@ -56,7 +56,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
 | 5 | Deferral-licensed run skipping and ledger-proven work subsumption | done |
-| 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | planned |
+| 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | done |
 | 7 | Surface: explain contract rendering, docs-site update | pending |
 
 ## Decision log
@@ -170,6 +170,24 @@ relaxation is declared, validated, probe-checked, and printed by
   newer than `D`), which a test cannot search; the bracket is its checkable equivalent — the
   maintained state must reflect everything older than `D` and may reflect nothing that is not in
   `S` at all. Both legs are one-directional `EXCEPT ALL` counts, so no new comparator appears.
+
+- 2026-08-10 — Phase 6 done: `smelt_logical::contract` gained `ContractPoint`/`OracleObligation`
+  plus `oracle_obligation`/`restrict_run_window`/`settled_cutoff`; `STracker` gained
+  `s_at_for_point`/`s_at_settled`/`materialize_s_for_point`/`materialize_s_settled`;
+  `maintenance_conformance/gate.rs`'s `assert_equivalence_at_point` dispatches on the oracle
+  obligation and `assert_equivalence` now delegates to it with `ContractPoint::Default`; two new
+  fixtures (`contract_points.rs`) exercise the relaxed oracles end-to-end. 70 conformance cases
+  total (67 + 3 new), all standing gates green.
+- 2026-08-10 — **A tracker-recorded window need not come from the model under test**: the deferral
+  fixture records the shared source's `upstream_advancer`-driven window into the same `STracker`
+  used for the deferred model's own oracle, since `S` represents what became visible in the
+  source, not what a specific model wrote — this is how the bracket's `full_refresh(S)` leg can
+  legitimately differ from a skipped model's own (empty) run history.
+- 2026-08-10 — **Settled-cutoff filtering is strict-less-than, not `<=`**: frontier values are
+  exclusive-end day counts throughout the codebase, so at the licensed-skip boundary
+  (`lag == d`), `settled_cutoff` equals `maintained_frontier` exactly — `<=` would overclaim one
+  extra day and make the bracket's settled leg spuriously fail on the very boundary case deferral
+  exists to license.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
