@@ -56,7 +56,7 @@ the addressing of one delta type, not the universal currency.
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
-| 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | pending |
+| 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | planned |
 | 9 | Surface: explain edge rendering, docs-site update | pending |
 
 ## Decision log
@@ -205,6 +205,19 @@ the addressing of one delta type, not the universal currency.
   scope note for the next planner: live dispatch reaches only a `grain: key` downstream today; a
   `KeyedUpsert` upstream feeding a `grain: partition` downstream (also admitted by phase 6's plan
   derivation) has no live dispatch yet (see `phases/07-summary.md` "For the next planner").
+
+- 2026-08-10 — Phase 8 planned; no phase-table reshape. Phase 7's one flagged scope note — a
+  `KeyedUpsert` upstream feeding a **partition-grain** downstream derives a key-addressed cell
+  that the run loop never dispatches — is handled inside phase 8 rather than given its own row
+  or silently dropped: no success criterion depends on that combination being *incremental*
+  (criterion 3 names a two-model chain, proven for the keyed-grain downstream in phase 7), but
+  the inert-cell divergence is real, so phase 8 pins its **correctness** with a conformance
+  recipe against the oracle, records it in `docs/specs/incremental_models.md` §Known
+  Divergences, and registers it as a `KnownBug` staleness entry in the conformance divergence
+  registry — the mechanism that exists for exactly this ("a gap this suite discovered and
+  deliberately did not fix yet", auto-stale the moment dispatch widens). The
+  `skeleton_closure.rs` `sources.`-only breadcrumb gap stays untouched and unregistered: still
+  latent, still no fixture reaching it, and speculative fixes were already ruled out in phase 7.
 
 ## Blocked
 
