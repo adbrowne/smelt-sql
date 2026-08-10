@@ -46,7 +46,7 @@ the addressing of one delta type, not the universal currency.
 |---|-------|--------|
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
-| 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | pending |
+| 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | planned |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
@@ -82,6 +82,12 @@ the addressing of one delta type, not the universal currency.
   phase-table reshape — phase 3 (edge typing) is unblocked with a working entry point; the
   `SourceFacts`-from-declared-sources adapter and the model-reference cross-model wiring are both
   still open, flagged for phase 3/4 in `phases/02-summary.md`.
+
+- 2026-08-10 — Phase 3 planned; no phase-table reshape. Phase 2's two flagged gaps are placed:
+  the `SourceInfo` → `output_delta::SourceFacts` adapter lands in phase 3 (edge typing is its
+  first real caller), and the cross-model verdict map stays in phase 4 with the consumer fold.
+  Phase 3 keeps typed components **advisory** — interval math is unchanged, so the adjoint
+  property is re-asserted rather than re-derived; acting on non-window components is phase 5.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
