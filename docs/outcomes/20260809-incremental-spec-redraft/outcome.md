@@ -63,7 +63,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
 | 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | done |
 | 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | done |
-| 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
+| 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | planned |
 
 ## Decision log
 
@@ -302,6 +302,24 @@ way (timeless-oracle rule), at substantially reduced length.
   mentions paired with `merge_key`, `merge_key` documented, no stale smelt.yml batched
   fixtures, timeless) all green; `verify-phase.sh` ALL GREEN plus the plan's four named
   standing-test invocations.
+
+- 2026-08-11 — Phase 10 planned with no phase-row reshape: the phase-9 summary reports no
+  ownerless criterion-serving work, and plan-time reconnaissance confirmed the row's three
+  workstreams are all tractable and all already owned by it. Sized at plan time so the
+  implementer isn't discovering scope: (a) the whole-file citation sweep has exactly **seven**
+  unresolvable `§"…"` citations across both specs (a heading-resolution pass that honours
+  cross-file citations and substring matching — phase 5's range-scoped check used self-file
+  substring matching only, which is why these survived), one of them a genuine wrong-name bug
+  (`architecture.md` §"Run pipeline parity rule (CLI ↔ LSP)"; the real heading is `(CLI ↔ UI)`);
+  (b) the timeless grep is already clean in both spec bodies and in `docs-site/docs/` except
+  one unrelated `### Phase Ordering` heading in `developing/architecture.md`, so criterion 4's
+  grep leg is a check-and-hold, not a rewrite; (c) `06-check.sh`'s failing rows are **three**,
+  not the two the phase-9 summary recorded — IP-01 (`no \`.sql\` frontmatter home`) joins IP-02
+  and MP-33, and all three are `keep` rows whose gaps phases 7 and 9 actually *closed*, so the
+  fix is a `keep` → `drop` reclassification in `phases/06-claims.md` (the treatment phase 8
+  applied to IC-21), not a spec edit. Also fixed as scope: `/smelt:validate` findings that are
+  genuine behaviour gaps become §Known Divergences bullets with tracking links, never code
+  changes — §Out of scope forbids new behaviour, and this is the outcome's last row.
 
 ## Blocked
 
