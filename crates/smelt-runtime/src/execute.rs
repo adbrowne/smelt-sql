@@ -2305,6 +2305,10 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: sink.retry_count(),
+                    // The cumulative arm dispatches no declared-fact probes
+                    // today — an empty array here is accurate, not a gap
+                    // (`docs/outcomes/20260809-probe-backed-facts/phases/
+                    // 08-plan.md`).
                     probes: Vec::new(),
                 },
             );
@@ -2659,6 +2663,13 @@ pub async fn execute_project(
                     }
                 }
 
+                // Accumulates every probe's held/skipped outcome across this
+                // model's batches, for `ModelRunRecord.probes`
+                // (`docs/specs/run_state.md` §"Run manifest"). The batch
+                // loop is sequential, so a plain `mut` Vec is sound — no
+                // concurrent writer.
+                let mut model_probe_records: Vec<smelt_state::ProbeRecord> = Vec::new();
+
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
                         return Ok(ModelOutcome::Cancelled);
@@ -2751,13 +2762,15 @@ pub async fn execute_project(
                         &compiled.sql,
                         smelt_backend::maintenance_dialect(backend.dialect()),
                     );
-                    crate::model_probes::dispatch_declared_model_probes(
-                        backend,
-                        &probe_policy_for_model(config, prior_runs, &plan.name),
-                        &declared_probes,
-                    )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    model_probe_records.extend(
+                        crate::model_probes::dispatch_declared_model_probes(
+                            backend,
+                            &probe_policy_for_model(config, prior_runs, &plan.name),
+                            &declared_probes,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                    );
 
                     // Live dispatch of the source append-only posture probe
                     // (`docs/specs/model_properties.md` §"Probe obligation",
@@ -2790,7 +2803,7 @@ pub async fn execute_project(
                             smelt_backend::maintenance_dialect(backend.dialect()),
                         );
                         if !source_probes.is_empty() {
-                            let (refreshed, _records) =
+                            let (refreshed, records) =
                                 crate::source_probes::dispatch_and_record_append_only_postures(
                                     backend,
                                     &probe_policy_for_model(config, prior_runs, &plan.name),
@@ -2798,6 +2811,7 @@ pub async fn execute_project(
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            model_probe_records.extend(records);
                             if !refreshed.is_empty() {
                                 let mut source_postures = source_postures;
                                 for r in refreshed {
@@ -3110,7 +3124,7 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
-                        probes: Vec::new(),
+                        probes: model_probe_records,
                     },
                 );
 
@@ -3232,6 +3246,11 @@ pub async fn execute_project(
                 )?;
                 reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
+                // Accumulates every probe's held/skipped outcome for this
+                // full-refresh write, for `ModelRunRecord.probes`
+                // (`docs/specs/run_state.md` §"Run manifest").
+                let mut model_probe_records: Vec<smelt_state::ProbeRecord> = Vec::new();
+
                 // Live dispatch of the declared model-scoped probes
                 // (`timeseries.assert_monotonic`, `functional_dependencies:`,
                 // `bounded_domain:`) before the materialization write —
@@ -3248,13 +3267,15 @@ pub async fn execute_project(
                     &compiled.sql,
                     smelt_backend::maintenance_dialect(backend.dialect()),
                 );
-                crate::model_probes::dispatch_declared_model_probes(
-                    backend,
-                    &probe_policy_for_model(config, prior_runs, &plan.name),
-                    &declared_probes,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                model_probe_records.extend(
+                    crate::model_probes::dispatch_declared_model_probes(
+                        backend,
+                        &probe_policy_for_model(config, prior_runs, &plan.name),
+                        &declared_probes,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                );
 
                 // Live dispatch of the source append-only posture probe
                 // (`docs/specs/model_properties.md` §"Probe obligation", row
@@ -3277,7 +3298,7 @@ pub async fn execute_project(
                         smelt_backend::maintenance_dialect(backend.dialect()),
                     );
                     if !source_probes.is_empty() {
-                        let (refreshed, _records) =
+                        let (refreshed, records) =
                             crate::source_probes::dispatch_and_record_append_only_postures(
                                 backend,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
@@ -3285,6 +3306,7 @@ pub async fn execute_project(
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        model_probe_records.extend(records);
                         if !refreshed.is_empty() {
                             let mut source_postures = source_postures;
                             for r in refreshed {
@@ -3420,7 +3442,7 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
-                        probes: Vec::new(),
+                        probes: model_probe_records,
                     },
                 );
 

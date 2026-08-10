@@ -437,6 +437,45 @@ async fn explain_maintenance_plan(
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+
+    // Target/schema/dialect derivation stays offline — only `smelt.yml`
+    // target metadata, never a live connection (`docs/specs/cli.md`
+    // §"`smelt explain <model>` maintenance-plan report") — so it is safe
+    // to compute up front and reuse for both the probe plan below and
+    // `--show-sql`'s statement rendering further down.
+    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
+    let schema = config
+        .targets
+        .get(&target)
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let dialect = config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+        .map(backend_type_to_maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+
+    // The declared-fact probe plan (`docs/specs/model_properties.md`
+    // §"Probe obligation"): built pure/offline by the shared
+    // `smelt_runtime::probe_plan` owner, never re-derived here
+    // (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+    // report").
+    let probe_entries = smelt_runtime::probe_plan::probe_plan_for_model(
+        &canonical,
+        &schema,
+        &model.db_name_owned(),
+        model.metadata.as_deref(),
+        model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()),
+        model,
+        &source_infos,
+        &target,
+        &result.plan.cells,
+        result.plan.key_locality.as_ref(),
+        dialect,
+    );
+
     let report = build_maintenance_plan_report(
         &canonical,
         &result,
@@ -445,6 +484,8 @@ async fn explain_maintenance_plan(
         cells_cfg,
         defaults_cfg,
         &source_infos,
+        &probe_entries,
+        config.probes.cadence,
     )
     .with_context(|| {
         format!(
@@ -468,20 +509,6 @@ async fn explain_maintenance_plan(
     // executes (`docs/specs/incremental_models.md` §"Statement emission
     // (single owner)"). Never connects to a backend: `CompilerRegistry`
     // only needs `smelt.yml` target metadata, not a live connection.
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
-    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
-    let schema = config
-        .targets
-        .get(&target)
-        .map(|t| t.schema.clone())
-        .unwrap_or_else(|| "main".to_string());
-    let dialect = config
-        .targets
-        .get(&target)
-        .and_then(|t| t.backend_type().ok())
-        .map(backend_type_to_maintenance_dialect)
-        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
-
     let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
     // Kept for the `--period` output-window derivation below (`expand_function_calls`
@@ -647,6 +674,8 @@ async fn explain_maintenance_plan(
             &diagnostics.cells,
             diagnostics.properties.clone(),
             result.state_columns.clone(),
+            probe_entries.clone(),
+            config.probes.cadence,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

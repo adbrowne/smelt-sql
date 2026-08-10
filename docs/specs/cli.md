@@ -193,6 +193,19 @@ collapse in plain language rather than printing an indistinguishable single-grou
 Omitting the model-name argument keeps the existing whole-project graph behavior described below,
 unchanged.
 
+**Declared-fact probes.** The report also prints the model's declared-fact probe set
+(`model_properties.md` §"Probe obligation"): per probe, the declared fact, the named diagnostic it
+raises, the licensed cell, the project cadence governing it (`smelt_yml.md` §"Top-level keys"
+`probes:`), and its cost — the one extra query each dispatched probe adds to a consuming run. A
+model declaring no probe-backed fact prints an empty probe set, not a missing section. The probe
+set stays offline like the rest of the report: probe SQL is built to confirm a declaration is
+probe-backed, never executed, so the cost line is a static "+1 query per consuming run" statement,
+not a measurement.
+
+With `--json`, the per-model report gains an append-stable `probes` array (§Constraints item 5):
+`{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
+"cost": "<one line>"}`.
+
 ### `smelt bakeoff <model>` flags
 
 | Flag | Default | Description |

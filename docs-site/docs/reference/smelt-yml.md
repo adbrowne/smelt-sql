@@ -14,6 +14,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `models` | map | no | `{}` | Per-model configuration overrides (see [Model Configuration](#model-configuration)) |
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
 | `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
+| `probes` | object | no | `{cadence: per_run}` | Project-wide dispatch cadence for declared-fact probes (see [Probes Configuration](#probes-configuration)) |
 
 ---
 
@@ -336,6 +337,38 @@ maintenance:
 - A refused pin never falls back to a different addressing — fix the pin or the model's declared facts.
 
 `smelt explain <model>` prints each cell's admissible pattern set and its active pin (if any), so you can see what a pin would resolve against before setting one.
+
+---
+
+## Probes Configuration
+
+A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,
+`mutation_profile: {kind: append_only}`, `referential_integrity:`, `key_recurrence`) is checked
+at run time by a cheap runtime probe before the maintenance write it licenses — "declared" means
+"checked", not "trusted forever". `probes:` controls how often those checks run project-wide:
+
+```yaml
+probes:
+  cadence: per_run       # default
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `cadence` | string or object | no | `per_run` | `per_run` — dispatch every probe on every consuming run. `off` — never dispatch; every declaration is trusted and recorded unverified on the run manifest. `{periodic: {every_n_runs: N}}` — dispatch once every `N` runs (a model's first run always dispatches). |
+
+```yaml
+# Dispatch every 10th run instead of every run
+probes:
+  cadence:
+    periodic:
+      every_n_runs: 10
+```
+
+A firing probe fails the run with a named diagnostic before any write — never a silent continue or
+a downgraded warning. `smelt explain <model>` lists the model's declared-fact probe set (the fact,
+the diagnostic it raises, the licensed maintenance cell, and its per-run cost) so you can see what
+a run will check before running it; see [`smelt explain`](smelt-explain.md#probes) and the run
+manifest's [`probes` field](state.md#run-manifest) for where a probe's outcome is recorded.
 
 ---
 

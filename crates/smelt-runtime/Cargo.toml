@@ -43,6 +43,13 @@ tempfile = "3"
 smelt-cli = { path = "../smelt-cli" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-backends = { path = "../smelt-backends" }
+# Test-only, back-edge dependency (same shape as the `smelt-cli` edge
+# above): the Link-C staged-project harness (`docs/outcomes/
+# 20260809-probe-backed-facts/phases/08-plan.md`) is the shortest path to a
+# real `execute_project` run over a declared-fact model for
+# `tests/probe_manifest.rs`. `smelt-maintenance-testkit` already depends on
+# `smelt-runtime` as a normal dependency; this only links test binaries.
+smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 async-trait = "0.1"
 arrow.workspace = true

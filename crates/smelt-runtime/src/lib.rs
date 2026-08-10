@@ -29,6 +29,7 @@ pub mod gate;
 pub mod maintenance_driver;
 pub mod meta_eval;
 pub mod model_probes;
+pub mod probe_plan;
 pub mod probes;
 pub mod propagation;
 pub mod python;

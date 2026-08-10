@@ -159,10 +159,14 @@ async fn monotonicity_probe_fires_named_diagnostic() {
         .expect("stage");
 
     let ts = timeseries(true);
+    let metadata = ModelMetadata {
+        unique_key: Some(vec!["user_id".to_string()]),
+        ..ModelMetadata::default()
+    };
     let probes = declared_model_probes(
         "main.events",
         "main.events creation",
-        None,
+        Some(&metadata),
         Some(&ts),
         "SELECT user_id, event_time FROM events",
         MaintenanceDialect::DuckDb,
@@ -172,9 +176,18 @@ async fn monotonicity_probe_fires_named_diagnostic() {
     let err = dispatch_declared_model_probes(&backend, &ProbePolicy::per_run(), &probes)
         .await
         .expect_err("a violated monotonicity declaration must fail loud");
+    let message = err.to_string();
     assert!(
-        err.to_string().contains("DeclaredMonotonicityViolated"),
-        "{err}"
+        message.contains("DeclaredMonotonicityViolated"),
+        "{message}"
+    );
+    assert!(
+        message.contains("row(s) violate"),
+        "expected a genuine violation-count message, not an execution failure: {message}"
+    );
+    assert!(
+        !message.contains("Binder Error") && !message.contains("does not have a column"),
+        "test must exercise the detection path, not a SQL binder error: {message}"
     );
 }
 

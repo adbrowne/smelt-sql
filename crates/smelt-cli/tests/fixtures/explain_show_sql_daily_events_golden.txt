@@ -33,6 +33,8 @@ Inbound edges: sources.raw.events
       identity: event_id
       derived grain: key
 
+Probes (0):
+
   cell[0] statements:
     BEGIN
       DELETE FROM main.daily_events WHERE event_date >= '{{window_start}}' AND event_date < '{{window_end}}'

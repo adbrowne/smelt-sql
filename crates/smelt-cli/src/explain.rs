@@ -219,6 +219,7 @@ fn find_source_info<'a>(source_infos: &'a [SourceInfo], bare_name: &str) -> Opti
 /// the repair stanza's affected-key discovery mechanism line; every other
 /// section of this report reads neither this parameter nor a source's
 /// mutation profile.
+#[allow(clippy::too_many_arguments)]
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
@@ -227,6 +228,8 @@ pub fn build_maintenance_plan_report(
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
     defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
     source_infos: &[SourceInfo],
+    probes: &[smelt_runtime::probe_plan::ProbePlanEntry],
+    cadence: smelt_core::config::ProbeCadence,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -756,8 +759,42 @@ pub fn build_maintenance_plan_report(
             write_relation_contract(&mut out, "      ", &edge.contract);
         }
     }
+    let _ = writeln!(out);
+
+    // Declared-fact probes (`docs/specs/model_properties.md` §"Probe
+    // obligation", `docs/specs/cli.md` §"`smelt explain <model>`
+    // maintenance-plan report"): the fact, its named diagnostic, the cell
+    // it licenses, and its static per-run cost — read verbatim from the
+    // shared `smelt_runtime::probe_plan` builder, never re-derived here.
+    // The project cadence line applies to every listed probe; a run under
+    // `probes: {cadence: off}` still lists them (trusted, not verified).
+    if probes.is_empty() {
+        let _ = writeln!(out, "Probes (0):");
+    } else {
+        let _ = writeln!(out, "Probes ({}):", probes.len());
+        let _ = writeln!(out, "  cadence: {}", format_probe_cadence(cadence));
+        for probe in probes {
+            let _ = writeln!(out, "  - fact: {}", probe.fact);
+            let _ = writeln!(out, "      probe: {}", probe.probe);
+            let _ = writeln!(out, "      licensed cell: {}", probe.cell);
+            let _ = writeln!(out, "      cost: {}", probe.cost);
+        }
+    }
 
     Ok(out)
+}
+
+/// The project `probes:` cadence rendered as one line, shared by the text
+/// report and the JSON `cadence` field's source of truth
+/// (`docs/specs/smelt_yml.md` §"Top-level keys" `probes:`).
+fn format_probe_cadence(cadence: smelt_core::config::ProbeCadence) -> String {
+    match cadence {
+        smelt_core::config::ProbeCadence::PerRun => "per_run".to_string(),
+        smelt_core::config::ProbeCadence::Periodic { every_n_runs } => {
+            format!("periodic (every {every_n_runs} runs)")
+        }
+        smelt_core::config::ProbeCadence::Off => "off".to_string(),
+    }
 }
 
 /// How a `--show-sql` region's literal bounds are sourced
@@ -1205,6 +1242,24 @@ pub struct ExplainMaintenanceJson {
     /// this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// The model's declared-fact probe set (`docs/specs/model_properties.md`
+    /// §"Probe obligation"), empty for a model declaring none — an
+    /// append-stable addition to this JSON shape (`docs/specs/cli.md`
+    /// §Constraints item 5).
+    pub probes: Vec<ExplainProbeJson>,
+}
+
+/// One entry of a model's declared-fact probe set
+/// (`docs/specs/cli.md` §"`smelt explain --json` output schema"):
+/// `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence":
+/// "per_run"|"periodic"|"off", "cost": "<one line>"}`.
+#[derive(Debug, Serialize)]
+pub struct ExplainProbeJson {
+    pub fact: String,
+    pub probe: String,
+    pub cell: String,
+    pub cadence: String,
+    pub cost: String,
 }
 
 /// Build the `--json --show-sql` report from the derived plan cells and
@@ -1226,7 +1281,20 @@ pub fn build_maintenance_plan_json(
     diagnostics_cells: &[PlanCellDiagnostics],
     properties: PropertySet,
     state_columns: Vec<smelt_logical::StateColumnSummary>,
+    probe_entries: Vec<smelt_runtime::probe_plan::ProbePlanEntry>,
+    cadence: smelt_core::config::ProbeCadence,
 ) -> ExplainMaintenanceJson {
+    let cadence_label = format_probe_cadence(cadence);
+    let probes = probe_entries
+        .into_iter()
+        .map(|p| ExplainProbeJson {
+            fact: p.fact,
+            probe: p.probe,
+            cell: p.cell,
+            cadence: cadence_label.clone(),
+            cost: p.cost,
+        })
+        .collect();
     let cells = plan_cells
         .iter()
         .zip(statements.iter())
@@ -1271,6 +1339,7 @@ pub fn build_maintenance_plan_json(
         cells,
         properties,
         state_columns,
+        probes,
     }
 }
 

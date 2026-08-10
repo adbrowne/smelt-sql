@@ -187,6 +187,17 @@ Inbound edges: sources.raw.events
       clock:    event_time_column=event_date partition_column=event_date granularity=Day
       identity: (none)
       derived grain: partition
+
+Probes (2):
+  cadence: per_run
+  - fact: mutation_profile.kind: append_only
+      probe: SourceMutationProfileViolated
+      licensed cell: main.silver_events_deduped (declared)
+      cost: +1 query per consuming run
+  - fact: key_recurrence
+      probe: KeyedRecurrenceBoundViolated
+      licensed cell: main.silver_events_deduped keyed merge
+      cost: +1 query per consuming run
 ```
 
 Two things the previous page's refusal didn't have:

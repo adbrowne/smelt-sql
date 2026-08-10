@@ -20,6 +20,26 @@ Every artifact `.smelt/` can contain, and what it records:
 
 Every run-scoped artifact nests under `.smelt/targets/<target>/`; only `meta.json` and `lock` live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no `intervals.json`, and one with no `grain: key` models has no `reconciliation.json`.
 
+## Run manifest
+
+`.smelt/targets/<target>/runs/<run_id>.json` records one entry per model that ran this run.
+Alongside outcome, strategy, row count, duration, `definition_hash`, and `retry_count` (see
+"Inventory" above), a model entry carries a `probes` array — one entry per declared-fact probe
+(`docs/specs/model_properties.md` §"Probe obligation") this run consulted for that model:
+
+```json
+{ "fact": "functional_dependencies:", "probe": "DeclaredFunctionalDependencyViolated", "outcome": "dispatched" }
+```
+
+`outcome` is one of two values: `dispatched` (the probe actually ran and held — a violation would
+have failed the run before any write, so a recorded entry is always a clean bill of health, never
+a silent pass on a violation) or `skipped` (the project's [`probes:` cadence](smelt-yml.md#probes-configuration)
+skipped this probe on this run — the declaration is trusted, not verified, and the manifest says
+so explicitly rather than making a skipped check look identical to a checked one). A model
+declaring no probe-backed fact has an empty `probes` array. Reading an older manifest with no
+`probes` key at all defaults to an empty array, not a parse failure — manifest evolution is
+backward-compatible.
+
 ## State-schema version and migration
 
 `.smelt/meta.json` records the layout version this store was written with. A version this smelt binary does not recognise (newer than the binary's own highest known version) is a hard error naming both versions -- smelt refuses to read or write rather than guess at an unfamiliar layout. A missing `meta.json` denotes the legacy pre-versioning layout (root-level `runs/`, `intervals.json`, etc. with no `targets/<target>/` nesting); the first locked open under a version-aware binary migrates it to the current layout and writes `meta.json`, under the advisory lock so a concurrent process can never observe a half-migrated store.

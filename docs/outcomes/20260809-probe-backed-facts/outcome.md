@@ -1,7 +1,7 @@
 # Outcome: Probe-backed world-facts
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §2 P-C, §6 step 3
 **Spec anchors:** `docs/specs/model_properties.md` (model-scoped declarations), `docs/specs/incremental_models.md` (declared contract facts)
 
@@ -54,7 +54,7 @@ safe to grow (the contract lattice will grow it).
 | 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
 | 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
 | 7 | Conformance recipes: violated-fact scenarios caught by probes | done |
-| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | planned |
+| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | done |
 
 ## Decision log
 
@@ -240,6 +240,17 @@ safe to grow (the contract lattice will grow it).
   ownership of that mapping is what the probe-obligation registry exists to prevent; (c) the
   cumulative-arm `ModelRunRecord` stays `probes: Vec::new()` with a comment, since no probe
   dispatches on that arm today — an empty array there is accurate, not a gap.
+
+- 2026-08-10: Phase 8 done (the outcome's last row; outcome marked done). `ModelRunRecord.probes`
+  is populated at all three live dispatch sites; the new `smelt_runtime::probe_plan` module builds
+  the offline probe-set descriptor `smelt explain` renders (text `Probes (N):` section and `--json`
+  `probes` array — fact, diagnostic, licensed cell, cadence, static cost line), reusing
+  `model_probes`/`source_probes` for the four registry-`built` probes and reading
+  `PlanCell::skeleton_source_closure`/`KeyLocality::slice` directly for the two plan-driven rows.
+  Fixed phase 7's recorded finding (`monotonicity_probe_fires_named_diagnostic` passed for the
+  wrong reason). `docs/specs/cli.md` and three docs-site reference pages
+  (`smelt-yml.md`/`smelt-explain.md`/`state.md`) document the new surface. See
+  `phases/08-summary.md`.
 
 ## Blocked
 

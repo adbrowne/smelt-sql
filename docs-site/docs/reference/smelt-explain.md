@@ -44,6 +44,34 @@ State columns:
 
 A model with no decomposed-state columns prints no state section. With `--json`, the same information appears as a top-level `state_columns` array: `[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]`.
 
+## Probes
+
+A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,
+`mutation_profile: {kind: append_only}`, `referential_integrity:`, `key_recurrence`) licenses a
+maintenance technique only because a cheap runtime probe checks it before every consuming write —
+see [`probes:` in the `smelt.yml` reference](smelt-yml.md#probes-configuration). `smelt explain
+<model>` prints the model's declared-fact probe set: per probe, the declared fact, the named
+diagnostic it raises, the maintenance cell it licenses, the project's dispatch cadence, and its
+cost:
+
+```
+Probes (1):
+  cadence: per_run
+  - fact: functional_dependencies:
+      probe: DeclaredFunctionalDependencyViolated
+      licensed cell: main.subscriptions (declared)
+      cost: +1 query per consuming run
+```
+
+A model declaring no probe-backed fact prints `Probes (0):`, not a missing section. The probe set
+stays **offline**: probe SQL is built to confirm a declaration is probe-backed, never executed, so
+`cost` is always the static "+1 query per consuming run" statement — `smelt explain` makes no
+backend connection. With `--json`, the same set appears as a top-level `probes` array:
+`[{"fact": "functional_dependencies:", "probe": "DeclaredFunctionalDependencyViolated", "cell":
+"main.subscriptions (declared)", "cadence": "per_run", "cost": "+1 query per consuming run"}]`.
+See the [run manifest](state.md#run-manifest) for where a live run records each probe's actual
+dispatched/skipped outcome.
+
 See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report. The web UI's [model diagnostics page](../guide/model-diagnostics.md) renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.
 
 ## JSON output schema
