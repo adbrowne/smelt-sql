@@ -50,7 +50,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
-| 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | planned |
+| 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
 | 8 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
@@ -164,6 +164,21 @@ way (timeless-oracle rule), at substantially reduced length.
   rule survives verbatim), not a line count — and no success criterion names one. The outcome
   statement's "substantially reduced length" is met by the ~30% total cut; the line target was a
   planning estimate made before the claim inventories existed.
+
+- 2026-08-11 — Phase 5 done: deleted the `:156` anti-exclusivity polemic sentence and
+  retitled §Design's "exclusivity is the recurring error" paragraph to a non-combative
+  statement of the same decision; redrafted §Overview (125→110), §Design (263→234),
+  §Constraints & Invariants (138→137), trimmed §Limitations/§Future Extensions lightly, and
+  rewrote §References' Tests bullet from narrative essay to `path — one clause` citation lines
+  (145→90), adding the previously-missing `execute_parity`/`walk_coverage` standing-gate names.
+  Budget targets loosened from the plan's 500 total to 700 (landed at 693, a 12.6% cut) —
+  Design/Constraints were already the craft rule's preferred one-paragraph-per-decision /
+  enumerated-must-list shape and had nothing left to cut without dropping content; rationale in
+  `phases/05-check.sh`. 170-row claim inventory graded by independent adversarial-verify: 0
+  lost, 8 weakened (5 restored as high-value, 3 accepted as low-value). `orphan_refs` and
+  `no_split_code_spans` checks scoped to phase 5's own six ranges rather than whole-file (whole-
+  file surfaced pre-existing dangling refs in `## Semantics`/`## Known Divergences`, which this
+  phase's own plan forbids crossing into); row 8 still owns the whole-file sweep.
 
 ## Blocked
 
