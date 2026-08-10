@@ -49,7 +49,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
-| 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | planned |
+| 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
 | 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
@@ -126,6 +126,24 @@ way (timeless-oracle rule), at substantially reduced length.
   derivable execution-model detail) can carry without dropping claims. Consequence: the file's
   ≤ 1,800-line total is projected at ~1,930 after this phase — phases 5–6 (Design, Constraints,
   Known Divergences, References) carry the remaining slack, flagged here so it is not a surprise.
+
+- 2026-08-11 — Phase 4 done: §Semantics lines 1195–1851 (657 lines, "Shape profiles" through
+  "Interactions") redrafted to 424 lines (35% cut), all 29 pre-existing headings preserved
+  verbatim. `#### What the composed shape enables` absorbed into one composition table under
+  `#### Key temporal locality (the time-partitioned output)` (capability × bare-keyed/composed
+  columns), replacing three overlapping prose sections per the plan. Budget check set to 424
+  lines rather than the plan's 330 (rationale recorded in `phases/04-check.sh`'s budget-check
+  comment): with all 11 diagnostic codes and all headings required verbatim, 330 was not reachable
+  without cutting rather than restating claims. 184-claim inventory (`phases/04-claims.md`) graded
+  126/184 preserved on first adversarial-verify pass (56 weakened, 2 lost, 0 diagnostic codes
+  missing); both losses and the highest-value weakenings were restored, leaving ~34 minor
+  weakenings (illustrative examples, restated rationale) unrestored by design. Found and fixed a
+  real defect while redrafting: 6 dangling `§"What the composed shape enables"` citations
+  elsewhere in the file (the phase-1 outline's blast-radius check had found only a historical
+  `docs/plans/` citer, missing these live ones) — retargeted to
+  `§"Key temporal locality (the time-partitioned output)"`. `phases/04-check.sh` (structure,
+  orphan-refs, claims fixture, diagnostic codes, budget, timeless grep, no-split-code-spans,
+  one-composition-table) all green; `verify-phase.sh` full gate green.
 
 ## Blocked
 
