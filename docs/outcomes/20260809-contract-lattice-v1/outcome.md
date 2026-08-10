@@ -47,7 +47,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | done |
-| 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | pending |
+| 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | planned |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | pending |
 | 4 | `deferral:` declaration + run skipping; ledger-proven work subsumption | pending |
 | 5 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
@@ -60,6 +60,10 @@ relaxation is declared, validated, probe-checked, and printed by
 - 2026-08-10 — **Relaxation surface is a top-level `contract:` block**, not an extension of `maintenance:` (phase 1 plan): `maintenance:` is specified as never widening what admission allows, and a lattice point does exactly that; `contract:` carries model-level `frozen_horizon:`/`deferral:` plus optional per-cell refinement addressed like `maintenance.cells`. `horizon_ceiling:` is untouched and stays a warning threshold on the derived horizon.
 - 2026-08-10 — Phase table unchanged (no prior phase summary to reshape against; phase 1 is the outcome's first phase).
 - 2026-08-10 — Phase 1 done: spec lands §"The contract lattice" (Semantics) + §"Contract relaxations (`contract:`)" (Surface) in `docs/specs/incremental_models.md`, the four diagnostic codes cross-catalogued in `diagnostics.md`, the single-owner constraint + `CLAUDE.md` bullet, the Known Divergence, and the standing gate `crates/smelt-logical/tests/contract_lattice_spec.rs`.
+- 2026-08-10 — Phase table unchanged again (phase 1's summary surfaced no work needing a new row; its only carry-forward was a local DuckDB env-path fact, environment not outcome scope).
+- 2026-08-10 — **Layering split for the single-owner triple** (phase 2 plan): the `contract:` *serde shape* (`ContractConfig`) lives in `smelt-core::config` beside `MaintenanceConfig` because `ModelMetadata` must deserialize it and `smelt-core` sits below `smelt-logical`; validation, the oracle transform, and the probe emitter — every semantic leg — are single-owned in a new `smelt-logical/src/contract/`. The single-owner rule binds the semantics, not the struct's crate.
+- 2026-08-10 — **`deferral:` and `contract.cells[]` are refused with a loud parse error until phase 4** wires their validation, rather than parsed-and-ignored: an accepted-but-unenforced relaxation key is exactly the silent weakening the lattice exists to prevent.
+- 2026-08-10 — **Frozen-horizon clamp anchors on the run's end date**, floor `end − H`, narrowing only (`start' = max(start, end − H)`) — deterministic, and never widens the derived reach clamp.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
