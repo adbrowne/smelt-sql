@@ -149,9 +149,11 @@ fn surface_row_exists_for_output_delta() {
     let row = row.expect("§Surface → Derived proofs must have a row named \"Output-delta shape\"");
     let maturity = row.last().expect("row has a maturity cell");
     assert_eq!(
-        maturity, "partial (derived; consumed by edge typing, not yet by dirt propagation)",
-        "§Surface → Derived proofs \"Output-delta shape\" row must carry phase 3's maturity: \
-         derived by the walk and consumed by edge typing, not yet by dirt propagation"
+        maturity,
+        "derived, typed onto propagation edges, and acted on by dirt propagation (keyed \
+         dirt-sets for an admitted `KeyedUpsert` component)",
+        "§Surface → Derived proofs \"Output-delta shape\" row must carry phase 5's maturity: \
+         derived by the walk, typed onto edges, and acted on by keyed dirt-set propagation"
     );
 }
 
@@ -216,7 +218,7 @@ fn known_divergence_states_cross_model_fold() {
     let divergences = section_body(&model_properties, "## Known Divergences / Open Questions");
 
     let bullet_start = divergences
-        .find("Output-delta shape is derived and typed")
+        .find("Output-delta shape is derived, typed onto propagation edges, and acted on")
         .expect("the output-delta known-divergence bullet must exist");
     let bullet = &divergences[bullet_start..];
     let bullet_end = bullet.find("\n- **").unwrap_or(bullet.len());
@@ -232,8 +234,13 @@ fn known_divergence_states_cross_model_fold() {
         "the known-divergence bullet must name the real graph-builder caller, got: {bullet:?}"
     );
     assert!(
-        bullet.contains("propagate") && bullet.contains("required_inputs"),
-        "the known-divergence bullet must still state the remaining gap: neither `propagate` \
-         nor `required_inputs` reads `Edge.components` yet, got: {bullet:?}"
+        bullet.contains("classify_keyed_edges") && bullet.contains("Edge.components"),
+        "the known-divergence bullet must state that `classify_keyed_edges` now reads \
+         `Edge.components`, got: {bullet:?}"
+    );
+    assert!(
+        bullet.contains("symbolic") && bullet.contains("value-level affected-key discovery"),
+        "the known-divergence bullet must still state the remaining gap: the keyed dirt-set is \
+         symbolic, not a materialised key-value set, got: {bullet:?}"
     );
 }

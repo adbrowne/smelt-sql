@@ -53,7 +53,7 @@ the addressing of one delta type, not the universal currency.
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
-| 5 | Keyed dirt-set propagation for admitted shapes | planned |
+| 5 | Keyed dirt-set propagation for admitted shapes | done |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
 | 7 | Surface: explain edge rendering, docs-site update | pending |
 
@@ -130,6 +130,14 @@ the addressing of one delta type, not the universal currency.
   maps, not a rewrite of dirt into a sum type — the value-level affected-key set stays with the
   run-time discovery mechanism, and a keyed-addressed edge into a *clocked* consumer still emits
   `DayInterval::WHOLE` so widen-never-narrow holds without inventing an axis.
+
+- 2026-08-10 — Phase 5 implemented: `classify_keyed_edges` (replacing `refuse_keyed_nodes`) admits
+  an edge touching a `PartitionGrain::Keyed` endpoint when a component carries `Addressing::Keyed`,
+  routing it through a new additive keyed channel (`Propagation::{per_edge_keys, keyed_dirty}`)
+  instead of interval math; a clocked/unclocked consumer of a keyed origin still gets
+  `DayInterval::WHOLE` so it runs. `smelt-runtime::refuse_bare_keyed_origins` narrowed the same
+  way, consulting the model's own derived output-delta shape. No phase-table reshape — phase 5's
+  scope matched the plan; phase 6 (end-to-end conformance chains) is now unblocked.
 
 ## Blocked
 

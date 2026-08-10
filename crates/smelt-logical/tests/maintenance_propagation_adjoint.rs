@@ -14,9 +14,12 @@
 
 use std::collections::BTreeMap;
 
+use smelt_logical::analysis::output_delta::OutputDelta;
+use smelt_logical::maintenance::edge_type::{Addressing, EdgeComponent};
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::propagate::{
-    project_observed_delta, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+    project_observed_delta, propagate, required_inputs, DayInterval, Edge, KeyedDirt,
+    PartitionGrain,
 };
 
 fn iv(start: i64, end: i64) -> DayInterval {
@@ -438,5 +441,200 @@ fn observed_delta_fed_composed_edge_satisfies_adjointness_widened_route() {
             .any(|d| d.start <= period.start && period.end <= d.end),
         "forward(backward({period:?})) must cover the widened period {period:?} at rollup; \
          got {dirty:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5 (`docs/outcomes/20260809-output-delta-typing/outcome.md`): keyed
+// dirt-set propagation for admitted shapes — an edge touching a
+// `PartitionGrain::Keyed` endpoint whose component vector carries an
+// admitted `Addressing::Keyed` component propagates through the keyed
+// channel instead of being refused; the refusal narrows to a `General`
+// (or absent) verdict.
+// ---------------------------------------------------------------------------
+
+fn keyed_component(keys: &[&str]) -> EdgeComponent {
+    EdgeComponent {
+        group: "{id}".to_string(),
+        shape: OutputDelta::KeyedUpsert {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+        },
+        addressing: Addressing::Keyed {
+            keys: keys.iter().map(|k| k.to_string()).collect(),
+        },
+        columns: keys.iter().map(|k| k.to_string()).collect(),
+    }
+}
+
+fn general_component(reason: &str) -> EdgeComponent {
+    EdgeComponent {
+        group: "{weight}".to_string(),
+        shape: OutputDelta::General {
+            reason: reason.to_string(),
+        },
+        addressing: Addressing::WholeModel {
+            degraded_by: reason.to_string(),
+        },
+        columns: vec!["weight".to_string()],
+    }
+}
+
+#[test]
+fn keyed_upstream_with_keyed_component_is_not_refused() {
+    let mut e = edge("agg", "downstream", 0, 0);
+    e.upstream_grain = PartitionGrain::Keyed;
+    e.components = vec![keyed_component(&["user_id"])];
+    let edges = vec![e];
+
+    propagate(&edges, &deltas(&[("agg", iv(1, 2))]))
+        .expect("admitted keyed edge must propagate, not refuse");
+}
+
+#[test]
+fn keyed_node_with_general_component_still_refuses_naming_the_operator() {
+    let mut e = edge("agg", "downstream", 0, 0);
+    e.upstream_grain = PartitionGrain::Keyed;
+    e.components = vec![general_component("'agg' reads a mutable snapshot")];
+    let edges = vec![e];
+
+    let err = propagate(&edges, &deltas(&[("agg", iv(1, 2))]))
+        .expect_err("a General-degraded shape must still refuse");
+    assert!(
+        err.contains("'agg' reads a mutable snapshot"),
+        "refusal must name the degrading operator: {err}"
+    );
+}
+
+#[test]
+fn keyed_node_without_components_fails_closed() {
+    let mut e = edge("source", "bare_keyed", 0, 0);
+    e.downstream_grain = PartitionGrain::Keyed;
+    let edges = vec![e];
+
+    let fwd = propagate(&edges, &deltas(&[("source", iv(1, 2))]))
+        .expect_err("bare keyed node with no derived shape must still refuse");
+    assert!(fwd.contains("without an admitted time axis"), "{fwd}");
+    assert!(fwd.contains("timeseries"), "{fwd}");
+    assert!(fwd.contains("bare_keyed"), "{fwd}");
+
+    let bwd = required_inputs(&edges, "bare_keyed", iv(1, 2))
+        .expect_err("bare keyed node with no derived shape must still refuse");
+    assert!(bwd.contains("without an admitted time axis"), "{bwd}");
+}
+
+#[test]
+fn keyed_edge_propagates_a_keyed_dirt_set_not_intervals() {
+    let mut e = edge("agg", "consumer", 0, 0);
+    e.upstream_grain = PartitionGrain::Keyed;
+    e.downstream_grain = PartitionGrain::Keyed;
+    e.components = vec![keyed_component(&["user_id"])];
+    let edges = vec![e];
+
+    let result = propagate(&edges, &deltas(&[("agg", iv(1, 2))])).expect("propagate");
+    let keys = result
+        .per_edge_keys
+        .get(&("consumer".to_string(), "agg".to_string()))
+        .expect("keyed channel entry must exist");
+    assert_eq!(
+        keys,
+        &vec![KeyedDirt {
+            keys: vec!["user_id".to_string()],
+            from: "agg".to_string(),
+        }]
+    );
+    assert!(!result
+        .keyed_dirty
+        .get("consumer")
+        .expect("consumer must be keyed-dirty")
+        .is_empty());
+    assert!(
+        !result
+            .per_edge
+            .contains_key(&("consumer".to_string(), "agg".to_string())),
+        "no interval dirt must be reflected through an edge into a keyed-grain consumer: \
+         {result:?}"
+    );
+}
+
+#[test]
+fn keyed_dirt_into_a_clocked_consumer_widens_to_whole() {
+    let mut e = edge("agg", "rollup", 0, 0);
+    e.upstream_grain = PartitionGrain::Keyed;
+    // downstream_grain defaults to Day (a clocked consumer).
+    e.components = vec![keyed_component(&["user_id"])];
+    let edges = vec![e];
+
+    let result = propagate(&edges, &deltas(&[("agg", iv(1, 2))])).expect("propagate");
+    let dirty = result.dirty.get("rollup").expect("rollup must be dirty");
+    assert!(
+        dirty.iter().any(|d| d.is_whole()),
+        "a clocked consumer of a keyed origin must get whole-table dirt: {dirty:?}"
+    );
+    assert!(!result
+        .keyed_dirty
+        .get("rollup")
+        .expect("the keyed channel must also carry the record")
+        .is_empty());
+}
+
+#[test]
+fn required_inputs_over_a_keyed_ancestor_requires_the_whole_table() {
+    let mut e = edge("agg", "rollup", 0, 0);
+    e.upstream_grain = PartitionGrain::Keyed;
+    e.components = vec![keyed_component(&["user_id"])];
+    let edges = vec![e];
+
+    let resolved = required_inputs(&edges, "rollup", iv(10, 12)).expect("resolve");
+    let agg_required = resolved.required.get("agg").expect("agg must be required");
+    assert!(
+        agg_required.iter().any(|d| d.is_whole()),
+        "a keyed ancestor must require the whole table: {agg_required:?}"
+    );
+    assert_eq!(
+        resolved.required.get("rollup"),
+        Some(&vec![iv(10, 12)]),
+        "the target's own interval math must be unchanged"
+    );
+    assert_eq!(
+        resolved.build_order,
+        vec!["rollup".to_string()],
+        "agg is a keyed origin with no inbound edge — like a raw source, it is \
+         staged, not built"
+    );
+}
+
+/// The adjointness law over a graph mixing a window-addressed edge and a
+/// keyed-addressed edge: `bronze -> silver` (ordinary interval math) feeds
+/// `silver`'s own dirt, while `agg` (a separate keyed-grain origin, fed
+/// directly as a delta — mirroring the real graph shape, where a bare
+/// keyed node's own inbound edges are never assembled) feeds `rollup`
+/// alongside `silver`.
+#[test]
+fn adjoint_property_holds_with_keyed_edges_present() {
+    let window_edge = edge("bronze", "silver", 0, 2);
+    let mut keyed_edge = edge("agg", "rollup", 0, 0);
+    keyed_edge.upstream_grain = PartitionGrain::Keyed;
+    keyed_edge.components = vec![keyed_component(&["user_id"])];
+    let mut silver_edge = edge("silver", "rollup", 1, 0);
+    silver_edge.upstream_grain = PartitionGrain::Day;
+
+    let edges = vec![window_edge, keyed_edge, silver_edge];
+    let period = iv(20, 21);
+    let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
+
+    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    for node in ["bronze", "agg"] {
+        if let Some(required) = resolved.required.get(node) {
+            replay.insert(node.to_string(), required.clone());
+        }
+    }
+
+    let forward = propagate(&edges, &replay).expect("propagate");
+    let dirty = forward.dirty.get("rollup").cloned().unwrap_or_default();
+    assert!(
+        dirty
+            .iter()
+            .any(|d| d.start <= period.start && period.end <= d.end),
+        "forward(backward(P)) must contain P: {dirty:?} vs {period:?}"
     );
 }

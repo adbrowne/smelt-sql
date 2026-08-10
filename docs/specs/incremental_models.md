@@ -2351,12 +2351,15 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   all-or-nothing there either, so a mid-group failure can still leave an added-but-unbackfilled
   column with an already-advanced schema snapshot. Neither case has a repair path today.
   Tracked: `docs/plans/20260809-sensitivity-precision.md` Phase 6.
-- **Edge typing is specified but the propagation layer still carries day intervals only.** The
-  typed edge (`(delta shape × addressing × column set)`) and keyed dirt-set propagation for an
-  admitted `KeyedUpsert` verdict are stated in §"The graph layer", but no output-delta verdict is
-  derived yet (`model_properties.md` §Known Divergences "Output-delta shape is specified but not
-  yet derived") and forward/backward propagation still only compute the window-addressed
-  component. Tracked by `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+- **Keyed dirt-sets are a symbolic channel, not a materialised key-value set.** The typed edge
+  (`(delta shape × addressing × column set)`) is derived and acted on: `propagate`/
+  `required_inputs` route an edge with an admitted `Addressing::Keyed` component through the
+  keyed dirt-set channel instead of refusing (§"The graph layer" → "Keyed dirt-sets and the
+  narrowed refusal"), and the refusal narrows to the `General`-or-absent-verdict case. The
+  remaining gap: a keyed dirt-set record carries key columns and provenance, not the affected
+  key **values** — value-level affected-key discovery stays with the run-time mechanism
+  (§"Affected-key discovery"). Tracked by
+  `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **Plan-consumer gaps.** The horizon-clamped partition-local mutation corner is not reachable
   from any real workspace (trigger construction emits `UpstreamMutation` only for unclocked
   sources; clocked mutable-source scan-bound derivation is deferred); dispatch cannot

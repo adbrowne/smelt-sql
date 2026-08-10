@@ -167,3 +167,63 @@ fn component_population_does_not_change_interval_dirt() {
     );
     assert_eq!(typed.per_edge, untyped.per_edge);
 }
+
+/// Phase 5 (`docs/outcomes/20260809-output-delta-typing/phases/05-plan.md`):
+/// a bare (not locality-admitted) `grain: key` model whose own derived
+/// output-delta shape is `KeyedUpsert` feeds a downstream consumer without
+/// tripping the propagation graph's keyed-grain refusal — the keyed dirt-set
+/// channel admits it instead.
+#[test]
+fn keyed_upstream_model_propagates_on_the_real_graph() {
+    use smelt_logical::maintenance::propagate::propagate;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect("build graph");
+    let agg_edge = edges
+        .iter()
+        .find(|e| e.upstream == "agg")
+        .unwrap_or_else(|| panic!("expected an edge with agg as upstream, got {edges:?}"));
+    assert!(
+        agg_edge
+            .components
+            .iter()
+            .any(|c| matches!(&c.addressing, Addressing::Keyed { .. })),
+        "expected a Keyed component from the keyed-upsert 'agg' model, got {:?}",
+        agg_edge.components
+    );
+
+    let mut deltas = std::collections::BTreeMap::new();
+    deltas.insert("agg".to_string(), vec![DayInterval::new(1, 2)]);
+    propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
+}

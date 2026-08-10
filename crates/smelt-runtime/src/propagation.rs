@@ -161,9 +161,9 @@ fn source_grain(info: &SourceInfo) -> Result<PartitionGrain> {
 /// like any other node (§"The graph layer": "A locality-admitted
 /// time-partitioned keyed output is not refused"); a **bare** keyed model —
 /// no `timeseries:` declared, or one declared but not admitted — stays
-/// [`PartitionGrain::Keyed`] for [`crate::propagate::refuse_keyed_nodes`]-
-/// equivalent (`smelt_logical::maintenance::propagate::refuse_keyed_nodes`)
-/// to refuse. Admission keys off the locality **verdict**, never off the
+/// [`PartitionGrain::Keyed`] for
+/// [`smelt_logical::maintenance::propagate::classify_keyed_edges`] to
+/// classify (admit through the keyed dirt-set channel, or refuse). Admission keys off the locality **verdict**, never off the
 /// mere presence of a `timeseries:` block.
 fn model_grain(
     model: &ModelFile,
@@ -335,9 +335,9 @@ fn consumer_output_delta_facts(
 /// self-referential model (a ref to its own address) before any interval
 /// math runs. A keyed-grain node is left in the graph for
 /// [`smelt_logical::maintenance::propagate::propagate`]'s own
-/// `refuse_keyed_nodes` to catch (so both `propagate` and `required_inputs`
-/// share exactly one refusal implementation, per that module's own
-/// composition law).
+/// `classify_keyed_edges` to classify (so both `propagate` and
+/// `required_inputs` share exactly one admission/refusal implementation,
+/// per that module's own composition law).
 pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) -> Result<Vec<Edge>> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
@@ -592,8 +592,9 @@ fn derive_clamp_and_locality_pass(
         // unconditionally, so a route-3 declared-sub-route composed node —
         // `examples/web_analytics`'s own flagship `silver.events_deduped` —
         // never established locality in the graph layer and its own bare
-        // `PartitionGrain::Keyed` classification made `refuse_keyed_nodes`
-        // fail-loud refuse ANY graph containing it, origin or not).
+        // `PartitionGrain::Keyed` classification made
+        // `classify_keyed_edges` fail-loud refuse ANY graph containing it,
+        // origin or not).
         let mut source_refs: Vec<(String, Option<SourceInfo>)> = Vec::new();
         for r in &model.refs {
             let segs = r.smelt_ref.to_path();
@@ -869,25 +870,30 @@ fn derive_clamp_and_locality_pass(
 }
 
 /// Refuse fail-loud when a `--source`/`--landed` delta origin names a
-/// **bare** keyed model (`grain: key`, no `timeseries:` declared, or one
-/// declared but locality not established) — even when the origin has no
-/// edge in the assembled graph at all. A bare keyed model whose only
-/// downstream reader can't derive a clock for it contributes no walkable
-/// edge (`build_forward_graph`'s own "underivable upstream clock is a
-/// recorded refusal" behaviour), so without this check an origin naming
-/// such a model would otherwise be a **silent no-op** — the delta seeds a
-/// dirty entry `propagate` never reflects through any edge, and
-/// `plan_since_upstream` prints "nothing to run" and exits 0. That is wrong
-/// for the same reason [`smelt_logical::maintenance::propagate`]'s own
-/// `refuse_keyed_nodes` fail-loud refuses a bare keyed node reached through
-/// an edge (`incremental_models.md` §"The graph layer" — a keyed node
-/// without an admitted time axis has no partition axis for interval dirt to
-/// propagate over) — the origin case just isn't reachable by that edge-only
-/// check, since an edge-less origin is never visited by it. Consults the
-/// SAME `locality_admitted` verdict [`build_forward_graph`] derives (never
-/// re-implementing admission); a **locality-admitted** composed origin
-/// (B1–B3, `incremental_models.md` §"Key temporal locality") passes through
-/// untouched — this refusal only ever fires on the bare case.
+/// **bare** keyed model (`grain: key`, no `timeseries:` declared or one
+/// declared but locality not established) whose own derived output-delta
+/// shape is `General` or absent — even when the origin has no edge in the
+/// assembled graph at all. A bare keyed model whose only downstream reader
+/// can't derive a clock for it contributes no walkable edge
+/// (`build_forward_graph`'s own "underivable upstream clock is a recorded
+/// refusal" behaviour), so without this check an origin naming such a
+/// model would otherwise be a **silent no-op** — the delta seeds a dirty
+/// entry `propagate` never reflects through any edge, and
+/// `plan_since_upstream` prints "nothing to run" and exits 0.
+///
+/// Narrowed (phase 5, `docs/outcomes/20260809-output-delta-typing/outcome.md`):
+/// mirrors [`smelt_logical::maintenance::propagate::classify_keyed_edges`]'s
+/// own admission rule — a bare keyed origin whose derived output-delta
+/// shape carries at least one non-`General` column group (i.e. an
+/// admitted `Addressing::Keyed` component, `type_edge` would derive for
+/// its own outbound edges) passes through untouched; the origin case just
+/// isn't reachable by `classify_keyed_edges`'s edge-only check, since an
+/// edge-less origin is never visited by it. Consults the SAME
+/// `locality_admitted` verdict [`build_forward_graph`] derives and the SAME
+/// `workspace_output_delta_verdicts` fold, never re-implementing either. A
+/// **locality-admitted** composed origin (B1–B3, `incremental_models.md`
+/// §"Key temporal locality") passes through untouched regardless — this
+/// refusal only ever fires on the bare, `General`-or-absent-shape case.
 fn refuse_bare_keyed_origins(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
@@ -898,6 +904,7 @@ fn refuse_bare_keyed_origins(
     let ClampAndLocality {
         locality_admitted, ..
     } = derive_clamp_and_locality(models, source_infos)?;
+    let workspace_verdicts = workspace_output_delta_verdicts(models, source_infos);
 
     for delta in deltas {
         let Some(model) = model_by_addr.get(&delta.source) else {
@@ -913,18 +920,31 @@ fn refuse_bare_keyed_origins(
             .get(&delta.source)
             .copied()
             .unwrap_or(false);
-        if !admitted {
-            bail!(
-                "MaintenanceGraphUnsupportedNode: '{}' is keyed-grain without an admitted time \
-                 axis: it has no partition axis for interval dirt to propagate over. Declare a \
-                 timeseries: block and establish key temporal locality \
-                 (docs/specs/incremental_models.md §\"Key temporal locality\") to admit it as a \
-                 locality-admitted composed node that participates in propagation like any other \
-                 clocked node — keyed dirt-sets over a bare keyed node are not yet supported \
-                 (S12)",
-                delta.source
-            );
+        if admitted {
+            continue;
         }
+        let has_addressable_shape = workspace_verdicts
+            .get(&delta.source.to_ascii_lowercase())
+            .is_some_and(|facts| {
+                facts
+                    .columns
+                    .iter()
+                    .any(|(_, shape)| !matches!(shape, OutputDelta::General { .. }))
+            });
+        if has_addressable_shape {
+            continue;
+        }
+        bail!(
+            "MaintenanceGraphUnsupportedNode: '{}' is keyed-grain without an admitted time \
+             axis: it has no partition axis for interval dirt to propagate over. Declare a \
+             timeseries: block and establish key temporal locality \
+             (docs/specs/incremental_models.md §\"Key temporal locality\") to admit it as a \
+             locality-admitted composed node that participates in propagation like any other \
+             clocked node, or ensure its own derived output-delta shape is addressable (keyed \
+             dirt-sets propagate for an admitted KeyedUpsert shape — \
+             docs/specs/incremental_models.md §\"Keyed dirt-sets and the narrowed refusal\")",
+            delta.source
+        );
     }
     Ok(())
 }
