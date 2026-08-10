@@ -45,7 +45,7 @@ the addressing of one delta type, not the universal currency.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
-| 2 | Walk transfer rules for the output-delta verdict per column group | pending |
+| 2 | Walk transfer rules for the output-delta verdict per column group | planned |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | pending |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
@@ -61,6 +61,13 @@ the addressing of one delta type, not the universal currency.
 - 2026-08-10 — Phase 1 implemented: transfer-rule table rows that preserve the input shape spell
   out all three lattice names explicitly rather than saying "preserves the input shape", so the
   table stays machine-checkable per row (`crates/smelt-logical/tests/output_delta_spec.rs`).
+
+- 2026-08-10 — Phase 2 planned; no phase-table reshape (phase 1 surfaced nothing out of scope). The
+  phase-1 transfer table has no **leaf** row, so phase 2 carries a small spec delta adding one:
+  a base relation seeds its shape from the source's declared mutation profile (append_only+clock ⇒
+  `AppendOnlyWindow`, change_feed+`delta_identity` ⇒ `KeyedUpsert`, everything else ⇒ `General`),
+  mirroring `input_delta_discovery`'s fail-closed default. A model-reference leaf takes the
+  referenced model's own verdict — the hook phase 4's consumer fold reads.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
