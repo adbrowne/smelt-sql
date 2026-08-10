@@ -149,9 +149,9 @@ fn surface_row_exists_for_output_delta() {
     let row = row.expect("§Surface → Derived proofs must have a row named \"Output-delta shape\"");
     let maturity = row.last().expect("row has a maturity cell");
     assert_eq!(
-        maturity, "partial (derived; not yet consumed by edge typing)",
-        "§Surface → Derived proofs \"Output-delta shape\" row must carry phase 2's maturity: \
-         derived by the walk, not yet consumed by edge typing"
+        maturity, "partial (derived; consumed by edge typing, not yet by dirt propagation)",
+        "§Surface → Derived proofs \"Output-delta shape\" row must carry phase 3's maturity: \
+         derived by the walk and consumed by edge typing, not yet by dirt propagation"
     );
 }
 

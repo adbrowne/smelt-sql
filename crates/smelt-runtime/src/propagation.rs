@@ -245,6 +245,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             after_days,
             upstream_grain,
             downstream_grain,
+            components: Vec::new(),
         });
     }
     Ok(edges)

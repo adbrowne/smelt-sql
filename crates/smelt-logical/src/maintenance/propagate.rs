@@ -35,6 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use super::edge_type::EdgeComponent;
 use super::{locality, ScanClamp};
 use crate::analysis::source_bounds::Seconds;
 
@@ -367,12 +368,21 @@ pub struct Edge {
     pub after_days: i64,
     pub upstream_grain: PartitionGrain,
     pub downstream_grain: PartitionGrain,
+    /// The typed component vector for this edge (`incremental_models.md`
+    /// §"The graph layer" → "Typed edges"), derived by
+    /// [`super::edge_type::type_edge`]. **Advisory this phase**: `propagate`
+    /// and `required_inputs` do not read this field — interval math is
+    /// unchanged (`docs/outcomes/20260809-output-delta-typing/outcome.md`
+    /// phase 3). Empty on [`Edge::from_clamp`] (today's untyped-edge
+    /// behaviour); populate via [`Edge::with_components`].
+    pub components: Vec<EdgeComponent>,
 }
 
 impl Edge {
     /// Build the edge from a cell's derived [`ScanClamp`] — the same number
     /// that sizes the maintenance SQL sizes the propagation. Day grain on
-    /// both axes; override the grain fields for coarser tables.
+    /// both axes; override the grain fields for coarser tables. Carries no
+    /// typed components — today's untyped-edge behaviour.
     pub fn from_clamp(downstream: &str, clamp: &ScanClamp) -> Self {
         Edge {
             upstream: clamp.source.clone(),
@@ -381,7 +391,15 @@ impl Edge {
             after_days: clamp_days(clamp.after),
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
         }
+    }
+
+    /// Attach a typed component vector (`super::edge_type::type_edge`) to an
+    /// already-built edge.
+    pub fn with_components(mut self, components: Vec<EdgeComponent>) -> Self {
+        self.components = components;
+        self
     }
 
     /// The downstream partitions an upstream delta of `[a, b)` dirties:
@@ -630,6 +648,7 @@ mod locality_margin_tests {
             after_days,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
         }
     }
 
@@ -923,5 +942,148 @@ mod project_observed_delta_tests {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 (`docs/outcomes/20260809-output-delta-typing/outcome.md`): typed
+// `Edge::components` are advisory this phase — `propagate`/`required_inputs`
+// read only `before_days`/`after_days`/the grain fields, unchanged by
+// whether a component vector is attached. These tests pin that an edge's
+// interval-math behaviour is byte-identical with or without components, for
+// both a window-addressed component and a degraded `WholeModel` one.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod typed_edge_advisory_tests {
+    use super::*;
+    use crate::analysis::output_delta::OutputDelta;
+    use crate::maintenance::edge_type::{Addressing, EdgeComponent};
+
+    fn window_component() -> EdgeComponent {
+        EdgeComponent {
+            group: "{amount}".to_string(),
+            shape: OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string(),
+            },
+            addressing: Addressing::Window {
+                axis: "event_date".to_string(),
+            },
+            columns: vec!["amount".to_string()],
+        }
+    }
+
+    fn whole_model_component() -> EdgeComponent {
+        EdgeComponent {
+            group: "{weight}".to_string(),
+            shape: OutputDelta::General {
+                reason: "'dims' is a mutable snapshot".to_string(),
+            },
+            addressing: Addressing::WholeModel {
+                degraded_by: "'dims' is a mutable snapshot".to_string(),
+            },
+            columns: vec!["weight".to_string()],
+        }
+    }
+
+    fn base_edge(before_days: i64, after_days: i64) -> Edge {
+        Edge {
+            upstream: "source".to_string(),
+            downstream: "downstream".to_string(),
+            before_days,
+            after_days,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
+        }
+    }
+
+    fn source_deltas(source: &str, iv: DayInterval) -> BTreeMap<String, Vec<DayInterval>> {
+        let mut m = BTreeMap::new();
+        m.insert(source.to_string(), vec![iv]);
+        m
+    }
+
+    #[test]
+    fn typed_edge_forward_matches_untyped_for_window_components() {
+        let untyped = base_edge(1, 2);
+        let typed = base_edge(1, 2).with_components(vec![window_component()]);
+        let delta = source_deltas("source", DayInterval::new(10, 12));
+
+        let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
+        let typed_result = propagate(&[typed], &delta).expect("typed propagates");
+
+        assert_eq!(
+            untyped_result.dirty, typed_result.dirty,
+            "attaching window components must not change forward propagation"
+        );
+        assert_eq!(untyped_result.per_edge, typed_result.per_edge);
+    }
+
+    #[test]
+    fn adjoint_holds_with_typed_components() {
+        // A small fixed DAG: source -> mid -> target, edges carrying window
+        // components throughout.
+        let e1 = Edge {
+            upstream: "source".to_string(),
+            downstream: "mid".to_string(),
+            before_days: 1,
+            after_days: 0,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: vec![window_component()],
+        };
+        let e2 = Edge {
+            upstream: "mid".to_string(),
+            downstream: "target".to_string(),
+            before_days: 0,
+            after_days: 1,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: vec![window_component()],
+        };
+        let edges = vec![e1, e2];
+
+        let period = DayInterval::new(20, 21);
+        let required = required_inputs(&edges, "target", period).expect("resolve");
+        let source_required = required.required.get("source").cloned().unwrap_or_default();
+
+        let deltas = source_deltas("source", source_required[0]);
+        let forward = propagate(&edges, &deltas).expect("propagate");
+        let target_dirty = forward.dirty.get("target").cloned().unwrap_or_default();
+
+        assert!(
+            target_dirty
+                .iter()
+                .any(|iv| iv.start <= period.start && period.end <= iv.end),
+            "forward(backward(P)) must contain P: target dirty {target_dirty:?} must cover \
+             {period:?}"
+        );
+    }
+
+    #[test]
+    fn whole_model_component_does_not_narrow_dirt() {
+        let untyped = base_edge(1, 2);
+        let typed = base_edge(1, 2).with_components(vec![whole_model_component()]);
+        let delta = source_deltas("source", DayInterval::new(10, 12));
+
+        let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
+        let typed_result = propagate(&[typed], &delta).expect("typed propagates");
+
+        let untyped_dirty = untyped_result
+            .dirty
+            .get("downstream")
+            .cloned()
+            .unwrap_or_default();
+        let typed_dirty = typed_result
+            .dirty
+            .get("downstream")
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(
+            untyped_dirty, typed_dirty,
+            "a WholeModel-degraded component must not narrow interval dirt below the untyped \
+             edge's own result this phase (components are advisory, not yet acted on)"
+        );
     }
 }

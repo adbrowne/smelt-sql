@@ -103,6 +103,32 @@ pub struct SourceFacts {
     pub delta_identity: Option<Vec<String>>,
 }
 
+impl SourceFacts {
+    /// Build the [`SourceFacts`] leaf-seeding reads from a source's
+    /// catalogued `SourceInfo` (`sources.md`), mirroring
+    /// `input_delta::SourceShape::from_source_info`'s fail-closed pattern:
+    /// `axis` from `timeseries:` presence (`None` when the source declares
+    /// no clock), `mutation_profile` from the declared `mutation_profile:`
+    /// key (`None` when undeclared — the fail-closed default is unchanged),
+    /// `delta_identity` from that block's own declared identity columns.
+    /// `name` is not carried on `SourceInfo` itself (it is the bare address
+    /// segment the caller already resolved the ref against), so it is taken
+    /// as a separate argument — the same shape `smelt-db`'s own
+    /// `source_facts(name, info, ..)` adapter uses for the maintenance-layer
+    /// `SourceFacts`.
+    pub fn from_source_info(name: &str, info: &smelt_core::sources::SourceInfo) -> Self {
+        SourceFacts {
+            name: name.to_string(),
+            axis: info.timeseries.as_ref().map(|t| t.partition_column.clone()),
+            mutation_profile: info.mutation_profile.as_ref().map(|m| m.kind.into()),
+            delta_identity: info
+                .mutation_profile
+                .as_ref()
+                .and_then(|m| m.delta_identity.clone()),
+        }
+    }
+}
+
 /// The walk verdict: per-output-column shape, in projection order.
 #[derive(Debug, Clone, Default)]
 pub struct OutputDeltaFacts {
@@ -876,6 +902,92 @@ mod tests {
                 axis: "event_date".to_string()
             }
         );
+    }
+
+    fn source_info(
+        has_timeseries: bool,
+        mutation_profile: Option<smelt_core::sources::MutationProfile>,
+        delta_identity: Option<Vec<&str>>,
+    ) -> smelt_core::sources::SourceInfo {
+        smelt_core::sources::SourceInfo {
+            path: std::path::PathBuf::from("/tmp/fake.yml"),
+            address_segments: vec!["fake".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: has_timeseries.then(|| smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: smelt_core::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            mutation_profile: mutation_profile.map(|kind| {
+                let mut profile = smelt_core::sources::SourceMutationProfile::from_kind(kind);
+                profile.delta_identity =
+                    delta_identity.map(|ks| ks.into_iter().map(|k| k.to_string()).collect());
+                profile
+            }),
+            source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
+            referential_integrity: None,
+        }
+    }
+
+    #[test]
+    fn source_facts_from_source_info_seeds_leaf() {
+        let append_only = source_info(
+            true,
+            Some(smelt_core::sources::MutationProfile::AppendOnly),
+            None,
+        );
+        let facts = SourceFacts::from_source_info("events", &append_only);
+        assert_eq!(facts.name, "events");
+        assert_eq!(facts.axis.as_deref(), Some("event_date"));
+        assert_eq!(
+            OutputDeltaTransfer {
+                ctx: &JoinContext::new(),
+                sources: &[facts],
+                model_verdicts: &BTreeMap::new(),
+            }
+            .seed_for_source_name("events"),
+            OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string()
+            }
+        );
+
+        let change_feed = source_info(
+            false,
+            Some(smelt_core::sources::MutationProfile::ChangeFeed),
+            Some(vec!["commit_version"]),
+        );
+        let facts = SourceFacts::from_source_info("cdc", &change_feed);
+        assert_eq!(
+            OutputDeltaTransfer {
+                ctx: &JoinContext::new(),
+                sources: &[facts],
+                model_verdicts: &BTreeMap::new(),
+            }
+            .seed_for_source_name("cdc"),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["commit_version".to_string()]
+            }
+        );
+
+        let undeclared = source_info(false, None, None);
+        let facts = SourceFacts::from_source_info("mystery", &undeclared);
+        assert!(matches!(
+            OutputDeltaTransfer {
+                ctx: &JoinContext::new(),
+                sources: &[facts],
+                model_verdicts: &BTreeMap::new(),
+            }
+            .seed_for_source_name("mystery"),
+            OutputDelta::General { .. }
+        ));
     }
 
     #[test]

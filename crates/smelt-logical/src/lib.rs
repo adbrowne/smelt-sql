@@ -29,6 +29,7 @@ pub use logical::{
     Provenance, ProvenanceTag,
 };
 pub use lowering::as_struct::{as_struct_to_sql, backend_supports_struct_literal};
+pub use maintenance::edge_type::{type_edge, Addressing, EdgeComponent};
 pub use plan_builder::{build_logical_plan_pure, FnCallInput};
 pub use rules::cumulative::{
     classify_cumulative, combiner_for, group_by_unique_key, state_column_summary, AggregatorColumn,

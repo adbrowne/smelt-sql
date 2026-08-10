@@ -39,6 +39,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         after_days,
         upstream_grain: Default::default(),
         downstream_grain: Default::default(),
+        components: Vec::new(),
     }
 }
 

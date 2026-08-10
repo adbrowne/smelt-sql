@@ -46,7 +46,7 @@ the addressing of one delta type, not the universal currency.
 |---|-------|--------|
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
-| 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | planned |
+| 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
@@ -88,6 +88,15 @@ the addressing of one delta type, not the universal currency.
   first real caller), and the cross-model verdict map stays in phase 4 with the consumer fold.
   Phase 3 keeps typed components **advisory** — interval math is unchanged, so the adjoint
   property is re-asserted rather than re-derived; acting on non-window components is phase 5.
+
+- 2026-08-10 — Phase 3 implemented: `maintenance::edge_type::type_edge` derives one typed
+  `EdgeComponent` per upstream column group the consumer reads, projecting `AppendOnlyWindow`
+  through the consumer's own derived column groups (degrading to `WholeModel` when the axis isn't
+  carried forward) and `KeyedUpsert`/`General` unconditionally to `Keyed`/`WholeModel`.
+  `propagate::Edge` carries the vector as an advisory field; interval math and the adjoint
+  property are unchanged and re-pinned by 3 new tests. `SourceFacts::from_source_info` lands but
+  is not yet called from production code — that, and wiring `type_edge` into
+  `build_forward_graph`, are phase 4's job alongside the consumer-side fold.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

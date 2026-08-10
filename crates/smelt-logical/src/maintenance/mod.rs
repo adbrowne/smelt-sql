@@ -28,6 +28,7 @@
 pub mod choice;
 pub mod derive;
 pub mod diff_patch;
+pub mod edge_type;
 pub mod emit;
 pub mod granularity;
 pub mod grouping;

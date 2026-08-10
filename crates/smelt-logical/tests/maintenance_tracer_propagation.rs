@@ -40,6 +40,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         after_days,
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Day,
+        components: Vec::new(),
     }
 }
 
@@ -559,6 +560,7 @@ fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
         after_days: 0,
         upstream_grain: PartitionGrain::Unclocked,
         downstream_grain: PartitionGrain::Day,
+        components: Vec::new(),
     }
 }
 
