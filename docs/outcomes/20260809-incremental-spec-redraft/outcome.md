@@ -48,7 +48,7 @@ way (timeless-oracle rule), at substantially reduced length.
 |---|-------|--------|
 | 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | done |
-| 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | planned |
+| 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
 | 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
@@ -103,6 +103,15 @@ way (timeless-oracle rule), at substantially reduced length.
   and the config/parser fossils — are already owned by rows 5 and 7). Note for later phases:
   `phases/01-outline.md`'s deletion-list "Owning phase" column predates the 2026-08-10 insertion
   of row 3, so its 4/5/6 map to current rows 5/6/7.
+
+- 2026-08-11 — Phase 3 done: §Semantics lines 752–1115 (364 lines, 7 headings) redrafted into
+  `### Per-cell write addressing` + `### Maintenance mechanics` (280 lines, 8 headings — one new
+  umbrella; all 7 pre-existing heading strings preserved verbatim). 94-claim inventory
+  (`phases/03-claims.md`) graded 84/94 preserved on first adversarial-verify pass (10 weakened —
+  rationale/detail drops only, zero lost, zero diagnostic-code or obligation-number changes); all
+  10 restored and re-verified present. `phases/03-check.sh` (structure, orphan-refs, claims
+  fixture, diagnostic codes, ≤280-line budget, timeless grep, no-split-code-span) all green;
+  `verify-phase.sh` full gate green.
 
 ## Blocked
 

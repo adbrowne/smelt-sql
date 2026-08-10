@@ -758,55 +758,33 @@ currently known write-pattern set, an **open registry**, not a closed enum:
 { region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild, diff_patch, … }
 ```
 
-**The available-addressings rule.** A write mechanism is admitted for a cell iff:
-
-> `available = (which contract facts the output declares) × (what the trigger/changed-input needs) × (the equivalence invariant) × (backend capability)`
-
+**The available-addressings rule.** A write mechanism is admitted for a cell iff
+`available = (which contract facts the output declares) × (what the trigger/changed-input needs) × (the equivalence invariant) × (backend capability)`.
 The first three factors are structural; the fourth is the target engine's capability registry
-(`architecture.md`). What each declared fact gates:
-
-- keyed `MERGE` / column-scoped `MERGE` / in-place `UPDATE` require a declared `unique_key`
-  (row identity);
-- region `DELETE`+`INSERT` requires a declared partition axis (`timeseries:`) to delete by;
-- a **bare lookup** (identity, no clock) has no region → only keyed merge or full rebuild;
-- a **bare partition table** (clock, no identity) has no identity → only region rewrite or full
-  rebuild. To gain keyed dimension-change addressing the output must declare a `unique_key`,
-  which makes it the composed clock-and-identity shape (§"What the composed shape enables") —
-  declaring identity is **load-bearing** (it admits keyed writes), never a dedup footnote.
-
-A cell with no admissible write mechanism is `MaintenanceNoAdmissibleTechnique`, naming the cell.
+(`architecture.md`). Keyed `MERGE` / column-scoped `MERGE` / in-place `UPDATE` require a declared
+`unique_key` (row identity); region `DELETE`+`INSERT` requires a declared partition axis
+(`timeseries:`). A **bare lookup** (identity, no clock) admits only keyed merge or full rebuild; a
+**bare partition table** (clock, no identity) admits only region rewrite or full rebuild — gaining
+keyed dimension-change addressing requires declaring `unique_key`, making it the composed
+clock-and-identity shape (§"What the composed shape enables"); declaring identity is
+**load-bearing** (it admits keyed writes), never a dedup footnote. A cell with no admissible write
+mechanism is `MaintenanceNoAdmissibleTechnique`, naming the cell.
 
 **Addressing is how a row is found, not how far the statement ranges.** Choosing keyed `MERGE`
-for a cell picks row-location by identity; it does not make the statement table-wide. When the
-output also declares a `timeseries:` axis, the write stays **bounded to the affected
-partitions**: the changed-input delta is resolved to the touched partitions first, and the keyed
-`MERGE` is emitted per partition (or with a partition predicate) against just those. A genuinely
-window-free keyed write — one whole-table `MERGE` — is reached only when the cell **provably
-cannot** be bounded to a partition set; that unboundedness is itself a
-derived per-cell fact, fail-loud, never a default. Partition-scoping is orthogonal to the
-addressing corner: region and keyed writes alike ride the partition pruning the plan computes
-(§"Partition-local maintenance").
+picks row-location by identity; it does not make the statement table-wide. When the output also
+declares a `timeseries:` axis, the write stays **bounded to the affected partitions**: the
+changed-input delta resolves to the touched partitions first, and keyed `MERGE` is emitted per
+partition (or with a partition predicate) against just those. A whole-table `MERGE` is reached
+only when the cell **provably cannot** be bounded to a partition set — unboundedness is itself a
+derived per-cell fact, fail-loud, never a default. Partition-scoping is orthogonal to addressing
+(§"Partition-local maintenance"). **User pins**: `maintenance.cells[].write` names the write
+mechanism per cell (§Surface), selecting among *admissible* mechanisms without ever widening the
+admissible set — refused with `MaintenanceWriteAddressingRefused` when the addressing cannot
+uphold the equivalence invariant, and with `MaintenanceWritePatternUnavailable` when the name is unrecognised or the backend cannot execute it.
 
-**User pins.** `maintenance.cells[].write` names the write mechanism per cell (§Surface). A pin
-is validated against the equivalence invariant for its cell — refused with
-`MaintenanceWriteAddressingRefused` when the addressing cannot uphold it — and refused with
-`MaintenanceWritePatternUnavailable` when the name is unrecognised or the target backend cannot
-execute it. The pin selects among *admissible* mechanisms; it never widens the admissible set.
-
-**Worked example — the plan of a composed model.** `order_facts` (running example) declares
-both facts and joins the mutable `customers` dimension:
-
-```sql
----
-refresh: incremental
-unique_key: [order_id]
-timeseries: { event_time_column: order_ts, partition_column: order_date, granularity: day }
----
-SELECT o.order_id, o.order_date, o.order_ts, o.amount, c.tier AS customer_tier
-FROM smelt.orders o JOIN smelt.customers c ON o.customer_id = c.customer_id
-```
-
-`smelt explain order_facts` prints a plan of this shape (illustrative rendering):
+**Worked example — the plan of a composed model.** `order_facts` (running example) declares both
+`unique_key: [order_id]` and a `timeseries:` clock on `order_ts`/`order_date`, joining mutable
+`customers` to project `c.tier AS customer_tier`; `smelt explain order_facts` prints this plan (illustrative):
 
 ```
 model order_facts  (grain: key, time-partitioned — clock + identity declared)
@@ -819,299 +797,237 @@ cells:
 ```
 
 One model, three cells, two addressings: new orders rewrite their partitions; a tier correction
-merges one column by key into just the partitions the affected orders live in. Neither verdict
-is declared, and pinning either (`cells[].write`) is validated, not trusted.
+merges one column by key into just the partitions the affected orders live in — neither verdict
+declared, pinning either (`cells[].write`) validated, not trusted.
 
 #### The write-pattern set is open (and partly backend-provided)
 
 The patterns named above are the ones understood *today*. The set grows — partition/atomic swap
-(Delta/Iceberg `REPLACE PARTITION`), copy-on-write vs merge-on-read variants, `MERGE … WHEN NOT
-MATCHED BY SOURCE` prune, staged-upsert, a predicate-targeted `UPDATE` locating rows by
-something other than the row key, incremental MV refresh, engine-specific primitives —
-and the durable contract is deliberately **not** the enumeration; the enumeration is data.
+(Delta/Iceberg `REPLACE PARTITION`), copy-on-write vs merge-on-read, an unmatched-by-source prune
+variant, staged-upsert, a predicate-targeted `UPDATE` locating rows by something other than the
+row key, incremental MV refresh, engine-specific primitives — and the durable contract is
+deliberately **not** the enumeration: the enumeration is data.
 
 - **The invariant is the admission function, not the enum.** A new pattern is admitted by
   declaring which contract facts it requires (identity? a partition axis? ordered arrival?) and
-  discharging the equivalence proof obligation for the cells it serves. Nothing else moves:
-  grain stays derived, the cost model ranks whatever the rule admits. A new mechanism can never
-  be less correct than the ones it joins, because the equivalence gate is the price of entry.
-  Concretely: a dimension-mutation cell could one day be served by an `UPDATE` that locates
-  rows through the **join key** (`customer_id`) rather than the output's `unique_key`,
-  partition by partition — admitted exactly like any other pattern, by declaring the facts it
-  needs (a proven functional dependency from join key to the repaired columns) and discharging
-  the equivalence obligation for that cell. Today's registry serves that cell with a keyed
-  column `MERGE` (§"Per-cell write addressing", worked example).
-- **The pattern set is backend-relative.** Engines differ sharply on atomic partition swap, true
-  `UPDATE`, and merge-on-read, so admission carries backend capability as its fourth factor: the
-  write layer queries the backend's capability registry (`architecture.md`), and a pattern the
-  target cannot execute is simply not a candidate. The registry is where backend-specific
-  optimisations are *contributed* rather than special-cased in the planner, and it keeps a
-  portable project from silently depending on a primitive only one engine has.
-- **The `write:` pin is an open, fail-loud vocabulary.** Pins name patterns and patterns are
-  extensible, so `write:` is an open name resolved against the registry, not a sealed enum. An
-  unrecognised pin, or one naming a pattern the target backend cannot provide, is refused with a
-  diagnostic — never silently downgraded.
+  discharging the equivalence proof obligation for the cells it serves; grain stays derived, the
+  cost model ranks whatever the rule admits, and a new mechanism can never be less correct than
+  the ones it joins, since the equivalence gate is the price of entry. Concretely, a
+  dimension-mutation cell could one day be served by an `UPDATE` locating rows through the **join
+  key** (`customer_id`) rather than `unique_key`, by declaring a proven functional dependency from
+  join key to the repaired columns and discharging equivalence — today's registry instead serves it with keyed column `MERGE` (worked example above).
+- **The pattern set is backend-relative, and `write:` is an open, fail-loud vocabulary.** Engines
+  differ sharply on atomic partition swap, true `UPDATE`, and merge-on-read, so admission carries
+  backend capability as a fourth factor via the backend's capability registry (`architecture.md`),
+  where backend-specific optimisations are *contributed* rather than special-cased in the planner,
+  keeping a portable project from silently depending on a primitive only one engine has. `write:`
+  pins resolve against this same registry, not a sealed enum: an unrecognised pin, or one naming a
+  pattern the backend cannot provide, is refused with a diagnostic, never silently downgraded.
 
-**`diff_patch` — compute, diff, write only the difference.** A pattern for reconciliation runs
-and idempotent re-runs: the candidate rows for a slice are computed, diffed against the slice's
-stored state, and only the difference is written — inserting rows absent from storage, updating
-stored rows whose compared columns differ from the candidate, and deleting stored rows absent
-from a *complete* candidate set. Contract facts it requires: a declared `unique_key` (row
-identity for the diff join) for the insert/update legs, and change comparability
-(`model_properties.md` §"Change comparability") over the written columns for the update leg. The
-delete leg additionally requires **slice completeness** — the candidate set must provably contain
-every row that should exist in the slice, the same premise the repair family's correctness
-argument rests on (§"The repair family") — and is not admitted without it; lacking completeness,
-the pattern degrades explicitly to insert+update, stated as a reduced-capability admission rather
-than a silently dropped delete leg. `diff_patch` is graded **Idempotent** — a second run against
-unchanged input diffs to empty — which is what makes it the reconciliation and drift-repair
-write (§"The transactional frontier write (merge ledger)"). The slice a `diff_patch` write restricts to is the
-*candidate's own* slice — the affected-key set for a per-group recompute (§"The repair family"),
-a partition region for a windowed one — so the pattern is not tied to a partition axis.
+**`diff_patch` — compute, diff, write only the difference.** A pattern for reconciliation runs and
+idempotent re-runs: the candidate rows for a slice are computed, diffed against the slice's stored
+state, and only the difference is written — inserting absent rows, updating rows whose compared
+columns differ, deleting stored rows absent from a *complete* candidate set. It requires a
+declared `unique_key` for the insert/update legs and change comparability
+(`model_properties.md` §"Change comparability") for the update leg; the delete leg additionally
+requires **slice completeness** (the repair family's correctness premise, §"The repair family")
+and without it degrades explicitly to insert+update, a reduced-capability admission rather than a
+silently dropped delete leg. `diff_patch` is graded **Idempotent** (a second run against unchanged
+input diffs to empty), making it the reconciliation and drift-repair write (§"The transactional
+frontier write (merge ledger)"); its slice is the *candidate's own* — affected-key set for a
+per-group recompute, partition region for a windowed one — so it is not tied to a partition axis.
+Backends **execute** registered patterns; they never **author** maintenance-statement text (§"Statement emission (single owner)").
 
-Backends **execute** registered patterns; they never **author** maintenance-statement text
-(§"Statement emission (single owner)").
-
-### The repair family
+#### The repair family
 
 A non-invertible combiner refuses reprocessing outright when a merged window's input changes
-(§"Reprocessing") — full refresh is the only universally correct fallback for it. The repair
-family narrows that refusal for one common case: when the change is a **retraction or mutation**
-whose affected output keys are provably finite (`model_properties.md` §"Affected-key discovery"),
-the plan recomputes *only those groups* from their bounded input slice instead of rebuilding the
-whole table or region. It is the **targeted-write refinement of recompute-a-region**: the same
-full-input read as a region recompute, addressed by key rather than by region — landing in the
-**column-scoped re-derivation** corner of the 2×2 (§"The plan matrix") — and like a region
-recompute it **supersedes and resets** the ledger for the keys it rewrites (§"Per-cell admission",
-interchangeability).
+(§"Reprocessing") — full refresh is the only universally correct fallback. The repair family
+narrows that refusal for one common case: when the change is a **retraction or mutation** whose
+affected output keys are provably finite (`model_properties.md` §"Affected-key discovery"), the
+plan recomputes *only those groups* from their bounded input slice instead of rebuilding the whole
+table or region — the **targeted-write refinement of recompute-a-region**: the same full-input
+read, addressed by key rather than region, landing in the **column-scoped re-derivation** corner
+of the 2×2 (§"The plan matrix"), and like a region recompute it **supersedes and resets** the
+ledger for the keys it rewrites (§"Per-cell admission", interchangeability).
 
-**Why it is correct.** Recomputing a key set `K` over an input slice that provably contains
-*every* row contributing to any `k ∈ K` reproduces `full_refresh` restricted to `K`; every key
-outside `K` is untouched, and therefore stays bit-identical to its prior state. The equivalence
-invariant (§"The equivalence invariant") holds cell-wide as a consequence: written keys equal the
-full-refresh oracle restricted to `K`, unwritten keys equal it trivially. The load-bearing premise
-is **slice completeness** — the input slice a per-group recompute reads must provably contain
-every row that can contribute to a key in `K`. This is not a new proof: it reuses **key temporal
-locality** (§"Key temporal locality"), whose whole purpose is establishing that a key's
-contributing rows lie within a computable slice of the input.
+**Why it is correct.** Recomputing key set `K` over an input slice that provably contains *every*
+row contributing to any `k ∈ K` reproduces `full_refresh` restricted to `K`; keys outside `K` stay
+bit-identical, so the equivalence invariant (§"The equivalence invariant") holds cell-wide. The
+load-bearing premise, **slice completeness**, is not a new proof but a reuse of **key temporal
+locality** (§"Key temporal locality"), whose purpose is establishing that a key's contributing
+rows lie within a computable slice of the input. **Admission obligations**: a repair cell is
+admitted only when §"Per-cell admission" obligations 4 (bounded reach — the key→input-slice reach,
+derived via a key-temporal-locality route or declared-and-checked), 6 (well-defined groups — the
+walk's grain names the groups recomputed), and 7 (affected-key discovery: the changed input's
+delta names a finite key set; a sound over-approximation is admissible, an under-approximation
+never is — a missed key leaves stale state for a touched group) all discharge — fail-closed, any
+one unprovable refuses the repair family by name, never widening to a whole-table repair, naming
+which obligation failed (`MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`).
 
-**Admission obligations.** A repair cell is admitted only when three obligations discharge. Two
-already exist in §"Per-cell admission"'s numbered list and are reused, not restated; the third is
-new:
+**Obligation 7 over a `mutable_snapshot` source.** This posture keeps no tombstone or change
+history, so a key whose *entire* window contribution was deleted between runs leaves no row for a
+current-source scan to select — an under-approximation obligation 7 forbids. The affected-key
+relation is instead the **group-grain fingerprint sidecar diff** (`sources.md` §"The fingerprint
+sidecar" — "Partition grain", one stored row per output group key): a vanished group still
+surfaces on the "sidecar row with no matching source key" leg with no source row left to name it.
+This discovery read is **unbounded by the cell's `ScanClamp`** — a clamped rescan against the
+sidecar's full digests would flag every out-of-clamp group as spuriously changed, degrading to a
+whole-table repair every run — while the per-group *recompute* stays bounded by the discovered key
+set per obligation 4. An **absent or stale-stamped comparandum**
+(`sources.md` §"The fingerprint sidecar" — "Invalidation") cannot
+distinguish a vanished group from one that never existed, so the affected set widens for that run
+to every currently-observed group *plus* every group already in stored output — a sound
+over-approximation (a runtime comparandum being absent, distinct from admission refusing an
+unprovable obligation), degenerating to a whole-table repair for that run and self-healing once
+the sidecar refreshes. An append-only source (no native deletion) keeps the ordinary clamped scan
+— the sidecar is scoped to the one posture that needs it. **Ledger grading and re-run safety**:
+per-group recompute is graded **Idempotent** for the keys in its slice, exactly like a region
+recompute (§"The transactional frontier write (merge ledger)") — re-running reproduces the same
+state and resets any additive ledger record rather than folding a second time on top of it.
 
-- **derivable group key** — obligation 6 ("well-defined groups"): the walk's grain names the
-  groups a repair recomputes;
-- **bounded per-group read footprint** — obligation 4 ("bounded reach"): the key→input-slice
-  reach is derived (a key-temporal-locality route) or declared-and-checked;
-- **affected-key discovery** — a new obligation 7, below: the changed input's delta names a
-  finite key set (`model_properties.md` §"Affected-key discovery"). A sound over-approximation
-  (a superset of the true affected keys) is admissible — it costs extra recomputation, never
-  correctness; an under-approximation is never admissible, because a missed key would leave stale
-  state for a group the retraction actually touched.
+**Repair over a decomposed combiner.** Its fold path (§"Decomposed state (rung 2) in keyed
+models") materialises hidden `__`-marked state columns alongside its presented ones, so a repaired
+group's candidate must carry them too or the write's implicit column list mismatches the physical
+table. The repair candidate is therefore the model's own **state-augmented** projection — raw
+model SQL widened with the state columns' own `per_partition_expr`s before compilation, identical
+to the widening `execute_windowed_keyed`/`execute_snapshot_reconcile` apply for the ordinary fold
+— a no-op for a stateless column family, and thus for every combiner admitted before decomposed
+state existed. A `diff_patch` write over a decomposed repair extends its change-suppression
+predicate over the hidden state columns too: a group whose presented value is unchanged but whose
+state moved is still rewritten — strictly less suppression than presented-only comparison, sound by construction.
 
-All three are fail-closed: any one unprovable refuses the repair family by name for that cell —
-it never widens to a whole-table repair, and the refusal always names which obligation failed
-(§Diagnostics, `MaintenanceRepairKeysNotDiscoverable` / `MaintenanceRepairSliceUnbounded`).
+### Maintenance mechanics
 
-**Obligation 7 over a `mutable_snapshot` source.** A `mutable_snapshot` source keeps no tombstone
-or change history, so a key whose *entire* window contribution was deleted between runs leaves no
-row for a current-source scan to select — a scan-based affected-key read alone cannot witness that
-key at all, which is exactly the under-approximation obligation 7 forbids. For this source posture
-the affected-key relation is instead the **group-grain fingerprint sidecar diff**
-(`sources.md` §"The fingerprint sidecar" — "Partition grain"): the sidecar keeps one row per output
-group key, so a vanished group still has a stored comparandum and surfaces on the diff's "sidecar
-row with no matching source key" leg even though no source row survives to name it. This discovery
-read is **unbounded by the cell's `ScanClamp`** — a clamped rescan compared against the sidecar's
-full stored digests would flag every group outside the clamp as spuriously changed, degrading to a
-whole-table repair on every run rather than only when the comparandum is missing — while the
-per-group *recompute* itself stays bounded by the discovered key set exactly as obligation 4
-requires. An **absent or stale-stamped comparandum** (no prior sidecar partition, or one whose
-identity stamp no longer matches — `sources.md` §"The fingerprint sidecar" — "Invalidation") cannot
-distinguish a group that vanished from one that never existed, so for that run the affected set
-widens further, to every currently-observed group *plus* every group already present in the stored
-output — a sound over-approximation, distinct from the obligation's own "never widens to a
-whole-table repair" rule above (that rule is about *admission* refusing an unprovable obligation;
-this is a runtime comparandum being absent). It degenerates to a whole-table repair for that one
-run and self-heals once the sidecar is refreshed. An append-only source (or any other posture with
-no native deletion) keeps the ordinary clamped current-source scan — the group-grain sidecar is
-scoped to the one posture that needs it.
+This group owns how a cell's chosen technique executes: scan/write windowing, the
+partition-locality guardrail on the SQL windowing produces, who authors that SQL, and the one
+trigger (fields added to a model) that plans differently from an ordinary delta.
 
-**Ledger grading and re-run safety.** Per-group recompute is graded **Idempotent** for the keys in
-its slice, exactly like a region recompute (§"The transactional frontier write (merge ledger)"): re-running it
-reproduces the same state, and it resets any additive ledger record for those keys rather than
-folding a second time on top of it.
-
-**Repair over a decomposed combiner.** A decomposed combiner's fold path (§"Decomposed state
-(rung 2) in keyed models") materialises hidden `__`-marked state columns alongside its presented
-ones — a repaired group's candidate must carry them too, or the write's implicit column list
-mismatches the physical table. The repair candidate a cell stages is therefore the model's own
-**state-augmented** projection, identical to the projection the fold's own create/merge path
-materialises: the raw model SQL widened with the state columns' own `per_partition_expr`s before
-compilation, the same widening `execute_windowed_keyed`/`execute_snapshot_reconcile` already apply
-for the ordinary fold. A stateless column family widens to nothing — this is a no-op for every
-combiner admitted before decomposed state existed. A `diff_patch` write over a decomposed repair
-extends its change-suppression predicate to compare the hidden state columns alongside the
-presented compared columns: a group whose presented value is unchanged but whose state moved is
-still rewritten, since suppressing that write would leave stale state behind a correct-looking
-value — strictly less suppression than presented-only comparison, sound by construction.
-
-### Windowed maintenance and the horizon
+#### Windowed maintenance and the horizon
 
 Maintenance runs over a **bounded input window by default** — a full scan is the surfaced
-fallback, not the baseline. A run reasons about two windows, always with `scan ⊇ write`:
-
-- the **write window** — the partitions or keys written this run;
-- the **scan window** — the input rows read to produce that write window correctly.
-
-The scan window is bounded **where the model carries a `timeseries:` clock**: input-delta
-discovery is window-forward, so only the new window (plus a lookback) is read, and stored state
-stands in for history. Without a clock the source can only be snapshot-diffed, so the scan
-degrades to a full read (`models.md` §"Input-consumption axis"). Scan windowing is orthogonal to
-output addressing: a clocked *key-addressed* model still windows its **scan** even though its
-**write** reaches back by key outside that window. Bounding the scan never weakens the
+fallback, not the baseline. A run reasons about two windows, always with `scan ⊇ write`: the
+**write window** (partitions or keys written this run) and the **scan window** (input rows read to
+produce it correctly). The scan window is bounded **where the model carries a `timeseries:`
+clock** — only the new window plus a lookback is read, stored state standing in for history —
+and degrades to a full read without a clock (`models.md` §"Input-consumption axis"). Scan
+windowing is orthogonal to output addressing (a clocked *key-addressed* model still windows its
+**scan** even though its **write** reaches back by key outside that window) and never weakens the
 invariant: the engine evaluates the model, joins included, over the widened scan window, and the
 write is **clamped** to the exact write window (`model_transforms.md` §"widened scan + exact
-clamp") — join optimisation stays with the engine rather than smelt hand-computing minimal
-deltas.
+clamp"), so join optimisation stays with the engine rather than smelt hand-computing minimal
+deltas. **The horizon (partition grain only)** is a **write-eligibility clamp** — a bound on
+which partitions a run may write to, the far edge of the maintained window past which inputs are
+no longer folded in. It is **derived**, never trusted from a declaration: the clamp comes from the
+model's own reach (lookback, window frames, join contribution — `model_properties.md`), since a
+declared horizon smaller than the true reach would drop rows that should have been rewritten. A
+modeller may declare a horizon *ceiling* (`horizon_ceiling: '30 days'`): smelt warns at compile
+time when the derived horizon would exceed it, and the clamp always uses the derived value. Because
+the clamp *is* the model's SQL, a genuinely late arrival — landing after its natural partition
+passed the horizon — is **silently excluded** at the **default point**, not diagnosed: smelt cannot
+fail loud on a row it never scans. **Surfacing lateness is a model-author concern, not a
+maintenance guarantee**, unless the model opts into the **frozen horizon** contract-lattice point
+(§"The contract lattice"), turning this into a checked, diagnosed condition
+(`ContractLateArrivalOutsideHorizon`). The default-point pattern: fold the late row into the
+current partition (re-stamping its partition time) carrying a lateness/validity flag, so data
+still flows and a data-quality check can raise on flagged rows.
 
-**The horizon (partition grain only).** The horizon is a **write-eligibility clamp** — a bound
-on which partitions a run may write to: the far edge of the maintained window, past which inputs
-are no longer folded in. It is **derived**, never trusted from a declaration: the clamp bounds
-are computed from the model's own reach (lookback, window frames, join contribution —
-`model_properties.md`), because a declared horizon smaller than the true reach would drop rows
-that should have been rewritten. A modeller may declare a horizon *ceiling*
-(`horizon_ceiling: '30 days'`): smelt warns at compile time when the derived horizon would
-exceed it, and the clamp always uses the derived value.
-
-Because the derived clamp *is* the model's SQL, a genuinely late arrival — one landing after its
-natural partition passed the horizon — is **silently excluded** from the maintenance run at the
-**default point**, not diagnosed: smelt cannot fail loud on a row it never scans, and rows
-outside the scan window are outside "inputs processed so far" by construction. **Surfacing
-lateness is a model-author concern, not a maintenance guarantee**, unless the model opts into the
-**frozen horizon** contract-lattice point (§"The contract lattice"), which turns this into a
-checked, diagnosed condition (`ContractLateArrivalOutsideHorizon`) instead. The available pattern
-for the default point: fold the late row into the current partition (re-stamping its partition
-time) carrying a lateness/validity flag, so the data still flows, and let a data-quality check
-raise on the flagged rows.
-
-**The key grain has no write-eligibility clamp.** A `grain: key` run merges **every** delta row
-it scans, into whatever key it names, however old (§"No write-eligibility clamp"). A derived
-forward reach is still computed and reported for observability, but it never gates admission and
-never bounds a write. This is deliberate, not an oversight: keyed write work is proportional to
-delta size regardless of key age, so a write clamp buys nothing for correctness — and it would
-silently drop scanned inputs, the one thing the invariant forbids. What a clamp would buy
-(settled-key GC, a bounded working set) is deferred optimisation that must ship together with
-late-fact accounting if ever introduced.
-
-**Three pruning categories, one principle.** *Only proofs prune; a declared bound is admitted
-only checked (fail-loud on violation); no unproven bound ever refuses a write.* Exactly three
-categories of narrowing exist:
+**The key grain has no write-eligibility clamp.** A `grain: key` run merges **every** delta row it
+scans, into whatever key it names, however old (§"No write-eligibility clamp"); a derived forward
+reach is still computed for observability but never gates admission or bounds a write — deliberate:
+keyed write work is proportional to delta size regardless of key age, so a clamp buys nothing for
+correctness and would silently drop scanned inputs, the one thing the invariant forbids. What it
+would buy (settled-key GC, a bounded working set) is deferred, shipping only with late-fact
+accounting if ever introduced. **Three pruning categories, one principle:** *only proofs prune; a
+declared bound is admitted only checked (fail-loud on violation); no unproven bound ever refuses a write.*
 
 1. **Target-scan slice pruning** (read-side) — rows the write provably cannot touch are removed
    from the merge's *read* of stored state; licensed by the key-temporal-locality proofs or the
    transactionally-checked recurrence declaration (§"Key temporal locality").
 2. **No-op write elimination** (write-side) — a maintenance write is skipped **iff** the row's
-   applied effect is proven to be the identity, per row *by evaluation*: an exact
-   `IS DISTINCT FROM` comparison over every column that can differ under the cell's trigger
-   (comparing only the mutation-sensitive group is sound *because* the other groups are proven
-   insensitive). Suppression may never skip **evaluating** a scanned input — restricting what is
-   *computed* is a separate concern with its own static licence (the delta-restricted
-   enrichment compute, `model_transforms.md`, licensed by the skeleton-source-closure proof). A compared
-   column must be a pure function of the processed inputs; a column that legitimately varies run
-   to run (`contract: plausible`, run-pinned `NOW()`) is incomparable, and a cell containing one
-   refuses the conditional technique, fail-closed. At a fixed `S` the suppressed and
-   unconditional variants produce identical state — interchangeable in the strongest sense of
-   §"Per-cell admission", so choosing between them is a cost-model/`prefer`/`technique` matter.
-   `model_transforms.md` catalogues the two physical realisations: change-suppressed MERGE (a
-   matched-arm `IS DISTINCT FROM` predicate, dialect-split on the unmatched-by-source side) and
+   applied effect is proven the identity, per row *by evaluation*: an exact `IS DISTINCT FROM`
+   comparison over every column that can differ under the cell's trigger (the mutation-sensitive
+   group alone, since the rest are proven insensitive). Suppression never skips **evaluating** a
+   scanned input — that is the separately-licensed delta-restricted enrichment compute
+   (`model_transforms.md`, skeleton-source-closure proof). A compared column must be a pure
+   function of the processed inputs; one varying run to run (`contract: plausible`, run-pinned
+   `NOW()`) is incomparable and refuses the technique, fail-closed. At fixed `S` the suppressed and
+   unconditional variants are interchangeable in the strongest sense of §"Per-cell admission" — a
+   cost-model/`prefer`/`technique` choice. `model_transforms.md` owns the two realisations, both
+   licensed by region row identity plus per-column change comparability: change-suppressed MERGE
+   (a matched-arm `IS DISTINCT FROM` predicate, dialect-split on the unmatched-by-source side) and
    the staged-candidate conditional DELETE+INSERT (the merge-less realisation for a backend
-   without `MERGE`), both licensed by region row identity plus per-column change comparability.
-3. **Write-eligibility clamps** — forbidden on the key grain; derived-only on the partition
-   grain (the horizon above).
+   without `MERGE`).
+3. **Write-eligibility clamps** — forbidden on the key grain; derived-only on the partition grain
+   (the horizon above).
 
-Categories 1–2 preserve the invariant bit-for-bit at fixed `S`; category 3 is different in kind
-— it bounds which inputs enter `S` at all. A suppressed write is the write-side dual of slice
-pruning (the proof is the per-row equality just evaluated), never a clamp. Two catalogued
-transforms read a *derived* forward reach without being write clamps: the dimension-driven
-horizon-bounded MERGE (a scan/recompute bound on the enrichment recompute, not the write) and
-the horizon settled-delay/tail-rewrite mechanism (partition-grain forward-reach machinery); both
-in `model_transforms.md`.
+Categories 1–2 preserve the invariant bit-for-bit at fixed `S`; category 3 bounds which inputs
+enter `S` at all, different in kind. A suppressed write is the write-side dual of slice pruning
+(the proof is the per-row equality just evaluated), never a clamp. Two catalogued transforms read
+a *derived* forward reach without being write clamps: the dimension-driven horizon-bounded MERGE
+(a scan/recompute bound on the enrichment recompute, not the write) and the horizon
+settled-delay/tail-rewrite mechanism (partition-grain forward-reach machinery), both in `model_transforms.md`.
 
-### Partition-local maintenance (the K8 guardrail)
+#### Partition-local maintenance (the K8 guardrail)
 
 A cell's per-`(cell × source)` locality verdict is the **partition-locality projection**
-(`model_properties.md` owns the proof, including the cross-axis predicate requirement). This
-section owns the policy consuming the verdict: emitted maintenance SQL must carry the partition
-predicate on **both** the scan and the merge/overwrite target — a bound stated only on a
-non-partition column is one the storage layer cannot prune by. Under the default `scan_bounds`
+(`model_properties.md` owns the proof, including the cross-axis predicate requirement); this
+section owns the policy consuming it: emitted maintenance SQL must carry the partition predicate
+on **both** the scan and the merge/overwrite target, since a bound stated only on a non-partition
+column is one the storage layer cannot prune by. Under the default `scan_bounds`
 (`require: partition_local`, `on_violation: error`), a non-local cell refuses
 (`MaintenanceScanUnbounded`) unless the source carries `allow_full_scan: true`; `max_lookback`
 additionally refuses a derived span wider than the operator's stated expectation. The guardrail
 never modifies a clamp — it only refuses or warns (§Surface "Maintenance overrides").
 
-### Statement emission (single owner)
+#### Statement emission (single owner)
 
-The physical statements a run executes for a cell — the region `DELETE`+`INSERT` pair, the keyed
-fold `MERGE`, the column-scoped `MERGE`, the in-place `UPDATE`, the first-run
-`CREATE TABLE … AS` — are produced by pure emitter functions in the maintenance layer
-(`smelt-logical`): the statement-level counterpart of "one derivation, many consumers". An
-emitter is a pure function from plain data — target table, region literals, key columns,
-combiner-rendered set expressions, the compiled/clamped SELECT body, a dialect tag — to an
-ordered statement group plus its transactional requirement (a paired `DELETE`+`INSERT` is one
-transaction: a failed `INSERT` rolls back its `DELETE`). Backends *execute* emitted statements
-(connections, transactions, blocking dispatch) and never author maintenance-statement text;
-dialect differences (e.g. `MERGE … UPDATE SET *` needing a full-row source projection versus an
-explicit column-list `SET`) live in the emitters as dialect-keyed variants.
+The physical statements a run executes for a cell — region `DELETE`+`INSERT`, keyed fold `MERGE`,
+column-scoped `MERGE`, in-place `UPDATE`, first-run `CREATE TABLE … AS` — are produced by pure
+emitter functions in the maintenance layer (`smelt-logical`): the statement-level counterpart of
+"one derivation, many consumers". An emitter is a pure function from plain data — target table,
+region literals, key columns, combiner-rendered set expressions, the compiled/clamped SELECT body,
+a dialect tag — to an ordered statement group plus its transactional requirement (a paired
+`DELETE`+`INSERT` is one transaction: a failed `INSERT` rolls back its `DELETE`). Backends
+*execute* emitted statements and never author maintenance-statement text; dialect differences
+(e.g. a full-row source projection versus an explicit column-list `SET` for `MERGE ... UPDATE`)
+live in the emitters as dialect-keyed variants. Three deliberate exclusions, all warehouse-resident
+bookkeeping owned per dialect by `smelt-state`, interleaved transactionally with the write each
+describes but not itself a maintenance statement: the reconciliation ledger's DDL/DML (§"The
+frontier record (reconciliation ledger)"); the observed-output-delta record (§"The graph layer");
+and the fingerprint sidecar's own storage — DDL, digest-refresh upsert, GC delete (`sources.md`
+§"The fingerprint sidecar") — excepting the sidecar's **diff query**, which IS emitter-authored
+since which source keys count as "changed" is a derived maintenance-relevant comparison
+(`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`). Non-maintenance SQL
+(introspection, seed loading, schema-evolution DDL) is outside this rule; single ownership is what
+makes maintenance SQL *observable* — the same emitters serve execution, the conformance
+equivalence gates, and `smelt explain --show-sql`, so printed SQL cannot drift from executed SQL.
 
-Three deliberate exclusions, all warehouse-resident bookkeeping owned per dialect by
-`smelt-state`, each interleaved transactionally with the write it describes but not itself a
-maintenance statement:
-
-- the reconciliation ledger's DDL/DML (§"The frontier record (reconciliation ledger)");
-- the observed-output-delta record (§"The graph layer");
-- the fingerprint sidecar's own storage — table DDL, digest-refresh upsert, GC delete
-  (`sources.md` §"The fingerprint sidecar"). The sidecar's **diff query** is the one exception
-  within that feature: which source keys count as "changed" is a derived maintenance-relevant
-  comparison, so it IS emitter-authored
-  (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`).
-
-Non-maintenance SQL (introspection, seed loading, schema-evolution DDL) is outside this rule.
-Single ownership is what makes maintenance SQL *observable*: the same emitters serve execution,
-the conformance equivalence gates, and `smelt explain --show-sql`, so printed SQL cannot drift
-from executed SQL.
-
-### The definition-change trigger
+#### The definition-change trigger
 
 A model gaining output fields is a trigger of its own kind: the added group's processed-input
 vector is `∅` over every existing region, and its backfill advances `∅ → current`, touching only
-the new group. The classification of an added field — `SkeletonAdd` / `PureBackfill` /
-`UpstreamRederive` — is the definition-change column classification proof
-(`model_properties.md`); this section owns the plan-level policy each maps to:
+the new group. The classification of an added field (`SkeletonAdd` / `PureBackfill` /
+`UpstreamRederive`) is the definition-change column classification proof (`model_properties.md`);
+this section owns the plan-level policy each maps to:
 
 - `SkeletonAdd` (identity / grouping / dedup / ordering) is a **grain change**, refused as a
-  column backfill (`MaintenanceSkeletonColumnAdded`) — the honest plan is a recompute,
-  effectively a new model.
+  column backfill (`MaintenanceSkeletonColumnAdded`) — the honest plan is a recompute, effectively a new model.
 - `PureBackfill` lands in the 2×2's targeted-write column as an in-place `UPDATE` (no upstream
   read); `UpstreamRederive` lands there as a column-scoped `MERGE`, keyed where the source is
-  keyed, inheriting each read source's partition-locality verdict unchanged.
-- Fields added together factor by shared mutation-sensitivity, one backfill op per group. The
-  backfill of a newly-added group is **always full-input**, even for a column whose ongoing
-  algebra folds — there is no prior state of that column to fold onto.
+  keyed, inheriting each read source's partition-locality verdict unchanged. Fields added together
+  factor by shared mutation-sensitivity, one backfill op per group; a newly-added group's backfill
+  is **always full-input**, even for a folding column, since there is no prior state to fold onto.
 - **Group convergence:** a field co-sensitive with an *existing* group still instantiates at `∅`
   and forms its own catch-up group; mid-catch-up, a delta folds into the sibling group but is
-  refused on the new group's unbackfilled regions (never fold ahead of the entry). The groups
-  merge only once the new group's processed vector equals its sibling's over every region.
-- **The backfill is atomic with the column's own migration.** A `PureBackfill` field's
-  physical column and its backfilled values are created by the SAME statement group as the
-  schema migration that adds the column — never a separately-dispatched write that could
-  observe the column already added but not yet backfilled. Concretely: the backfill's
-  `UPDATE` is folded into the migration's `ADD COLUMN` statement group before it executes,
-  the same mechanism a declared `backfill:`/`default:` frontmatter directive already used.
-  A group failure (a transactional-DDL backend) leaves neither the physical column nor the
-  saved deployed-schema snapshot changed, so the next run's diff still sees the column
-  missing and retries the whole migration+backfill together — there is no window in which
-  the deployed-schema snapshot can outrun the column's real values (cross-ref §Known
-  Divergences for the one case this does not cover).
+  refused on the new group's unbackfilled regions (never fold ahead of the entry) until the new
+  group's processed vector equals its sibling's over every region, when the groups merge.
+- **The backfill is atomic with the column's own migration.** A `PureBackfill` field's physical
+  column and its backfilled values are created by the SAME statement group as the schema migration
+  adding the column — never a separately-dispatched write observing the column added but not yet
+  backfilled — the same mechanism a declared `backfill:`/`default:` frontmatter directive already
+  uses. A group failure (transactional-DDL backend) leaves neither changed, so the next run
+  retries the whole migration+backfill together; there is no window where the deployed-schema
+  snapshot outruns the column's real values (cross-ref §Known Divergences for the one case this does not cover).
 
 ### The frontier
 
