@@ -5352,6 +5352,19 @@ both render through the identical <code>clock:</code> / <code>identity:</code> /
 <code>(source)</code> or <code>(model)</code> so it's clear which provider filled them. A row prints <code>(none)</code> when
 that provider declares neither fact — a source with no <code>timeseries:</code> and no <code>unique_key:</code> is
 legal and simply has nothing to summarize, never an error.</p>
+<p>Each edge additionally prints a <code>delta type:</code> row — the shape of change that edge's own upstream
+emits: <code>append-only within window</code> (every change lands as new rows within a bounded window,
+never revising an already-emitted row), <code>keyed upsert</code> (a change instead revises the row
+identified by a key set), or <code>general</code> (neither addressing holds, naming the construct or
+world-fact that degraded it — an unregistered operator such as a window function, a
+row-multiplying join, or a source declaring no <code>mutation_profile</code>). A source edge is typed by its
+own declared mutation profile; a model edge is typed by the upstream model's own derived verdict.
+An edge with no derivable verdict (e.g. the upstream isn't itself <code>refresh: incremental</code>) prints
+no <code>delta type:</code> row at all, rather than a fabricated one. A per-group recompute cell reading a
+<code>keyed upsert</code> upstream model edge (key-addressed, no partition clamp of its own) prints the
+group-grain fingerprint-sidecar diff <strong>over the upstream's own output table</strong> as its
+affected-key discovery mechanism, alongside the clamped current-source scan and the
+<code>mutable_snapshot</code> source sidecar diff.</p>
 <p>Add <code>--show-sql</code> to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
 compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
@@ -5449,6 +5462,7 @@ dependencies, per-column determinism/comparability/discriminants, row identity, 
 <a id="__codelineno-51-27" name="__codelineno-51-27" href="#__codelineno-51-27"></a>      clock:    (none)
 <a id="__codelineno-51-28" name="__codelineno-51-28" href="#__codelineno-51-28"></a>      identity: event_id
 <a id="__codelineno-51-29" name="__codelineno-51-29" href="#__codelineno-51-29"></a>      derived grain: key
+<a id="__codelineno-51-30" name="__codelineno-51-30" href="#__codelineno-51-30"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
 </code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>
