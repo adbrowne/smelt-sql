@@ -304,6 +304,12 @@ jobs:
     name: Publish to TestPyPI
     needs: [dev-release]
     runs-on: ubuntu-latest
+    # TestPyPI's 10 GB storage quota for this project is exhausted (every dev
+    # build uploads under a unique version, nothing ever ages out — see
+    # https://docs.pypi.org/project-management/storage-limits#requesting-a-project-size-limit-increase).
+    # Freeing space requires manual action on test.pypi.org; don't let that
+    # external, non-code failure block the rest of the Dev Release workflow.
+    continue-on-error: true
     environment:
       name: testpypi
       url: https://test.pypi.org/p/smelt-sql
