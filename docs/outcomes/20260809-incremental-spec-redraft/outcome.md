@@ -41,6 +41,11 @@ way (timeless-oracle rule), at substantially reduced length.
 - Kernel externalisation: no verbs/kinds/plan-cell API surface is published
   here or in any phase this outcome's plans reshape (see Decision log
   2026-08-09) — externalisation is a separate post-redraft outcome.
+- Raw-`metadata.grain` reads that should route through `resolved_grain()` — the surviving instance
+  at `crates/smelt-db/src/lib.rs:2261` (`contract.frozen_horizon` admissibility) and any others an
+  `rg` sweep finds. Same latent bug class phase 8 fixed where its own fixture exercised it, but a
+  pre-existing correctness gap serving no success criterion of this outcome; belongs in a queued
+  follow-up outcome, not a row here.
 - `crates/smelt-planner/src/python_bridge.rs`'s `python`-feature-gated test breakage (a
   `PartitionGrainConfig { enabled: … }` field that never existed) — pre-existing, unrelated to
   this outcome's edits, feature off by default and in no standing gate.
@@ -57,7 +62,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
 | 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | done |
-| 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | pending |
+| 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | planned |
 | 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
 ## Decision log
@@ -266,6 +271,19 @@ way (timeless-oracle rule), at substantially reduced length.
   `drop` (the code its Known-Divergence bullet tracked is now actually deleted); `06-check.sh`'s
   two remaining `gap_claims` failures (IP-02, MP-33) confirmed pre-existing via `git stash`, not
   caused by this phase.
+
+- 2026-08-11 — Phase 9 planned with no phase-row reshape, plus two dispositions. (a) The phase-8
+  summary's `resolved_grain()` sweep item is recorded under §Out of scope: it is a real latent bug
+  but serves no success criterion, and §Out of scope already routes uncovered behaviour gaps to a
+  queued outcome. (b) `06-check.sh`'s two pre-existing `gap_claims` failures (IP-02, MP-33) are
+  assigned to row 10, which already owns the whole-file citation sweep and the validate/timeless
+  greps. Phase 9 also fixes the one open decision the phase-1 outline deferred into this row: the
+  MERGE-dedup-only `batched.unique_key` gets the named top-level replacement **`merge_key:`**
+  (frontmatter + `smelt.yml`, frontmatter wins), rather than being folded onto top-level
+  `unique_key:` — that mapping is grain-changing for a row-shaped body and would break the two
+  `examples/timeseries` models that carry the fact. The `.sql`-frontmatter `batched.unique_key`
+  fix-it, which today prescribes exactly that grain-changing mapping, is retargeted to `merge_key:`
+  in the same phase.
 
 ## Blocked
 
