@@ -455,8 +455,8 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 
     // 2e: Non-deterministic functions — flow/taint check (incremental_models.md
     // §"Non-determinism and the payload rule"): a non-deterministic
-    // value is admitted only when it flows exclusively into a column listed
-    // in `batched.nondeterministic_columns`, and never into the
+    // value is admitted only when it flows exclusively into a column
+    // declared `columns.<c>.contract: plausible`, and never into the
     // event_time_column/partition_column/unique_key roles or a row-set
     // membership/grouping position. See `check_nondeterminism` for the full
     // analysis.
@@ -469,6 +469,7 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
             &partition_expr,
             event_time_column,
             inc_config,
+            &model.plausible_columns,
         )?;
     }
 
@@ -651,7 +652,7 @@ fn find_nondeterministic_fn(text_upper: &str) -> Option<&'static str> {
 /// True for the run-nondeterministic class (`NOW()`, `CURRENT_TIMESTAMP`,
 /// `CURRENT_DATE`) — frozen once per run at compile time, so a direct payload
 /// projection carries no cross-run variance risk and is admitted even when
-/// the target column is not listed in `nondeterministic_columns` (still
+/// the target column does not declare `columns.<c>.contract: plausible` (still
 /// subject to the same hard-exclusion roles as every other class).
 fn is_run_clock_pinning_fn(func: &str) -> bool {
     classify_function_determinism(func) == FunctionDeterminism::RunDeterministic
@@ -663,7 +664,7 @@ fn reject_nondeterministic_position(model_name: &str, func: &str, position: &str
     format!(
         "Model '{model_name}': non-deterministic function '{func}' is not compatible with \
          incremental materialization — it reaches {position}, which must be deterministic \
-         regardless of any `batched.nondeterministic_columns` opt-in"
+         regardless of any `columns.<c>.contract: plausible` opt-in"
     )
 }
 
@@ -708,7 +709,7 @@ fn collect_over_contents(upper_sql: &str) -> Vec<String> {
 /// and the payload rule"; §"Partition-grain constraints" #12).
 ///
 /// A non-deterministic function is admitted only when its value flows
-/// exclusively into a column listed in `batched.nondeterministic_columns` — a
+/// exclusively into a column declared `columns.<c>.contract: plausible` — a
 /// *payload* column, never read back to place, filter, group, or dedup a
 /// row. Three hard exclusions reject the value regardless of the opt-in,
 /// naming the offending position: the `event_time_column` / `partition_column`
@@ -735,6 +736,7 @@ fn check_nondeterminism(
     partition_expr: &str,
     event_time_column: &str,
     inc_config: &crate::types::PartitionGrainConfig,
+    plausible_columns: &std::collections::BTreeSet<String>,
 ) -> Result<(), String> {
     // 1. Hard exclusion: the partition_column expression.
     if let Some(func) = find_nondeterministic_fn(&partition_expr.to_uppercase()) {
@@ -891,17 +893,14 @@ fn check_nondeterminism(
                     "SELECT DISTINCT (the whole row is the dedup key)",
                 ));
             }
-            let listed = inc_config
-                .nondeterministic_columns
-                .iter()
-                .any(|c| c == alias);
+            let listed = plausible_columns.contains(alias);
             if listed || is_run_clock_pinning_fn(func) {
                 continue;
             }
             return Err(format!(
                 "Model '{model_name}': non-deterministic function '{func}' flows into column \
-                 '{alias}', which is not listed in `batched.nondeterministic_columns` — add \
-                 '{alias}' to `batched.nondeterministic_columns` to accept the variation, or set \
+                 '{alias}', which does not declare `columns.{alias}.contract: plausible` — add \
+                 that declaration to accept the variation, or set \
                  `safety_overrides.allow_nondeterministic: true`"
             ));
         }
@@ -1450,9 +1449,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         }
     }
 
@@ -1475,19 +1475,21 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: overrides,
             }),
+            plausible_columns: Default::default(),
         }
     }
 
-    /// Build a model with a `batched.nondeterministic_columns` list (and
-    /// optional `unique_key`) for the non-determinism flow/taint tests.
-    fn model_with_nondeterministic_columns(
+    /// Build a model with the given columns declared `columns.<c>.contract:
+    /// plausible` (and optional `unique_key`) for the non-determinism
+    /// flow/taint tests.
+    fn model_with_plausible_columns(
         name: &str,
         sql: &str,
         partition_column: &str,
-        nondeterministic_columns: Vec<String>,
+        plausible_columns: Vec<String>,
         unique_key: Vec<String>,
     ) -> ModelInfo {
         ModelInfo {
@@ -1503,9 +1505,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key,
-                nondeterministic_columns,
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: plausible_columns.into_iter().collect(),
         }
     }
 
@@ -1581,9 +1584,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
         let opp = detect(&m).unwrap().unwrap();
         match opp.data {
@@ -1604,6 +1608,7 @@ mod tests {
             refs: vec![],
             timeseries_config: None,
             incremental_config: None,
+            plausible_columns: Default::default(),
         };
         assert!(detect(&m).unwrap().is_none());
     }
@@ -1763,12 +1768,12 @@ mod tests {
         assert!(err.contains("RANDOM"));
     }
 
-    // --- Non-determinism flow/taint tests (batched.nondeterministic_columns) ---
+    // --- Non-determinism flow/taint tests (columns.<c>.contract: plausible) ---
 
     #[test]
     fn test_nondeterministic_now_listed_column_admitted() {
         // NOW() flowing only into a listed payload column builds cleanly.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "audit_stamped",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
              NOW() as inserted_at FROM events GROUP BY 1, 2",
@@ -1784,10 +1789,10 @@ mod tests {
     #[test]
     fn test_nondeterministic_now_unlisted_column_admitted_pinned_clock() {
         // Run-clock pinning: NOW() as a direct SELECT-list projection is
-        // admitted even when the target column is NOT listed in
-        // nondeterministic_columns — it is frozen once per run, so there is
+        // admitted even when the target column does NOT declare
+        // `columns.<c>.contract: plausible` — it is frozen once per run, so there is
         // no cross-run variance for the guardrail to gate.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "audit_stamped_unlisted",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
              NOW() as inserted_at FROM events GROUP BY 1, 2",
@@ -1813,7 +1818,7 @@ mod tests {
         // `smelt run` invocations. The catch-all must not treat the CTE
         // occurrence as "accounted for" just because the same function name
         // appears safely elsewhere in the outer SELECT list.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "cte_now_in_where",
             "WITH staged AS (\
                  SELECT event_timestamp, user_id FROM events \
@@ -1834,7 +1839,7 @@ mod tests {
 
     #[test]
     fn test_nondeterministic_random_where_rejects() {
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "random_in_where",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt \
              FROM events WHERE RANDOM() > 0.5 GROUP BY 1, 2",
@@ -1851,7 +1856,7 @@ mod tests {
 
     #[test]
     fn test_nondeterministic_random_group_by_rejects() {
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "random_in_group_by",
             "SELECT date_trunc('day', event_timestamp) as event_date, RANDOM() as grp, \
              COUNT(*) as cnt FROM events GROUP BY 1, 2",
@@ -1871,7 +1876,7 @@ mod tests {
         // RANDOM() aligned so the 2a window-alignment check admits it (the
         // PARTITION BY keys are a superset that includes the partition
         // column), isolating the assertion to the non-determinism check.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "random_in_window_partition_by",
             "SELECT date_trunc('day', event_timestamp) as event_date, \
              SUM(amount) OVER (PARTITION BY event_date, RANDOM() ORDER BY event_timestamp) \
@@ -1889,11 +1894,11 @@ mod tests {
 
     #[test]
     fn test_nondeterministic_random_unlisted_column_still_rejects() {
-        // Flow/taint case: RANDOM() flowing into a column NOT listed in
-        // nondeterministic_columns is still rejected (unchanged from the
+        // Flow/taint case: RANDOM() flowing into a column that does NOT declare
+        // `columns.<c>.contract: plausible` is still rejected (unchanged from the
         // pre-opt-in behaviour) — only the run-nondeterministic class gets
         // the unlisted pinned-clock exception.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "random_unlisted",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
              RANDOM() as foo FROM events GROUP BY 1, 2",
@@ -1912,7 +1917,7 @@ mod tests {
     fn test_nondeterministic_random_listed_column_admitted() {
         // The opt-in also covers the row-nondeterministic class when the
         // target column is explicitly listed.
-        let m = model_with_nondeterministic_columns(
+        let m = model_with_plausible_columns(
             "random_listed",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt, \
              RANDOM() as foo FROM events GROUP BY 1, 2",
@@ -2145,9 +2150,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
         let opp = detect(&m).unwrap().unwrap();
         assert_eq!(opp.rule_name, "incremental");
@@ -2223,9 +2229,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
         let result = detect(&m);
         assert!(result.is_ok());
@@ -2247,9 +2254,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec!["nonexistent_col".to_string()],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
         let result = detect(&m);
         assert!(result.is_err());
@@ -2327,6 +2335,7 @@ mod tests {
             refs: vec![],
             timeseries_config: None,
             incremental_config: None,
+            plausible_columns: Default::default(),
         };
         let safety = analyze_batch_safety(&m);
         assert_eq!(safety, BatchSafety::FullyBatchSafe);
@@ -2539,6 +2548,7 @@ mod tests {
                 assert_monotonic: false,
             }),
             incremental_config: None,
+            plausible_columns: Default::default(),
         });
 
         let m = ModelInfo {
@@ -2558,9 +2568,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -2602,6 +2613,7 @@ mod tests {
                 assert_monotonic: false,
             }),
             incremental_config: None,
+            plausible_columns: Default::default(),
         });
 
         let m = ModelInfo {
@@ -2617,9 +2629,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -2658,6 +2671,7 @@ mod tests {
                 assert_monotonic: false,
             }),
             incremental_config: None,
+            plausible_columns: Default::default(),
         });
 
         let m = ModelInfo {
@@ -2675,12 +2689,13 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides {
                     allow_window_functions: true,
                     ..Default::default()
                 },
             }),
+            plausible_columns: Default::default(),
         };
 
         let result = derive_model_source_bounds(&m, &graph);
@@ -2734,6 +2749,7 @@ mod tests {
                 assert_monotonic: false,
             }),
             incremental_config: None,
+            plausible_columns: Default::default(),
         }
     }
 
@@ -2761,9 +2777,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -2802,9 +2819,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let result = derive_model_source_bounds(&m, &graph);
@@ -2845,9 +2863,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("must not be rejected");
@@ -2895,9 +2914,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -2940,12 +2960,13 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides {
                     allow_subqueries: true,
                     ..Default::default()
                 },
             }),
+            plausible_columns: Default::default(),
         };
 
         let result = derive_model_source_bounds(&m, &graph);
@@ -2985,12 +3006,13 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides {
                     allow_subqueries: true,
                     ..Default::default()
                 },
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -3032,9 +3054,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph)
@@ -3079,9 +3102,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -3129,9 +3153,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let result = derive_model_source_bounds(&m, &graph);
@@ -3171,9 +3196,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph)
@@ -3214,9 +3240,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let result = derive_model_source_bounds(&m, &graph);
@@ -3271,9 +3298,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");
@@ -3376,9 +3404,10 @@ mod tests {
             }),
             incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
+            plausible_columns: Default::default(),
         };
 
         let bounds = derive_model_source_bounds(&m, &graph).expect("bound must be derivable");

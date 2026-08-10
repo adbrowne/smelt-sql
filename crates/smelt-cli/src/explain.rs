@@ -1702,6 +1702,7 @@ fn compute_batch_safety_label(
             .collect(),
         incremental_config: Some(inc.clone()),
         timeseries_config: Some(ts.clone()),
+        plausible_columns: Default::default(),
     };
     match analyze_batch_safety(&model_info) {
         BatchSafety::FullyBatchSafe => "fully_batch_safe".to_string(),
@@ -1815,7 +1816,7 @@ mod tests {
                 safety_overrides: None,
                 batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
-                    nondeterministic_columns: vec![],
+                    nondeterministic_columns_retired: (),
                     safety_overrides: Default::default(),
                 }),
                 tags: vec![],
@@ -1920,7 +1921,7 @@ mod tests {
                 safety_overrides: None,
                 batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
-                    nondeterministic_columns: vec![],
+                    nondeterministic_columns_retired: (),
                     safety_overrides: Default::default(),
                 }),
                 tags: vec!["revenue".to_string(), "daily".to_string()],

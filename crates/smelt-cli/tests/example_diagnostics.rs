@@ -134,7 +134,7 @@ fn fn_incremental_ts_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_incremental_ts");
 }
 
-/// `batched.nondeterministic_columns` opt-in fixture: an incremental model
+/// `columns.<c>.contract: plausible` opt-in fixture: an incremental model
 /// stamping every row with `NOW()` into a listed payload column. Verifies
 /// the workspace loads without any diagnostics (the non-determinism
 /// flow/taint check runs at build time in `smelt-logical::rules::incremental`,

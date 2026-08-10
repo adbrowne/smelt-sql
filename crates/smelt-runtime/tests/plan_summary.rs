@@ -245,7 +245,7 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
             safety_overrides: None,
             batched: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
             tags: vec![],

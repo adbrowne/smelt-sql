@@ -97,6 +97,11 @@ pub struct RuleContext<'a> {
     /// (`rules::cumulative::classify_once_write`,
     /// `docs/plans/20260809-keyed-frontier.md` Phase 4).
     pub declared_functional_dependencies: &'a [smelt_core::config::FunctionalDependency],
+    /// Columns declared `columns.<c>.contract: plausible` in the model's
+    /// `.sql` frontmatter — threaded through to `incremental::detect`'s
+    /// non-determinism flow/taint check the same way the build itself
+    /// resolves it, so the LSP diagnostic and the build agree.
+    pub plausible_columns: &'a BTreeSet<String>,
 }
 
 /// A planner rule that surfaces its rejections as diagnostics.
@@ -179,6 +184,7 @@ impl PlannerRule for IncrementalRule {
             refs: ctx.refs.to_vec(),
             timeseries_config: Some(ts.clone()),
             incremental_config: Some(inc.clone()),
+            plausible_columns: ctx.plausible_columns.clone(),
         };
         match incremental::detect(&model) {
             Ok(_) => Vec::new(),
@@ -611,6 +617,7 @@ mod tests {
             timeseries_config: None,
             incremental_config: None,
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -637,6 +644,7 @@ mod tests {
             timeseries_config: None,
             incremental_config: None,
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -658,6 +666,7 @@ mod tests {
             timeseries_config: None,
             incremental_config: None,
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -665,7 +674,7 @@ mod tests {
     fn inc_config() -> PartitionGrainConfig {
         PartitionGrainConfig {
             unique_key: vec!["event_date".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         }
     }
@@ -693,6 +702,7 @@ mod tests {
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -720,6 +730,7 @@ mod tests {
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -746,6 +757,7 @@ mod tests {
             timeseries_config: None,
             incremental_config: Some(&inc),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -789,6 +801,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -842,6 +855,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -870,7 +884,7 @@ mod tests {
         };
         let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["month_start".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -883,6 +897,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -916,6 +931,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -958,6 +974,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         let hit = diags
@@ -995,7 +1012,7 @@ mod tests {
         ts_map.insert("smelt.src".to_string(), tsc.clone());
         let inc = PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: crate::types::PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
@@ -1010,6 +1027,7 @@ mod tests {
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -1044,6 +1062,7 @@ mod tests {
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             check_batched_bound_derivable(&ctx).is_none(),
@@ -1067,7 +1086,7 @@ mod tests {
         };
         let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["event_ts".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -1080,6 +1099,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
             declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         // Note: PartitionGrainNotSafe Warning may fire (subquery in FROM),
         // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.

@@ -191,7 +191,7 @@ fn refresh_keyed_forbids_incremental() {
         grain: Some(Grain::Key),
         batched: Some(PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         }),
         ..Default::default()

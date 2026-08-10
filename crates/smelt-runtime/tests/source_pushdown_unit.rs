@@ -169,7 +169,7 @@ fn skewed_batch_scan_sized_from_output_window() {
     };
     let inc = PartitionGrainConfig {
         unique_key: vec![],
-        nondeterministic_columns: vec![],
+        nondeterministic_columns_retired: (),
         safety_overrides: PartitionGrainSafetyOverrides::default(),
     };
     let range = TimeRange {

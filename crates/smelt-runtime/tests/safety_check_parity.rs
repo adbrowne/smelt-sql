@@ -33,7 +33,7 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
 fn make_inc() -> PartitionGrainConfig {
     PartitionGrainConfig {
         unique_key: vec![],
-        nondeterministic_columns: vec![],
+        nondeterministic_columns_retired: (),
         safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }
@@ -48,6 +48,7 @@ fn unsafe_incremental_graph() -> ModelGraph {
         refs: vec![],
         timeseries_config: None,
         incremental_config: Some(make_inc()),
+        plausible_columns: Default::default(),
     });
     graph
 }
@@ -65,6 +66,7 @@ fn undefinable_bound_graph() -> ModelGraph {
         refs: vec![],
         timeseries_config: Some(make_ts("event_date", "event_date")),
         incremental_config: None,
+        plausible_columns: Default::default(),
     });
 
     // Downstream model: bare LAG without RANGE BETWEEN → NotDerivable
@@ -76,6 +78,7 @@ fn undefinable_bound_graph() -> ModelGraph {
         refs: vec!["silver.events".into()],
         timeseries_config: Some(make_ts("ts", "ts")),
         incremental_config: Some(make_inc()),
+        plausible_columns: Default::default(),
     });
 
     graph

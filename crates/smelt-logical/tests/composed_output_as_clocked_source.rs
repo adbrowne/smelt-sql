@@ -33,6 +33,7 @@ fn composed_upstream() -> ModelInfo {
             assert_monotonic: false,
         }),
         incremental_config: None,
+        plausible_columns: Default::default(),
     }
 }
 
@@ -61,6 +62,7 @@ fn downstream_partition_grain_model_gets_pushdown_against_a_composed_upstream() 
             assert_monotonic: false,
         }),
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
 
     let bounds = derive_model_source_bounds(&downstream, &graph)
@@ -100,6 +102,7 @@ fn downstream_partition_grain_model_sees_composed_upstream_even_with_no_lookback
             assert_monotonic: false,
         }),
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
 
     let bounds = derive_model_source_bounds(&downstream, &graph)

@@ -316,6 +316,7 @@ fn plan_recipe(recipe: &CubeRecipe) -> Result<Vec<smelt_planner::ExecutionStep>,
         refs: vec![],
         timeseries_config: None,
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
     let mut graph = ModelGraph::new();
     graph.add_model(model);
@@ -472,6 +473,7 @@ fn unannotated_model_is_never_rewritten() {
         refs: vec![],
         timeseries_config: None,
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
     let mut graph = ModelGraph::new();
     graph.add_model(model);

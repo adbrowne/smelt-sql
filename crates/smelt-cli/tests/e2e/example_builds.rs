@@ -195,7 +195,7 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
     (
         "incremental_nondeterministic_columns",
         "Catalog Error: Table with name sources_events does not exist \
-         (batched.nondeterministic_columns fixture: the non-determinism flow/taint check \
+         (columns.<c>.contract: plausible fixture: the non-determinism flow/taint check \
          admits the model correctly; source table `main.sources_events` not seeded in \
          standalone build env; verified e2e via incremental_nondeterministic_columns_e2e.rs)",
     ),

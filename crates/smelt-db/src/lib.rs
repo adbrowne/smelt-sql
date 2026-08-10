@@ -123,6 +123,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // path — they are never returned by extract_file_metadata itself:
         MetadataError::TimeseriesRequiredForPartitionGrain => None,
         MetadataError::MalformedTimeseries { .. } => None,
+        MetadataError::PlausibleContractOnSkeletonColumn { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
         MetadataError::PartitionGrainRequiresRefreshIncremental => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
@@ -2156,6 +2157,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
+                smelt_core::metadata::MetadataError::PlausibleContractOnSkeletonColumn {
+                    ..
+                } => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::PlausibleContractOnSkeletonColumn,
+                )),
                 // `validate_timeseries` no longer raises this — whether
                 // keyed+timeseries: is admitted is decided by the locality
                 // gate in plan derivation
@@ -2453,6 +2460,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // `batched:` block — default to an empty config when the block is
             // absent so a bare `refresh: batched` model still reaches the rule.
             let default_batched_config = smelt_core::config::PartitionGrainConfig::default();
+            let plausible_columns: std::collections::BTreeSet<String> = metadata
+                .columns
+                .iter()
+                .filter(|(_, c)| c.contract == Some(smelt_core::metadata::Contract::Plausible))
+                .map(|(name, _)| name.clone())
+                .collect();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
@@ -2466,6 +2479,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     None
                 },
                 declared_functional_dependencies: &metadata.functional_dependencies,
+                plausible_columns: &plausible_columns,
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
             for rd in smelt_logical::detect_builtin_rules(&ctx) {

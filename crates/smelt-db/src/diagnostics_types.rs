@@ -649,6 +649,12 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
     MalformedTimeseries,
+    /// A `columns.<c>.contract: plausible` declaration names a column that
+    /// also serves as the model's `event_time_column`, `partition_column`,
+    /// or a `unique_key` member.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "PlausibleContractOnSkeletonColumn: `columns.{column}.contract: plausible` cannot be declared — '{column}' is {role}, which must stay deterministic"
+    PlausibleContractOnSkeletonColumn,
     /// A `functional_dependencies:` entry is structurally invalid: an empty
     /// `key`/`determines`, a `determines` column also listed in `key`, or a
     /// `key`/`determines` column absent from the model's SQL body.

@@ -78,7 +78,7 @@ fn registry_rows(section: &str) -> Vec<Vec<String>> {
 /// (`docs/outcomes/20260809-probe-backed-facts/phases/01-plan.md`).
 const EXPECTED_DECLARATIONS: &[&str] = &[
     "assert_monotonic",
-    "nondeterministic_columns",
+    "columns.<c>.contract",
     "functional_dependencies",
     "bounded_domain",
     "horizon_ceiling",

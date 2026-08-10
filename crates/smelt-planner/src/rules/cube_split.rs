@@ -262,6 +262,7 @@ mod tests {
             refs: vec![],
             timeseries_config: None,
             incremental_config: None,
+            plausible_columns: Default::default(),
         }
     }
 

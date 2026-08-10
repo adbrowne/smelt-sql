@@ -134,6 +134,15 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
             .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+        let plausible_columns = metadata
+            .map(|m| {
+                m.columns
+                    .iter()
+                    .filter(|(_, c)| c.contract == Some(smelt_core::metadata::Contract::Plausible))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
             sql: model.content.clone(),
@@ -144,6 +153,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 .collect(),
             timeseries_config: ts_config,
             incremental_config: inc_config,
+            plausible_columns,
         });
     }
 

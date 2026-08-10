@@ -52,7 +52,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
-| 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | planned |
+| 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
 | 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | pending |
 | 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | pending |
 | 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
@@ -218,6 +218,23 @@ way (timeless-oracle rule), at substantially reduced length.
   so the retirement diagnostic for `models.<name>.batched.nondeterministic_columns` directs the
   caller to declare the contract in the model's `.sql` frontmatter. Adding a `columns:` block to
   `smelt.yml` would be new behaviour (§Out of scope) and is not required by criterion 2.
+
+- 2026-08-11 — Phase 7 done: `PartitionGrainConfig::nondeterministic_columns` retired to a
+  renamed, always-erroring `deserialize_with` sentinel (`nondeterministic_columns_retired: ()`) —
+  presence in SQL frontmatter's `batched:` sub-block *or* `smelt.yml`'s `models.<name>.batched:`
+  block is a hard error naming `columns.<c>.contract: plausible` per declared column. Ported the
+  skeleton-position bar (event_time_column/partition_column/unique_key) from the old list-form
+  scan to a new `MetadataError::PlausibleContractOnSkeletonColumn` /
+  `DiagnosticCode::PlausibleContractOnSkeletonColumn` reading `columns.<c>.contract == Plausible`.
+  Added `ModelInfo.plausible_columns: BTreeSet<String>` and `RuleContext.plausible_columns`,
+  threaded through every production construction site so the build and the LSP diagnostic path
+  agree. `docs/specs/models.md`/`model_properties.md`/`incremental_models.md`/`diagnostics.md`
+  updated; the model_properties.md Known-Divergences gap bullet this phase closes is deleted.
+  `phases/07-check.sh` (no live struct field, retirement sentinel wired, spec/docs-site mentions
+  paired with the replacement, gap bullet gone, diagnostic registered, timeless) all green;
+  `verify-phase.sh` ALL GREEN. Left `smelt-planner/src/python_bridge.rs`'s python-feature-gated
+  test alone — pre-existing unrelated breakage (`enabled` field that never existed on the real
+  type), feature off by default, not part of any standing gate.
 
 ## Blocked
 

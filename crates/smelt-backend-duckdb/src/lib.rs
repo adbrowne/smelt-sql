@@ -1647,7 +1647,7 @@ mod tests {
 
         let config_with_key = PartitionGrainConfig {
             unique_key: vec!["id".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(
@@ -1657,7 +1657,7 @@ mod tests {
 
         let config_without_key = PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(

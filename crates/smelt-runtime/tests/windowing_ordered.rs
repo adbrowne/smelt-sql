@@ -39,7 +39,7 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
 fn make_inc() -> PartitionGrainConfig {
     PartitionGrainConfig {
         unique_key: vec![],
-        nondeterministic_columns: vec![],
+        nondeterministic_columns_retired: (),
         safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }

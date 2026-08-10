@@ -509,6 +509,18 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
+    /// A `columns.<c>.contract: plausible` declaration names a column that
+    /// also serves as the model's `event_time_column`, `partition_column`,
+    /// or a `unique_key` member — those skeleton positions govern windowing,
+    /// partition placement, or dedup identity and must stay deterministic
+    /// (`docs/specs/models.md` §"Constraint violations"). Ports the bar the
+    /// retired `batched.nondeterministic_columns` list form used to enforce.
+    #[error(
+        "PlausibleContractOnSkeletonColumn: `columns.{column}.contract: plausible` cannot be \
+         declared — '{column}' is {role}, which must stay deterministic"
+    )]
+    PlausibleContractOnSkeletonColumn { column: String, role: String },
+
     /// A model declares `refresh: incremental` + `grain: key` and a
     /// `timeseries:` block, and key temporal locality cannot be
     /// established for it. Not raised by [`validate_timeseries`] — the
@@ -743,7 +755,34 @@ fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) 
 fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
     let header = "the `batched:` sub-block has been removed — declare each key at the \
                   model's top level instead:";
-    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(raw_value.clone()) {
+
+    // `nondeterministic_columns`'s retirement sentinel always errors when the key is
+    // present (`PartitionGrainConfig::nondeterministic_columns_retired`), which would
+    // otherwise fail the whole-struct deserialize below and lose the caller's own
+    // `unique_key`/`safety_overrides` values. Extract its raw column list directly from
+    // the mapping first, then deserialize the remainder.
+    let raw_nondeterministic_columns: Vec<String> = raw_value
+        .as_mapping()
+        .and_then(|m| {
+            m.get(serde_yaml::Value::String(
+                "nondeterministic_columns".to_string(),
+            ))
+        })
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut sans_nondeterministic_columns = raw_value.clone();
+    if let Some(m) = sans_nondeterministic_columns.as_mapping_mut() {
+        m.remove(serde_yaml::Value::String(
+            "nondeterministic_columns".to_string(),
+        ));
+    }
+
+    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(sans_nondeterministic_columns) {
         Ok(cfg) => cfg,
         Err(_) => {
             return format!(
@@ -787,7 +826,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
             flags.join(", ")
         ));
     }
-    for col in &cfg.nondeterministic_columns {
+    for col in &raw_nondeterministic_columns {
         lines.push(format!(
             "  - `batched.nondeterministic_columns: [{col}]` -> `columns.{col}.contract: plausible`"
         ));
@@ -1061,40 +1100,34 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: `batched.nondeterministic_columns` must not name a column that
-    // governs windowing, partition placement, or dedup identity — those
-    // roles must stay deterministic regardless of any opt-in
+    // Rule: a `columns.<c>.contract: plausible` declaration must not name a
+    // column that governs windowing, partition placement, or dedup identity
+    // — those roles must stay deterministic regardless of any opt-in
     // (`incremental_models.md` §"Partition-grain constraints" #12;
-    // §"Non-determinism and the payload rule").
-    if let Some(batched) = &metadata.batched {
-        for col in &batched.nondeterministic_columns {
-            if col == &ts.event_time_column {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is the \
-                         event_time_column, which governs windowing and must stay \
-                         deterministic"
-                    ),
-                });
-            }
-            if col == &ts.partition_column {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is the \
-                         partition_column, which governs partition placement and must \
-                         stay deterministic"
-                    ),
-                });
-            }
-            if batched.unique_key.contains(col) {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is a \
-                         unique_key column, which governs dedup identity and must stay \
-                         deterministic"
-                    ),
-                });
-            }
+    // §"Non-determinism and the payload rule"). Ports the bar the retired
+    // `batched.nondeterministic_columns` list form used to enforce.
+    let declared_unique_key = metadata.unique_key.as_deref().unwrap_or(&[]);
+    for (col, col_meta) in &metadata.columns {
+        if col_meta.contract != Some(Contract::Plausible) {
+            continue;
+        }
+        if col == &ts.event_time_column {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "the event_time_column".to_string(),
+            });
+        }
+        if col == &ts.partition_column {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "the partition_column".to_string(),
+            });
+        }
+        if declared_unique_key.contains(col) {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "a unique_key column".to_string(),
+            });
         }
     }
 
@@ -2584,11 +2617,20 @@ FROM smelt.orders_raw"#;
         );
     }
 
-    /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
-    /// configuration error (`incremental_models.md` §"Partition-grain constraints" #12) — that
-    /// column governs windowing and can never tolerate non-determinism.
+    /// A `columns.<c>.contract: plausible` declaration naming the
+    /// `event_time_column` is a configuration error (`incremental_models.md`
+    /// §"Partition-grain constraints" #12) — that column governs windowing
+    /// and can never tolerate non-determinism.
     #[test]
-    fn test_nondeterministic_columns_rejects_event_time_column() {
+    fn test_plausible_contract_on_event_time_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_ts".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
@@ -2600,27 +2642,32 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec![],
-                nondeterministic_columns: vec!["order_ts".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
-            .expect_err("listing event_time_column in nondeterministic_columns must error");
+            .expect_err("plausible contract on event_time_column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_ts"));
     }
 
-    /// Listing `partition_column` in `batched.nondeterministic_columns` is a
-    /// configuration error — that column governs partition placement.
+    /// A `columns.<c>.contract: plausible` declaration naming the
+    /// `partition_column` is a configuration error — that column governs
+    /// partition placement.
     #[test]
-    fn test_nondeterministic_columns_rejects_partition_column() {
+    fn test_plausible_contract_on_partition_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_date".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
@@ -2632,31 +2679,35 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec![],
-                nondeterministic_columns: vec!["order_date".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
-            .expect_err("listing partition_column in nondeterministic_columns must error");
+            .expect_err("plausible contract on partition_column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_date"));
     }
 
-    /// Listing a `unique_key` column in `batched.nondeterministic_columns` is a
-    /// configuration error — that column governs dedup identity.
+    /// A `columns.<c>.contract: plausible` declaration naming a `unique_key`
+    /// column is a configuration error — that column governs dedup
+    /// identity.
     #[test]
-    fn test_nondeterministic_columns_rejects_unique_key_column() {
+    fn test_plausible_contract_on_unique_key_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_id".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
-            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -2664,31 +2715,35 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec!["order_id".to_string()],
-                nondeterministic_columns: vec!["order_id".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            unique_key: Some(vec!["order_id".to_string()]),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date, order_id FROM foo")
-            .expect_err("listing a unique_key column in nondeterministic_columns must error");
+            .expect_err("plausible contract on a unique_key column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_id"));
     }
 
-    /// A payload column not overlapping event_time/partition/unique_key is a
-    /// legitimate `nondeterministic_columns` entry and parses cleanly.
+    /// A `columns.<c>.contract: plausible` declaration on a payload column
+    /// not overlapping event_time/partition/unique_key parses cleanly.
     #[test]
-    fn test_nondeterministic_columns_accepts_payload_column() {
+    fn test_plausible_contract_on_payload_column_validates() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "inserted_at".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
-            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -2696,18 +2751,15 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec!["order_id".to_string()],
-                nondeterministic_columns: vec!["inserted_at".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            unique_key: Some(vec!["order_id".to_string()]),
+            columns,
             ..Default::default()
         };
         validate_timeseries(
             &metadata,
             "SELECT order_ts, order_date, order_id, inserted_at FROM foo",
         )
-        .expect("payload-only nondeterministic_columns must pass validation");
+        .expect("payload-only plausible contract must pass validation");
     }
 
     // ── functional_dependencies: validation (DC2) ────────────────────────────
@@ -3182,7 +3234,7 @@ GROUP BY device_id, user_id"#;
             grain: Some(crate::config::Grain::Key),
             batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
@@ -3259,7 +3311,7 @@ GROUP BY device_id, user_id"#;
             refresh: Some(crate::config::RefreshStrategy::MaterializedView),
             batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()

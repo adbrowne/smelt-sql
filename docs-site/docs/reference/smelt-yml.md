@@ -245,14 +245,13 @@ models:
 ```
 
 !!! note "`batched:` is `smelt.yml`-only"
-    The `.sql` frontmatter `batched:` sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). Declaring the *identity* fact this way makes the output key-shaped (see [Incremental models](../guide/incremental-models.md)), which a row-shaped model with no `GROUP BY` cannot become. `smelt.yml`'s `models.<name>.batched:` block above is a **separate, still-supported** mechanism carrying a MERGE-dedup-only `unique_key` (and `nondeterministic_columns`, since per-column `contract:` is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.
+    The `.sql` frontmatter `batched:` sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). Declaring the *identity* fact this way makes the output key-shaped (see [Incremental models](../guide/incremental-models.md)), which a row-shaped model with no `GROUP BY` cannot become. `smelt.yml`'s `models.<name>.batched:` block above is a **separate, still-supported** mechanism carrying a MERGE-dedup-only `unique_key` for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed. Its `nondeterministic_columns` key is retired the same way: `columns.<c>.contract: plausible` is SQL-frontmatter-only, with no `smelt.yml` spelling.
 
 #### Incremental Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `unique_key` (under `batched:`) | string[] | no | `[]` | A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level `unique_key:` is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell. |
-| `nondeterministic_columns` (under `batched:`) | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
 
 `safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of this `batched:` block.
 

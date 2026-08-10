@@ -1,7 +1,7 @@
 name: incremental_nondeterministic_columns
 version: 1
 
-# Fixture for the `batched.nondeterministic_columns` opt-in
+# Fixture for the `columns.<c>.contract: plausible` opt-in
 # (docs/specs/incremental_models.md §"Safety checks" — "Non-determinism and
 # the payload rule"): an incremental model that stamps every row with `NOW()`, a
 # run-nondeterministic value the modeller accepts varying between runs. The

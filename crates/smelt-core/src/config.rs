@@ -761,19 +761,48 @@ pub struct PartitionGrainConfig {
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
-    /// Output columns exempt from the determinism requirement — audit stamps
-    /// and surrogates the modeller accepts may vary (e.g. `inserted_at =
-    /// NOW()`, `batch_id = UUID()`). A non-deterministic value is admitted
-    /// only when it flows exclusively into a listed column (`incremental_models.md`
-    /// §"Non-determinism and the payload rule"). Listing
-    /// `timeseries.event_time_column`, `timeseries.partition_column`, or a
-    /// `unique_key` column here is a configuration error — validated in
-    /// `smelt-core::metadata::validate_timeseries`.
-    #[serde(default)]
-    pub nondeterministic_columns: Vec<String>,
+    /// Retirement sentinel for the removed `nondeterministic_columns` list
+    /// form (`docs/specs/models.md` §"Constraint violations"). Presence of
+    /// the `nondeterministic_columns` key under `smelt.yml`'s
+    /// `models.<name>.batched:` block — regardless of value — is a hard
+    /// parse error with a fix-it naming `columns.<c>.contract: plausible`
+    /// in the model's `.sql` frontmatter, the sole surviving surface for the
+    /// contract (there is no `smelt.yml` spelling). Renamed from the former
+    /// field so no consumer can read a stale value; never serialized.
+    #[serde(
+        default,
+        rename = "nondeterministic_columns",
+        skip_serializing,
+        deserialize_with = "reject_nondeterministic_columns"
+    )]
+    pub nondeterministic_columns_retired: (),
     /// Safety overrides for patterns that may diverge on partial data
     #[serde(default)]
     pub safety_overrides: PartitionGrainSafetyOverrides,
+}
+
+/// `deserialize_with` for [`PartitionGrainConfig::nondeterministic_columns_retired`]:
+/// any presence of the `nondeterministic_columns` key — regardless of value
+/// — is refused with a fix-it naming, per declared column, its sole
+/// replacement.
+fn reject_nondeterministic_columns<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let cols: Vec<String> = serde::Deserialize::deserialize(deserializer)?;
+    let fixit = if cols.is_empty() {
+        "columns.<c>.contract: plausible".to_string()
+    } else {
+        cols.iter()
+            .map(|c| format!("columns.{c}.contract: plausible"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(D::Error::custom(format!(
+        "`nondeterministic_columns` has been removed — declare `{fixit}` in the model's .sql \
+         frontmatter instead (the contract has no `smelt.yml` spelling)"
+    )))
 }
 
 /// The `maintenance:` block (`incremental_models.md` §Surface "Frontmatter"):
@@ -2014,7 +2043,7 @@ models:
             grain: Some(Grain::Key),
             batched: Some(PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
@@ -2204,23 +2233,37 @@ targets:
     }
 
     #[test]
-    fn test_nondeterministic_columns_defaults_empty() {
+    fn test_nondeterministic_columns_retired_absent_parses_clean() {
         let yaml = r#"
             safety_overrides: {}
         "#;
         let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(config.nondeterministic_columns.is_empty());
+        assert_eq!(config.nondeterministic_columns_retired, ());
     }
 
+    /// `models.<name>.batched.nondeterministic_columns` in `smelt.yml` fails
+    /// deserialization with a fix-it naming `columns.<c>.contract: plausible`
+    /// and the `.sql`-frontmatter-only location, regardless of the value
+    /// declared (`docs/specs/models.md` §"Constraint violations").
     #[test]
-    fn test_nondeterministic_columns_deserialization() {
+    fn test_smelt_yml_batched_nondeterministic_columns_is_refused_with_fixit() {
         let yaml = r#"
             nondeterministic_columns: [inserted_at, batch_id]
         "#;
-        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(
-            config.nondeterministic_columns,
-            vec!["inserted_at".to_string(), "batch_id".to_string()]
+        let err = serde_yaml::from_str::<PartitionGrainConfig>(yaml)
+            .expect_err("smelt.yml nondeterministic_columns must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("columns.inserted_at.contract: plausible"),
+            "fix-it must name columns.inserted_at.contract: plausible; got: {message}"
+        );
+        assert!(
+            message.contains("columns.batch_id.contract: plausible"),
+            "fix-it must name columns.batch_id.contract: plausible; got: {message}"
+        );
+        assert!(
+            message.contains(".sql frontmatter"),
+            "fix-it must point at the .sql frontmatter location; got: {message}"
         );
     }
 
@@ -2550,7 +2593,7 @@ models:
                 materialization: Some(Materialization::Ephemeral),
                 batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
-                    nondeterministic_columns: vec![],
+                    nondeterministic_columns_retired: (),
                     safety_overrides: PartitionGrainSafetyOverrides::default(),
                 }),
                 ..Default::default()
@@ -2705,7 +2748,7 @@ targets:
                 materialization: Some(Materialization::Table),
                 batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
-                    nondeterministic_columns: vec![],
+                    nondeterministic_columns_retired: (),
                     safety_overrides: PartitionGrainSafetyOverrides::default(),
                 }),
                 ..Default::default()

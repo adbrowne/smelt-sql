@@ -181,6 +181,7 @@ pub fn build_model_details(
                         .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
+                    plausible_columns: Default::default(),
                 };
                 let safety = analyze_batch_safety(&model_info);
                 match safety {
@@ -531,6 +532,7 @@ pub fn build_run_plan(
                         .collect(),
                     timeseries_config: Some(ts.clone()),
                     incremental_config: Some(inc.clone()),
+                    plausible_columns: Default::default(),
                 };
                 let safety = analyze_batch_safety(&model_info);
 
