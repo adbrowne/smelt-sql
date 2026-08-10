@@ -76,7 +76,18 @@ Concretely on the CLI surface:
 - **CI mode:** the plan in `--json` + an exit-code contract makes "definition change with non-eclipsed, non-approved cells" a CI-visible state; eclipsed-only changes pass silently — the semantic deploy gate the 2026-08-09 rethink's P-G wanted, for free.
 - The same presentation is where **destructive backbuild options** (drop-and-rebuild legs, swap) surface their verification hooks (count/fingerprint probes from the probe layer) before the swap.
 
-## 5. Sequencing
+## 5. The lattice's next points
+
+Contract lattice v1 shipped frozen horizon and deferral. The deferred points each land *stronger* under the delta-signature framing, in this priority order:
+
+- **Retention / key departure.** The sharpest user-facing gap in §Known Divergences (snapshot-reconcile retains departed keys forever; no deletion mechanism exists). As a lattice point it gives deletion a contract home — declared retention licensing tombstone or hard-delete techniques — and the retained-departed-keys carve-out becomes the default point's honest statement rather than a special case. In delta terms it is the missing **retraction row** of the output-delta lattice, which is also the prerequisite shape for rung 3 and change-feed deletes: one point serving two roadmaps.
+- **Reconciliation points** (equivalence promised at declared points, not after every run). Its mechanism now exists: the repair family's `diff_patch` *is* the reconciliation write, and the probe and the remedy are the same operation — the diff at the declared point both measures drift and repairs it. The triple (declaration, oracle transform, probe emitter) assembles largely from built parts; cheapest remaining point to ship.
+- **Declared indifference** (equivalence modulo stated tie-breaks or tolerances). Mostly spec hygiene with real payoff: the two carve-outs currently special-cased inside the equivalence invariant (departed keys, ordering ties) become ordinary lattice points. The genuine cost: the conformance comparator must quotient by the declared relation — the first point where the single `EXCEPT ALL` comparator stops sufficing.
+- **Per-column-group freshness** is not a separate point to plan: it is blocked on exactly the per-cell frontier addressing gap already recorded for per-cell `deferral` (the frontier record tracks per-region only) and rides that state-shape work.
+
+**Interaction with definition deltas (must be decided, not discovered):** a definition delta instantiates `∅` over *all* regions — including partitions a `frozen_horizon` contract says are never revisited. The plan-and-approve gate is the natural resolution: the migration plan surfaces the conflict, and approval is either explicit consent to cross the horizon or the plan clamps its backfill to `H` and says so. Similarly, a deferral-licensed skip must never defer a definition-delta catch-up silently — catch-up progress belongs on the presented plan, not the ambient scheduler.
+
+## 6. Sequencing
 
 Each step independently shippable, each converting built machinery into user functionality:
 
@@ -85,7 +96,9 @@ Each step independently shippable, each converting built machinery into user fun
 3. **Proofs as product (closes D3).** Explain completes (guarantee ledger, run shape, postures, scope maps); `prefer`/cost-model consumption; then `smelt prove` / `must_hold:` / proof-diff. Deliberately last: steps 1–2 change what the proofs say.
 4. **Spec re-architecture**, alongside or just after step 2: (i) delta signatures and composition; (ii) the contract lattice; (iii) the plan — cells, verbs, frontier; (iv) shape profiles (the corners live here); (v) definition deltas — likely its own spec file (`incremental_models.md` is 2,400 lines *after* a 30% cut), cross-owned with the same care as `model_properties.md`/`model_transforms.md`.
 
-## 6. Open questions
+Lattice v2 slots naturally between steps 2 and 3: retention and reconciliation both consume step 2's machinery (approved destructive legs; `diff_patch`), and step 3's proof surface should print the full lattice, not v1's two points.
+
+## 7. Open questions
 
 - **Verb naming.** What replaces `smelt backbuild` (ranged rebuild), and does the migration flow live under `smelt diff` + `smelt apply`, or one `smelt migrate` verb with `--plan`/`--apply`? Decide in the spec diff for step 2.
 - **Approval persistence.** Is an approval a stored artifact (plan hash recorded, `apply` refuses on drift — terraform-like) or a flag on the invocation? Leaning stored-hash: it is what makes CI mode honest.
