@@ -98,6 +98,102 @@ pub fn deferral_violations(
     }
 }
 
+/// The scheduling decision `deferral`'s measured lag licenses for a cell's
+/// run: [`RunLicense::Skip`] when there is genuinely pending work that is
+/// still inside the declared window `D` (a licensed relaxation of the
+/// default point, never the fallback), [`RunLicense::Run`] otherwise —
+/// including when nothing is pending (`lag <= 0`) or either frontier is
+/// unresolved (the cell's first run, or nothing has landed yet), since a
+/// skip requires *knowing* there is pending-but-tolerable work, not merely
+/// the absence of evidence against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLicense {
+    Run,
+    Skip { lag: i64, d: i64 },
+}
+
+/// The pure licensing decision this phase adds to the deferral triple: given
+/// the same two ledger frontiers [`deferral_violations`] already compares,
+/// decide whether the cell's run may be skipped this cycle.
+pub fn run_license(
+    maintained_frontier: Option<i64>,
+    input_frontier: Option<i64>,
+    d: i64,
+) -> RunLicense {
+    let (Some(maintained), Some(input)) = (maintained_frontier, input_frontier) else {
+        return RunLicense::Run;
+    };
+    let lag = measure_lag(maintained, input);
+    if lag.lag > 0 && within_deferral(lag, d) {
+        RunLicense::Skip { lag: lag.lag, d }
+    } else {
+        RunLicense::Run
+    }
+}
+
+/// The event-time window a deferred cell owes: the maintained frontier
+/// (exclusive — already folded) up to the input frontier (inclusive — the
+/// newest data the cell has not yet folded). `None` when there is nothing
+/// pending (`lag <= 0`) or either frontier is unresolved — mirroring
+/// [`run_license`]'s own "nothing to skip" cases, since a pending window
+/// only exists when there is genuinely pending work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingWindow {
+    pub maintained_exclusive: i64,
+    pub input_inclusive: i64,
+}
+
+pub fn pending_window(
+    maintained_frontier: Option<i64>,
+    input_frontier: Option<i64>,
+) -> Option<PendingWindow> {
+    let maintained = maintained_frontier?;
+    let input = input_frontier?;
+    if input <= maintained {
+        return None;
+    }
+    Some(PendingWindow {
+        maintained_exclusive: maintained,
+        input_inclusive: input,
+    })
+}
+
+/// A pending window this run's own write range proves it folded, even
+/// though the cell was never scheduled to run over exactly that window —
+/// the ledger-proven work-subsumption capability `deferral` licenses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubsumedWork {
+    pub pending: PendingWindow,
+}
+
+/// Whether `pending` counts as subsumed by a run whose own write range is
+/// `[scheduled_start, scheduled_end]`. Both legs are ledger facts the caller
+/// must supply, never inferred here: `prior_run_recorded_skip` — a prior run
+/// manifest actually recorded `skipped_deferral` for this cell (proof the
+/// window was genuinely deferred, not merely never-yet-due) — and
+/// `scheduled_start..=scheduled_end` covering the *entire* pending window
+/// (a partial cover is not a subsumption; the cell still owes the
+/// uncovered remainder). Reporting subsumption from range coverage alone,
+/// without the recorded prior skip, would fire on every ordinary
+/// incremental run whose window happens to widen.
+pub fn subsumption(
+    pending: Option<PendingWindow>,
+    prior_run_recorded_skip: bool,
+    scheduled_start: i64,
+    scheduled_end: i64,
+) -> Option<SubsumedWork> {
+    let pending = pending?;
+    if !prior_run_recorded_skip {
+        return None;
+    }
+    let covers =
+        scheduled_start <= pending.maintained_exclusive && scheduled_end >= pending.input_inclusive;
+    if !covers {
+        return None;
+    }
+    Some(SubsumedWork { pending })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -154,5 +250,62 @@ mod tests {
     #[test]
     fn deferral_violations_holds_within_the_window() {
         assert_eq!(deferral_violations("cell", Some(100), Some(106), 6), None);
+    }
+
+    #[test]
+    fn run_license_skips_when_lag_is_within_d() {
+        assert_eq!(
+            run_license(Some(100), Some(106), 6),
+            RunLicense::Skip { lag: 6, d: 6 }
+        );
+        assert_eq!(
+            run_license(Some(100), Some(103), 6),
+            RunLicense::Skip { lag: 3, d: 6 }
+        );
+    }
+
+    #[test]
+    fn run_license_runs_when_lag_exceeds_d() {
+        assert_eq!(run_license(Some(100), Some(107), 6), RunLicense::Run);
+    }
+
+    #[test]
+    fn run_license_runs_when_nothing_is_pending() {
+        assert_eq!(run_license(Some(100), Some(100), 6), RunLicense::Run);
+        assert_eq!(run_license(Some(105), Some(100), 6), RunLicense::Run);
+        assert_eq!(run_license(None, Some(100), 6), RunLicense::Run);
+        assert_eq!(run_license(Some(100), None, 6), RunLicense::Run);
+    }
+
+    #[test]
+    fn pending_window_is_maintained_exclusive_to_input_inclusive() {
+        assert_eq!(
+            pending_window(Some(100), Some(106)),
+            Some(PendingWindow {
+                maintained_exclusive: 100,
+                input_inclusive: 106,
+            })
+        );
+        assert_eq!(pending_window(Some(100), Some(100)), None);
+        assert_eq!(pending_window(None, Some(100)), None);
+        assert_eq!(pending_window(Some(100), None), None);
+    }
+
+    #[test]
+    fn subsumption_requires_a_covering_scheduled_range() {
+        let pending = pending_window(Some(100), Some(106));
+        assert_eq!(subsumption(pending, true, 100, 105), None);
+        assert_eq!(
+            subsumption(pending, true, 100, 106),
+            Some(SubsumedWork {
+                pending: pending.unwrap()
+            })
+        );
+    }
+
+    #[test]
+    fn subsumption_requires_a_prior_deferred_run() {
+        let pending = pending_window(Some(100), Some(106));
+        assert_eq!(subsumption(pending, false, 100, 106), None);
     }
 }

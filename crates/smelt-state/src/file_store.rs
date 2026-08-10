@@ -693,6 +693,7 @@ mod tests {
                 error: None,
                 retry_count: 0,
                 probes: Vec::new(),
+                subsumed: None,
             },
         );
         RunManifest {
@@ -1191,6 +1192,7 @@ mod tests {
                 error: None,
                 retry_count: 0,
                 probes: Vec::new(),
+                subsumed: None,
             },
         );
         models.insert(
@@ -1207,6 +1209,7 @@ mod tests {
                 error: None,
                 retry_count: 0,
                 probes: Vec::new(),
+                subsumed: None,
             },
         );
         models.insert(
@@ -1223,6 +1226,7 @@ mod tests {
                 error: None,
                 retry_count: 0,
                 probes: Vec::new(),
+                subsumed: None,
             },
         );
 

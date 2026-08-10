@@ -18,14 +18,16 @@
 //! `crate::probes::dispatch_probe` — it consults `should_dispatch` and
 //! executes the snapshot SQL directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Datelike, NaiveDate};
 use smelt_backend::{Backend, BackendError, MaintenanceDialect};
 use smelt_core::metadata::ModelMetadata;
 use smelt_core::sources::SourceInfo;
 use smelt_core::ModelFile;
-use smelt_logical::contract::deferral::deferral_violations;
+use smelt_logical::contract::deferral::{
+    deferral_violations, pending_window, run_license, subsumption, PendingWindow, RunLicense,
+};
 use smelt_logical::contract::frozen_horizon::{
     emit_frozen_band_snapshot, frozen_band_before, late_arrivals, PartitionCount,
 };
@@ -33,7 +35,7 @@ use smelt_logical::maintenance::{should_dispatch, ProbeDispatch};
 use smelt_state::frozen_band_baselines::{FrozenBandBaselineStore, FrozenBandPartition};
 use smelt_state::intervals::IntervalStore;
 use smelt_state::landed_deltas::LandedDeltaStore;
-use smelt_state::{ProbeRecord, ProbeRecordOutcome};
+use smelt_state::{ProbeRecord, ProbeRecordOutcome, SubsumedWindow};
 
 use crate::probes::{probe_violation_suffix, ProbeContext, ProbePolicy};
 
@@ -367,17 +369,12 @@ pub fn evaluate_deferral(
     let mut records = Vec::with_capacity(probes.len());
     let mut violations = Vec::new();
 
-    let maintained_frontier = interval_store
-        .get(model_name)
-        .and_then(|mi| mi.latest_date())
-        .map(|d| d.num_days_from_ce() as i64);
-    let input_frontier = clocked_source_addresses
-        .iter()
-        .filter_map(|addr| landed_deltas.get(addr))
-        .filter_map(|landing| landing.covered_intervals.last())
-        .filter_map(|iv| NaiveDate::parse_from_str(&iv.end, "%Y-%m-%d").ok())
-        .map(|d| d.num_days_from_ce() as i64)
-        .max();
+    let (maintained_frontier, input_frontier) = resolve_deferral_frontiers(
+        model_name,
+        clocked_source_addresses,
+        interval_store,
+        landed_deltas,
+    );
 
     for probe in probes {
         match should_dispatch(policy.cadence, policy.run_ordinal) {
@@ -421,4 +418,132 @@ pub fn evaluate_deferral(
     }
 
     (records, violations)
+}
+
+/// Both ledger frontiers `contract.deferral`'s licensing decisions compare
+/// — `model_name`'s maintained frontier (`IntervalStore`'s per-model latest
+/// recorded interval end) and the input frontier (the latest covered
+/// interval end across `clocked_source_addresses` in `LandedDeltaStore`).
+/// Shared by [`evaluate_deferral`] (the probe) and [`deferral_decision`]
+/// (the scheduler) so both read the same two frontiers the same way.
+fn resolve_deferral_frontiers(
+    model_name: &str,
+    clocked_source_addresses: &[String],
+    interval_store: &IntervalStore,
+    landed_deltas: &LandedDeltaStore,
+) -> (Option<i64>, Option<i64>) {
+    let maintained_frontier = interval_store
+        .get(model_name)
+        .and_then(|mi| mi.latest_date())
+        .map(|d| d.num_days_from_ce() as i64);
+    let input_frontier = clocked_source_addresses
+        .iter()
+        .filter_map(|addr| landed_deltas.get(addr))
+        .filter_map(|landing| landing.covered_intervals.last())
+        .filter_map(|iv| NaiveDate::parse_from_str(&iv.end, "%Y-%m-%d").ok())
+        .map(|d| d.num_days_from_ce() as i64)
+        .max();
+    (maintained_frontier, input_frontier)
+}
+
+/// The run-skip license and pending window `contract.deferral` grants one
+/// model for this run, computed once before the wavefront scheduler starts
+/// (`docs/outcomes/20260809-contract-lattice-v1/phases/05-plan.md`). Thin
+/// over `smelt_logical::contract::deferral`'s pure functions — this module
+/// contributes no independent lag-vs-window comparison of its own.
+#[derive(Debug, Clone, Copy)]
+pub struct DeferralDecision {
+    pub license: RunLicense,
+    pub pending: Option<PendingWindow>,
+}
+
+/// Build `model_name`'s [`DeferralDecision`], or `None` when it declares no
+/// `contract.deferral` (the scheduling decision is opt-in only, mirroring
+/// [`deferral_probes`]).
+pub fn deferral_decision(
+    model_name: &str,
+    metadata: Option<&ModelMetadata>,
+    clocked_source_addresses: &[String],
+    interval_store: &IntervalStore,
+    landed_deltas: &LandedDeltaStore,
+) -> Option<DeferralDecision> {
+    let d_days = metadata
+        .and_then(|m| m.contract.as_ref())
+        .and_then(|c| c.deferral.as_ref())
+        .map(|d| d.to_days() as i64)?;
+    let (maintained_frontier, input_frontier) = resolve_deferral_frontiers(
+        model_name,
+        clocked_source_addresses,
+        interval_store,
+        landed_deltas,
+    );
+    Some(DeferralDecision {
+        license: run_license(maintained_frontier, input_frontier, d_days),
+        pending: pending_window(maintained_frontier, input_frontier),
+    })
+}
+
+/// Closes `own_skip` (models `contract.deferral` itself licensed to skip)
+/// over `upstream_map` (every selected model's transitive upstream set) to
+/// the fixpoint: a dependent of a deferral-skipped model is skipped with
+/// it, since a dependent that ran while its upstream was deferred would
+/// record interval coverage for a window its upstream never folded, and
+/// would never revisit it — the silent hole the default point forbids
+/// (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5
+/// decision log). Mirrors `execute_project`'s own `--resume` downstream
+/// closure.
+pub fn propagate_deferral_skip(
+    own_skip: &HashSet<String>,
+    upstream_map: &HashMap<String, HashSet<String>>,
+    all_models: &[String],
+) -> HashSet<String> {
+    let mut skip = own_skip.clone();
+    loop {
+        let mut added = false;
+        for name in all_models {
+            if skip.contains(name) {
+                continue;
+            }
+            if let Some(ups) = upstream_map.get(name) {
+                if ups.iter().any(|u| skip.contains(u)) {
+                    skip.insert(name.clone());
+                    added = true;
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    skip
+}
+
+/// Whether `pending` (this model's `contract.deferral` pending window,
+/// already computed by [`deferral_decision`]) is subsumed by a run whose
+/// own write range is `[scheduled_start, scheduled_end]`, given whether a
+/// prior run manifest recorded a `skipped_deferral` for this model. Thin
+/// date-formatting wrapper over `smelt_logical::contract::deferral::
+/// subsumption` — the licensing decision itself is not reimplemented here.
+pub fn subsumed_window(
+    pending: Option<PendingWindow>,
+    prior_run_recorded_skip: bool,
+    scheduled_start: NaiveDate,
+    scheduled_end: NaiveDate,
+) -> Option<SubsumedWindow> {
+    let work = subsumption(
+        pending,
+        prior_run_recorded_skip,
+        scheduled_start.num_days_from_ce() as i64,
+        scheduled_end.num_days_from_ce() as i64,
+    )?;
+    Some(SubsumedWindow {
+        maintained_exclusive: NaiveDate::from_num_days_from_ce_opt(
+            work.pending.maintained_exclusive as i32,
+        )
+        .map(|d| d.format("%Y-%m-%d").to_string())
+        .unwrap_or_default(),
+        input_inclusive: NaiveDate::from_num_days_from_ce_opt(work.pending.input_inclusive as i32)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_default(),
+    })
 }

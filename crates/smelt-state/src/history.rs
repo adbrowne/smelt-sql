@@ -92,6 +92,7 @@ mod tests {
                 error: None,
                 retry_count: 0,
                 probes: Vec::new(),
+                subsumed: None,
             },
         );
         RunManifest {

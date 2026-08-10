@@ -18,7 +18,10 @@
 //! - `deferral`: the complete triple has landed — clock-admissibility
 //!   validation, the lag oracle, and the deferral-exceeded probe comparison
 //!   all live in the `deferral` module. The two capabilities the point
-//!   licenses (run skipping, work subsumption) are separate, later work
+//!   licenses, run skipping and work subsumption, have also landed —
+//!   `deferral::run_license`, `deferral::pending_window`, and
+//!   `deferral::subsumption` single-own the licensing decisions;
+//!   `smelt-runtime`'s scheduler is a thin builder over them
 //!   (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 5).
 
 pub mod deferral;

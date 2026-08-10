@@ -55,7 +55,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
-| 5 | Deferral-licensed run skipping and ledger-proven work subsumption | planned |
+| 5 | Deferral-licensed run skipping and ledger-proven work subsumption | done |
 | 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
 | 7 | Surface: explain contract rendering, docs-site update | pending |
 
@@ -145,6 +145,16 @@ relaxation is declared, validated, probe-checked, and printed by
   maintained frontier the ledger does not track, and criterion 2 is met at model granularity. The
   other carry-forward (no `execute_project`-driven test on the live deferral path) is folded into
   phase 5's own test list rather than a new row.
+
+- 2026-08-10 — Phase 5 done: the deferral triple's licensing half
+  (`RunLicense`, `pending_window`, `subsumption`) lands in `smelt-logical`; `smelt-runtime`'s
+  `contract_probes::deferral_decision`/`propagate_deferral_skip`/`subsumed_window` schedule it;
+  `execute.rs` records `skipped_deferral`/`skipped_deferral_upstream` and attaches `subsumed` on a
+  covering run. **Discovery**: under the default `PerRun` probe cadence, a genuine `lag > D` run
+  will always also trip the phase-4 `ContractDeferralExceeded` probe (both read the same stale
+  pre-write frontier) — correct behavior, but it means demonstrating the "catch-up run records
+  `subsumed`" path end-to-end needs `probes: cadence: off` in that fixture; not a code gap, just a
+  fixture necessity (`docs/outcomes/20260809-contract-lattice-v1/phases/05-summary.md`).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

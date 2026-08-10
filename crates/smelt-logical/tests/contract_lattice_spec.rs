@@ -261,6 +261,53 @@ fn deferral_triple_is_complete() {
 }
 
 #[test]
+fn deferral_capabilities_are_single_owned() {
+    let module = read("crates/smelt-logical/src/contract/deferral.rs");
+    assert!(
+        module.contains("pub fn run_license"),
+        "the run-skip licensing decision must be single-owned in smelt-logical"
+    );
+    assert!(
+        module.contains("pub fn pending_window"),
+        "the pending-window transform must be single-owned in smelt-logical"
+    );
+    assert!(
+        module.contains("pub fn subsumption"),
+        "the work-subsumption proof must be single-owned in smelt-logical"
+    );
+
+    // `smelt-runtime` may only call these decisions, never re-derive them —
+    // no independent comparison of the two frontiers, or of the
+    // pending/scheduled ranges, outside the `smelt_logical::contract::deferral`
+    // functions above.
+    let runtime_dirs = ["crates/smelt-runtime/src", "crates/smelt-runtime/tests"];
+    for dir in runtime_dirs {
+        let dir = repo_root().join(dir);
+        for entry in std::fs::read_dir(&dir).expect("read runtime dir") {
+            let entry = entry.expect("dir entry");
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let contents = std::fs::read_to_string(&path).unwrap_or_default();
+            if path.file_name().and_then(|n| n.to_str()) == Some("contract_probes.rs")
+                || contents.contains("smelt_logical::contract::deferral")
+            {
+                // Uses the shared functions — expected. Guard against a
+                // parallel reimplementation: no local lag-vs-window
+                // arithmetic that duplicates `run_license`/`subsumption`.
+                assert!(
+                    !contents.contains("lag.lag <= d") && !contents.contains("lag <= d"),
+                    "{}: reimplements the deferral lag-vs-window comparison instead of calling \
+                     smelt_logical::contract::deferral::run_license",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn known_divergence_tracks_the_unimplemented_lattice() {
     let spec = read("docs/specs/incremental_models.md");
     let section = h2_section_body(&spec, "## Known Divergences / Open Questions");

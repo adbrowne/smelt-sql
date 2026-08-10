@@ -568,6 +568,23 @@ latest covered end across its clocked inputs' recorded landings — and the prob
 raising `ContractDeferralExceeded`, naming the cell and the measured lag, whenever lag exceeds the
 declared `D`.
 
+Operationally, the same two ledger frontiers the probe compares also drive the scheduling
+decision: measured `lag = input_frontier − maintained_frontier`. When `0 < lag ≤ D`, the run is
+licensed to skip — recorded on the run manifest as `skipped_deferral` (never silently omitted,
+the same posture as every other manifest-recorded skip reason), leaving the target table and the
+interval ledger untouched. `lag ≤ 0` (nothing pending) or an unresolved frontier (the cell's first
+run) always falls through to the normal path — skipping is a licensed relaxation, never the
+fallback, and it is never available past `D`: once `lag > D`, the run proceeds and the probe's own
+`ContractDeferralExceeded` check applies as described above. A deferral skip propagates to every
+selected dependent of the skipped cell, recorded `skipped_deferral_upstream` — a dependent that
+ran while its upstream was deferred would record interval coverage for a window its upstream never
+folded, and would never revisit it, the exact silent hole the default point forbids. Work
+subsumption is proven from two ledger facts, never inferred from range coverage alone: a prior run
+manifest recorded `skipped_deferral` for this cell, **and** the current run's own write range
+covers that cell's pending window (`(maintained_frontier, input_frontier]`, computed from the same
+two frontiers). When both hold, the covering run's manifest entry records the subsumed window
+alongside its normal `success` outcome.
+
 Both points compose with the shape facts already in play (`grain`, the column-family catalogue,
 `maintenance:` overrides) without introducing a new mode: a relaxed cell still resolves a
 technique via the same per-cell admission rule (§"Per-cell admission"), just checked against its
@@ -2456,20 +2473,22 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 ### The contract, plan, and graph layer
 
 - **The parameterised conformance oracle and the `explain` surface remain unimplemented for the
-  contract lattice; `deferral`'s declaration and probe are landed but not yet a licensed
-  capability.** §"The contract lattice" and §"Contract relaxations (`contract:`)" define the
+  contract lattice.** §"The contract lattice" and §"Contract relaxations (`contract:`)" define the
   default point and the two v1 relaxations (`frozen_horizon`, `deferral`), each as a
   declaration-schema + oracle-transform + probe-emitter triple. Both triples are landed: the
   loader accepts a `contract:` block with `frozen_horizon`, `deferral`, and `cells:`;
   `smelt-logical` validates grain admissibility (`frozen_horizon`) and clock admissibility
   (`deferral`); the partition-grain write range narrows to `end - H`; the baseline-comparative
   late-arrival probe (`ContractLateArrivalOutsideHorizon`) raises on a genuine late arrival
-  outside `H`; and the ledger-derived lag probe (`ContractDeferralExceeded`) raises when a cell's
-  measured lag exceeds its declared `D`. Still missing: `deferral`'s two licensed capabilities
-  (run skipping, work subsumption — declaring `deferral` today only gets the probe, not the
-  scheduling change it licenses), `maintenance_conformance` parameterisation per lattice point
-  (every recipe today is checked against the default point's strict oracle only), and `smelt
-  explain` rendering the effective contract per cell. Tracked:
+  outside `H`; the ledger-derived lag probe (`ContractDeferralExceeded`) raises when a cell's
+  measured lag exceeds its declared `D`; and `deferral`'s two licensed capabilities — run skipping
+  (`skipped_deferral`/`skipped_deferral_upstream`, model granularity) and ledger-proven work
+  subsumption — are scheduled by `smelt-runtime` from the same `smelt-logical` licensing functions.
+  Per-cell `deferral` (`contract.cells[].deferral`) still parses and validates fail-loud but is not
+  yet scheduled — it needs a per-cell maintained frontier the interval ledger does not track, a
+  state-shape change, not a lattice-point change. Still missing: `maintenance_conformance`
+  parameterisation per lattice point (every recipe today is checked against the default point's
+  strict oracle only) and `smelt explain` rendering the effective contract per cell. Tracked:
   `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")

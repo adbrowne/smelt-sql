@@ -71,6 +71,27 @@ pub struct ModelRunRecord {
     /// manifests written before probe dispatch was wired in.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes: Vec<ProbeRecord>,
+    /// The `contract.deferral` pending window this run's write range proved
+    /// it folded, ledger-proven work subsumption
+    /// (`docs/specs/run_state.md` §"Run manifest",
+    /// `docs/specs/incremental_models.md` §"The contract lattice"). `None`
+    /// for every model without a declared `contract.deferral`, and for a
+    /// run that folds work on schedule without ever having deferred it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subsumed: Option<SubsumedWindow>,
+}
+
+/// The dated bounds of a `contract.deferral` pending window a run's own
+/// write range covered, recorded on the covering run's manifest entry
+/// (`docs/specs/run_state.md` §"Run manifest").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubsumedWindow {
+    /// The maintained frontier the pending window starts just after
+    /// (exclusive), `YYYY-MM-DD`.
+    pub maintained_exclusive: String,
+    /// The input frontier the pending window ends at (inclusive),
+    /// `YYYY-MM-DD`.
+    pub input_inclusive: String,
 }
 
 /// One declared-fact probe's cadence outcome on this run

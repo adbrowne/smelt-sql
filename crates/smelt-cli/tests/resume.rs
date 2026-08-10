@@ -921,6 +921,7 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
             error: None,
             retry_count: 0,
             probes: Vec::new(),
+            subsumed: None,
         },
     );
     let constructed = smelt_state::RunManifest {

@@ -1083,31 +1083,51 @@ pub async fn execute_project(
         HashMap::new()
     };
 
+    let file_store = FileStore::new(project_dir, &request.target);
+
+    // Models declaring `contract.deferral` at model granularity
+    // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
+    // below to widen the `upstream_map` build condition, since a deferral
+    // skip must also propagate to dependents.
+    let deferral_declared: HashSet<String> = model_plans
+        .iter()
+        .filter(|p| {
+            p.model_file
+                .metadata
+                .as_deref()
+                .and_then(|m| m.contract.as_ref())
+                .and_then(|c| c.deferral.as_ref())
+                .is_some()
+        })
+        .map(|p| p.name.clone())
+        .collect();
+
     // Build model → all_upstream map for the selected set (needed for
     // downstream closure computation — both the check-skip downstream
-    // closure and, when `request.resume` is set, the `--resume` downstream
-    // closure below). Captured here to avoid holding the graph lock across
-    // awaits in the model loop.
-    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks || request.resume {
-        // graph_lock was already dropped above; we need to re-lock briefly to
-        // read all_upstream for each selected model.
-        // Actually, graph was dropped before backends were created.
-        // We need to rebuild from the model graph. Since we dropped graph_lock,
-        // we captured needed data already. But we need all_upstream.
-        // Use the already-built model_plans to reconstruct deps from model_file refs.
-        // Actually, model_file.refs captures the smelt refs, not the canonical names.
-        // The cleanest: re-lock the graph briefly just to capture upstream maps.
-        // This is safe because graph is only mutated before the lock is dropped.
-        let graph_lock2 = graph.lock().await;
-        let map: HashMap<String, HashSet<String>> = selected
-            .iter()
-            .map(|name| (name.clone(), graph_lock2.all_upstream(name)))
-            .collect();
-        drop(graph_lock2);
-        map
-    } else {
-        HashMap::new()
-    };
+    // closure, the `--resume` downstream closure, and the deferral-skip
+    // downstream closure below). Captured here to avoid holding the graph
+    // lock across awaits in the model loop.
+    let upstream_map: HashMap<String, HashSet<String>> =
+        if request.run_checks || request.resume || !deferral_declared.is_empty() {
+            // graph_lock was already dropped above; we need to re-lock briefly to
+            // read all_upstream for each selected model.
+            // Actually, graph was dropped before backends were created.
+            // We need to rebuild from the model graph. Since we dropped graph_lock,
+            // we captured needed data already. But we need all_upstream.
+            // Use the already-built model_plans to reconstruct deps from model_file refs.
+            // Actually, model_file.refs captures the smelt refs, not the canonical names.
+            // The cleanest: re-lock the graph briefly just to capture upstream maps.
+            // This is safe because graph is only mutated before the lock is dropped.
+            let graph_lock2 = graph.lock().await;
+            let map: HashMap<String, HashSet<String>> = selected
+                .iter()
+                .map(|name| (name.clone(), graph_lock2.all_upstream(name)))
+                .collect();
+            drop(graph_lock2);
+            map
+        } else {
+            HashMap::new()
+        };
 
     let mut skip_set: HashSet<String> = HashSet::new();
     let mut check_results: Vec<CheckOutcome> = Vec::new();
@@ -1121,8 +1141,6 @@ pub async fn execute_project(
             .collect::<Vec<_>>(),
         total_batches,
     );
-
-    let file_store = FileStore::new(project_dir, &request.target);
 
     // ── `--resume`: locate the run to resume from, fail loud if there is
     // none ────────────────────────────────────────────────────────────────
@@ -1210,6 +1228,77 @@ pub async fn execute_project(
         HashSet::new()
     };
 
+    // ── `contract.deferral`: the run-skip license and pending window for
+    // every model declaring it, computed once before the wavefront
+    // scheduler runs (`docs/outcomes/20260809-contract-lattice-v1/phases/
+    // 05-plan.md`) — both ledger frontiers this reads are untouched until
+    // this run's own writes touch them, so one upfront snapshot is correct
+    // for every model's decision. `deferral_own_skip` is the set licensed
+    // to skip on its own declaration; `deferral_pending` is every declaring
+    // model's pending window (`None` when nothing is pending), consulted
+    // later to prove work subsumption on a covering run.
+    let (deferral_own_skip, deferral_pending): (
+        HashSet<String>,
+        HashMap<String, smelt_logical::contract::deferral::PendingWindow>,
+    ) = if deferral_declared.is_empty() {
+        (HashSet::new(), HashMap::new())
+    } else {
+        let interval_store = file_store.load_intervals().unwrap_or_default();
+        let landed_deltas = file_store.load_landed_deltas().unwrap_or_default();
+        let mut own_skip = HashSet::new();
+        let mut pending = HashMap::new();
+        for plan in model_plans.iter() {
+            if !deferral_declared.contains(&plan.name) {
+                continue;
+            }
+            let (source_facts, _) = build_maint_source_facts(&plan.model_file, &source_infos);
+            let clocked_source_addresses: Vec<String> = source_facts
+                .iter()
+                .filter(|sf| {
+                    sf.partition_col.is_some()
+                        && sf.mutation == smelt_logical::maintenance::MutationProfile::AppendOnly
+                })
+                .map(|sf| sf.name.clone())
+                .collect();
+            if let Some(decision) = crate::contract_probes::deferral_decision(
+                &plan.name,
+                plan.model_file.metadata.as_deref(),
+                &clocked_source_addresses,
+                &interval_store,
+                &landed_deltas,
+            ) {
+                if let smelt_logical::contract::deferral::RunLicense::Skip { lag, d } =
+                    decision.license
+                {
+                    tracing::info!(
+                        "Deferring model '{}' — measured lag ({} day(s)) is within the \
+                         declared deferral window (D={} day(s))",
+                        plan.name,
+                        lag,
+                        d
+                    );
+                    own_skip.insert(plan.name.clone());
+                }
+                if let Some(window) = decision.pending {
+                    pending.insert(plan.name.clone(), window);
+                }
+            }
+        }
+        (own_skip, pending)
+    };
+
+    // A deferral skip propagates to dependents (`docs/outcomes/
+    // 20260809-contract-lattice-v1/outcome.md` phase 5 decision log) — see
+    // `contract_probes::propagate_deferral_skip`'s doc comment.
+    let deferral_skip_set: HashSet<String> = crate::contract_probes::propagate_deferral_skip(
+        &deferral_own_skip,
+        &upstream_map,
+        &model_plans
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>(),
+    );
+
     // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
     // this run — every state write below (manifest, intervals,
     // reconciliation ledger, landed deltas, schema snapshots) happens while
@@ -1277,6 +1366,9 @@ pub async fn execute_project(
     let state_io_lock = &state_io_lock;
     let model_plans = &model_plans;
     let resume_skip_set = &resume_skip_set;
+    let deferral_own_skip = &deferral_own_skip;
+    let deferral_skip_set = &deferral_skip_set;
+    let deferral_pending = &deferral_pending;
 
     // ── Per-model execution unit ──────────────────────────────────────────
     // Runs one model to completion (or cancellation, or failure) and returns
@@ -1344,6 +1436,55 @@ pub async fn execute_project(
                     error: None,
                     retry_count: 0,
                     probes: Vec::new(),
+                    subsumed: None,
+                },
+            );
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: 0,
+            }));
+        }
+
+        // ── `contract.deferral`: skip a model whose measured lag is a
+        // licensed relaxation, or a dependent of one that was
+        // (`docs/specs/incremental_models.md` §"The contract lattice") ────
+        // No compilation, no backend call, no interval/reconciliation/
+        // landed-delta write — recorded, never silently dropped, so a later
+        // covering run can prove work subsumption from this very record.
+        if deferral_skip_set.contains(&plan.name) {
+            let own = deferral_own_skip.contains(&plan.name);
+            let strategy = if own {
+                "skipped_deferral"
+            } else {
+                "skipped_deferral_upstream"
+            };
+            tracing::info!(
+                "Skipping model '{}' — {}",
+                plan.name,
+                if own {
+                    "measured lag is within the declared deferral window"
+                } else {
+                    "downstream of a deferral-skipped model"
+                }
+            );
+            manifest_entries.insert(
+                plan.name.clone(),
+                smelt_state::ModelRunRecord {
+                    strategy: strategy.to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1375,6 +1516,7 @@ pub async fn execute_project(
                     error: None,
                     retry_count: 0,
                     probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -2424,6 +2566,7 @@ pub async fn execute_project(
                     // (`docs/outcomes/20260809-probe-backed-facts/phases/
                     // 08-plan.md`).
                     probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -3334,6 +3477,37 @@ pub async fn execute_project(
                 } else {
                     format!("{:?}", resolved_strategy).to_lowercase()
                 };
+
+                // `contract.deferral`: prove ledger-proven work subsumption
+                // on the run that catches a previously-deferred window up —
+                // both legs are ledger facts, never inferred
+                // (`docs/outcomes/20260809-contract-lattice-v1/outcome.md`
+                // phase 5 decision log): a prior run manifest actually
+                // recorded `skipped_deferral` for this model, AND this
+                // run's own write range covers the pending window computed
+                // from the SAME pre-run frontier snapshot the skip decision
+                // used.
+                let subsumed = match (start_date, end_date) {
+                    (Some(s), Some(e)) => {
+                        // The nearest prior manifest that actually recorded
+                        // an entry for THIS model (`prior_runs` is
+                        // newest-first) — a run that never selected this
+                        // model at all must not count as "no prior skip"
+                        // and mask an older recorded one.
+                        let prior_recorded_skip = prior_runs
+                            .iter()
+                            .find_map(|m| m.models.get(&plan.name))
+                            .is_some_and(|rec| rec.strategy == "skipped_deferral");
+                        crate::contract_probes::subsumed_window(
+                            deferral_pending.get(&plan.name).copied(),
+                            prior_recorded_skip,
+                            s,
+                            e,
+                        )
+                    }
+                    _ => None,
+                };
+
                 manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
@@ -3351,6 +3525,7 @@ pub async fn execute_project(
                         error: None,
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
+                        subsumed,
                     },
                 );
 
@@ -3669,6 +3844,7 @@ pub async fn execute_project(
                         error: None,
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
+                        subsumed: None,
                     },
                 );
 
@@ -3896,6 +4072,7 @@ pub async fn execute_project(
                     error: None,
                     retry_count: 0,
                     probes: Vec::new(),
+                    subsumed: None,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -3947,6 +4124,7 @@ pub async fn execute_project(
                     error: Some(error.to_string()),
                     retry_count: 0,
                     probes: Vec::new(),
+                    subsumed: None,
                 }
             });
         }
@@ -3966,6 +4144,7 @@ pub async fn execute_project(
                     error: None,
                     retry_count: 0,
                     probes: Vec::new(),
+                    subsumed: None,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
