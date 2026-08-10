@@ -54,8 +54,10 @@ the addressing of one delta type, not the universal currency.
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
-| 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
-| 7 | Surface: explain edge rendering, docs-site update | pending |
+| 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | planned |
+| 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | pending |
+| 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | pending |
+| 9 | Surface: explain edge rendering, docs-site update | pending |
 
 ## Decision log
 
@@ -138,6 +140,23 @@ the addressing of one delta type, not the universal currency.
   `DayInterval::WHOLE` so it runs. `smelt-runtime::refuse_bare_keyed_origins` narrowed the same
   way, consulting the model's own derived output-delta shape. No phase-table reshape — phase 5's
   scope matched the plan; phase 6 (end-to-end conformance chains) is now unblocked.
+
+- 2026-08-10 — Phase 6 planned **with a reshape**: the old single row 6 ("conformance recipes")
+  assumed a keyed upstream could already reach its consumer through the real plan derivation. It
+  cannot, and phase 5's own fixture is the evidence — it had to hand a `grain: key` model a
+  synthetic `timeseries:` block "purely so the downstream's `ModelEdge` derivation gets a
+  `clock_col`". Reading the derivation confirms two hard stops in
+  `maintenance::derive::append_model_edge_cells`: an edge with `clock_col: None` is refused
+  `ReachNotDerivable`, and a downstream with no `output_partition_col` (i.e. any keyed consumer)
+  returns before any cell is built ("its model-edge creation would be a keyed fold, deferred").
+  Both are exactly the change-feed case success criterion 3 names, so the work is not deferrable
+  out — it gets rows. Old row 6 splits into: 6 key-addressed model-edge cells (plan derivation),
+  7 lowering/execution of such a cell, 8 the conformance recipes, 9 the surface/docs row
+  (formerly 7). Design call taken in-plan, not blocked: the key-addressed restriction is an
+  **additive** `PlanCell::key_scope` alongside the interval-shaped `scans` (the phase-5 precedent
+  of an additive keyed channel rather than a sum-typed rewrite), and the technique reused is the
+  existing `Technique::PerGroupRecompute` — the repair family already means "recompute and write
+  only the affected key groups", which is what folding an upstream upsert delta is.
 
 ## Blocked
 
