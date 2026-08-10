@@ -56,7 +56,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
 | 5 | Deferral-licensed run skipping and ledger-proven work subsumption | done |
-| 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
+| 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | planned |
 | 7 | Surface: explain contract rendering, docs-site update | pending |
 
 ## Decision log
@@ -155,6 +155,21 @@ relaxation is declared, validated, probe-checked, and printed by
   pre-write frontier) — correct behavior, but it means demonstrating the "catch-up run records
   `subsumed`" path end-to-end needs `probes: cadence: off` in that fixture; not a code gap, just a
   fixture necessity (`docs/outcomes/20260809-contract-lattice-v1/phases/05-summary.md`).
+
+- 2026-08-10 — Phase table unchanged (phase 5's summary deferred nothing and confirmed rows 6 and 7
+  as next).
+- 2026-08-10 — **The per-point oracle is a pure restriction on `S`, not a per-point comparator**
+  (phase 6 plan): `smelt-logical::contract` gains `ContractPoint`/`OracleObligation` plus
+  `restrict_run_window` (frozen horizon — delegates to the existing `clamp_write_range`) and
+  `settled_cutoff` (deferral — `input_frontier − D`); the gate keeps its ONE `EXCEPT ALL`
+  comparator and only varies which `S` it materialises. This is what "the conformance gate consumes
+  the oracle transform" has to mean structurally — a second comparator in the harness would be the
+  drift the single-owner rule exists to prevent.
+- 2026-08-10 — **The deferral oracle is asserted as a bracket**: `full_refresh(S_settled) ⊆
+  maintained ⊆ full_refresh(S)`. The spec's form is existential (`∃ S' ⊆ S` omitting only inputs
+  newer than `D`), which a test cannot search; the bracket is its checkable equivalent — the
+  maintained state must reflect everything older than `D` and may reflect nothing that is not in
+  `S` at all. Both legs are one-directional `EXCEPT ALL` counts, so no new comparator appears.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
