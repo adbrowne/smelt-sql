@@ -57,7 +57,7 @@ the addressing of one delta type, not the universal currency.
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
-| 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | planned |
+| 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | done |
 | 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | pending |
 
 ## Decision log
@@ -251,6 +251,21 @@ the addressing of one delta type, not the universal currency.
   `derive_workspace_output_deltas`, rather than recursing a Salsa query per model reference — the
   pure fold is already bounded-pass cycle-safe, whereas Salsa recursion over a cyclic model-ref
   graph would panic.
+
+- 2026-08-10 — Phase 9 implemented: `ref_model_edge` (`crates/smelt-db/src/lib.rs`) derives
+  `output_shape` for real instead of hard-coding `None` — a new `model_delta_inputs` helper
+  walks model refs transitively from the Salsa `file` (address-deduplicated, terminating over a
+  cycle by construction) to build the cross-model verdict map `derive_workspace_output_deltas`
+  folds once per report, and a new public `model_edges_for(db, workspace, file)` entry point
+  replaces the inline assembly so `smelt explain`'s plan report and any other caller (and this
+  phase's own tests, which need to observe `output_shape` directly since `MaintenancePlan`
+  doesn't retain the input edges) read the same edges. `docs/specs/incremental_models.md`
+  §Known Divergences narrowed accordingly. No phase-table reshape — phase 9's scope matched the
+  plan, with one latent gap flagged for the next planner (not this phase's own regression): a
+  model-reference leaf inside an upstream's own SQL only resolves through `model_verdicts` when
+  the SQL literally spells `smelt.models.<addr>`; every current fixture's bare `smelt.<addr>`
+  form bypasses it for a 3+-hop chain (pre-existing since phase 4, unexercised by any current
+  conformance recipe). Phase 10 (surface: explain edge rendering, docs-site update) is unblocked.
 
 ## Blocked
 

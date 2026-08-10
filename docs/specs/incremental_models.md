@@ -2376,10 +2376,12 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   propagation and `smelt explain`, but the propagated region is materialized by the ordinary
   incremental run loop rather than a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
-- **A key-addressed model-edge cell's `smelt explain` rendering is still generic.** Execution
-  (statement emission, driver dispatch) lowers and runs the cell (§"Upstream model edges"), but
-  `smelt explain`'s edge rendering does not yet name the affected-key discovery route or the
-  upstream sidecar it reads. Tracked: `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+- **A key-addressed model-edge cell's `smelt explain` rendering is still generic.** `smelt
+  explain`'s plan report derives the same typed model edges (upstream output-delta shape per
+  edge, §"Upstream model edges") the run loop does, so the report agrees with execution on
+  which edges admit a key-addressed cell — what remains unrendered is the affected-key
+  discovery route and the upstream sidecar it reads. Tracked:
+  `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **A `KeyedUpsert` upstream feeding a `grain: partition` downstream has no live key-addressed
   dispatch.** §"Upstream model edges" describes the key-addressed route in terms of the plan
   layer's own admission rule (an edge whose upstream output-delta shape is `KeyedUpsert` and
