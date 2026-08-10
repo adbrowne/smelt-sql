@@ -41,6 +41,11 @@ relaxation is declared, validated, probe-checked, and printed by
   per-column-group freshness, retention) — v2+ once these two prove the shape.
 - Restating the invariant per-cell in the spec headline (that is the spec
   redraft outcome's job; v1 adds the lattice without rewriting the whole spec).
+- Per-cell `deferral` *scheduling and probing* (a cell-level `contract.cells[].deferral` still
+  parses and fail-loud validates, but is not probed or scheduled): a per-cell lag needs a per-cell
+  maintained frontier, which the interval ledger does not track and which is a state-shape change,
+  not a lattice-point change. Success criterion 2 reads "a cell/model" and is served at model
+  granularity.
 
 ## Phases
 
@@ -50,7 +55,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
-| 5 | Deferral-licensed run skipping and ledger-proven work subsumption | pending |
+| 5 | Deferral-licensed run skipping and ledger-proven work subsumption | planned |
 | 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
 | 7 | Surface: explain contract rendering, docs-site update | pending |
 
@@ -123,6 +128,23 @@ relaxation is declared, validated, probe-checked, and printed by
   granularity only this phase — cell-level `deferral` validates but is not yet probed;
   `contract.cells[].deferral`'s own probe/scheduling is phase 5 (`docs/outcomes/
   20260809-contract-lattice-v1/phases/04-summary.md`).
+
+- 2026-08-10 — **A deferral skip propagates to dependents** (phase 5 plan): a dependent that ran
+  while its upstream was deferral-skipped would record interval coverage for a window its upstream
+  never folded and would never revisit it — the silent hole the default point forbids. Dependents
+  are skipped with the deferred model (`skipped_deferral_upstream`), closed over `upstream_map`
+  the way `resume_skip_set` already is. Letting dependents run and simply inherit the lag was
+  rejected for that reason.
+- 2026-08-10 — **Subsumption is proven by two ledger legs, not inferred** (phase 5 plan): the
+  pending window `(maintained_frontier, input_frontier]` counts as subsumed only when a prior run
+  manifest recorded a `skipped_deferral` for this model **and** the current run's write range
+  covers that window. Reporting subsumption from range coverage alone would fire on every ordinary
+  incremental run.
+- 2026-08-10 — Phase table unchanged; phase 4's remaining carry-forward (per-cell `deferral`
+  probing/scheduling) is recorded under Out of scope with its rationale — it needs a per-cell
+  maintained frontier the ledger does not track, and criterion 2 is met at model granularity. The
+  other carry-forward (no `execute_project`-driven test on the live deferral path) is folded into
+  phase 5's own test list rather than a new row.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
