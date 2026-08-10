@@ -2472,27 +2472,27 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **The `explain` surface remains unimplemented for the contract lattice.** §"The contract
-  lattice" and §"Contract relaxations (`contract:`)" define the default point and the two v1
-  relaxations (`frozen_horizon`, `deferral`), each as a declaration-schema + oracle-transform +
-  probe-emitter triple. Both triples are landed: the loader accepts a `contract:` block with
-  `frozen_horizon`, `deferral`, and `cells:`; `smelt-logical` validates grain admissibility
-  (`frozen_horizon`) and clock admissibility (`deferral`); the partition-grain write range narrows
-  to `end - H`; the baseline-comparative late-arrival probe
-  (`ContractLateArrivalOutsideHorizon`) raises on a genuine late arrival outside `H`; the
-  ledger-derived lag probe (`ContractDeferralExceeded`) raises when a cell's measured lag exceeds
-  its declared `D`; `deferral`'s two licensed capabilities — run skipping
-  (`skipped_deferral`/`skipped_deferral_upstream`, model granularity) and ledger-proven work
-  subsumption — are scheduled by `smelt-runtime` from the same `smelt-logical` licensing
-  functions; and `maintenance_conformance` asserts each recipe against its OWN lattice point's
-  oracle (default cells against strict equivalence, `frozen_horizon` cells against the
-  `end - H`-restricted `S`, `deferral` cells against the bracket `full_refresh(S_settled) ⊆
-  maintained ⊆ full_refresh(S)`), consuming the same `smelt-logical::contract` transforms rather
-  than re-deriving the restriction. Per-cell `deferral` (`contract.cells[].deferral`) still parses
-  and validates fail-loud but is not yet scheduled — it needs a per-cell maintained frontier the
-  interval ledger does not track, a state-shape change, not a lattice-point change. Still missing:
-  `smelt explain` rendering the effective contract per cell. Tracked:
-  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
+- **Per-cell `deferral` is declared but not yet scheduled.** §"The contract lattice" and
+  §"Contract relaxations (`contract:`)" define the default point and the two v1 relaxations
+  (`frozen_horizon`, `deferral`), each as a declaration-schema + oracle-transform + probe-emitter
+  triple. Both triples are landed: the loader accepts a `contract:` block with `frozen_horizon`,
+  `deferral`, and `cells:`; `smelt-logical` validates grain admissibility (`frozen_horizon`) and
+  clock admissibility (`deferral`); the partition-grain write range narrows to `end - H`; the
+  baseline-comparative late-arrival probe (`ContractLateArrivalOutsideHorizon`) raises on a genuine
+  late arrival outside `H`; the ledger-derived lag probe (`ContractDeferralExceeded`) raises when a
+  cell's measured lag exceeds its declared `D`; `deferral`'s two licensed capabilities — run
+  skipping (`skipped_deferral`/`skipped_deferral_upstream`, model granularity) and ledger-proven
+  work subsumption — are scheduled by `smelt-runtime` from the same `smelt-logical` licensing
+  functions; `maintenance_conformance` asserts each recipe against its OWN lattice point's oracle
+  (default cells against strict equivalence, `frozen_horizon` cells against the `end -
+  H`-restricted `S`, `deferral` cells against the bracket `full_refresh(S_settled) ⊆ maintained ⊆
+  full_refresh(S)`), consuming the same `smelt-logical::contract` transforms rather than
+  re-deriving the restriction; and `smelt explain` prints the effective contract per cell — default
+  or the applicable relaxations with their declared parameters — in both the text report and the
+  `--json` per-cell `contract_point` object. Per-cell `deferral` (`contract.cells[].deferral`)
+  still parses and validates fail-loud, and prints as declared, but is not yet scheduled — it needs
+  a per-cell maintained frontier the interval ledger does not track, a state-shape change, not a
+  lattice-point change. Tracked: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")
   executes via its emitter, with the executed-vs-emitted `statement_parity` leg proven for that

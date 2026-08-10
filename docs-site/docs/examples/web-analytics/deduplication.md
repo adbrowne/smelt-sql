@@ -153,6 +153,7 @@ Cells (2):
       corner:    FoldDelta
       technique: KeyedFold
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
@@ -163,6 +164,7 @@ Cells (2):
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)

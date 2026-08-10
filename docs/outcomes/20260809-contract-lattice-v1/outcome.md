@@ -1,7 +1,7 @@
 # Outcome: Contract lattice v1 — frozen horizons and deferral
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §4.2, §6 step 5; `docs/research/20260726-beyond-ivm-differentiation.md` §5.2/§5.3
 **Spec anchors:** `docs/specs/incremental_models.md` (the equivalence invariant)
 
@@ -57,7 +57,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
 | 5 | Deferral-licensed run skipping and ledger-proven work subsumption | done |
 | 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | done |
-| 7 | Surface: explain contract rendering, docs-site update | planned |
+| 7 | Surface: explain contract rendering, docs-site update | done |
 
 ## Decision log
 
@@ -200,6 +200,14 @@ relaxation is declared, validated, probe-checked, and printed by
   scheduled** (Out of scope, per-cell frontier): printing only what is scheduled would make a
   declared-but-unscheduled relaxation invisible, which is the silent weakening the lattice exists
   to prevent; the spec records the gap instead.
+
+- 2026-08-10 — Phase 7 done (the outcome's last row; outcome marked done). `smelt_logical::
+  contract::effective_contract` (plus `EffectiveContract`/`EffectiveDeferral`/`DeferralOrigin`)
+  single-owns the per-cell narrower-wins resolution; `smelt explain` prints a `contract:  <label>`
+  row per cell in the text report and a `contract_point` object per cell in `--json` (absent
+  relaxations omitted, never `null`). Two generated fixtures needed regeneration as a direct
+  consequence of the new row (golden `--show-sql` snapshot, one web-analytics tutorial page) — see
+  `phases/07-summary.md`. All six success criteria are now met.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

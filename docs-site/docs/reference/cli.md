@@ -1138,6 +1138,10 @@ the model's own **Relation Contract** (its clock, identity, and derived `grain` 
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
 
+Each cell also prints a `contract:` row — its effective [contract relaxation](../guide/incremental-models.md#contract-relaxations)
+(`default`, or `frozen_horizon`/`deferral` with their declared intervals); `--json` carries the
+same information per cell as a `contract_point` object.
+
 A `ColumnScopedMerge` cell's block additionally prints an `observed-delta recording:` line —
 the only technique family recording is wired for today (`KeyedFold` and the staged-candidate
 write family do not record yet, so their cells print no such line at all). The line still says

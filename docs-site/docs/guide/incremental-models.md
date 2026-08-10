@@ -573,6 +573,36 @@ FROM smelt.events
 
 Here the model's own `RANGE BETWEEN INTERVAL '2 hours'` frame derives a 2-hour horizon, comfortably inside the declared 30-day ceiling — no warning. If a future edit widened that frame past 30 days, smelt would emit a compile-time warning naming both the derived reach and the declared ceiling. Either way, **the clamp always uses the derived value** — the ceiling narrows nothing; it only tells you when the model's real reach has grown further than expected.
 
+## Contract relaxations
+
+Every incremental model defaults to the equivalence invariant: its maintained state always equals a full refresh over the same inputs. A model can declare a bounded, checked relaxation of that guarantee with a `contract:` block:
+
+```yaml
+contract:
+  frozen_horizon: '90 days'      # partition grain only
+  deferral: '6 hours'
+  cells:                          # optional per-cell refinement, addressed like maintenance.cells
+    - columns: [<col>, ...]
+      on: <source-address> | backfill
+      deferral: '1 day'
+```
+
+Two relaxations are available:
+
+- **`frozen_horizon`** — partitions older than `end - frozen_horizon` are never revisited by maintenance. Admitted only on a partition-grain model (`grain: partition`), since a key-grain model has no write-eligibility clamp to narrow. A genuinely late arrival outside the frozen horizon is diagnosed (`ContractLateArrivalOutsideHorizon`), never silently dropped. An unparseable or negative interval, or declaring it on a key-grain model, is `ContractFrozenHorizonInvalid`.
+- **`deferral`** — the maintained state may lag its inputs by up to the declared window, licensing a run to be skipped while the pending work stays inside that window, and a later catch-up run to prove it subsumed the skipped work. Admitted on either grain, model-level or per cell, but only where there is a clock to measure lag against — a model-level `deferral` needs a `timeseries:` clock, and a `cells[]` entry's `deferral` needs its `on:` trigger to be a clocked, interval-representable source. A cell whose measured lag exceeds its declared window raises `ContractDeferralExceeded`. An unparseable/negative interval, or a `deferral` with no clock to measure against, is `ContractDeferralInvalid`.
+
+Model-level values are the default for every cell; a `contract.cells[]` entry — addressed the same way as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is model-level only. A per-cell `deferral` refinement validates and prints as declared, but is not yet scheduled — it needs a per-cell maintained frontier the interval ledger does not track yet.
+
+`smelt explain <model>` prints each cell's effective contract — `default` when no `contract:` applies, otherwise the applicable relaxations with their declared intervals:
+
+```
+      contract:  default
+      contract:  frozen_horizon 90 days, deferral 6 hours (cell)
+```
+
+A relaxation is never silent: absent `contract:` is always the default point, and a declared relaxation always shows up here, per cell.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.

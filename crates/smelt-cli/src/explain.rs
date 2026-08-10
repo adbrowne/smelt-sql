@@ -193,6 +193,19 @@ fn format_output_delta(delta: &smelt_logical::analysis::output_delta::OutputDelt
     }
 }
 
+/// A cell's own trigger, addressed the same way `maintenance.cells[]`/
+/// `contract.cells[]` address it (a source address, or the literal
+/// `backfill`) — `None` for `Trigger::ColumnAdded`, which has no `on:`
+/// address of its own.
+fn cell_trigger_address(trigger: &smelt_logical::maintenance::Trigger) -> Option<String> {
+    use smelt_logical::maintenance::Trigger;
+    match trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::Backfill => Some("backfill".to_string()),
+        Trigger::ColumnAdded { .. } => None,
+    }
+}
+
 /// Find `bare_name`'s [`SourceInfo`] among `source_infos` — same bare-name
 /// convention `smelt_runtime::execute::build_maint_source_facts` uses
 /// (strip a leading `sources` address segment).
@@ -240,6 +253,11 @@ pub fn find_source_info<'a>(
 /// keyed by the same `name` an [`InboundEdgeContract`] carries — never
 /// re-derived here; an edge absent from this slice prints no `delta type:`
 /// row rather than a fabricated one.
+/// `contract_cfg` is the model's own `contract:` frontmatter (`None` when it
+/// declares none) — resolved per cell through the single-owner
+/// `smelt_logical::contract::effective_contract`
+/// (`docs/outcomes/20260809-contract-lattice-v1/outcome.md` phase 7), never
+/// re-derived locally.
 #[allow(clippy::too_many_arguments)]
 pub fn build_maintenance_plan_report(
     model_name: &str,
@@ -248,6 +266,7 @@ pub fn build_maintenance_plan_report(
     edges: &[InboundEdgeContract],
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
     defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
+    contract_cfg: Option<&smelt_core::config::ContractConfig>,
     source_infos: &[SourceInfo],
     probes: &[smelt_runtime::probe_plan::ProbePlanEntry],
     cadence: smelt_core::config::ProbeCadence,
@@ -296,6 +315,27 @@ pub fn build_maintenance_plan_report(
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
+            // Effective contract (`docs/specs/incremental_models.md` §"The
+            // contract lattice"): default or a relaxed point, with its
+            // declared parameters — resolved by the single-owner
+            // `smelt_logical::contract::effective_contract`, never a local
+            // model-vs-cell ladder over `ContractConfig`.
+            let contract_group_columns: Vec<String> = result
+                .column_groups
+                .iter()
+                .find(|g| g.name() == cell.group)
+                .map(|g| g.columns.clone())
+                .unwrap_or_default();
+            let effective_contract = smelt_logical::contract::effective_contract(
+                contract_cfg,
+                cell_trigger_address(&cell.trigger).as_deref().unwrap_or(""),
+                &contract_group_columns,
+            );
+            let _ = writeln!(
+                out,
+                "      contract:  {}",
+                effective_contract.render_label()
+            );
             // Region row identity (P2, `model_properties.md` §"Region row
             // identity") — plain data carried on the cell
             // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
@@ -1259,6 +1299,47 @@ pub struct ExplainCellJson {
     /// `smelt-runtime::diagnostics` builder — never re-derived here
     /// (§Semantics "Thin-consumer boundary").
     pub technique_previews: Vec<TechniquePreview>,
+    /// This cell's effective contract lattice point — default (an empty
+    /// object) or the applicable relaxations with their declared parameters
+    /// (`docs/specs/incremental_models.md` §"The contract lattice"),
+    /// resolved through the single-owner `smelt_logical::contract::
+    /// effective_contract`. An append-stable addition to this JSON shape
+    /// (`docs/specs/cli.md` §Constraints item 5).
+    pub contract_point: ExplainContractPointJson,
+}
+
+/// JSON shape of one cell's effective contract (`smelt explain --json`):
+/// absent relaxations are omitted, never rendered as `null`.
+#[derive(Debug, Serialize, Default)]
+pub struct ExplainContractPointJson {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frozen_horizon: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferral: Option<String>,
+    /// `"model"` or `"cell"` — which declaration `deferral` came from.
+    /// Omitted along with `deferral` when no deferral applies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferral_origin: Option<String>,
+}
+
+impl From<smelt_logical::contract::EffectiveContract> for ExplainContractPointJson {
+    fn from(effective: smelt_logical::contract::EffectiveContract) -> Self {
+        let (deferral, deferral_origin) = match effective.deferral {
+            Some(d) => {
+                let origin = match d.origin {
+                    smelt_logical::contract::DeferralOrigin::Model => "model",
+                    smelt_logical::contract::DeferralOrigin::Cell => "cell",
+                };
+                (Some(d.window.display), Some(origin.to_string()))
+            }
+            None => (None, None),
+        };
+        ExplainContractPointJson {
+            frozen_horizon: effective.frozen_horizon.map(|h| h.display),
+            deferral,
+            deferral_origin,
+        }
+    }
 }
 
 /// The `--json --show-sql` per-model report:
@@ -1327,6 +1408,8 @@ pub fn build_maintenance_plan_json(
     state_columns: Vec<smelt_logical::StateColumnSummary>,
     probe_entries: Vec<smelt_runtime::probe_plan::ProbePlanEntry>,
     cadence: smelt_core::config::ProbeCadence,
+    column_groups: &[smelt_logical::maintenance::ColumnGroup],
+    contract_cfg: Option<&smelt_core::config::ContractConfig>,
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1363,6 +1446,16 @@ pub fn build_maintenance_plan_json(
                 }
                 Err(reason) => (Some(reason.clone()), Vec::new()),
             };
+            let group_columns: Vec<String> = column_groups
+                .iter()
+                .find(|g| g.name() == cell.group)
+                .map(|g| g.columns.clone())
+                .unwrap_or_default();
+            let effective_contract = smelt_logical::contract::effective_contract(
+                contract_cfg,
+                cell_trigger_address(&cell.trigger).as_deref().unwrap_or(""),
+                &group_columns,
+            );
             ExplainCellJson {
                 group: cell.group.clone(),
                 trigger: format!("{:?}", cell.trigger),
@@ -1373,6 +1466,7 @@ pub fn build_maintenance_plan_json(
                 no_statements_reason,
                 statements,
                 technique_previews: diag_cell.technique_previews.clone(),
+                contract_point: effective_contract.into(),
             }
         })
         .collect();

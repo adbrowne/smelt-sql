@@ -477,6 +477,7 @@ async fn explain_maintenance_plan(
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
     // Target/schema/dialect derivation stays offline — only `smelt.yml`
     // target metadata, never a live connection (`docs/specs/cli.md`
@@ -523,6 +524,7 @@ async fn explain_maintenance_plan(
         &edges,
         cells_cfg,
         defaults_cfg,
+        contract_cfg,
         &source_infos,
         &probe_entries,
         config.probes.cadence,
@@ -717,6 +719,8 @@ async fn explain_maintenance_plan(
             result.state_columns.clone(),
             probe_entries.clone(),
             config.probes.cadence,
+            &result.column_groups,
+            contract_cfg,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

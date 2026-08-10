@@ -206,6 +206,18 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
 "cost": "<one line>"}`.
 
+**Effective contract.** Each cell's block additionally prints its effective contract lattice point
+(`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
+otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`
+(model-level, reaching every cell of a partition-grain model) and/or `deferral: 6 hours`
+(model-level by default, or a `contract.cells[]` refinement, which prints the narrower value and
+labels its origin `(cell)`). A relaxation is never silent — a model declaring `contract:` always
+shows it here, per cell. A per-cell `deferral` refinement prints as declared even though it is not
+yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each cell in the
+`cells` array carries a `contract_point` object with the same information: `frozen_horizon` and/or
+`deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
+cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
+
 ### `smelt bakeoff <model>` flags
 
 | Flag | Default | Description |

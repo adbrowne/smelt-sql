@@ -5,6 +5,7 @@ Cells (2):
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
@@ -14,6 +15,7 @@ Cells (2):
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_date", "user_id"])
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)

@@ -388,6 +388,41 @@ fn conformance_gate_consumes_the_oracle_transform() {
 }
 
 #[test]
+fn explain_contract_rendering_is_single_owned() {
+    // Phase 7 (`docs/outcomes/20260809-contract-lattice-v1/phases/07-plan.md`):
+    // the CLI's `smelt explain` per-cell contract row/`contract_point` JSON
+    // field must resolve through `smelt_logical::contract::effective_contract`
+    // — no local model-vs-cell ladder over `ContractConfig` in `smelt-cli`.
+    let module = read("crates/smelt-logical/src/contract/mod.rs");
+    assert!(
+        module.contains("pub fn effective_contract"),
+        "the per-cell effective-contract resolution must be single-owned in smelt-logical"
+    );
+
+    let explain_rs = read("crates/smelt-cli/src/explain.rs");
+    assert!(
+        explain_rs.contains("smelt_logical::contract::effective_contract"),
+        "smelt-cli's explain.rs must call smelt_logical::contract::effective_contract, not \
+         re-derive the model-vs-cell ladder locally"
+    );
+
+    // Guard against a parallel reimplementation of the narrower-wins match:
+    // `smelt-cli` must never scan `contract.cells` / `ContractConfig` fields
+    // itself to resolve which point wins for a cell.
+    for line in explain_rs.lines() {
+        let code = line.trim_start();
+        if code.starts_with("//") {
+            continue;
+        }
+        assert!(
+            !code.contains("cfg.cells.iter()") && !code.contains("contract_cfg.cells.iter()"),
+            "crates/smelt-cli/src/explain.rs: reimplements the contract.cells[] matching \
+             ladder instead of calling smelt_logical::contract::effective_contract: {line:?}"
+        );
+    }
+}
+
+#[test]
 fn known_divergence_tracks_the_unimplemented_lattice() {
     let spec = read("docs/specs/incremental_models.md");
     let section = h2_section_body(&spec, "## Known Divergences / Open Questions");

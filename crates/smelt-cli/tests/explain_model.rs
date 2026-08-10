@@ -75,6 +75,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
     // Mirrors `commands::explain::explain_maintenance_plan`'s own
     // `edge_delta_types` assembly (`docs/outcomes/20260809-output-delta-
@@ -119,6 +120,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &edges,
             cells_cfg,
             defaults_cfg,
+            contract_cfg,
             &source_infos,
             &[],
             smelt_core::config::ProbeCadence::PerRun,
@@ -958,6 +960,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         &[],
         None,
+        None,
         &[],
         &[],
         smelt_core::config::ProbeCadence::PerRun,
@@ -1079,6 +1082,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &RelationContractView::from_facts(None, None),
         &[],
         &[],
+        None,
         None,
         &[],
         &[],
@@ -1267,6 +1271,7 @@ mod write_variant_explain_surface {
             &[],
             cells_cfg,
             defaults_cfg,
+            None,
             &[],
             &[],
             smelt_core::config::ProbeCadence::PerRun,
