@@ -157,7 +157,7 @@ models:
       unique_key: [<column>, ...]  # MERGE-dedup-only key — see the callout below
 ```
 
-`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
+`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive. `key_per_partition` is a third derived label (a clock plus an identity whose `partition_column` is a member) with no writable spelling — declaring `grain: key_per_partition` is a hard error.
 
 ### Model Fields
 
@@ -169,7 +169,7 @@ models:
 | `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
 | `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from `batched.unique_key` below (a partition-grain MERGE-dedup key, never identity). |
-| `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
+| `grain` | string | no | | Optional check-only assertion — `partition` or `key` — validated against the label `timeseries:`/`unique_key:` derive; never a driver. `key_per_partition` is derived-only; declaring it is a hard error. |
 | `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and a non-default `batched.safety_overrides` on the same `smelt.yml` model entry is an error — declare it once. |
 | `batched` | object | no | | `smelt.yml`-only preference block carrying `unique_key` — a MERGE-dedup key for a partition-shaped output, distinct from the identity-conferring top-level `unique_key:` above (see the callout in [Incremental Configuration](#incremental-configuration)) |
 

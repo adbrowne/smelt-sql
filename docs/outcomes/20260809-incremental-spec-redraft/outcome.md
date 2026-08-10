@@ -56,7 +56,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
-| 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | planned |
+| 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | done |
 | 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | pending |
 | 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
@@ -251,6 +251,21 @@ way (timeless-oracle rule), at substantially reduced length.
   `examples/timeseries_broken_key_per_partition` must *derive* the grain (adding a top-level
   `unique_key` containing the partition column) instead of declaring it, so the two standing
   `UnsupportedGrain` tests keep exercising the same refusal.
+
+- 2026-08-11 — Phase 8 done: `Grain::deserialize` rejects `key_per_partition` naming the two
+  derivation facts and `grain: key`; `IncrementalStrategy::{Append, InsertOverwrite}` deleted
+  along with their dispatch arms and CLI display mapping (`Backend::insert_into_from_query`/
+  `insert_overwrite` stay as the future admission capability). Four spec files updated
+  (`incremental_models.md`, `models.md`, `diagnostics.md`, and one stale mention in
+  `architecture.md` outside the phase's file list, fixed for correctness). Found and fixed a
+  latent bug while converting the KPP fixture to derive rather than declare:
+  `smelt-db::lib.rs`'s `maintenance_plan`/`maintenance_plan_report` gated entry on the *raw*
+  `grain:` field rather than the resolved label, so a facts-only-derived model got no
+  maintenance-plan diagnostics at all — switched to `resolved_grain()`. `phases/08-check.sh` all
+  green; `verify-phase.sh` ALL GREEN. `phases/06-claims.md`'s IC-21 row reclassified `keep` →
+  `drop` (the code its Known-Divergence bullet tracked is now actually deleted); `06-check.sh`'s
+  two remaining `gap_claims` failures (IP-02, MP-33) confirmed pre-existing via `git stash`, not
+  caused by this phase.
 
 ## Blocked
 

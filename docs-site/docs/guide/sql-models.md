@@ -161,7 +161,7 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | `name` | string | Model name (optional, inferred from filename) |
 | `materialization` | `table` \| `view` \| `ephemeral` | How to materialize. See [Materializations](materializations.md) for details on each type. |
 | `refresh` | `full` \| `incremental` \| `materialized_view` | Who keeps a stored table current, and how. See [Materializations](materializations.md#refresh-axis). |
-| `grain` | `partition` \| `key` \| `key_per_partition` | Required with `refresh: incremental` — what a stored row *is* and how it is addressed. See [Materializations](materializations.md#refresh-axis). |
+| `grain` | `partition` \| `key` | Optional check-only assertion with `refresh: incremental` — what a stored row *is* and how it is addressed. `key_per_partition` is a third derived label with no writable spelling. See [Materializations](materializations.md#refresh-axis). |
 | `timeseries.event_time_column` | string | Source-of-truth time column for time-based filtering |
 | `timeseries.partition_column` | string | Column the engine prunes / deletes on |
 | `timeseries.granularity` | `hour` \| `day` \| `week` \| `month` \| `quarter` \| `year` | Time granularity for partitioning |

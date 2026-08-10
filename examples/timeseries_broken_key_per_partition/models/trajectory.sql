@@ -1,14 +1,15 @@
 ---
 materialization: table
 refresh: incremental
-grain: key_per_partition
+unique_key: [device_id, event_date]
 timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
 ---
--- `grain: key_per_partition` (one row per `(key, partition)`) is not yet
--- supported by maintenance-plan derivation
+-- A clock plus an identity with partition_column ∈ unique_key derives the
+-- `key_per_partition` grain (one row per `(key, partition)`), which is not
+-- yet supported by maintenance-plan derivation
 -- (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A0):
 -- refused fail-loud with `MaintenanceUnsupportedGrain`, never silently
 -- collapsed into an ordinary keyed plan with an empty unique_key.

@@ -500,9 +500,16 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceGranularityMismatch` | Error | A declared `timeseries.granularity` narrows past what the model's own `partition_column` projection actually derives (a `date_trunc`-style grouping check) — a safe widen (declared coarser than or equal to the derived unit) is never flagged. |
 | `MaintenanceWriteAddressingRefused` | Error | A `maintenance.cells[].write` pin names a physical addressing that cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a region write on a cell whose footprint escapes any partition set); names the cell and the refused pattern. |
 | `MaintenanceWritePatternUnavailable` | Error | A `write:` pin names an unrecognised write pattern, or one the target backend's write-pattern capability registry does not provide; names the pattern and the backend, never a silent downgrade. |
-| `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model declares a `grain:` maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
+| `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model's derived grain (from its clock, identity, and `partition_column ∈ key?` facts) is one maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
 | `MaintenanceRepairKeysNotDiscoverable` | Error | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set (`incremental_models.md` §"The repair family" obligation (c)). Names the changed input and why the delta yields no key set. |
 | `MaintenanceRepairSliceUnbounded` | Error | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked (`incremental_models.md` §"The repair family" obligation (b)). Names the source and the unbounded reach. |
+
+Declaring `grain: key_per_partition` in frontmatter is refused outright at config parse —
+`YamlParseError` (no dedicated code) — since the label has no writable spelling; the message
+names the two facts that derive it (a `timeseries:` clock and `partition_column ∈ unique_key`)
+and `grain: key` as the closest supported declared shape (`docs/specs/models.md` §"The Relation
+Contract"). A model whose declared facts *derive* `key_per_partition` still reaches
+`MaintenanceUnsupportedGrain` at plan derivation, unaffected by this refusal.
 
 ### Contract lattice
 

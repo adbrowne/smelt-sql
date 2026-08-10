@@ -277,7 +277,8 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
 
-    /// Declared grain (`partition` | `key` | `key_per_partition`) — an
+    /// Declared grain (`partition` | `key`; `key_per_partition` is
+    /// derived-only and has no writable spelling) — an
     /// optional **check-only assertion** over the derived output shape
     /// (`docs/specs/models.md` §"Refresh axis"). When written it is checked
     /// against the label derived from the two shape-defining facts
@@ -583,7 +584,7 @@ pub enum MetadataError {
     /// `refresh: incremental` is admitted on the facts alone
     /// (`docs/specs/models.md` §"Refresh axis"); with neither declared there
     /// is nothing maintainable (`models.md` §"Constraint violations").
-    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key | key_per_partition` assertion)")]
+    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key` assertion)")]
     GrainRequiredForIncremental,
 
     /// A model declares `grain:` without `refresh: incremental`. `grain:` is

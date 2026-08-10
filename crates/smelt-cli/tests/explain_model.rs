@@ -295,9 +295,10 @@ fn sessions_show_sql_emits_statements() {
 
 /// Phase A0 TDD (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 /// `smelt explain` on `examples/timeseries_broken_key_per_partition/models/trajectory.sql`
-/// (`grain: key_per_partition`) prints the `UnsupportedGrain` refusal — naming
-/// the grain and the tracking plan — and no cell table, never a keyed cell
-/// derived with an empty `unique_key`.
+/// (a `timeseries:` clock plus a `unique_key:` identity whose
+/// `partition_column` is a member — derived `key_per_partition`) prints the
+/// `UnsupportedGrain` refusal — naming the grain and the tracking plan — and
+/// no cell table, never a keyed cell derived with an empty `unique_key`.
 #[test]
 fn key_per_partition_shows_unsupported_grain_refusal_not_keyed_cells() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))

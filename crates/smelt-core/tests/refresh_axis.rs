@@ -757,9 +757,12 @@ fn grain_assertion_is_check_only() {
     validate_timeseries(&metadata, "SELECT order_id FROM foo")
         .expect("grain: key agreeing with the facts-derived key shape must pass");
 
-    // clock + identity + `partition_column ∈ key` derives `key_per_partition`
-    // — the derivation agrees with the written assertion at the frontmatter
-    // level (still refused later, at plan derivation, by A0's fail-loud
+    // clock + identity + `partition_column ∈ key` derives `key_per_partition`.
+    // `key_per_partition` has no writable spelling (declaring `grain:
+    // key_per_partition` is a hard error at config parse,
+    // `crates/smelt-core/src/config.rs`'s `Grain` deserializer) — this model
+    // writes no `grain:` at all and still resolves to the derived label
+    // (still refused later, at plan derivation, by A0's fail-loud
     // `key_per_partition` guard — a separate, composing diagnostic, not this
     // one; `docs/plans/20260715-composed-axes-conditional-maintenance.md`
     // Phase A0).
@@ -767,7 +770,7 @@ fn grain_assertion_is_check_only() {
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
         refresh: Some(RefreshStrategy::Incremental),
-        grain: Some(Grain::KeyPerPartition),
+        grain: None,
         unique_key: Some(vec!["order_id".to_string(), "dt".to_string()]),
         timeseries: Some(TimeseriesConfig {
             event_time_column: "ts".to_string(),
@@ -778,8 +781,7 @@ fn grain_assertion_is_check_only() {
         }),
         ..Default::default()
     };
-    validate_timeseries(&metadata, "SELECT order_id, dt FROM foo").expect(
-        "grain: key_per_partition agreeing with a partition_column ∈ key derivation must pass",
-    );
+    validate_timeseries(&metadata, "SELECT order_id, dt FROM foo")
+        .expect("no grain: written, so there is nothing to validate against the derived facts");
     assert_eq!(metadata.resolved_grain(), Some(Grain::KeyPerPartition));
 }

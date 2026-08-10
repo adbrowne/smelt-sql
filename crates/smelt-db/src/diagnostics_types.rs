@@ -669,7 +669,7 @@ pub enum DiagnosticCode {
     MalformedBoundedDomain,
     /// A model declares `refresh: incremental` without a sibling `grain:`.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`"
+    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key` assertion)"
     GrainRequiredForIncremental,
     /// A model declares `grain:` without `refresh: incremental`.
     /// Anchored at the top of the file (line 0, column 0).

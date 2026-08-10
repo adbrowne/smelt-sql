@@ -1611,8 +1611,9 @@ pub fn maintenance_plan(
     else {
         return Arc::new(Default::default());
     };
+    let resolved_grain = metadata.resolved_grain();
     if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || metadata.grain.is_none()
+        || resolved_grain.is_none()
     {
         return Arc::new(Default::default());
     }
@@ -1659,7 +1660,7 @@ pub fn maintenance_plan(
     let extra_model_sources: Vec<(
         smelt_logical::maintenance::SourceFacts,
         smelt_core::config::Granularity,
-    )> = if metadata.grain == Some(smelt_core::config::Grain::Key) {
+    )> = if resolved_grain == Some(smelt_core::config::Grain::Key) {
         refs.iter()
             .filter_map(|r| ref_model_source_facts(db, workspace, r))
             .collect()
@@ -1703,7 +1704,7 @@ pub fn maintenance_plan(
 /// inputs from Salsa accessors and calls pure derivation code — it never
 /// re-implements admission, locality, or ledger logic. Returns `None` for a
 /// model with no maintenance plan (not `refresh: incremental`, or no
-/// `grain:` declared).
+/// shape-defining fact declared and no `grain:` to resolve).
 pub fn maintenance_plan_report(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -1717,8 +1718,9 @@ pub fn maintenance_plan_report(
     else {
         return None;
     };
+    let resolved_grain = metadata.resolved_grain();
     if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || metadata.grain.is_none()
+        || resolved_grain.is_none()
     {
         return None;
     }
@@ -1775,7 +1777,7 @@ pub fn maintenance_plan_report(
     // downstream's pushdown against a composed upstream is already derived
     // through `smelt-logical`'s own model-graph registry, not this path.
     let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
-    if metadata.grain == Some(smelt_core::config::Grain::Key) {
+    if resolved_grain == Some(smelt_core::config::Grain::Key) {
         for r in &refs {
             if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
                 if !sources.iter().any(|s| s.name == facts.name) {

@@ -4081,8 +4081,10 @@ fn check_excluded_from_run_and_explain() {
 
 /// Phase A0 TDD (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 /// `examples/timeseries_broken_key_per_partition/models/trajectory.sql`
-/// declares `refresh: incremental` + `grain: key_per_partition` — a grain
-/// maintenance-plan derivation does not yet support. It must produce exactly
+/// declares `refresh: incremental` with a `timeseries:` clock and a
+/// `unique_key:` identity whose `partition_column` is a member — derives the
+/// `key_per_partition` grain, which maintenance-plan derivation does not yet
+/// support. It must produce exactly
 /// one `MaintenanceUnsupportedGrain` diagnostic naming the grain and the
 /// tracking plan, not a silently-derived keyed plan with an empty
 /// `unique_key` (`crates/smelt-db/src/queries/maintenance.rs`).

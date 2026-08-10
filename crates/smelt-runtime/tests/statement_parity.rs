@@ -3934,17 +3934,16 @@ struct StatementAuthoringHit {
 /// authoring is itself the review signal this gate exists to raise.
 ///
 /// Every entry here belongs to `Backend::delete_partitions`/
-/// `Backend::insert_overwrite`, serving `IncrementalStrategy::
-/// InsertOverwrite` — a per-partition materialization strategy that
-/// predates `incremental_models.md`'s single-owner emitters entirely and
-/// that no live derivation selects today: `smelt_runtime::
+/// `Backend::insert_overwrite` — DELETE/INSERT-OVERWRITE SQL that predates
+/// `incremental_models.md`'s single-owner emitters entirely. `IncrementalStrategy`
+/// has one dispatchable variant, `DeleteInsert`; `smelt_runtime::
 /// maintenance_driver::resolve_incremental_strategy` and the batch loop's
-/// own dispatch (`crates/smelt-runtime/src/execute.rs`) only ever resolve
-/// `IncrementalStrategy::DeleteInsert`; `Append`/`InsertOverwrite` have no
-/// construction site outside their own enum definition, a CLI display-name
-/// mapping (`smelt-cli/src/helpers.rs`), and unit tests. Retiring this dead
-/// code (or routing it through `emit_delete_insert` too, closing the
-/// remaining gap) is out of Phase 4's file scope (`docs/plans/
+/// own dispatch (`crates/smelt-runtime/src/execute.rs`) only ever resolve it.
+/// `insert_into_from_query`/`insert_overwrite` remain on the `Backend` trait
+/// as the capability that would admit an append-only or overwrite strategy
+/// once plan derivation selects one; no plan derivation calls them today.
+/// Routing this hand-authored SQL through `emit_delete_insert` too, closing
+/// the remaining gap, is out of Phase 4's file scope (`docs/plans/
 /// 20260710-emit-unification.md` Phase 4 "Critical files" — the backend
 /// crates are not listed); tracked as follow-up, not fixed here.
 const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[

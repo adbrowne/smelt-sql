@@ -83,14 +83,14 @@ Frontmatter wins over `smelt.yml` when both set the same field. The two sources 
 | `table`, `refresh: full` | Yes |
 | `table`, `refresh: incremental`, `grain: partition` | **Required** |
 | `table`, `refresh: incremental`, `grain: key` | **Optional** — the [composed shape](#interaction-with-grain-key): admitted iff [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) is established, refused otherwise (`KeyedForbidsTimeseries`, naming the missing route) |
-| `table`, `refresh: incremental`, `grain: key_per_partition` | **Required** — the partition axis is half the grain |
+| `table`, `refresh: incremental`, derived `key_per_partition` grain | **Required** — the partition axis is half the grain |
 | `table`, `refresh: materialized_view` | No — `MaterializedViewForbidsTimeseries` |
 | `ephemeral` | No — `MalformedTimeseries` |
 | `test` | No — `MalformedTimeseries` |
 
 ## Interaction with `refresh: incremental`
 
-A `refresh: incremental` model must also declare `timeseries:` whenever its `grain:` is `partition` or `key_per_partition`. The two blocks are independent:
+A `refresh: incremental` model must also declare `timeseries:` whenever its grain (declared or derived) is `partition` or `key_per_partition`. The two blocks are independent:
 
 - `timeseries:` declares the time dimension (event time, partition column, granularity).
 - `refresh: incremental` + `grain:` opts the model into the derived maintenance plan; the top-level `safety_overrides:` key carries per-model safety-check escape hatches layered on top.

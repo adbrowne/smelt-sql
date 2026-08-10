@@ -33,7 +33,7 @@ pass (`preserved` / `weakened` / `lost`, only for `keep` rows).
 | IC-18 | Cost model between two admissible techniques is unbuilt | `cost model between two admissible techniques is unbuilt` | keep | preserved |
 | IC-19 | `AppendOnly` sources get no `UpstreamMutation` cell | `AppendOnly sources get no UpstreamMutation cell` | keep | preserved |
 | IC-20 | Additive fold's MERGE-inside-ledger-transaction interior not observable at the statement-group seam; parity leg uses idempotent fixture | `not observable at the statement-group seam` | keep | preserved |
-| IC-21 | `Backend::delete_partitions`/`insert_overwrite` hand-author SQL for production-unreachable `InsertOverwrite` strategy (dead code, allowlisted) | `still hand-author SQL for the` | keep | preserved |
+| IC-21 | `Backend::delete_partitions`/`insert_overwrite` hand-author SQL for production-unreachable `InsertOverwrite` strategy (dead code, allowlisted) | `still hand-author SQL for the` | drop (landed: phase 8 deleted `IncrementalStrategy::InsertOverwrite`, the code the bullet described) | |
 | IC-22 | Landed-work recital: "All seven maintenance-plan proofs are derived" | `All seven maintenance-plan proofs are derived` | drop | |
 | IC-23 | Keyed-grain output poses no partition-locality question; locality-admitted keyed model's clamps carry an assumed (underived) write-footprint mirror into propagation | `a keyed-grain output poses no` | keep | preserved |
 | IC-24 | `MaintenanceSkeletonColumnAdded` reachable via unit coverage but not surfaced as an LSP/CLI diagnostic ahead of a run; a skeleton-position add doesn't block the run today | `not yet surfaced as an LSP/CLI` | keep | preserved |

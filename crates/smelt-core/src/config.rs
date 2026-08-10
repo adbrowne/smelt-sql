@@ -143,9 +143,13 @@ impl<'de> Deserialize<'de> for Grain {
         match s.to_lowercase().as_str() {
             "partition" => Ok(Grain::Partition),
             "key" => Ok(Grain::Key),
-            "key_per_partition" => Ok(Grain::KeyPerPartition),
+            "key_per_partition" => Err(serde::de::Error::custom(
+                "grain: key_per_partition cannot be declared — it is a derived-only label. \
+                 It is derived from a `timeseries:` clock plus `partition_column ∈ unique_key`; \
+                 the closest supported declared shape is `grain: key`.",
+            )),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid grain: {}. Must be 'partition', 'key', or 'key_per_partition'",
+                "Invalid grain: {}. Must be 'partition' or 'key'",
                 s
             ))),
         }
@@ -667,8 +671,6 @@ pub struct PartitionGrainSafetyOverrides {
 #[serde(rename_all = "snake_case")]
 pub enum IncrementalStrategy {
     DeleteInsert,
-    Append,
-    InsertOverwrite,
 }
 
 /// Time-dimension declaration for a model or source output.
@@ -2335,22 +2337,25 @@ targets:
         let strategy = IncrementalStrategy::DeleteInsert;
         let json = serde_json::to_string(&strategy).unwrap();
         assert_eq!(json, r#""delete_insert""#);
-
-        let strategy: IncrementalStrategy = serde_json::from_str(r#""append""#).unwrap();
-        assert_eq!(strategy, IncrementalStrategy::Append);
     }
 
     /// `merge` is not an incremental strategy — UPSERT is the physical
     /// primitive used by the keyed merge loop (`refresh: incremental` + `grain: key`),
-    /// not a knob on `incremental:`. Deserialising it must fail.
+    /// not a knob on `incremental:`. Deserialising it must fail. `append` and
+    /// `insert_overwrite` are gone too — `IncrementalStrategy` has one variant,
+    /// `DeleteInsert`; the backend trait's `insert_into_from_query`/
+    /// `insert_overwrite` capability methods stay as the future admission point.
     #[test]
-    fn test_incremental_strategy_no_merge_variant() {
-        let result: Result<IncrementalStrategy, _> = serde_json::from_str(r#""merge""#);
-        assert!(
-            result.is_err(),
-            "`merge` must not deserialise as an IncrementalStrategy — it is the \
-             physical primitive of the keyed merge loop (`refresh: incremental` + `grain: key`)"
-        );
+    fn incremental_strategy_append_and_insert_overwrite_are_gone() {
+        for value in ["merge", "append", "insert_overwrite"] {
+            let result: Result<IncrementalStrategy, _> =
+                serde_json::from_str(&format!(r#""{value}""#));
+            assert!(
+                result.is_err(),
+                "`{value}` must not deserialise as an IncrementalStrategy — `DeleteInsert` is \
+                 the only variant"
+            );
+        }
     }
 
     #[test]

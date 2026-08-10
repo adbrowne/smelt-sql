@@ -295,7 +295,7 @@ fn key_per_partition_upstream_propagates_by_granularity_not_refused_as_keyed() {
     write(
         root,
         "models/trajectory.sql",
-        "---\nmaterialization: table\nrefresh: incremental\ngrain: key_per_partition\n\
+        "---\nmaterialization: table\nrefresh: incremental\nunique_key: [user_id, d]\n\
          timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
          SELECT user_id, d, amount FROM smelt.sources.payments\n",
     );

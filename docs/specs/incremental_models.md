@@ -45,12 +45,12 @@ Everything beyond those facts — which maintenance technique runs where, how wr
 
 ### The four corners
 
-The two facts vary independently, giving four inhabitable shapes. The friendly name for each corner is its **grain** — a derived label, writable in frontmatter only as a checked assertion:
+The two facts vary independently, giving four inhabitable shapes. The friendly name for each corner is its **grain** — a derived label. `partition` and `key` may also be written in frontmatter as a checked assertion; `key_per_partition` is derived-only and declaring it is a hard error (§"The declared shape"):
 
 | | **declares a clock** | **no clock** |
 |---|---|---|
 | **no identity** | complete time-partitioned table — derived `grain: partition` | — (no maintainable shape) |
-| **declares identity** | time-partitioned keyed table — derived `grain: key` (partition ∉ key) or `grain: key_per_partition` (partition ∈ key) | keyed lookup, read in full — derived `grain: key` |
+| **declares identity** | time-partitioned keyed table — derived `grain: key` (partition ∉ key) or derived-only `grain: key_per_partition` (partition ∈ key) | keyed lookup, read in full — derived `grain: key` |
 
 Three-line sketches, one per inhabited corner (the running example below fills them in):
 
@@ -133,14 +133,14 @@ The entire declared shape surface of an incremental model is the two shape-defin
 refresh: incremental        # the one refresh mode this spec covers
 timeseries: { ... }         # the clock: event_time_column / partition_column / granularity (timeseries.md)
 unique_key: [ ... ]         # the identity: makes the output key-addressable
-grain: partition | key | key_per_partition   # optional CHECK-ONLY assertion; drives nothing
+grain: partition | key      # optional CHECK-ONLY assertion; drives nothing (key_per_partition is derived-only, see below)
 ```
 
 The `refresh:` axis itself (including `full` and `materialized_view`) and the declaration law are owned by `models.md` §"Refresh axis". The declarations name **shape-defining facts only**: which technique realizes which part of the output, and how each write physically addresses rows, are per-cell derived properties (§"The plan matrix", §"Per-cell write addressing"), never model-wide declarations, and the machinery validates the declared facts rather than choosing them (§"Validator, not chooser").
 
 **The two facts are orthogonal and compose.** Whether the output declares an identity and whether it declares a clock vary independently (§Overview "The four corners" shows the inhabited combinations). A model with both is a first-class shape, not a corner case (§"Key temporal locality (the time-partitioned output)"). Both axes are also orthogonal to **input consumption**: a bare keyed model over a clocked source still consumes that source window-forward; a composed model's *output* clock is a property of its own stored shape, not of its sources.
 
-**Grain is a derived label.** `grain` is a classification computed from `(clock?, identity?, partition_column ∈ key?)`, reported by `smelt explain`, and computed for sources too (a source likewise has an effective grain: clocked-fact, keyed-dimension, …). A modeller who wants the friendly name in frontmatter may write it only as a **check-only assertion**: it errors on mismatch with the derived facts (`models.md` §"Constraint violations") and drives nothing. The declared *facts* stay one-per-node, so two declarations of one node can never disagree. The single fact `partition_column ∈ unique_key` is what distinguishes the trajectory (`key_per_partition` — the key recurs across partitions) from a keyed lookup whose key has a fixed home slice (`key`, time-partitioned); the same fact reappears as key-temporal-locality routes 1 and 2 (§"Key temporal locality").
+**Grain is a derived label.** `grain` is a classification computed from `(clock?, identity?, partition_column ∈ key?)`, reported by `smelt explain`, and computed for sources too (a source likewise has an effective grain: clocked-fact, keyed-dimension, …). A modeller who wants the friendly name in frontmatter may write `grain: partition` or `grain: key` only as a **check-only assertion**: it errors on mismatch with the derived facts (`models.md` §"Constraint violations") and drives nothing. Declaring `grain: key_per_partition` is a hard error at config parse — there is no writable spelling for the trajectory corner; the error names the two facts that derive it (a `timeseries:` clock and `partition_column ∈ unique_key`) and `grain: key` as the closest supported declared shape. The declared *facts* stay one-per-node, so two declarations of one node can never disagree. The single fact `partition_column ∈ unique_key` is what distinguishes the trajectory (`key_per_partition` — the key recurs across partitions) from a keyed lookup whose key has a fixed home slice (`key`, time-partitioned); the same fact reappears as key-temporal-locality routes 1 and 2 (§"Key temporal locality").
 
 ### Maintenance overrides (`maintenance:`)
 
@@ -282,7 +282,7 @@ Rules:
 - One profile covers the running-aggregate, latest-value, and milestone patterns; what distinguishes them is the **column family** of each projection, derived from the SQL, never declared.
 - No shape-specific config block exists, and `safety_overrides` is a hard error once identity makes the output key-addressed: every keyed rejection guards the equivalence invariant itself, and there is nothing safe to waive (§"Key-grain design").
 - By default the output carries no partition column and downstream consumers read it in full, like any lookup. A `timeseries:` block on the model is admitted **iff key temporal locality is established** (§"Key temporal locality"), refused otherwise with `KeyedForbidsTimeseries` naming the three routes and the nearest missing fact. Output partitioning is independent of *consumption*: a keyed model over a clocked source consumes it window-forward regardless.
-- `grain: key_per_partition` is a **different grain**, not a sub-declaration: it stores the per-partition trajectory (`partition_column ∈ unique_key`), not the end-state this profile maintains.
+- `key_per_partition` is a **different derived grain**, not a sub-declaration and not writable: it stores the per-partition trajectory (`partition_column ∈ unique_key`), not the end-state this profile maintains.
 
 The time-partitioned form, on the shape it exists for — event dedupe over a bounded redelivery window (`event_dedupe` from the running example; the driving source declares `key_recurrence` — `sources.md`):
 
@@ -1227,13 +1227,13 @@ sequential DELETE+INSERT pairs, each sized from its own chunk's reach.
 
 #### Strategy enum (backend-internal)
 
-Strategy is not declared — it is derived per cell. Backends pick a physical strategy
-(`DeleteInsert`/`Append`/`InsertOverwrite`) from config and capability; DuckDB always uses
-`DeleteInsert`. A pure partition grain (no declared identity) has no keyed addressing; keyed
-`MERGE` is the addressing a *dimension-change* cell derives on a composed clock-and-identity
-output (§"Per-cell write addressing") — per-cell, not tied to a grain. A backend may select only a
-strategy preserving the declared shape's invariants; `Append` is unreachable until gated on
-ledger-verified unwritten windows (§Known Divergences).
+Strategy is not declared — it is derived per cell. `DeleteInsert` is the only physical strategy
+today; DuckDB always uses it. A pure partition grain (no declared identity) has no keyed
+addressing; keyed `MERGE` is the addressing a *dimension-change* cell derives on a composed
+clock-and-identity output (§"Per-cell write addressing") — per-cell, not tied to a grain. The
+backend trait carries `insert_into_from_query`/`insert_overwrite` as the capability that would
+admit an append-only or overwrite strategy for a shape whose invariants permit it; no plan
+derivation selects them yet.
 
 #### Run window vs partition granularity
 
@@ -1758,8 +1758,8 @@ rejected: it duplicates engine state and opens a sync-correctness window. The ke
 transactional merge ledger is the one deliberate exception across the family — backend-resident,
 written in the same transaction as the merge it describes, so it cannot drift from the state it
 records. Consequence: a backend may only select a physical strategy that preserves the declared
-shape's invariants — the partition-grain `Append` strategy is unreachable until gated on
-ledger-verified unwritten windows. (`docs/research/20260705-keyed-collapse-application.md` D7.)
+shape's invariants — `DeleteInsert` is the only one plan derivation selects today.
+(`docs/research/20260705-keyed-collapse-application.md` D7.)
 
 **Non-determinism is opted in per column, and confined by proof.** Whether a column is
 acceptable-to-vary is a value judgement only the author holds, so it is declared
@@ -1905,8 +1905,8 @@ inherits the driver's granularity support (§Known Divergences).
 4. **smelt does not manage computational state** (partition-grain-scoped doctrine); watermarks,
    offsets, and run history live in the backend. The key grain's transactional merge ledger is
    the one deliberate exception (§"Key-grain design"). A backend may select only a physical
-   strategy that preserves the declared shape's invariants; `Append` is unreachable until gated
-   on ledger-verified unwritten windows.
+   strategy that preserves the declared shape's invariants; `DeleteInsert` is the only one plan
+   derivation selects today.
 5. **Output-filter injection is per-model; source-filter pushdown is per-reference.**
 6. **Per-partition equivalence with full refresh holds** on all local, deterministic columns; a
    `contract: plausible` column need only be a plausible full-refresh value; globally-dependent
@@ -2100,10 +2100,8 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is not
-  observable at the statement-group seam (its parity leg uses an idempotent fixture instead);
-  `Backend::delete_partitions`/`insert_overwrite` still hand-author SQL for the
-  production-unreachable `InsertOverwrite` strategy (dead code, allowlisted). Refs:
-  `docs/plans/20260707-maintenance-plan-impl.md`.
+  observable at the statement-group seam (its parity leg uses an idempotent fixture instead).
+  Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output poses
   no partition-locality question, so a locality-admitted keyed model's clamps carry an assumed
   (underived) write-footprint mirror into propagation; `MaintenanceSkeletonColumnAdded` is
@@ -2145,7 +2143,8 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   granularity; declared-vs-derived recurrence precedence and order-independent key-set
   comparison are implementation choices the spec text underdetermines. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **`grain: key_per_partition` derives no plan** — it parses and validates but refuses at plan
+- **The `key_per_partition` grain derives no plan** — declaring it is refused at config parse, and
+  the derived label (clock + identity with `partition_column ∈ unique_key`) refuses again at plan
   derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Conditional-maintenance gaps**: `smelt explain --show-sql` renders the unconditional matched

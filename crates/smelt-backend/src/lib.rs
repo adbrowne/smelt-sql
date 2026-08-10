@@ -264,12 +264,6 @@ pub trait Backend: Send + Sync {
                             self.delete_and_insert_transactional(schema, name, &partition, sql)
                                 .await?;
                         }
-                        IncrementalStrategy::Append => {
-                            self.insert_into_from_query(schema, name, sql).await?;
-                        }
-                        IncrementalStrategy::InsertOverwrite => {
-                            self.insert_overwrite(schema, name, sql, &partition).await?;
-                        }
                     }
                 }
             }
