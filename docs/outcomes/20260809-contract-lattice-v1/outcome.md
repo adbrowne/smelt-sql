@@ -49,9 +49,10 @@ relaxation is declared, validated, probe-checked, and printed by
 | 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | done |
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
 | 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
-| 4 | `deferral:` declaration + run skipping; ledger-proven work subsumption | pending |
-| 5 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
-| 6 | Surface: explain contract rendering, docs-site update | pending |
+| 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | planned |
+| 5 | Deferral-licensed run skipping and ledger-proven work subsumption | pending |
+| 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
+| 7 | Surface: explain contract rendering, docs-site update | pending |
 
 ## Decision log
 
@@ -97,6 +98,20 @@ relaxation is declared, validated, probe-checked, and printed by
   pattern, would have skipped persistence on violation). Not yet exercised: no end-to-end
   `execute_project`-driven test hits the real `execute.rs` call site (unit-level dispatch tests
   only, mirroring `source_probes.rs`'s own test posture).
+
+- 2026-08-10 — **Phase 4 split into two rows** (phase 4 plan): the original row bundled the
+  deferral *triple* (declaration schema, oracle transform, probe emitter — the admission rule the
+  outcome's own decision log makes structural) with the two *capabilities* the point licenses (run
+  skipping, work subsumption). They are separable and each is a phase's worth of work: the triple
+  is a compile-time + ledger-comparison layer in `smelt-logical`/`smelt-db`, the capabilities are a
+  scheduling change in `smelt-runtime`'s execute loop, and the capabilities are only safe to build
+  once the oracle they must not violate exists. Nothing left the outcome; success criterion 2 is
+  now served by rows 4 and 5 together. Old rows 5/6 shift to 6/7.
+- 2026-08-10 — **Deferral lag is event-time, read from the existing ledger stores** (phase 4 plan):
+  the maintained frontier is `IntervalStore`'s per-model `latest_date()` and the input frontier is
+  `LandedDeltaStore`'s per-source max covered end — both already written by `execute.rs`. No new
+  state file and no wall-clock arrival record is introduced; the spec's "ledger-derived" probe is
+  literally a comparison of two frontiers the ledger already holds.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
