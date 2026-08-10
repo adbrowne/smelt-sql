@@ -194,7 +194,7 @@ fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
         }],
         driving_source: DrivingSource {
             name: format!("smelt.sources.{}", recipe.source.name),
-            timeseries: composed_driving_timeseries(),
+            timeseries: Some(composed_driving_timeseries()),
         },
     }
 }
