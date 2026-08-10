@@ -1,0 +1,295 @@
+//! Live dispatch of the `contract.frozen_horizon` late-arrival probe
+//! (`docs/specs/incremental_models.md` §"The contract lattice", frozen
+//! horizon) at a run's pre-write site. Like
+//! `crate::source_probes`, this probe's scope is not the run's own compiled
+//! SQL — it is a source's recorded frozen-band baseline
+//! (`smelt_state::frozen_band_baselines`) compared against that source's
+//! current frozen-band state, so this module also owns persisting the
+//! refreshed baseline.
+//!
+//! Unlike the append-only posture probe, a genuine late arrival does not
+//! leave the baseline untouched: the baseline is refreshed after a held
+//! verification **and** after a reported violation, so the same late rows
+//! are reported once, never re-reported on every subsequent run
+//! (`docs/outcomes/20260809-contract-lattice-v1/phases/03-plan.md`). The
+//! comparison itself is pure Rust
+//! (`smelt_logical::contract::frozen_horizon::late_arrivals`), not a SQL
+//! `violation_count` contract, so this module cannot reuse
+//! `crate::probes::dispatch_probe` — it consults `should_dispatch` and
+//! executes the snapshot SQL directly.
+
+use std::collections::HashSet;
+
+use chrono::{Datelike, NaiveDate};
+use smelt_backend::{Backend, BackendError, MaintenanceDialect};
+use smelt_core::metadata::ModelMetadata;
+use smelt_core::sources::SourceInfo;
+use smelt_core::ModelFile;
+use smelt_logical::contract::frozen_horizon::{
+    emit_frozen_band_snapshot, frozen_band_before, late_arrivals, PartitionCount,
+};
+use smelt_logical::maintenance::{should_dispatch, ProbeDispatch};
+use smelt_state::frozen_band_baselines::{FrozenBandBaselineStore, FrozenBandPartition};
+use smelt_state::{ProbeRecord, ProbeRecordOutcome};
+
+use crate::probes::{probe_violation_suffix, ProbeContext, ProbePolicy};
+
+/// The bare source-address convention `crate::source_probes` already uses:
+/// `sources.raw.events` becomes `raw.events`. Kept local to this module —
+/// the same duplication `source_probes.rs` documents for its own copy,
+/// avoiding a dependency on a `smelt-logical`-shaped intermediate for one
+/// small pure helper.
+fn bare_source_address(segments: &[String]) -> String {
+    match segments.split_first() {
+        Some((first, rest)) if first == "sources" => rest.join("."),
+        _ => segments.join("."),
+    }
+}
+
+/// Resolve `model_file`'s refs against `source_infos`, pairing each
+/// resolved source with its bare address — mirrors
+/// `source_probes::resolve_model_source_infos`.
+fn resolve_model_source_infos<'a>(
+    model_file: &ModelFile,
+    source_infos: &'a [SourceInfo],
+) -> Vec<(String, &'a SourceInfo)> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+    for r in &model_file.refs {
+        let segs = r.smelt_ref.to_path();
+        let Some(info) = source_infos.iter().find(|s| s.address_segments == segs) else {
+            continue;
+        };
+        let bare = bare_source_address(&segs);
+        if seen.insert(bare.clone()) {
+            resolved.push((bare, info));
+        }
+    }
+    resolved
+}
+
+/// One declared frozen-horizon late-arrival probe, built pure from a
+/// model's metadata and its consumed clocked sources.
+pub struct DeclaredContractProbe {
+    pub source_address: String,
+    pub ctx: ProbeContext,
+    pub frozen_before: String,
+    pub h_days: i64,
+    pub snapshot_sql: String,
+}
+
+/// Build the declared frozen-horizon late-arrival probe set for
+/// `model_name`'s run — pure, no I/O. Returns an empty set when the model
+/// has no `contract.frozen_horizon` declaration (the probe is opt-in only)
+/// or when none of its refs resolve to a source with a `timeseries:` clock
+/// ("clocked sources" — an unclocked source has no partition axis the
+/// frozen band is measured over).
+#[allow(clippy::too_many_arguments)]
+pub fn frozen_horizon_probes(
+    model_name: &str,
+    cell: &str,
+    model_file: &ModelFile,
+    metadata: Option<&ModelMetadata>,
+    source_infos: &[SourceInfo],
+    end_date: NaiveDate,
+    target_name: &str,
+    target_schema: &str,
+    dialect: MaintenanceDialect,
+) -> Vec<DeclaredContractProbe> {
+    let Some(h_days) = metadata
+        .and_then(|m| m.contract.as_ref())
+        .and_then(|c| c.frozen_horizon.as_ref())
+        .map(|fh| fh.to_days() as i64)
+    else {
+        return Vec::new();
+    };
+
+    let end_days = end_date.num_days_from_ce() as i64;
+    let frozen_before_days = frozen_band_before(end_days, h_days);
+    let Some(frozen_before_date) = NaiveDate::from_num_days_from_ce_opt(frozen_before_days as i32)
+    else {
+        return Vec::new();
+    };
+    let frozen_before = frozen_before_date.format("%Y-%m-%d").to_string();
+
+    let mut probes = Vec::new();
+    for (source_address, info) in resolve_model_source_infos(model_file, source_infos) {
+        let Some(ts) = &info.timeseries else {
+            continue;
+        };
+        let table = info.db_name_for_target(target_name, target_schema);
+        let snapshot =
+            emit_frozen_band_snapshot(&table, &ts.partition_column, &frozen_before, dialect);
+        probes.push(DeclaredContractProbe {
+            source_address,
+            ctx: ProbeContext {
+                probe_code: "ContractLateArrivalOutsideHorizon".to_string(),
+                fact: "contract.frozen_horizon".to_string(),
+                model: model_name.to_string(),
+                cell: cell.to_string(),
+                remedy: "the arrival is genuine — `smelt repair` the affected frozen partition, \
+                         or widen `frozen_horizon` if this lateness is expected"
+                    .to_string(),
+            },
+            frozen_before: frozen_before.clone(),
+            h_days,
+            snapshot_sql: snapshot.sql,
+        });
+    }
+    probes
+}
+
+/// One source's refreshed frozen-band baseline, ready for the caller to
+/// persist under `state_io_lock`.
+#[derive(Debug, Clone)]
+pub struct RefreshedFrozenBandBaseline {
+    pub source_address: String,
+    pub partitions: Vec<FrozenBandPartition>,
+}
+
+/// One genuine late arrival this dispatch observed, carrying the message a
+/// caller should fail the run with.
+#[derive(Debug, Clone)]
+pub struct LateArrivalViolation {
+    pub source_address: String,
+    pub message: String,
+}
+
+/// The result of dispatching a probe set: the refreshed baselines (to
+/// persist regardless of whether a violation fired — see the module doc's
+/// "report once" rule), the probe records, and any genuine late-arrival
+/// violations observed. Callers must persist `refreshed` before consulting
+/// `violations`; a non-empty `violations` fails the run, but only after the
+/// baseline reflecting what was just observed has been saved.
+pub struct FrozenHorizonDispatchResult {
+    pub refreshed: Vec<RefreshedFrozenBandBaseline>,
+    pub records: Vec<ProbeRecord>,
+    pub violations: Vec<LateArrivalViolation>,
+}
+
+/// Dispatch every probe in `probes` through the shared cadence policy: no
+/// recorded baseline unconditionally establishes; a recorded baseline is
+/// compared via [`late_arrivals`] and, if it disproves the frozen-band
+/// oracle, recorded as a [`LateArrivalViolation`] — the run's write is not
+/// aborted here (the caller decides, after persisting the refreshed
+/// baseline for every probe this dispatch touched, held or violated alike).
+pub async fn dispatch_and_record_frozen_horizon_probes(
+    backend: &dyn Backend,
+    policy: &ProbePolicy,
+    probes: &[DeclaredContractProbe],
+    baselines: &FrozenBandBaselineStore,
+) -> Result<FrozenHorizonDispatchResult, BackendError> {
+    let mut refreshed = Vec::new();
+    let mut records = Vec::with_capacity(probes.len());
+    let mut violations = Vec::new();
+
+    for probe in probes {
+        match should_dispatch(policy.cadence, policy.run_ordinal) {
+            ProbeDispatch::Skip(_) => {
+                records.push(ProbeRecord {
+                    fact: probe.ctx.fact.clone(),
+                    probe: probe.ctx.probe_code.clone(),
+                    outcome: ProbeRecordOutcome::Skipped,
+                });
+                continue;
+            }
+            ProbeDispatch::Dispatch => {}
+        }
+
+        let batches = backend
+            .execute_sql(&probe.snapshot_sql)
+            .await
+            .map_err(|e| BackendError::ExecutionFailed {
+                model: probe.ctx.model.clone(),
+                message: format!(
+                    "Failed to execute frozen-band snapshot for source '{}' (model '{}'):\n  \
+                     SQL: {}\n  Error: {}",
+                    probe.source_address, probe.ctx.model, probe.snapshot_sql, e
+                ),
+            })?;
+        let rows = crate::check_runner::batches_to_rows(&batches);
+        let current: Vec<PartitionCount> = rows
+            .iter()
+            .map(|row| PartitionCount {
+                partition_value: row.get("partition_value").cloned().unwrap_or_default(),
+                row_count: row
+                    .get("row_count")
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+            })
+            .collect();
+
+        let recorded: Vec<PartitionCount> = baselines
+            .get(&probe.source_address)
+            .map(|s| {
+                s.partitions
+                    .iter()
+                    .map(|p| PartitionCount {
+                        partition_value: p.partition_value.clone(),
+                        row_count: p.recorded_count,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let new_baseline = || RefreshedFrozenBandBaseline {
+            source_address: probe.source_address.clone(),
+            partitions: current
+                .iter()
+                .map(|p| FrozenBandPartition {
+                    partition_value: p.partition_value.clone(),
+                    recorded_count: p.row_count,
+                })
+                .collect(),
+        };
+
+        if recorded.is_empty() {
+            // First observation: nothing to disprove, unconditionally
+            // establish.
+            refreshed.push(new_baseline());
+            records.push(ProbeRecord {
+                fact: probe.ctx.fact.clone(),
+                probe: probe.ctx.probe_code.clone(),
+                outcome: ProbeRecordOutcome::Dispatched,
+            });
+            continue;
+        }
+
+        let arrivals = late_arrivals(&recorded, &current, &probe.frozen_before);
+        refreshed.push(new_baseline());
+        records.push(ProbeRecord {
+            fact: probe.ctx.fact.clone(),
+            probe: probe.ctx.probe_code.clone(),
+            outcome: ProbeRecordOutcome::Dispatched,
+        });
+
+        if !arrivals.is_empty() {
+            let sample: Vec<String> = arrivals
+                .iter()
+                .take(5)
+                .map(|a| format!("{} (+{} row(s))", a.partition, a.added_rows))
+                .collect();
+            violations.push(LateArrivalViolation {
+                source_address: probe.source_address.clone(),
+                message: format!(
+                    "{}: source '{}' (model '{}') declares `{}`, but {} partition(s) received \
+                     rows after being frozen (H = {} day(s)). Sample: {}.{}",
+                    probe.ctx.probe_code,
+                    probe.source_address,
+                    probe.ctx.model,
+                    probe.ctx.fact,
+                    arrivals.len(),
+                    probe.h_days,
+                    sample.join(", "),
+                    probe_violation_suffix(&probe.ctx)
+                ),
+            });
+        }
+    }
+
+    Ok(FrozenHorizonDispatchResult {
+        refreshed,
+        records,
+        violations,
+    })
+}

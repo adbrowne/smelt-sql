@@ -48,7 +48,7 @@ relaxation is declared, validated, probe-checked, and printed by
 |---|-------|--------|
 | 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | done |
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
-| 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | planned |
+| 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | done |
 | 4 | `deferral:` declaration + run skipping; ledger-proven work subsumption | pending |
 | 5 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
 | 6 | Surface: explain contract rendering, docs-site update | pending |
@@ -85,6 +85,18 @@ relaxation is declared, validated, probe-checked, and printed by
 - 2026-08-10 — Phase table unchanged (phase 2's summary surfaced no success-criteria work outside
   the existing rows; its carry-forwards — the unbuilt probe emitter and the missing `explain`
   rendering — are already rows 3 and 6).
+
+- 2026-08-10 — Phase 3 done: the frozen-horizon triple is complete. `smelt-logical::contract::
+  frozen_horizon` gained the pure baseline comparison (`late_arrivals`) and probe emitter
+  (`emit_frozen_band_snapshot`); a dedicated `frozen_band_baselines.json` state store
+  (`smelt-state`); `smelt-runtime::contract_probes` (pure builder + dispatch), wired into
+  `execute.rs`'s incremental-batch pre-write site. **Design decision**: the dispatch never
+  returns `Err` on a violation — it returns refreshed baselines + a `violations` list as data, so
+  the caller persists the baseline unconditionally before failing the run, satisfying "report
+  once, not every subsequent run" (a plain early-`Err`, the `source_probes`/`model_probes`
+  pattern, would have skipped persistence on violation). Not yet exercised: no end-to-end
+  `execute_project`-driven test hits the real `execute.rs` call site (unit-level dispatch tests
+  only, mirroring `source_probes.rs`'s own test posture).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

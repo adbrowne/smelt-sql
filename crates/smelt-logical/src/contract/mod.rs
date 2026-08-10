@@ -11,13 +11,12 @@
 //! the *semantics* (validation, oracle transform, probe emitter), not the
 //! struct's crate.
 //!
-//! Landing status per lattice point (phase 2,
-//! `docs/outcomes/20260809-contract-lattice-v1/phases/02-plan.md`):
-//! - `frozen_horizon`: grain-admissibility validation and the write-range
-//!   clamp land this phase (`frozen_horizon` module). The late-arrival probe
-//!   emitter lands in phase 3.
+//! Landing status per lattice point:
+//! - `frozen_horizon`: the complete triple has landed — grain-admissibility
+//!   validation, the write-range clamp, and the late-arrival probe emitter
+//!   all live in the `frozen_horizon` module.
 //! - `deferral`: unbuilt — declaration is refused fail-loud
 //!   (`smelt_core::config::ContractConfig` is `deny_unknown_fields`) until
-//!   phase 4.
+//!   it is wired.
 
 pub mod frozen_horizon;

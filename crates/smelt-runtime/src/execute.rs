@@ -2936,6 +2936,64 @@ pub async fn execute_project(
                         }
                     }
 
+                    // Live dispatch of the contract-lattice `frozen_horizon`
+                    // late-arrival probe (`docs/specs/incremental_models.md`
+                    // §"The contract lattice") before this batch's write —
+                    // opt-in only (empty probe set absent a `contract.
+                    // frozen_horizon` declaration), scoped to the model's
+                    // clocked sources' recorded frozen-band baselines. The
+                    // baseline is refreshed whether the probe held OR fired,
+                    // so a genuine late arrival is reported once, not every
+                    // subsequent run
+                    // (`docs/outcomes/20260809-contract-lattice-v1/phases/
+                    // 03-plan.md`).
+                    if let Some(end_date) = end_date {
+                        let _io_guard = state_io_lock.lock().await;
+                        let frozen_band_baselines = file_store
+                            .load_frozen_band_baselines()
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let contract_probes = crate::contract_probes::frozen_horizon_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            &plan.model_file,
+                            plan.model_file.metadata.as_deref(),
+                            source_infos,
+                            end_date,
+                            model_target,
+                            schema,
+                            smelt_backend::maintenance_dialect(backend.dialect()),
+                        );
+                        if !contract_probes.is_empty() {
+                            let result =
+                                crate::contract_probes::dispatch_and_record_frozen_horizon_probes(
+                                    backend,
+                                    &probe_policy_for_model(config, prior_runs, &plan.name),
+                                    &contract_probes,
+                                    &frozen_band_baselines,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            model_probe_records.extend(result.records);
+                            if !result.refreshed.is_empty() {
+                                let mut frozen_band_baselines = frozen_band_baselines;
+                                for r in result.refreshed {
+                                    frozen_band_baselines.record(&r.source_address, r.partitions);
+                                }
+                                let _ =
+                                    file_store.save_frozen_band_baselines(&frozen_band_baselines);
+                            }
+                            if let Some(violation) = result.violations.first() {
+                                return Err(anyhow::anyhow!("{}", violation.message));
+                            }
+                        }
+                    }
+
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
                     // (`docs/specs/model_transforms.md` §Constraints — "Write window

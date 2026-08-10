@@ -16,6 +16,8 @@ cargo test -p smelt-state
   - `.smelt/targets/<target>/reconciliation.json` — reconciliation ledger
   - `.smelt/targets/<target>/landed_deltas.json` — per-source landed-delta intervals
   - `.smelt/targets/<target>/snapshots.json` — fingerprint/environment snapshots
+  - `.smelt/targets/<target>/source_postures.json` — per-source append-only posture baselines
+  - `.smelt/targets/<target>/frozen_band_baselines.json` — per-source `contract.frozen_horizon` frozen-band row-count baselines
   - `.smelt/targets/<target>/schemas/{model}.json` — deployed schema snapshots (schema tracking)
   Only `.smelt/meta.json` (layout-version marker) and `.smelt/lock` (the project-wide advisory lock — deliberately *not* per-target; see the doc comment on `FileStore` for why) live at the `.smelt/` root, shared across every target. A missing `meta.json` denotes the legacy pre-partitioning layout (root-level `runs/`, `intervals.json`, etc., no `targets/<target>/` nesting); `FileStore::lock()` migrates it in place, once, under the lock. Never create state files outside `.smelt/`; the `.smelt/` root is gitignored in example workspaces.
 - **`RunManifest` is serialized to JSON.** Adding required fields (no `Option<>`, no `#[serde(default)]`) is a breaking change for anyone reading historical manifest files. Prefer `Option` or `#[serde(default)]` for new fields.

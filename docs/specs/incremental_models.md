@@ -436,7 +436,7 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | Code | Fires when |
 |---|---|
 | `ContractFrozenHorizonInvalid` | A `contract.frozen_horizon` is unparseable or negative, or declared on a non-partition-grain model (§"Contract relaxations"). |
-| `ContractLateArrivalOutsideHorizon` | Runtime probe, frozen-horizon point only: a scanned row's natural partition falls outside the declared `H`; names the partition and `H` (§"The contract lattice"). |
+| `ContractLateArrivalOutsideHorizon` | Runtime probe, frozen-horizon point only: a frozen-band partition's baseline row count increased (or a new partition appeared in the frozen band); names the partition, the added row count, and `H` (§"The contract lattice"). |
 | `ContractDeferralInvalid` | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against (§"Contract relaxations"). |
 | `ContractDeferralExceeded` | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag (§"The contract lattice"). |
 
@@ -536,11 +536,18 @@ clamps writes **by contract** to partitions within `H` of the current run — na
 widening) the derived horizon clamp described in §"Windowed maintenance and the horizon"; a
 partition older than `H` is never revisited even if the model's own reach would otherwise cover
 it. Because the clamp is now a declared contract rather than only a derived reach bound, a
-genuinely late arrival landing outside `H` is a checked condition, not an unscanned row: the
-probe counts scanned rows whose natural partition falls outside `H` and raises
-`ContractLateArrivalOutsideHorizon`, naming the partition and the declared `H` — this closes the
-one accepted silent-data behaviour of the default point (§"Windowed maintenance and the
-horizon") for every model that opts in.
+genuinely late arrival landing outside `H` is a checked condition, not an unscanned row — but a
+partition-filtered scan never reads a row whose partition is already frozen, so the probe cannot
+observe lateness by scanning either; it is baseline-comparative instead. Each run of a
+`frozen_horizon` model snapshots a per-partition row-count baseline of its clocked sources
+restricted to their frozen band (partitions strictly before `end − H`); the next run compares the
+recorded baseline against the sources' current frozen-band state. A frozen-band partition whose
+row count increased, or that is present now but absent from the baseline, is a genuine late
+arrival, and the probe raises `ContractLateArrivalOutsideHorizon`, naming the partition, the added
+row count, and the declared `H` — this closes the one accepted silent-data behaviour of the
+default point (§"Windowed maintenance and the horizon") for every model that opts in. The first
+run of a `frozen_horizon` model has nothing recorded to compare against, so it establishes the
+baseline and verifies nothing.
 
 **Deferral (`D`).** The oracle licenses lag: `∃ S' ⊆ S` such that every input in `S \ S'` arrived
 within the last `D`, and `incremental_state(S) == full_refresh(source | input ∈ S')` — the
@@ -2441,19 +2448,19 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **`frozen_horizon`'s declaration and write clamp are implemented; its late-arrival probe,
-  `deferral`, the parameterised conformance oracle, and the `explain` surface are not.**
-  §"The contract lattice" and §"Contract relaxations (`contract:`)" define the default point and
-  the two v1 relaxations (`frozen_horizon`, `deferral`), each as a declaration-schema +
-  oracle-transform + probe-emitter triple. The loader now accepts a `contract:` block with
-  `frozen_horizon` (`deferral` and per-cell `cells:` refinement are refused, fail-loud, until
-  they are wired), `smelt-logical` validates grain admissibility
-  (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`) and narrows the
-  partition-grain write range to `end - H`. Still missing: the late-arrival diagnostic outside
-  the horizon (partitions older than `H` are still silently excluded, not yet diagnosed), the
-  `deferral` point entirely, `maintenance_conformance` parameterisation per lattice point (every
-  recipe today is checked against the default point's strict oracle only), and `smelt explain`
-  rendering the effective contract per cell. Tracked:
+- **`deferral`, the parameterised conformance oracle, and the `explain` surface remain
+  unimplemented for the contract lattice.** §"The contract lattice" and §"Contract relaxations
+  (`contract:`)" define the default point and the two v1 relaxations (`frozen_horizon`,
+  `deferral`), each as a declaration-schema + oracle-transform + probe-emitter triple.
+  `frozen_horizon` is fully landed: the loader accepts a `contract:` block with `frozen_horizon`
+  (`deferral` and per-cell `cells:` refinement are refused, fail-loud, until they are wired),
+  `smelt-logical` validates grain admissibility
+  (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`), narrows the
+  partition-grain write range to `end - H`, and the baseline-comparative late-arrival probe
+  (`ContractLateArrivalOutsideHorizon`) raises on a genuine late arrival outside `H`. Still
+  missing: the `deferral` point entirely, `maintenance_conformance` parameterisation per lattice
+  point (every recipe today is checked against the default point's strict oracle only), and
+  `smelt explain` rendering the effective contract per cell. Tracked:
   `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")

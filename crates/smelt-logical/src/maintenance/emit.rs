@@ -32,7 +32,7 @@ pub struct MaintenanceStatement {
 }
 
 impl MaintenanceStatement {
-    fn new(sql: String) -> Self {
+    pub(crate) fn new(sql: String) -> Self {
         Self { sql }
     }
 }
@@ -1100,7 +1100,7 @@ pub fn emit_recurrence_bound_probe(
 /// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
 /// `STRING`. Confirmed live against Spark
 /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
-fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
+pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
     match dialect {
         MaintenanceDialect::DuckDb => "VARCHAR",
         MaintenanceDialect::Spark => "STRING",

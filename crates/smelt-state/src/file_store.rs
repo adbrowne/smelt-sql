@@ -1,3 +1,4 @@
+use crate::frozen_band_baselines::FrozenBandBaselineStore;
 use crate::intervals::IntervalStore;
 use crate::landed_deltas::LandedDeltaStore;
 use crate::reconciliation::ReconciliationStore;
@@ -161,6 +162,10 @@ impl FileStore {
 
     fn source_postures_path(&self) -> PathBuf {
         self.target_dir.join("source_postures.json")
+    }
+
+    fn frozen_band_baselines_path(&self) -> PathBuf {
+        self.target_dir.join("frozen_band_baselines.json")
     }
 
     fn snapshots_path(&self) -> PathBuf {
@@ -528,6 +533,34 @@ impl FileStore {
         let path = self.source_postures_path();
         write_json_atomic(&path, store)
             .with_context(|| format!("Failed to write source-posture store: {:?}", path))
+    }
+
+    // --- Contract-lattice frozen-band baseline store ---
+
+    /// Load the per-source frozen-band row-count baseline store from disk
+    /// (`docs/specs/incremental_models.md` §"The contract lattice", frozen
+    /// horizon). Returns default if the file doesn't exist — a source with
+    /// no entry has never had its frozen band snapshotted, so its next
+    /// observation is unconditionally established.
+    pub fn load_frozen_band_baselines(&self) -> Result<FrozenBandBaselineStore> {
+        self.check_version()?;
+        let path = self.frozen_band_baselines_path();
+        if !path.exists() {
+            return Ok(FrozenBandBaselineStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read frozen-band baseline store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse frozen-band baseline store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-source frozen-band row-count baseline store to disk.
+    pub fn save_frozen_band_baselines(&self, store: &FrozenBandBaselineStore) -> Result<()> {
+        self.init()?;
+        let path = self.frozen_band_baselines_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write frozen-band baseline store: {:?}", path))
     }
 
     // --- Snapshot / Environment Store ---

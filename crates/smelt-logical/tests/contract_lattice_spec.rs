@@ -203,6 +203,37 @@ fn constraint_and_claude_md_state_the_lattice_invariant() {
 }
 
 #[test]
+fn frozen_horizon_triple_is_complete() {
+    let module = read("crates/smelt-logical/src/contract/frozen_horizon.rs");
+    assert!(
+        module.contains("pub fn validate_frozen_horizon"),
+        "the declaration-schema validator leg must be present"
+    );
+    assert!(
+        module.contains("pub fn clamp_write_range"),
+        "the oracle-transform (write-clamp) leg must be present"
+    );
+    assert!(
+        module.contains("pub fn emit_frozen_band_snapshot"),
+        "the probe-emitter leg must be present — the frozen-horizon triple is now complete"
+    );
+    assert!(
+        module.contains("pub fn late_arrivals"),
+        "the pure baseline-comparison the probe emitter's dispatch consumes must be present"
+    );
+
+    let mod_doc = read("crates/smelt-logical/src/contract/mod.rs");
+    assert!(
+        !mod_doc.contains("lands in phase 3"),
+        "contract/mod.rs's landing-status doc must be updated once the probe emitter lands"
+    );
+    assert!(
+        mod_doc.contains("has landed") || mod_doc.contains("landed —"),
+        "contract/mod.rs must state that the frozen_horizon triple has landed"
+    );
+}
+
+#[test]
 fn known_divergence_tracks_the_unimplemented_lattice() {
     let spec = read("docs/specs/incremental_models.md");
     let section = h2_section_body(&spec, "## Known Divergences / Open Questions");
