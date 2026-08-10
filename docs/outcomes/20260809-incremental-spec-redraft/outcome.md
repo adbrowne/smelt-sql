@@ -47,12 +47,13 @@ way (timeless-oracle rule), at substantially reduced length.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
-| 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | pending |
-| 3 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
-| 4 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
-| 5 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
-| 6 | Remove parser/config fossils with fail-loud diagnostics | pending |
-| 7 | docs-site terminology sync; validate + timeless greps clean | pending |
+| 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | planned |
+| 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | pending |
+| 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
+| 5 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
+| 6 | Rewrite Known Divergences (both specs) as genuine gap lists | pending |
+| 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
+| 8 | docs-site terminology sync; validate + timeless greps clean | pending |
 
 ## Decision log
 
@@ -73,6 +74,21 @@ way (timeless-oracle rule), at substantially reduced length.
   terminology table, and an 11-row deletion list with `rg`-verified anchors for phases
   2–7. `grain: key_per_partition`'s disposition is *delete* (removal is the one
   sanctioned behaviour change per §Out of scope; implementing it is a separate outcome).
+
+- 2026-08-10 — Phase table reshaped again: the phase-1 outline's Semantics budget assigns owners
+  to eleven subsection groups, but two of them — "Per-cell write addressing" (with the open
+  write-pattern set and the repair family folded in) and "Maintenance mechanics" (windowed
+  maintenance, the K8 guardrail, statement emission, the definition-change trigger) — were named
+  by no phase row: row 2 covered the contract/plan-matrix material and row 3 the shape profiles.
+  ~360 lines of §Semantics would have been left unredrafted, which the outcome statement's
+  "reduced length, reads as always designed this way" requires. Added as new row 3; later rows
+  shifted by one; no row removed.
+- 2026-08-10 — Phase 2 will consolidate by *demotion*, not renaming: the four headings it merges
+  (`The equivalence invariant`, `The algebraic maintenance ladder`, `Decomposed state (rung 2) in
+  keyed models`, `Validator, not chooser`) and `Per-cell admission` become `####` children rather
+  than disappearing. `rg` shows these heading names are cited by ~100 `§"…"` references across
+  sibling specs, root `CLAUDE.md`, and six production crates; the craft doc treats a heading
+  rename as a symbol rename, and the corpus sweep is not work this outcome's criteria ask for.
 
 ## Blocked
 
