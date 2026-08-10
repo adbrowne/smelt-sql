@@ -838,7 +838,8 @@ pub async fn execute_project(
                 // call (`build_delete_insert_group_dispatched`) the live
                 // executor uses, never a hand-picked `emit_delete_insert`
                 // call, so the two paths cannot structurally diverge.
-                let model_edges_dry = model_edges_for(model_file, &model_by_addr_dry);
+                let model_edges_dry =
+                    model_edges_for(model_file, &model_by_addr_dry, &source_infos);
                 let delta_facts_dry = if model_edges_dry.is_empty() {
                     None
                 } else {
@@ -1710,6 +1711,32 @@ pub async fn execute_project(
                 }
                 None => None,
             };
+            // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
+            // §"Upstream model edges"): an upstream maintained model whose own
+            // derived output-delta shape is `KeyedUpsert` folds via the repair
+            // family's own `Technique::PerGroupRecompute`, restricted to the
+            // upstream's affected key set rather than a source's `ScanClamp` —
+            // the sibling of `per_group_recompute_cell` above for this
+            // model's upstream MODEL edges rather than its declared sources.
+            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+            let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
+                None
+            } else {
+                match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
+                            &clean_sql_for_merge,
+                            &db_table_name,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            backend.dialect(),
+                        )?
+                    }
+                    None => None,
+                }
+            };
 
             // Classify up front, regardless of window presence, so the
             // derived run shape (`docs/specs/incremental_models.md` §"The
@@ -1740,7 +1767,92 @@ pub async fn execute_project(
 
             let mut used_per_group_recompute = false;
             let mut used_diff_patch = false;
-            let exec_result = match (start_date, end_date) {
+            // A key-addressed model-edge cell has no run-window axis at all
+            // (its bounded read is the upstream's own affected key set, not
+            // an interval) — checked BEFORE the `(start_date, end_date)`
+            // dispatch below rather than nested inside its window-forward
+            // arm, so it fires regardless of which run shape this model's
+            // OWN driving trigger classifies as (a clockless upstream
+            // typically drives the downstream into the snapshot-reconcile
+            // shape, which has no run window to match on at all). It is
+            // derived for a DIFFERENT trigger source (the upstream model's
+            // own bare name) than any declared-source repair cell, so the
+            // two can never contend for the same trigger. Never on the
+            // creation run — there is nothing to repair yet, and the fold's
+            // own create path is what materializes the table
+            // (`table_exists_before_run` was captured before any of this
+            // model's writes).
+            let exec_result = match key_addressed_edge_cell
+                .as_ref()
+                .filter(|_| table_exists_before_run)
+            {
+                Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) => {
+                    used_per_group_recompute = matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                    );
+                    used_diff_patch = matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                    );
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "keyed run path: model '{}' resolved a live key-addressed model-edge \
+                             cell on upstream '{edge_name}', but that upstream has no resolved \
+                             ModelFile — internal inconsistency",
+                            plan.name
+                        )
+                    })?;
+                    let upstream_target = config.get_target(
+                        edge_name,
+                        upstream_model.metadata.as_deref(),
+                        &request.target,
+                    );
+                    let upstream_schema = &config.targets[&upstream_target].schema;
+                    let upstream_table =
+                        format!("{upstream_schema}.{}", upstream_model.db_name_owned());
+                    let upstream_source_address = format!("smelt.models.{edge_name}");
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql_for_merge,
+                        resolver,
+                    )?;
+                    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+                        backend,
+                        schema,
+                        &db_table_name,
+                        &upstream_source_address,
+                        &upstream_table,
+                        upstream_keys,
+                        digest_columns,
+                        &key_scope.keys,
+                        &clean_sql_for_merge,
+                        &compiled.sql,
+                        write,
+                        &retry_policy,
+                    )
+                    .await
+                    {
+                        Ok(Some(result)) => Ok(result),
+                        Ok(None) => {
+                            let row_count = backend
+                                .get_row_count(schema, &db_table_name)
+                                .await
+                                .unwrap_or(0);
+                            Ok(smelt_backend::ExecutionResult {
+                                model_name: db_table_name.clone(),
+                                duration: StdDuration::default(),
+                                row_count,
+                                preview: None,
+                            })
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => match (start_date, end_date) {
                 (Some(s), Some(e)) => {
                     if classification.is_snapshot_reconcile() {
                         anyhow::bail!(
@@ -2028,7 +2140,9 @@ pub async fn execute_project(
                         preview: None,
                     })
                 }
-            };
+                }
+                }
+            ;
 
             let exec_result = match exec_result {
                 Ok(r) => r,
@@ -2464,7 +2578,7 @@ pub async fn execute_project(
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
                 // scan, unchanged from before this phase.
-                let model_edges = model_edges_for(&plan.model_file, model_by_addr);
+                let model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
@@ -4122,9 +4236,22 @@ fn maintenance_dialect_for_target(
 fn model_edges_for(
     model_file: &smelt_core::ModelFile,
     model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+    source_infos: &[smelt_core::sources::SourceInfo],
 ) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
     let mut edges = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // The SAME per-workspace output-delta fold `crate::propagation::
+    // build_forward_graph`'s own `type_edge` call reads — never a second,
+    // independent derivation (`docs/outcomes/20260809-output-delta-typing/
+    // phases/06-summary.md` "For the next planner"). Recomputed per call
+    // (this driver-facing resolver has no cross-model cache to lean on, and
+    // is only ever called once per live model per run); the workspace-wide
+    // fixed-point fold itself is O(models) per model reference resolved.
+    let model_by_addr_ref: std::collections::BTreeMap<String, &smelt_core::ModelFile> =
+        model_by_addr.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let models: Vec<smelt_core::ModelFile> = model_by_addr.values().cloned().collect();
+    let workspace_verdicts =
+        crate::propagation::workspace_output_delta_verdicts(&models, source_infos);
     for r in &model_file.refs {
         let segs = r.smelt_ref.to_path();
         if segs.first().map(|s| s.as_str()) == Some("sources") {
@@ -4158,16 +4285,25 @@ fn model_edges_for(
         let unique_key = up_meta
             .and_then(|m| m.unique_key.clone())
             .unwrap_or_default();
+        // The upstream's own derived output-delta shape — the meet across
+        // whatever per-column-group verdicts `upstream_output_delta_groups`
+        // derives for it, mirroring `propagation.rs`'s own `ModelEdge`
+        // construction exactly.
+        let output_shape = crate::propagation::upstream_output_delta_groups(
+            &addr,
+            &model_by_addr_ref,
+            source_infos,
+            &workspace_verdicts,
+        )
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
         edges.push(smelt_logical::maintenance::derive::ModelEdge {
             name: addr,
             clock_col,
             clock_col_aliases,
             unique_key,
-            // Lowering/execution of a key-addressed cell is phase 7's scope
-            // (`docs/outcomes/20260809-output-delta-typing/outcome.md`) —
-            // this driver-facing edge list stays clock-only admission until
-            // then, unaffected by this phase's plan-derivation-only change.
-            output_shape: None,
+            output_shape,
         });
     }
     edges

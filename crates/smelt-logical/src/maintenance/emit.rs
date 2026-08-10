@@ -2461,6 +2461,74 @@ pub fn emit_repair_group_sidecar_diff(
     )
 }
 
+/// A key-addressed model edge's affected-keys relation
+/// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
+/// downstream's own key columns (`KeyScope::keys`), distinct, for every
+/// upstream row whose own `KeyedUpsert` key (`upstream_keys`) is one of the
+/// already-resolved `changed_keys` — the changed-key set the group-grain
+/// fingerprint sidecar diff over the upstream's output table discovered
+/// (`diff_repair_group_sidecar_changed_keys`, `smelt-runtime`). This is the
+/// key-correspondence projection: an upstream key that changed does not
+/// necessarily equal the downstream's own key column set, so the relation
+/// re-selects the downstream's key expression over the upstream table rather
+/// than reusing the changed keys directly.
+///
+/// Same `key_expr_for_columns` canonicalisation
+/// [`repair_affected_keys_select`]/[`repair_candidate_select`] (`smelt-
+/// runtime`) use for the resulting `delta_key` column, so this relation
+/// composes into the same repair-family candidate-select/write emitters
+/// unchanged — only how the affected-key relation itself is discovered
+/// differs from the ordinary clamped-scan repair path.
+///
+/// `changed_keys` is a literal `VARCHAR` value list (already resolved by the
+/// caller's sidecar-diff read, not opaque SQL) — the same shape
+/// [`super::super::maintenance_driver`]'s `repair_keys_literal_select`-style
+/// callers pass. An empty `changed_keys` yields a well-typed EMPTY relation
+/// (`WHERE FALSE`), never an unrestricted `SELECT DISTINCT`: a run
+/// discovering no changed upstream keys touches nothing.
+///
+/// `dialect` is accepted for signature symmetry with this module's other
+/// repair-family emitters; only the DuckDB shape is built today, matching
+/// this phase's DuckDB-only discovery-route scope.
+///
+/// # Panics
+/// Panics if `upstream_keys` or `downstream_keys` is empty — mirrors
+/// [`emit_repair_group_digest_select`]'s own contract.
+pub fn emit_key_addressed_affected_keys_select(
+    upstream_table: &str,
+    upstream_keys: &[String],
+    downstream_keys: &[String],
+    changed_keys: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !upstream_keys.is_empty(),
+        "emit_key_addressed_affected_keys_select requires a non-empty upstream key for \
+         {upstream_table}"
+    );
+    assert!(
+        !downstream_keys.is_empty(),
+        "emit_key_addressed_affected_keys_select requires a non-empty downstream key for \
+         {upstream_table}"
+    );
+    let downstream_key_expr = key_expr_for_columns(downstream_keys);
+    if changed_keys.is_empty() {
+        return format!(
+            "SELECT {downstream_key_expr} AS delta_key FROM {upstream_table} WHERE FALSE"
+        );
+    }
+    let upstream_key_expr = key_expr_for_columns(upstream_keys);
+    let literals = changed_keys
+        .iter()
+        .map(|k| format!("'{}'", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT DISTINCT {downstream_key_expr} AS delta_key FROM {upstream_table} WHERE \
+         {upstream_key_expr} IN ({literals})"
+    )
+}
+
 #[cfg(test)]
 mod fingerprint_sidecar_tests {
     use super::*;

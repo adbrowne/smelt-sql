@@ -54,7 +54,7 @@ pub struct SourceDelta {
 /// literally (`SmeltRef::to_path`'s doc comment), which is never part of
 /// `ModelFile::canonical_path()` — stripping it here is what lets a
 /// model-reference address resolve against `model_by_addr`.
-fn bare_name(segs: &[String]) -> String {
+pub(crate) fn bare_name(segs: &[String]) -> String {
     match segs.split_first() {
         Some((first, rest)) if first == "sources" || first == "models" => rest.join("."),
         _ => segs.join("."),
@@ -203,7 +203,7 @@ fn model_grain(
 /// only the fail-closed leaf-seeding facts the output-delta proof needs
 /// (`analysis::output_delta::SourceFacts::from_source_info`), not the
 /// maintenance-plan `SourceFacts` shape.
-fn model_output_delta_sources(
+pub(crate) fn model_output_delta_sources(
     model: &ModelFile,
     source_infos: &[SourceInfo],
 ) -> Vec<output_delta::SourceFacts> {
@@ -229,7 +229,7 @@ fn model_output_delta_sources(
 /// from its own declared `unique_key`/`timeseries.partition_column` — the
 /// SAME two facts `smelt-db`'s own maintenance-plan derivation reads to seed
 /// the identical call, never re-derived differently here.
-fn model_skeleton_columns(model: &ModelFile, sql: &str) -> BTreeSet<String> {
+pub(crate) fn model_skeleton_columns(model: &ModelFile, sql: &str) -> BTreeSet<String> {
     let metadata = model.metadata.as_deref();
     let declared_unique_key = metadata
         .and_then(|m| m.unique_key.clone())
@@ -245,7 +245,7 @@ fn model_skeleton_columns(model: &ModelFile, sql: &str) -> BTreeSet<String> {
 /// over EVERY model in the workspace — a downstream model-reference leaf may
 /// name any model, not only the `refresh: incremental` ones
 /// `derive_clamp_and_locality_pass` restricts itself to.
-fn workspace_output_delta_verdicts(
+pub(crate) fn workspace_output_delta_verdicts(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
 ) -> BTreeMap<String, OutputDeltaFacts> {
@@ -272,7 +272,7 @@ fn workspace_output_delta_verdicts(
 /// (`output_delta::source_output_delta`). Neither (an upstream this
 /// workspace cannot locate) contributes no groups — `type_edge` then
 /// derives no component for it, never a fabricated one.
-fn upstream_output_delta_groups(
+pub(crate) fn upstream_output_delta_groups(
     upstream: &str,
     model_by_addr: &BTreeMap<String, &ModelFile>,
     source_infos: &[SourceInfo],

@@ -1140,6 +1140,27 @@ downstream's own SQL does not carry the upstream's key columns (they cannot be r
 the downstream's own grain), the edge is refused by name
 (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a silent whole-table cell.
 
+A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint sidecar
+diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over a
+`mutable_snapshot` source"), keyed at the upstream's `KeyedUpsert` key columns: a clockless keyed
+upstream is, from the consumer's own view, exactly a mutable snapshot with no clock to clamp a
+scan by, so the sidecar's stored comparandum is what bounds the read instead — a clamp-less
+`SELECT DISTINCT` over the upstream would degenerate to a full-table rescan, which the technique
+this cell admits (`Technique::PerGroupRecompute`) exists specifically to avoid. The changed
+upstream keys are then projected through the upstream relation onto the downstream's own key
+columns (the `KeyScope::keys` this cell names): `SELECT DISTINCT <key_expr(key_scope.keys)> FROM
+<upstream_table> WHERE <upstream key expr> IN (<changed keys>)`. The candidate recompute is the
+downstream's full (unwindowed) SQL semi-joined to that key relation, and the write is the repair
+family's own targeted `DELETE`+`INSERT` (or the `write: diff_patch` write leg, when pinned) —
+identical to any other `Technique::PerGroupRecompute` cell's lowering once its affected-key
+relation and candidate select exist; only how the key relation is discovered differs. The upstream
+sidecar partition refreshes in the same backend transaction as the downstream's write, so a failed
+write never leaves the sidecar advanced past a change it did not actually consume. This discovery
+route is DuckDB-only, matching the sidecar's existing posture elsewhere in this spec — a non-DuckDB
+target dialect refuses by name before any backend call, never a silent widening to a full-table
+read. A `key_scope` key the upstream relation does not carry is a fail-loud refusal, never a
+widening to every key.
+
 **Forward propagation — what must run.** Runs are driven by **what landed**, per source, as
 partition intervals on that source's own axis; a cron tick is only the poller. Processing nodes
 in topological order, each node's merged dirt reflects through each outgoing edge — an upstream
@@ -2355,11 +2376,10 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   propagation and `smelt explain`, but the propagated region is materialized by the ordinary
   incremental run loop rather than a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
-- **A key-addressed model-edge cell is derived and rendered but not yet executed.** Plan
-  derivation admits the cell (§"Upstream model edges") and the propagation graph carries its
-  edge, but no lowering path (statement emission, driver dispatch) consumes it yet — a run
-  reaching such a cell has nothing to execute. Tracked:
-  `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+- **A key-addressed model-edge cell's `smelt explain` rendering is still generic.** Execution
+  (statement emission, driver dispatch) lowers and runs the cell (§"Upstream model edges"), but
+  `smelt explain`'s edge rendering does not yet name the affected-key discovery route or the
+  upstream sidecar it reads. Tracked: `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **The definition-change backfill's atomicity is conditional on the schema-evolution gate
   actually running this run.** The fold described in §"The definition-change trigger" only
   happens inside `schema_evolution`'s migration call; a model whose `schema_evolution:

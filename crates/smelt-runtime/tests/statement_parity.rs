@@ -2316,6 +2316,231 @@ mutation_profile:
     );
 }
 
+/// Phase 7 (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
+/// a key-addressed model-edge cell's `Technique::PerGroupRecompute` group
+/// must be byte-identical to a direct [`emit_per_group_recompute`] call —
+/// the SAME parity proof `per_group_recompute_statements_come_from_the_
+/// emitter` runs for the ordinary declared-source repair route, over a
+/// clockless `KeyedUpsert` upstream model edge instead of a
+/// `mutation_profile: mutable_snapshot` source.
+#[tokio::test]
+async fn key_addressed_model_edge_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("models/sources")).expect("mkdir models/sources");
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: key_addressed_parity\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    )
+    .expect("write smelt.yml");
+    std::fs::write(
+        project_dir.join("models/sources/payments.yml"),
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    )
+    .expect("write payments source yml");
+    write_model(
+        &project_dir,
+        "agg",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         unique_key: user_id\n---\n\
+         SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write_model(
+        &project_dir,
+        "downstream",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         unique_key: user_id\n---\n\
+         SELECT user_id, ANY_VALUE(total) AS total FROM smelt.agg GROUP BY user_id\n",
+    );
+
+    let db_path = tmp.path().join("run.duckdb");
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_payments (user_id INTEGER, amount DECIMAL(10,2), \
+                 d DATE)",
+            )
+            .await
+            .expect("create payments source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_payments VALUES \
+                 (1, 100.00, DATE '2025-01-01'), (1, 50.00, DATE '2025-01-02'), \
+                 (2, 70.00, DATE '2025-01-01')",
+            )
+            .await
+            .expect("seed payments");
+    }
+
+    let multi_select = |models: &[&str]| ExecuteRequest {
+        target: "dev".to_string(),
+        select: models.iter().map(|s| s.to_string()).collect(),
+        exclude: vec![],
+        start: None,
+        end: None,
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: false,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
+    };
+
+    // Run 1: creation — nothing to fold yet.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        execute_project(
+            "key-edge-parity-run-1".to_string(),
+            multi_select(&["agg", "downstream"]),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &RecordingBackendFactory {
+                db_path: db_path.clone(),
+                backend: Arc::new(Mutex::new(None)),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Mutate user 1's contribution in place.
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql(
+                "UPDATE main.sources_payments SET amount = 200.00 WHERE user_id = 1 AND \
+                 amount = 100.00",
+            )
+            .await
+            .expect("mutate payments");
+    }
+
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "key-edge-parity-run-2".to_string(),
+        multi_select(&["agg", "downstream"]),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("second run (key-addressed recompute) must succeed");
+
+    let record = outcome.models.get("downstream").expect("downstream ran");
+    assert_eq!(
+        record.strategy, "per_group_recompute",
+        "the upstream's key-addressed fold must dispatch the repair family"
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let repair_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| {
+            g.statements
+                .first()
+                .is_some_and(|s| s.sql.starts_with("CREATE TEMP TABLE __smelt_repair_"))
+        })
+        .collect();
+    assert_eq!(
+        repair_groups.len(),
+        1,
+        "exactly one key-addressed per-group-recompute group must have executed: {groups:?}"
+    );
+    let group = repair_groups[0];
+    assert!(group.transactional, "the repair group is transactional");
+    assert_eq!(group.statements.len(), 5);
+
+    let staged_relation = "__smelt_repair_downstream";
+    let candidate_prefix = format!("INSERT INTO {staged_relation} ");
+    let insert_sql = &group.statements[1].sql;
+    assert!(
+        insert_sql.starts_with(&candidate_prefix),
+        "unexpected staged INSERT statement: {insert_sql}"
+    );
+    let candidate_select = &insert_sql[candidate_prefix.len()..];
+
+    let key = vec!["user_id".to_string()];
+    let affected_keys_select = extract_affected_keys_select(candidate_select);
+    assert!(
+        affected_keys_select.contains("SELECT DISTINCT"),
+        "a key-addressed cell's affected-key relation must be the key-restricted projection \
+         over the upstream table: {affected_keys_select}"
+    );
+    assert!(
+        !affected_keys_select
+            .to_uppercase()
+            .contains("__SMELT_REPAIR_GROUP_KEYS"),
+        "a key-addressed cell must not route through the ordinary sidecar-literal-keys \
+         relation shape — it reads the upstream table directly: {affected_keys_select}"
+    );
+
+    let expected = emit_per_group_recompute(
+        "main.downstream",
+        staged_relation,
+        &key,
+        &affected_keys_select,
+        candidate_select,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed key-addressed per-group-recompute group must be byte-identical to a direct \
+         emitter call over the same inputs"
+    );
+
+    // Result-equivalence: the key-addressed fold actually executed must
+    // leave the downstream equal to a full refresh over agg's current state.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT user_id, total FROM main.downstream",
+            "SELECT user_id, SUM(amount) AS total FROM main.sources_payments GROUP BY user_id"
+        )
+        .await,
+        "the key-addressed fold actually executed must reproduce a full refresh"
+    );
+}
+
 #[tokio::test]
 async fn diff_patch_statements_come_from_the_emitter() {
     const ORDERS_SOURCE_YML: &str = r#"description: Mutable order snapshot

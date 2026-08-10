@@ -55,7 +55,7 @@ the addressing of one delta type, not the universal currency.
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
-| 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | planned |
+| 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | pending |
 | 9 | Surface: explain edge rendering, docs-site update | pending |
 
@@ -191,6 +191,20 @@ the addressing of one delta type, not the universal currency.
   The latent `skeleton_closure.rs` breadcrumb gap phase 6 flagged stays a **conditional,
   red-test-first task inside phase 7** (fixed only if a fixture trips it), not a speculative fix
   and not a deferral.
+
+- 2026-08-10 — Phase 7 implemented: `emit_key_addressed_affected_keys_select` (`smelt-logical`),
+  `resolve_live_key_addressed_model_edge_cell` + `resolve_key_addressed_affected_keys` +
+  `execute_key_addressed_model_edge_cell` (`smelt-runtime::maintenance_driver`), and
+  `execute.rs`'s keyed-run-loop dispatch (checked BEFORE the `(start_date, end_date)` match rather
+  than nested inside its window-forward arm — a clockless upstream typically drives its downstream
+  into the snapshot-reconcile shape, which has no run window to match on at all, so nesting inside
+  the window-forward arm would make the new route unreachable for the archetypal case). The
+  `skeleton_closure.rs` conditional task was not needed — no fixture tripped it. Real-DuckDB
+  two-model chain proven end-to-end (`key_addressed_model_edge_lowering.rs`) plus a
+  `statement_parity` leg. No phase-table reshape — phase 7's scope matched the plan, with one
+  scope note for the next planner: live dispatch reaches only a `grain: key` downstream today; a
+  `KeyedUpsert` upstream feeding a `grain: partition` downstream (also admitted by phase 6's plan
+  derivation) has no live dispatch yet (see `phases/07-summary.md` "For the next planner").
 
 ## Blocked
 
