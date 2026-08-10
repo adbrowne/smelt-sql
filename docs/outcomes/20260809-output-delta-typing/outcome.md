@@ -59,7 +59,7 @@ the addressing of one delta type, not the universal currency.
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
 | 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | done |
 | 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | done |
-| 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | pending |
+| 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | planned |
 
 ## Decision log
 
@@ -296,6 +296,21 @@ the addressing of one delta type, not the universal currency.
   web-analytics tutorial page updated to match. No phase-table reshape — phase 9's own flagged
   gap (bare `smelt.<addr>` model-reference leaves bypassing `model_verdicts`) is unaffected by
   this phase and remains phase 11's scope as already placed.
+
+- 2026-08-10 — Phase 11 planned; no phase-table reshape (phase 10's summary flagged nothing
+  beyond this already-placed row). Reading the code sharpened the gap's shape and widened the
+  phase slightly, within its own row: the mismatch is symmetric, not one-directional. The
+  verdict map's keys are built differently by its two producers — `smelt-runtime` keys by
+  `ModelFile::canonical_path()` (no breadcrumb, e.g. `silver.users`), `smelt-db`'s
+  `model_delta_inputs` keys by the ref path as literally spelled (so `models.silver.users`
+  when the SQL carries the breadcrumb) — while the lookup side strips `models.` before
+  matching. So a bare ref misses on the lookup side AND a breadcrumbed `smelt-db` key can miss
+  on the insert side. The fix is therefore one shared key normalization applied at both the
+  insert and the lookup, not just a lookup fallback. Design call taken in-plan rather than
+  blocked: for a **bare** name that matches both a declared source and a model verdict, the
+  declared source wins — it preserves every existing behaviour exactly (only names that
+  currently fail-close to `General` change) and a source's declared mutation profile is the
+  more specific fact; the precedence is pinned by its own test and stated in the spec.
 
 ## Blocked
 
