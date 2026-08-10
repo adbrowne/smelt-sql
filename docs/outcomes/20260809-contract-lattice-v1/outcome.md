@@ -57,7 +57,7 @@ relaxation is declared, validated, probe-checked, and printed by
 | 4 | `deferral:` declaration + validation + the ledger-derived lag oracle and `ContractDeferralExceeded` probe (the deferral triple) | done |
 | 5 | Deferral-licensed run skipping and ledger-proven work subsumption | done |
 | 6 | Conformance oracle parameterised per lattice point + recipes for both relaxations | done |
-| 7 | Surface: explain contract rendering, docs-site update | pending |
+| 7 | Surface: explain contract rendering, docs-site update | planned |
 
 ## Decision log
 
@@ -188,6 +188,18 @@ relaxation is declared, validated, probe-checked, and printed by
   (`lag == d`), `settled_cutoff` equals `maintained_frontier` exactly — `<=` would overclaim one
   extra day and make the bracket's settled leg spuriously fail on the very boundary case deferral
   exists to license.
+
+- 2026-08-10 — Phase table unchanged (phase 6's summary deferred nothing; phase 7 is the last row).
+- 2026-08-10 — **The per-cell effective contract is resolved by one pure `smelt-logical` function,
+  not by the CLI** (phase 7 plan): `contract::effective_contract` applies the model-level →
+  `contract.cells[]` narrower-wins ladder with the same addressing semantics as
+  `maintenance::choice::matching_cell`, and both the text report and the `--json` per-cell
+  `contract_point` render its output. A local ladder in `explain.rs` was rejected — the lattice's
+  single-owner rule binds every semantic leg, and "which point is this cell at" is one.
+- 2026-08-10 — **A per-cell `deferral` refinement is printed as declared even though it is not
+  scheduled** (Out of scope, per-cell frontier): printing only what is scheduled would make a
+  declared-but-unscheduled relaxation invisible, which is the silent weakening the lattice exists
+  to prevent; the spec records the gap instead.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
