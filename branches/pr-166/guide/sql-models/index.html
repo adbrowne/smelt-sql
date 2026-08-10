@@ -3113,8 +3113,8 @@
 </tr>
 <tr>
 <td><code>grain</code></td>
-<td><code>partition</code> | <code>key</code> | <code>key_per_partition</code></td>
-<td>Required with <code>refresh: incremental</code> — what a stored row <em>is</em> and how it is addressed. See <a href="../materializations/#refresh-axis">Materializations</a>.</td>
+<td><code>partition</code> | <code>key</code></td>
+<td>Optional check-only assertion with <code>refresh: incremental</code> — what a stored row <em>is</em> and how it is addressed. <code>key_per_partition</code> is a third derived label with no writable spelling. See <a href="../materializations/#refresh-axis">Materializations</a>.</td>
 </tr>
 <tr>
 <td><code>timeseries.event_time_column</code></td>

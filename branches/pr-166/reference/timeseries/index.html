@@ -3006,7 +3006,7 @@
 <td><strong>Optional</strong> — the <a href="#interaction-with-grain-key">composed shape</a>: admitted iff <a href="../../guide/incremental-models/#the-composed-shape-key-time">key temporal locality</a> is established, refused otherwise (<code>KeyedForbidsTimeseries</code>, naming the missing route)</td>
 </tr>
 <tr>
-<td><code>table</code>, <code>refresh: incremental</code>, <code>grain: key_per_partition</code></td>
+<td><code>table</code>, <code>refresh: incremental</code>, derived <code>key_per_partition</code> grain</td>
 <td><strong>Required</strong> — the partition axis is half the grain</td>
 </tr>
 <tr>
@@ -3024,7 +3024,7 @@
 </tbody>
 </table>
 <h2 id="interaction-with-refresh-incremental">Interaction with <code>refresh: incremental</code><a class="headerlink" href="#interaction-with-refresh-incremental" title="Permanent link">&para;</a></h2>
-<p>A <code>refresh: incremental</code> model must also declare <code>timeseries:</code> whenever its <code>grain:</code> is <code>partition</code> or <code>key_per_partition</code>. The two blocks are independent:</p>
+<p>A <code>refresh: incremental</code> model must also declare <code>timeseries:</code> whenever its grain (declared or derived) is <code>partition</code> or <code>key_per_partition</code>. The two blocks are independent:</p>
 <ul>
 <li><code>timeseries:</code> declares the time dimension (event time, partition column, granularity).</li>
 <li><code>refresh: incremental</code> + <code>grain:</code> opts the model into the derived maintenance plan; the top-level <code>safety_overrides:</code> key carries per-model safety-check escape hatches layered on top.</li>

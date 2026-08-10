@@ -3485,7 +3485,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
 <a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">      </span><span class="nt">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">&lt;column&gt;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span><span class="w">  </span><span class="c1"># MERGE-dedup-only key — see the callout below</span>
 </code></pre></div>
-<p><code>refresh: incremental</code> is admitted on the two <strong>shape-defining facts</strong> alone — a <code>timeseries:</code> block (the clock) and/or a top-level <code>unique_key:</code> (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. <code>grain:</code> itself is never required to admit a model — it is an optional, <strong>check-only</strong> <code>partition</code> / <code>key</code> / <code>key_per_partition</code> label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.</p>
+<p><code>refresh: incremental</code> is admitted on the two <strong>shape-defining facts</strong> alone — a <code>timeseries:</code> block (the clock) and/or a top-level <code>unique_key:</code> (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. <code>grain:</code> itself is never required to admit a model — it is an optional, <strong>check-only</strong> <code>partition</code> / <code>key</code> label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive. <code>key_per_partition</code> is a third derived label (a clock plus an identity whose <code>partition_column</code> is a member) with no writable spelling — declaring <code>grain: key_per_partition</code> is a hard error.</p>
 <h3 id="model-fields">Model Fields<a class="headerlink" href="#model-fields" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
@@ -3545,7 +3545,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>string</td>
 <td>no</td>
 <td></td>
-<td>Optional check-only assertion — <code>partition</code>, <code>key</code>, or <code>key_per_partition</code> — validated against the label <code>timeseries:</code>/<code>unique_key:</code> derive; never a driver</td>
+<td>Optional check-only assertion — <code>partition</code> or <code>key</code> — validated against the label <code>timeseries:</code>/<code>unique_key:</code> derive; never a driver. <code>key_per_partition</code> is derived-only; declaring it is a hard error.</td>
 </tr>
 <tr>
 <td><code>safety_overrides</code></td>
