@@ -2514,6 +2514,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#probes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Probes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#json-output-schema" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2828,6 +2839,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#probes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Probes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#json-output-schema" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2992,14 +3014,37 @@
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>      presentation: avg_amount__sum / avg_amount__count
 </code></pre></div>
 <p>A model with no decomposed-state columns prints no state section. With <code>--json</code>, the same information appears as a top-level <code>state_columns</code> array: <code>[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]</code>.</p>
+<h2 id="probes">Probes<a class="headerlink" href="#probes" title="Permanent link">&para;</a></h2>
+<p>A declared world-fact (<code>functional_dependencies:</code>, <code>bounded_domain:</code>, <code>assert_monotonic</code>,
+<code>mutation_profile: {kind: append_only}</code>, <code>referential_integrity:</code>, <code>key_recurrence</code>) licenses a
+maintenance technique only because a cheap runtime probe checks it before every consuming write —
+see <a href="../smelt-yml/#probes-configuration"><code>probes:</code> in the <code>smelt.yml</code> reference</a>. <code>smelt explain
+&lt;model&gt;</code> prints the model's declared-fact probe set: per probe, the declared fact, the named
+diagnostic it raises, the maintenance cell it licenses, the project's dispatch cadence, and its
+cost:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>Probes (1):
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  cadence: per_run
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>  - fact: functional_dependencies:
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>      probe: DeclaredFunctionalDependencyViolated
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>      licensed cell: main.subscriptions (declared)
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>      cost: +1 query per consuming run
+</code></pre></div>
+<p>A model declaring no probe-backed fact prints <code>Probes (0):</code>, not a missing section. The probe set
+stays <strong>offline</strong>: probe SQL is built to confirm a declaration is probe-backed, never executed, so
+<code>cost</code> is always the static "+1 query per consuming run" statement — <code>smelt explain</code> makes no
+backend connection. With <code>--json</code>, the same set appears as a top-level <code>probes</code> array:
+<code>[{"fact": "functional_dependencies:", "probe": "DeclaredFunctionalDependencyViolated", "cell":
+"main.subscriptions (declared)", "cadence": "per_run", "cost": "+1 query per consuming run"}]</code>.
+See the <a href="../state/#run-manifest">run manifest</a> for where a live run records each probe's actual
+dispatched/skipped outcome.</p>
 <p>See <a href="../cli/#smelt-explain"><code>smelt explain</code> in the CLI reference</a> for the full flag list and a sample maintenance-plan report. The web UI's <a href="../../guide/model-diagnostics/">model diagnostics page</a> renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.</p>
 <h2 id="json-output-schema">JSON output schema<a class="headerlink" href="#json-output-schema" title="Permanent link">&para;</a></h2>
 <p>With <code>--json</code>, smelt prints a single JSON object with the following top-level fields:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="p">{</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;&lt;model-name&gt;&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">&quot;execution_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model-name&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="nt">&quot;physical&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;&lt;model-name&gt;&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">},</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">&quot;execution_order&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;&lt;model-name&gt;&quot;</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">],</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">&quot;physical&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="err">...</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="p">}</span>
 </code></pre></div>
 <h3 id="models-per-model-entry"><code>models</code> — per-model entry<a class="headerlink" href="#models-per-model-entry" title="Permanent link">&para;</a></h3>
 <p>Each entry in <code>models</code> has:</p>
@@ -3096,14 +3141,14 @@
 <p>The <code>source_bounds</code> object maps each timeseries upstream reference name to its derived bound. Lookup sources (those without a <code>timeseries:</code> declaration) do not appear.</p>
 <p>Each entry is a tagged object with <code>"type"</code>:</p>
 <p><strong><code>"bounded"</code></strong> — the planner derived an explicit lookback/lookahead:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="p">{</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT30M&quot;</span><span class="p">,</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="p">}</span>
 </code></pre></div>
 <table>
 <thead>
@@ -3132,10 +3177,10 @@
 </tbody>
 </table>
 <p><strong><code>"unbounded"</code></strong> — the source requires reading unbounded history (cumulative aggregation, <code>UNBOUNDED PRECEDING</code>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unbounded&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;unbounded&quot;</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <p><strong><code>"not_derivable"</code></strong> — the planner could not determine the bound (bare <code>LAG/LEAD</code> without a <code>RANGE</code> clause, or a computed-expression join without an explicit interval filter). A model with any <code>not_derivable</code> bound is refused at planning time.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;not_derivable&quot;</span><span class="w"> </span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;not_derivable&quot;</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <h3 id="duration-format">Duration format<a class="headerlink" href="#duration-format" title="Permanent link">&para;</a></h3>
 <p>All <code>before</code> and <code>after</code> values use ISO-8601 duration strings:</p>
@@ -3203,11 +3248,11 @@
 </table>
 <p>Each node in <code>nodes</code> has <code>strategy</code>, <code>materialization</code>, <code>target</code>, and <code>logical_origins</code>.</p>
 <h2 id="example">Example<a class="headerlink" href="#example" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Human-readable</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>smelt<span class="w"> </span>explain
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="c1"># JSON, piped to jq for the sessions model&#39;s source bounds</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1"># Human-readable</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>smelt<span class="w"> </span>explain
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="c1"># JSON, piped to jq for the sessions model&#39;s source bounds</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
 </code></pre></div>
 
 

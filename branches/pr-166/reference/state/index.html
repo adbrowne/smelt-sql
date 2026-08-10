@@ -2425,6 +2425,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-manifest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run manifest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#state-schema-version-and-migration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2745,6 +2756,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#run-manifest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run manifest
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#state-schema-version-and-migration" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2886,6 +2908,21 @@
 </tbody>
 </table>
 <p>Every run-scoped artifact nests under <code>.smelt/targets/&lt;target&gt;/</code>; only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no <code>intervals.json</code>, and one with no <code>grain: key</code> models has no <code>reconciliation.json</code>.</p>
+<h2 id="run-manifest">Run manifest<a class="headerlink" href="#run-manifest" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/targets/&lt;target&gt;/runs/&lt;run_id&gt;.json</code> records one entry per model that ran this run.
+Alongside outcome, strategy, row count, duration, <code>definition_hash</code>, and <code>retry_count</code> (see
+"Inventory" above), a model entry carries a <code>probes</code> array — one entry per declared-fact probe
+(<code>docs/specs/model_properties.md</code> §"Probe obligation") this run consulted for that model:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="p">{</span><span class="w"> </span><span class="nt">&quot;fact&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;functional_dependencies:&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;probe&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;DeclaredFunctionalDependencyViolated&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;outcome&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;dispatched&quot;</span><span class="w"> </span><span class="p">}</span>
+</code></pre></div>
+<p><code>outcome</code> is one of two values: <code>dispatched</code> (the probe actually ran and held — a violation would
+have failed the run before any write, so a recorded entry is always a clean bill of health, never
+a silent pass on a violation) or <code>skipped</code> (the project's <a href="../smelt-yml/#probes-configuration"><code>probes:</code> cadence</a>
+skipped this probe on this run — the declaration is trusted, not verified, and the manifest says
+so explicitly rather than making a skipped check look identical to a checked one). A model
+declaring no probe-backed fact has an empty <code>probes</code> array. Reading an older manifest with no
+<code>probes</code> key at all defaults to an empty array, not a parse failure — manifest evolution is
+backward-compatible.</p>
 <h2 id="state-schema-version-and-migration">State-schema version and migration<a class="headerlink" href="#state-schema-version-and-migration" title="Permanent link">&para;</a></h2>
 <p><code>.smelt/meta.json</code> records the layout version this store was written with. A version this smelt binary does not recognise (newer than the binary's own highest known version) is a hard error naming both versions -- smelt refuses to read or write rather than guess at an unfamiliar layout. A missing <code>meta.json</code> denotes the legacy pre-versioning layout (root-level <code>runs/</code>, <code>intervals.json</code>, etc. with no <code>targets/&lt;target&gt;/</code> nesting); the first locked open under a version-aware binary migrates it to the current layout and writes <code>meta.json</code>, under the advisory lock so a concurrent process can never observe a half-migrated store.</p>
 <h2 id="locking">Locking<a class="headerlink" href="#locking" title="Permanent link">&para;</a></h2>
