@@ -46,7 +46,7 @@ way (timeless-oracle rule), at substantially reduced length.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | planned |
+| 1 | Terminology + outline: frontier/ledger unification, section plan, deletion list ratified against the rethink | done |
 | 2 | Redraft the contract + plan-matrix sections around typed deltas and the lattice | pending |
 | 3 | Redraft the shape profiles; state the composed key+time corner's single composition table | pending |
 | 4 | Overview / Design / Constraints / Limitations / References pass: polemics and plan-vocabulary deleted, terminology aligned | pending |
@@ -65,6 +65,14 @@ way (timeless-oracle rule), at substantially reduced length.
 - 2026-08-10 — Phase 1 scoped to *land* the frontier unification (criterion 1) rather
   than only describe it, so the terminology is fixed in the spec before phases 2–3
   rewrite sections that reference it, and the phase has a checkable artifact.
+- 2026-08-10 — Phase 1 done: frontier defined once in `incremental_models.md` §Semantics
+  (`### The frontier`, with `#### The frontier record (reconciliation ledger)` and
+  `#### The transactional frontier write (merge ledger)` as its two realizations); the
+  per-cell-`deferral` divergence entry no longer names one realization as foreign to the
+  other. `phases/01-outline.md` ratifies the target section outline (≤ 1,800 lines),
+  terminology table, and an 11-row deletion list with `rg`-verified anchors for phases
+  2–7. `grain: key_per_partition`'s disposition is *delete* (removal is the one
+  sanctioned behaviour change per §Out of scope; implementing it is a separate outcome).
 
 ## Blocked
 

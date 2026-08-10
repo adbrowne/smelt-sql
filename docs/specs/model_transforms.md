@@ -240,7 +240,7 @@ fold onto.
 
 **The reconciliation-ledger fold/recompute-reset pair** is the bookkeeping every
 additive column-group technique consults before it merges, per
-`incremental_models.md` §"The reconciliation ledger": each `(output-region ×
+`incremental_models.md` §"The frontier record (reconciliation ledger)": each `(output-region ×
 column-group)` ledger entry records the processed-input vector the region has
 already folded. **Fold** refuses (never merges) a delta already reflected in
 the entry's processed set, otherwise combines and extends it — the real

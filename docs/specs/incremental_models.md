@@ -337,11 +337,11 @@ The classifier assigns each non-key projection to exactly one **column family**.
 
 | Family | Per-key aggregators | Cross-window combiner | Idempotent (re-run safe) | Order-independent | Invertible | Run shapes admitted | Extra licence |
 |---|---|---|---|---|---|---|---|
-| **additive fold** | `COUNT(...)`, `SUM(...)`, `BIT_XOR(...)` | `+` / `xor` | no | yes | yes | window-forward only | ledger-enforced re-run refusal (§"The transactional merge ledger") |
+| **additive fold** | `COUNT(...)`, `SUM(...)`, `BIT_XOR(...)` | `+` / `xor` | no | yes | yes | window-forward only | ledger-enforced re-run refusal (§"The transactional frontier write (merge ledger)") |
 | **extremal / lattice fold** | `MIN`, `MAX`, `BOOL_AND`, `BOOL_OR`, `BIT_AND`, `BIT_OR` | `LEAST`/`GREATEST`/`AND`/`OR`/`&`/`\|` | yes | yes | no | window-forward only | — |
 | **order-monotone overwrite** | `MAX_BY(value, ordering)`, `MIN_BY(value, ordering)` | max/min-by-ordering over hidden `(v, o)` state (§"Decomposed state (rung 2) in keyed models", §"Ordering ties") | yes | up to ordering-key ties | no | window-forward only | — |
 | **once-write** | `COALESCE`-first-non-null over the group | `COALESCE(target, delta)`, or the decomposed `(value, written)` state fold for the fallback/multi-candidate spellings (§"Decomposed state (rung 2) in keyed models") | yes | yes (given the proof) | no | window-forward only | once-write provenance proof (`model_properties.md`): key-derived, or a declared functional dependency over a NULL-preserving reduction |
-| **decomposed fold** | `AVG(...)`, `STDDEV_*(...)`, `VAR_*(...)` | pairwise state combiner (§"Decomposed state (rung 2) in keyed models") | no | yes | per underlying combiner (additive state, invertible) | window-forward only | ledger-graded as additive (§"The transactional merge ledger") |
+| **decomposed fold** | `AVG(...)`, `STDDEV_*(...)`, `VAR_*(...)` | pairwise state combiner (§"Decomposed state (rung 2) in keyed models") | no | yes | per underlying combiner (additive state, invertible) | window-forward only | ledger-graded as additive (§"The transactional frontier write (merge ledger)") |
 | **plain overwrite** | `ANY_VALUE(...)` | incoming row wins | yes | n/a — one row per key per scan | no | **snapshot-reconcile only** | — |
 
 Any other aggregate, any non-aggregate non-key expression, and any composite expression over aggregates (`SUM(x) + 1`) is rejected (`KeyedUnknownCombiner`). Add columns for the underlying aggregates and derive downstream.
@@ -669,7 +669,8 @@ per-family shape:
 `AVG`'s and `STDDEV_*`/`VAR_*`'s state combiners are commutative monoids over their state tuples
 (component-wise `SUM`, itself a monoid), so the equivalence invariant and the order/set-determinacy
 corollary (§"The equivalence invariant") hold over the state with no exception — they are graded
-**additive** in the transactional merge ledger (§"The transactional merge ledger"), the same as
+**additive** in the transactional frontier write (§"The transactional frontier write (merge
+ledger)"), the same as
 `SUM`/`COUNT`, since their state components are `SUM`-shaped. `MAX_BY`/`MIN_BY`'s state combiner
 carries the same ordering-key-tie carve-out its rung-1 form already had (§"Two named carve-outs",
 §"Ordering ties") — moving the ordering value into hidden state changes nothing about that
@@ -946,7 +947,7 @@ argument rests on (§"The repair family") — and is not admitted without it; la
 the pattern degrades explicitly to insert+update, stated as a reduced-capability admission rather
 than a silently dropped delete leg. `diff_patch` is graded **Idempotent** — a second run against
 unchanged input diffs to empty — which is what makes it the reconciliation and drift-repair
-write (§"The transactional merge ledger"). The slice a `diff_patch` write restricts to is the
+write (§"The transactional frontier write (merge ledger)"). The slice a `diff_patch` write restricts to is the
 *candidate's own* slice — the affected-key set for a per-group recompute (§"The repair family"),
 a partition region for a windowed one — so the pattern is not tied to a partition axis.
 
@@ -1018,7 +1019,7 @@ no native deletion) keeps the ordinary clamped current-source scan — the group
 scoped to the one posture that needs it.
 
 **Ledger grading and re-run safety.** Per-group recompute is graded **Idempotent** for the keys in
-its slice, exactly like a region recompute (§"The transactional merge ledger"): re-running it
+its slice, exactly like a region recompute (§"The transactional frontier write (merge ledger)"): re-running it
 reproduces the same state, and it resets any additive ledger record for those keys rather than
 folding a second time on top of it.
 
@@ -1148,7 +1149,7 @@ Three deliberate exclusions, all warehouse-resident bookkeeping owned per dialec
 `smelt-state`, each interleaved transactionally with the write it describes but not itself a
 maintenance statement:
 
-- the reconciliation ledger's DDL/DML (§"The reconciliation ledger");
+- the reconciliation ledger's DDL/DML (§"The frontier record (reconciliation ledger)");
 - the observed-output-delta record (§"The graph layer");
 - the fingerprint sidecar's own storage — table DDL, digest-refresh upsert, GC delete
   (`sources.md` §"The fingerprint sidecar"). The sidecar's **diff query** is the one exception
@@ -1194,18 +1195,35 @@ the new group. The classification of an added field — `SkeletonAdd` / `PureBac
   the deployed-schema snapshot can outrun the column's real values (cross-ref §Known
   Divergences for the one case this does not cover).
 
-### The reconciliation ledger
+### The frontier
 
-The plan's bookkeeping is a `(output-region × column-group)` ledger; each entry records the
-processed-input vector `S_{i,g}` of that region-group. Storage is graded by algebra: additive
-groups record **delta identities** (never-fold-twice needs them); idempotent groups record only
-a **frontier** watermark (re-folding is harmless). Two operations: *fold* (refuse if the delta
-is already in the entry's processed set; otherwise combine and extend) and *recompute-reset* (a
-region recompute resets every intersecting entry to exactly the input it read). Region↔window
-attribution is exact under key temporal locality or explicit footprint tracking; a delta is
-attributed to the unique ledger region containing its footprint. Schema evolution is a ledger
-operation: adding a group instantiates its entries at `S = ∅` (§"The definition-change
-trigger").
+A **frontier** is the record of which typed deltas a cell has absorbed — the plan's one ledger
+concept, addressed by the cell's own output-delta type (`model_properties.md` §"Output-delta
+shape") and graded by combiner algebra (§"Per-cell admission"). An **additive** grade records
+delta identities, because a never-fold-twice check needs them; an **idempotent** grade records
+only a watermark, because re-folding the same delta is harmless. Two operations, defined once
+here and specialised by each realization below: **fold** (refuse if the delta is already
+reflected in the frontier's recorded state; otherwise combine and extend the record) and
+**recompute-reset** (a recompute resets the frontier for exactly the region or keys it read, to
+the input it actually read — never fold ahead of a reset).
+
+The frontier has two named realizations, differing in addressing grain and storage, not in these
+semantics: the **frontier record** (§"The frontier record (reconciliation ledger)"), the
+`(output-region × column-group)` bookkeeping every derived plan maintains; and the
+**transactional frontier write** (§"The transactional frontier write (merge ledger)"), the
+per-model backend table a window-forward keyed model's merge writes transactionally. No
+divergence entry may describe one realization as lacking a concept the other tracks — per-cell
+addressing is simply unbuilt for the frontier record's realization (§Known Divergences), not a
+foreign concept.
+
+#### The frontier record (reconciliation ledger)
+
+Each entry records the processed-input vector `S_{i,g}` of one `(output-region ×
+column-group)` pair, graded per §"The frontier": additive groups record delta identities,
+idempotent groups a watermark. Region↔window attribution is exact under key temporal locality or
+explicit footprint tracking; a delta is attributed to the unique region containing its footprint.
+Schema evolution is a fold-family operation on this record: adding a group instantiates its
+entries at `S = ∅` (§"The definition-change trigger").
 
 ### The graph layer
 
@@ -1662,7 +1680,7 @@ backend owns computational state (DuckDB: table state + transactions; Delta/Spar
 log + MERGE; Flink: checkpoints). Optional run-state tracking with gap detection is opt-in via
 `state.mode: intervals` (`virtual_environments.md`); the on-disk layout is owned by
 `run_state.md`. The one deliberate exception across the family is the key grain's transactional
-merge ledger (§"The transactional merge ledger" and §"Key-grain design").
+merge ledger (§"The transactional frontier write (merge ledger)" and §"Key-grain design").
 
 #### `partition_column` validation
 
@@ -1728,21 +1746,21 @@ Three model-level properties fold from the column families; each is derived, sur
    re-merged for **any** family: an irreversible fold cannot un-see a removed contribution, and
    an overwrite cannot retract a superseded-by-nothing value (§"Reprocessing").
 
-#### The transactional merge ledger
+#### The transactional frontier write (merge ledger)
 
-Every **window-forward** keyed model maintains a per-model **ledger** — a small backend table
+Every **window-forward** keyed model maintains a per-model frontier — a small backend table
 recording each merged window — written **in the same backend transaction** as that window's
 `merge_into`. By posture:
 
-- **Additive-fold models** (not re-run tolerant): a run whose window is already ledgered is
+- **Additive-fold models** (not re-run tolerant): a run whose window is already recorded is
   refused (`KeyedReprocessedWindow`) — exactly, not best-effort. Crash resume merges only
-  unledgered windows; a run interrupted at window *k* of *n* resumes correctly by re-running the
+  unrecorded windows; a run interrupted at window *k* of *n* resumes correctly by re-running the
   same range.
-- **Re-run-tolerant models**: a ledgered window may be re-merged (a no-op on unchanged input);
-  the ledger serves reprocessing detection and `--auto` bookkeeping, not refusal.
+- **Re-run-tolerant models**: a recorded window may be re-merged (a no-op on unchanged input);
+  the frontier serves reprocessing detection and `--auto` bookkeeping, not refusal.
 
-Snapshot-reconcile models keep no ledger — each run is a self-contained reconciliation.
-The ledger is backend-resident and transactional with the write it describes; it is a
+Snapshot-reconcile models keep no frontier — each run is a self-contained reconciliation. This
+realization is backend-resident and transactional with the write it describes; it is a
 **correctness structure**, distinct from the opt-in run-state observability surface
 (`run_state.md`). Rationale for why this does not violate the state-ownership doctrine:
 §"Partition-grain design" ("smelt does not own state").
@@ -2491,8 +2509,10 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   or the applicable relaxations with their declared parameters — in both the text report and the
   `--json` per-cell `contract_point` object. Per-cell `deferral` (`contract.cells[].deferral`)
   still parses and validates fail-loud, and prints as declared, but is not yet scheduled — it needs
-  a per-cell maintained frontier the interval ledger does not track, a state-shape change, not a
-  lattice-point change. Tracked: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
+  per-cell frontier addressing, which the frontier record (§"The frontier record (reconciliation
+  ledger)") does not yet track (its addressing today is per-region, not per-cell) — a
+  state-shape change, not a lattice-point change. Tracked:
+  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")
   executes via its emitter, with the executed-vs-emitted `statement_parity` leg proven for that
@@ -2553,7 +2573,7 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   supports_transactional_ddl == false`): the migration's own statement group is no longer
   all-or-nothing there either, so a mid-group failure can still leave an added-but-unbackfilled
   column with an already-advanced schema snapshot. Neither case has a repair path today.
-  Tracked: `docs/plans/20260809-sensitivity-precision.md` Phase 6.
+  Tracked: `docs/plans/20260809-sensitivity-precision.md`.
 - **Keyed dirt-sets are a symbolic channel, not a materialised key-value set.** The typed edge
   (`(delta shape × addressing × column set)`) is derived and acted on: `propagate`/
   `required_inputs` route an edge with an admitted `Addressing::Keyed` component through the
@@ -2726,7 +2746,7 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional merge ledger"
+- **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional frontier write (merge ledger)"
   gives every window-forward model a ledger, refusal-bearing for additive folds and
   detection/bookkeeping-bearing for the idempotent families; the runtime only ever creates the
   ledger table for an additive-graded model (`Grade::Additive`), so a fully idempotent model has
@@ -2744,10 +2764,10 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   declaration" makes it one; frontmatter validation only checks the double-declaration case and
   never conditions on the derived grain, so the block parses on a keyed model and is ignored.
 - **The reconciliation ledger's fold is transactional on DuckDB only.** §"The transactional
-  merge ledger" requires the ledger write to share the merge's backend transaction; the default
-  `Backend::fold_ledger_delta` is an explicitly best-effort check-then-act across separate
-  statements, and only the DuckDB backend overrides it with a real transaction (the same
-  DuckDB-only substrate the ledger DDL divergence above names).
+  frontier write (merge ledger)" requires the ledger write to share the merge's backend
+  transaction; the default `Backend::fold_ledger_delta` is an explicitly best-effort
+  check-then-act across separate statements, and only the DuckDB backend overrides it with a
+  real transaction (the same DuckDB-only substrate the ledger DDL divergence above names).
 - **`smelt explain` prints neither the per-column guarantee ledger (§Surface CLI) nor the
   derivable forward reach (§"No write-eligibility clamp")** — the cell/addressing/clamp/locality
   and edge sections are the whole of the rendered plan today.

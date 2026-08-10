@@ -111,7 +111,7 @@ mutation_profile:
 
 - `kind: append_only` — rows are only ever appended; an existing row never changes or disappears. `redelivery: at_least_once` (the conservative default) states a delivered row may arrive again; `none` states each row arrives exactly once.
 - `kind: mutable_snapshot` — rows may be updated or deleted in place; only a full re-scan sees every change.
-- `kind: change_feed` — the source itself reports what changed (CDC/CDF). `retractions` states whether delete/update events appear; `delta_identity` names the column(s) forming a stable identity per delivered delta (e.g. Delta CDF's commit version + row offset, Kafka's partition + offset) — required for any additive fold over a redeliverable or feed source, since it is the dedup key of the ledger's never-fold-twice obligation (`incremental_models.md` §"The reconciliation ledger"). The named columns must exist, be `NOT NULL`, and be unique per delivered row (probed).
+- `kind: change_feed` — the source itself reports what changed (CDC/CDF). `retractions` states whether delete/update events appear; `delta_identity` names the column(s) forming a stable identity per delivered delta (e.g. Delta CDF's commit version + row offset, Kafka's partition + offset) — required for any additive fold over a redeliverable or feed source, since it is the dedup key of the ledger's never-fold-twice obligation (`incremental_models.md` §"The frontier record (reconciliation ledger)"). The named columns must exist, be `NOT NULL`, and be unique per delivered row (probed).
 - `key_recurrence` — the delivery-contract recurrence bound (e.g. an at-least-once feed whose redeliveries land within three days). It lives inside the block because it is delivery-contract metadata of the same species as the other sub-facts. Consumed by key temporal locality (`incremental_models.md` §"Key temporal locality") when a consuming model's `unique_key` resolves exactly to the declared columns; **always runtime-checked, never trusted** (`KeyedRecurrenceBoundViolated`).
 
 What each posture licenses (the mapping consumed by per-cell admission, `incremental_models.md`):
@@ -167,7 +167,7 @@ a formally established fact.
 
 **Naming and namespace.** The sidecar is a warehouse-resident table, `_smelt_fingerprint_sidecar`,
 alongside the reconciliation ledger and the observed-delta table (`incremental_models.md`
-§"The reconciliation ledger", §"Observed deltas on model edges") — the same excluded bookkeeping
+§"The frontier record (reconciliation ledger)", §"Observed deltas on model edges") — the same excluded bookkeeping
 class under §"Statement emission (single owner)"'s third exclusion, owned per dialect by
 `smelt-state`, DuckDB-scoped today (matching the ledger's own posture; a non-DuckDB target fails
 loud rather than silently skipping the sidecar). A row is namespaced by `(source address,
