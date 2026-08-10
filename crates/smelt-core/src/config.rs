@@ -497,29 +497,44 @@ pub struct ModelConfig {
     /// §"Refresh axis", §"The Relation Contract"). A single string is sugar
     /// for a one-element list. Frontmatter wins over this smelt.yml override
     /// when both set it (see [`Config::get_unique_key_with_metadata`]).
-    /// Distinct from the `batched:` sub-block's `unique_key` (a
-    /// partition-grain dedup aid, never key-addressing).
+    /// Distinct from `merge_key:` (a MERGE-dedup write key, never
+    /// key-addressing).
     #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
     pub unique_key: Option<Vec<String>>,
     /// Top-level `safety_overrides:` (`docs/specs/models.md` §"The Relation
     /// Contract") — named escape hatches for the partition-grain safety
-    /// checks, the smelt.yml-side replacement spelling for the
+    /// checks, the smelt.yml-side replacement spelling for the retired
     /// `batched.safety_overrides` sub-block. Frontmatter's own top-level
-    /// `safety_overrides:` (or its own `batched.safety_overrides` sub-block)
-    /// wins over this wholesale — see
+    /// `safety_overrides:` wins over this wholesale — see
     /// [`Config::get_incremental_with_metadata`]. When smelt.yml is the only
     /// side declaring incremental config, this value is folded into the
-    /// effective `batched:` block. Declaring both this key and a non-default
-    /// `batched.safety_overrides` sub-block on the same smelt.yml model
-    /// entry is a hard error, validated in
-    /// [`Config::validate_model_configs`].
+    /// effective `batched:` block representation.
     #[serde(default)]
     pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
-    /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
-    /// itself is `refresh: incremental` + `grain: partition`, not the
-    /// presence of this block.
-    #[serde(default)]
-    pub batched: Option<PartitionGrainConfig>,
+    /// Retirement sentinel for the removed `models.<name>.batched:`
+    /// sub-block (`docs/specs/models.md` §"Constraint violations").
+    /// Presence of the `batched:` key on a smelt.yml model entry —
+    /// regardless of value — is a hard parse error naming each declared
+    /// sub-key's top-level replacement (`unique_key` → `merge_key:`,
+    /// `safety_overrides` → `safety_overrides:`, `nondeterministic_columns`
+    /// → `columns.<c>.contract: plausible`). Renamed from the former field
+    /// so no consumer can read a stale value; never serialized.
+    #[serde(
+        default,
+        rename = "batched",
+        skip_serializing,
+        deserialize_with = "reject_batched_subblock"
+    )]
+    pub batched_retired: (),
+    /// The write/dedup key ([`PartitionGrainConfig::unique_key`]'s
+    /// smelt.yml-side spelling) a column-scoped MERGE technique writes on —
+    /// never the identity-conferring fact `unique_key:` is, and never a
+    /// driver of grain. A single string is sugar for a one-element list.
+    /// Frontmatter's own top-level `merge_key:` wins over this wholesale —
+    /// see [`Config::get_incremental_with_metadata`]. Folded into the
+    /// effective `batched:` block by [`fold_smelt_yml_incremental_keys`].
+    #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
+    pub merge_key: Option<Vec<String>>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Target to execute this model on (overrides CLI --target)
@@ -805,6 +820,66 @@ where
         "`nondeterministic_columns` has been removed — declare `{fixit}` in the model's .sql \
          frontmatter instead (the contract has no `smelt.yml` spelling)"
     )))
+}
+
+/// `deserialize_with` for [`ModelConfig::batched_retired`]: any presence of
+/// the `batched:` key on a smelt.yml model entry — regardless of value — is
+/// refused with a fix-it naming each declared sub-key's top-level
+/// replacement and the caller's own value (`docs/specs/models.md`
+/// §"Constraint violations").
+fn reject_batched_subblock<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let raw: serde_yaml::Value = serde::Deserialize::deserialize(deserializer)?;
+    let header = "the `batched:` sub-block has been removed — declare each key at the \
+                  model's top level instead:";
+    let generic = format!(
+        "{header}\n  - `batched.unique_key` -> top-level `merge_key:`\n  - \
+         `batched.safety_overrides` -> top-level `safety_overrides:`\n  - \
+         `batched.nondeterministic_columns: [c]` -> `columns.c.contract: plausible`"
+    );
+    let Some(map) = raw.as_mapping() else {
+        return Err(D::Error::custom(generic));
+    };
+
+    let mut lines = vec![header.to_string()];
+    if let Some(v) = map.get(serde_yaml::Value::String("unique_key".to_string())) {
+        let cols: Vec<String> = serde_yaml::from_value(v.clone()).unwrap_or_default();
+        lines.push(format!(
+            "  - `batched.unique_key: {:?}` -> top-level `merge_key: {:?}`",
+            cols, cols
+        ));
+    }
+    if let Some(v) = map.get(serde_yaml::Value::String("safety_overrides".to_string())) {
+        lines.push(format!(
+            "  - `batched.safety_overrides: {:?}` -> top-level `safety_overrides: {:?}`",
+            v, v
+        ));
+    }
+    if let Some(v) = map.get(serde_yaml::Value::String(
+        "nondeterministic_columns".to_string(),
+    )) {
+        let cols: Vec<String> = serde_yaml::from_value(v.clone()).unwrap_or_default();
+        if cols.is_empty() {
+            lines.push(
+                "  - `batched.nondeterministic_columns` -> `columns.<c>.contract: plausible`"
+                    .to_string(),
+            );
+        } else {
+            for col in &cols {
+                lines.push(format!(
+                    "  - `batched.nondeterministic_columns: [{col}]` -> `columns.{col}.contract: plausible`"
+                ));
+            }
+        }
+    }
+
+    if lines.len() == 1 {
+        return Err(D::Error::custom(generic));
+    }
+    Err(D::Error::custom(lines.join("\n")))
 }
 
 /// The `maintenance:` block (`incremental_models.md` §Surface "Frontmatter"):
@@ -1284,22 +1359,20 @@ fn interpolate_string(
     out
 }
 
-/// Fold a smelt.yml model entry's top-level `safety_overrides:`
-/// ([`ModelConfig::safety_overrides`]) into its `batched:` block
-/// ([`ModelConfig::batched`]), the smelt.yml-side mirror of
-/// `metadata::fold_top_level_safety_overrides` for SQL frontmatter. Called
-/// from [`Config::get_incremental`] / [`Config::get_incremental_with_metadata`]
-/// so every `batched:`-shaped safety-override consumer sees the top-level
-/// spelling identically to the sub-block form.
-///
-/// Declaring both the top-level key and a non-default
-/// `batched.safety_overrides` sub-block on the same smelt.yml model entry is
-/// a conflict, refused fail-loud by
-/// [`Config::validate_model_configs`] — this fold takes the top-level value
-/// when both are present so a caller who bypasses validation still gets a
-/// deterministic (not silently-precedence) result rather than a panic.
-fn fold_smelt_yml_safety_overrides(model_config: &ModelConfig) -> PartitionGrainConfig {
-    let mut batched = model_config.batched.clone().unwrap_or_default();
+/// Fold a smelt.yml model entry's top-level `merge_key:`
+/// ([`ModelConfig::merge_key`]) and `safety_overrides:`
+/// ([`ModelConfig::safety_overrides`]) into the effective `batched:` block
+/// representation ([`PartitionGrainConfig`]), the smelt.yml-side mirror of
+/// `metadata::fold_top_level_merge_key` / `metadata::fold_top_level_safety_overrides`
+/// for SQL frontmatter. Called from [`Config::get_incremental`] /
+/// [`Config::get_incremental_with_metadata`] so every `batched:`-shaped
+/// consumer sees the top-level spellings identically to the retired
+/// sub-block form.
+fn fold_smelt_yml_incremental_keys(model_config: &ModelConfig) -> PartitionGrainConfig {
+    let mut batched = PartitionGrainConfig::default();
+    if let Some(merge_key) = &model_config.merge_key {
+        batched.unique_key = merge_key.clone();
+    }
     if let Some(top_level) = &model_config.safety_overrides {
         batched.safety_overrides = top_level.clone();
     }
@@ -1523,7 +1596,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .map(fold_smelt_yml_safety_overrides)
+                .map(fold_smelt_yml_incremental_keys)
                 .unwrap_or_default(),
         )
     }
@@ -1667,7 +1740,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .map(fold_smelt_yml_safety_overrides)
+                .map(fold_smelt_yml_incremental_keys)
                 .unwrap_or_default(),
         )
     }
@@ -1682,31 +1755,16 @@ impl Config {
     ) -> Vec<(String, String)> {
         let mut errors = Vec::new();
 
-        // A smelt.yml model entry declaring both the top-level
-        // `safety_overrides:` key and a non-default `batched.safety_overrides`
-        // sub-block names the same fact twice — refuse rather than silently
-        // preferring one, mirroring `MetadataError::SafetyOverridesDoubleDeclared`
-        // for the SQL frontmatter side.
-        for (name, model_config) in &self.models {
-            let sub_block_declared = model_config
-                .batched
-                .as_ref()
-                .is_some_and(|b| b.safety_overrides != PartitionGrainSafetyOverrides::default());
-            if model_config.safety_overrides.is_some() && sub_block_declared {
-                errors.push((
-                    name.to_string(),
-                    "both top-level `safety_overrides:` and `batched.safety_overrides` are \
-                     declared — declare it once (top-level `safety_overrides:` is the \
-                     replacement spelling for `batched.safety_overrides`)"
-                        .to_string(),
-                ));
-            }
-        }
-
-        // Collect all model names and their effective materialization + config
+        // Collect all model names and their effective materialization + config.
+        // The smelt.yml-side dual-declaration check between top-level
+        // `safety_overrides:` and `batched.safety_overrides` is gone: the
+        // literal `batched:` sub-block is refused at parse time
+        // (`reject_batched_subblock`), so a `ModelConfig` can never carry
+        // both spellings at once — the conflict this used to catch is now
+        // unreachable.
         let mut all_models: HashMap<
             &str,
-            (Materialization, Option<&PartitionGrainConfig>, Option<&str>),
+            (Materialization, Option<PartitionGrainConfig>, Option<&str>),
         > = HashMap::new();
 
         // From smelt.yml
@@ -1715,13 +1773,15 @@ impl Config {
                 .materialization
                 .clone()
                 .unwrap_or_else(|| self.default_materialization.clone());
+            let incremental =
+                if model_config.merge_key.is_some() || model_config.safety_overrides.is_some() {
+                    Some(fold_smelt_yml_incremental_keys(model_config))
+                } else {
+                    None
+                };
             all_models.insert(
                 name.as_str(),
-                (
-                    mat,
-                    model_config.batched.as_ref(),
-                    model_config.target.as_deref(),
-                ),
+                (mat, incremental, model_config.target.as_deref()),
             );
         }
 
@@ -1734,7 +1794,7 @@ impl Config {
                 entry.0 = mat.clone();
             }
             if let Some(inc) = &metadata.batched {
-                entry.1 = Some(inc);
+                entry.1 = Some(inc.clone());
             }
             if let Some(target) = &metadata.target {
                 entry.2 = Some(target.as_str());
@@ -2269,6 +2329,262 @@ targets:
         );
     }
 
+    /// `models.<name>.batched: {unique_key: [a]}` in `smelt.yml` fails to
+    /// parse, with the fix-it naming the top-level `merge_key: [a]`
+    /// replacement (`docs/specs/models.md` §"Constraint violations").
+    #[test]
+    fn smelt_yml_batched_block_is_retired() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  x:
+    batched:
+      unique_key: [a]
+"#;
+        let err = serde_yaml::from_str::<Config>(yaml)
+            .expect_err("smelt.yml `batched:` sub-block must be refused at parse time");
+        let message = err.to_string();
+        assert!(
+            message.contains("merge_key"),
+            "fix-it must name the top-level merge_key: replacement; got: {message}"
+        );
+        assert!(
+            message.contains(r#"["a"]"#) || message.contains("[\"a\"]"),
+            "fix-it must carry the caller's own value; got: {message}"
+        );
+    }
+
+    /// A `batched:` block declaring `safety_overrides` and
+    /// `nondeterministic_columns` names both replacements
+    /// (`safety_overrides:` top-level, `columns.c.contract: plausible`); an
+    /// empty `batched: {}` still errors with the generic fix-it naming all
+    /// three replacement keys.
+    #[test]
+    fn smelt_yml_batched_block_names_every_declared_key() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  x:
+    batched:
+      safety_overrides:
+        allow_having: true
+      nondeterministic_columns: [c]
+"#;
+        let err = serde_yaml::from_str::<Config>(yaml)
+            .expect_err("declared batched: sub-keys must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("top-level `safety_overrides:"),
+            "fix-it must name the top-level safety_overrides: replacement; got: {message}"
+        );
+        assert!(
+            message.contains("columns.c.contract: plausible"),
+            "fix-it must name columns.c.contract: plausible; got: {message}"
+        );
+
+        let empty_yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  x:
+    batched: {}
+"#;
+        let empty_err = serde_yaml::from_str::<Config>(empty_yaml)
+            .expect_err("empty batched: {} must still be refused");
+        let empty_message = empty_err.to_string();
+        assert!(
+            empty_message.contains("top-level `merge_key:")
+                && empty_message.contains("top-level `safety_overrides:")
+                && empty_message.contains("columns.c.contract: plausible"),
+            "empty batched: {{}} must still name all three generic replacements; got: {empty_message}"
+        );
+    }
+
+    /// `smelt.yml` `merge_key: [event_id]` on a `refresh: incremental` +
+    /// `grain: partition` model surfaces as `get_incremental(...).unique_key`;
+    /// the single-string sugar form is also accepted.
+    #[test]
+    fn merge_key_folds_into_incremental_config() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    merge_key: [event_id]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("merge_key: must parse");
+        let incremental = config
+            .get_incremental("daily_revenue")
+            .expect("selected model returns Some(incremental)");
+        assert_eq!(incremental.unique_key, vec!["event_id".to_string()]);
+
+        // Single-string sugar form.
+        let yaml_sugar = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    merge_key: event_id
+"#;
+        let config: Config =
+            serde_yaml::from_str(yaml_sugar).expect("single-string merge_key: must parse");
+        let incremental = config
+            .get_incremental("daily_revenue")
+            .expect("selected model returns Some(incremental)");
+        assert_eq!(incremental.unique_key, vec!["event_id".to_string()]);
+    }
+
+    /// Frontmatter's `merge_key:` wins wholesale over the `smelt.yml`
+    /// model-override spelling when both set it, mirroring `unique_key:`'s
+    /// precedence rule.
+    #[test]
+    fn merge_key_frontmatter_wins_over_smelt_yml() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    merge_key: [from_yaml]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("smelt.yml merge_key: must parse");
+        let frontmatter_meta = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(Grain::Partition),
+            batched: Some(PartitionGrainConfig {
+                unique_key: vec!["from_frontmatter".to_string()],
+                nondeterministic_columns_retired: (),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let incremental = config
+            .get_incremental_with_metadata("daily_revenue", Some(&frontmatter_meta))
+            .expect("selected model returns Some(incremental)");
+        assert_eq!(
+            incremental.unique_key,
+            vec!["from_frontmatter".to_string()],
+            "frontmatter's merge_key: must win wholesale over the smelt.yml spelling"
+        );
+    }
+
+    /// Declaring only `merge_key:` never confers identity: the model still
+    /// derives `Grain::Partition` (not the composed key+time shape), and
+    /// `get_unique_key_with_metadata` stays empty.
+    #[test]
+    fn merge_key_does_not_confer_identity() {
+        let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    merge_key: [event_id]
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("merge_key: must parse");
+        assert_eq!(
+            config.get_grain("daily_revenue"),
+            Some(Grain::Partition),
+            "merge_key: alone must not flip the declared grain"
+        );
+        assert_eq!(
+            config.get_unique_key_with_metadata("daily_revenue", None),
+            None,
+            "merge_key: must never surface as the identity fact"
+        );
+    }
+
+    /// The ephemeral/view "cannot have incremental configuration" checks
+    /// that used to key off `ModelConfig::batched` presence keep firing
+    /// off `merge_key:` (and `safety_overrides:`), the new top-level
+    /// signal.
+    #[test]
+    fn ephemeral_model_with_merge_key_is_refused() {
+        let config = Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets: HashMap::new(),
+            default_materialization: Materialization::View,
+            models: {
+                let mut models = HashMap::new();
+                models.insert(
+                    "my_model".to_string(),
+                    ModelConfig {
+                        materialization: Some(Materialization::Ephemeral),
+                        timeseries: None,
+                        refresh: None,
+                        grain: None,
+                        unique_key: None,
+                        safety_overrides: None,
+                        batched_retired: (),
+                        merge_key: Some(vec!["a".to_string()]),
+                        tags: vec![],
+                        target: None,
+                        format: None,
+                    },
+                );
+                models
+            },
+            python: None,
+            target: None,
+            state: StateConfig::default(),
+            maintenance: None,
+            probes: ProbesConfig::default(),
+        };
+
+        let errors = config.validate_model_configs(&HashMap::new());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].1.contains("incremental"));
+    }
+
     #[test]
     fn test_functional_dependency_deserialization() {
         let yaml = r#"
@@ -2793,7 +3109,7 @@ models:
         );
     }
 
-    /// BUG-056 regression: correct format has `timeseries:` and `batched:`
+    /// BUG-056 regression: correct format has `timeseries:` and `merge_key:`
     /// as sibling keys on the model config, not nested.
     #[test]
     fn timeseries_and_incremental_are_sibling_keys() {
@@ -2814,16 +3130,16 @@ models:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    batched: {}
+    merge_key: [transaction_id]
 "#;
         let config: Config =
-            serde_yaml::from_str(yaml).expect("timeseries + batched as siblings must parse");
+            serde_yaml::from_str(yaml).expect("timeseries + merge_key as siblings must parse");
         let model = config.models.get("daily_revenue").unwrap();
         let ts = model.timeseries.as_ref().unwrap();
         assert_eq!(ts.event_time_column, "transaction_timestamp");
         assert_eq!(ts.partition_column, "revenue_date");
         assert_eq!(ts.granularity, Granularity::Day);
-        assert!(model.batched.is_some());
+        assert_eq!(model.merge_key, Some(vec!["transaction_id".to_string()]));
     }
 
     /// `paths:` defaults to `["models"]` when omitted (`smelt_yml.md`

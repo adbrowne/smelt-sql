@@ -2987,16 +2987,18 @@ fn stage_value_enriched_recipe(
         recipe.dimension_source_yaml(),
     )?;
     // `smelt.yml`, NOT the SQL frontmatter, carries this recipe's
-    // `models.<name>.batched.unique_key` block — the only remaining surface
-    // for `PartitionGrainConfig.unique_key` under `grain: partition`
+    // `models.<name>.merge_key:` — the top-level replacement for the retired
+    // `batched.unique_key` sub-block (`docs/specs/models.md` §"Batched
+    // sub-block retirement"), and the only surface for
+    // `PartitionGrainConfig.unique_key` under `grain: partition`
     // (`ValueEnrichedRecipe::model_file`'s own doc comment explains why the
-    // SQL-frontmatter `batched:` sub-block can't carry it). This is the
-    // column-scoped `MERGE`'s own `ON`-predicate key
+    // SQL-frontmatter form can't carry it — `merge_key:` never confers
+    // identity). This is the column-scoped `MERGE`'s own `ON`-predicate key
     // (`decide_column_merge_dispatch`'s `model_declares_unique_key`
     // precondition) — without it the live `ColumnScopedMerge` cell resolves
     // in the derived plan but never actually dispatches at execution time.
     let smelt_yml = format!(
-        "{base}models:\n  {model}:\n    batched:\n      unique_key: [{id}]\n",
+        "{base}models:\n  {model}:\n    merge_key: [{id}]\n",
         base = render::render_smelt_yml(&db_path),
         model = recipe.model_name,
         id = recipe.fact.key_column,

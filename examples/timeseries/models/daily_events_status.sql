@@ -14,8 +14,9 @@ timeseries:
 # still the correct row identity for MP11's horizon-clamped column-scoped
 # `MERGE` (`PartitionLocal::Yes` corner) when a `raw.user_status` mutation
 # drives the `{status}` cell — the retired `batched.unique_key: [event_id]`
-# spelling this model used to carry here never fed row-identity derivation
-# for a partition-grain output either (`derive::ModelInputs::declared_unique_key`
+# sub-block spelling (now `merge_key:` in smelt.yml) this model used to
+# carry here never fed row-identity derivation for a partition-grain output
+# either (`derive::ModelInputs::declared_unique_key`
 # is empty for every `Grain::Partition`), so dropping it changes nothing.
 ---
 -- Fact (events) enriched with a CLOCKED, mutable dimension

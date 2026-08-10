@@ -2174,11 +2174,6 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The partition grain
 
-- **A row-shaped model's MERGE-dedup key has no `.sql` frontmatter home** — the per-row identity
-  for a column-scoped MERGE is declared today only via the `smelt.yml` override
-  `models.<name>.batched.unique_key`; a top-level `unique_key:` would make the output key-shaped,
-  which a row-shaped body can't occupy. Tracked:
-  `docs/plans/20260719-prod-w8-composed-axes-followups.md`.
 - **One classification call site reads the outer SQL body**: the bound-`NotDerivable` refusal
   gate classifies on the outer `model.sql`, so a lookback living only inside a function body
   with no outer filter would diverge (no such case exists in the repo). Tracked:

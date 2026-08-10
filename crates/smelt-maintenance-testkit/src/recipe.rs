@@ -877,16 +877,15 @@ impl ValueEnrichedRecipe {
     /// precondition). The column-scoped `MERGE`'s own `ON`-predicate key
     /// (`decide_column_merge_dispatch`'s `model_declares_unique_key`
     /// precondition, `smelt_core::PartitionGrainConfig::unique_key`) is NOT
-    /// declarable in SQL frontmatter — the `batched:` sub-block there was
-    /// retired in favour of the top-level `unique_key:` identity fact, which
+    /// declarable via the top-level `unique_key:` identity fact — that
     /// instead flips the DERIVED grain to `Key`/`KeyPerPartition`
     /// (`smelt_core::config::derive_grain`), conflicting with this recipe's
-    /// asserted `grain: partition`. The only remaining surface for a
-    /// partition-grain `PartitionGrainConfig.unique_key` is smelt.yml's
-    /// `models.<name>.batched.unique_key` (`ModelConfig::batched`,
-    /// `Config::get_incremental_with_metadata`'s smelt.yml-only fallback
-    /// arm) — the staging harness (`gate.rs::stage_value_enriched_recipe`)
-    /// writes that block into the generated `smelt.yml` rather than here.
+    /// asserted `grain: partition`. The write/dedup-only spelling is
+    /// `merge_key:` — declarable in `.sql` frontmatter or as a smelt.yml
+    /// model override (`smelt_core::PartitionGrainConfig::unique_key`,
+    /// `Config::get_incremental_with_metadata`) — the staging harness
+    /// (`gate.rs::stage_value_enriched_recipe`) writes it into the generated
+    /// `smelt.yml` rather than here.
     pub fn model_file(&self) -> String {
         let d = &self.fact.clock_column;
         format!(

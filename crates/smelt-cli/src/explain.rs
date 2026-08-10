@@ -1790,7 +1790,7 @@ mod tests {
     #[test]
     fn test_batch_safety_uses_expanded_function_body() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, PartitionGrainConfig};
+        use smelt_core::Granularity;
 
         // A model whose only lookback lives inside a `smelt.define` body must
         // classify as `bounded_safe` — but only when the explain path expands
@@ -1814,11 +1814,8 @@ mod tests {
                 grain: Some(smelt_core::config::Grain::Partition),
                 unique_key: None,
                 safety_overrides: None,
-                batched: Some(PartitionGrainConfig {
-                    unique_key: vec![],
-                    nondeterministic_columns_retired: (),
-                    safety_overrides: Default::default(),
-                }),
+                batched_retired: (),
+                merge_key: None,
                 tags: vec![],
                 target: None,
                 format: None,
@@ -1894,7 +1891,7 @@ mod tests {
     #[test]
     fn test_explain_with_incremental() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, PartitionGrainConfig};
+        use smelt_core::Granularity;
 
         let models = vec![
             make_model("orders", vec![], "SELECT * FROM raw_orders"),
@@ -1919,11 +1916,8 @@ mod tests {
                 grain: Some(smelt_core::config::Grain::Partition),
                 unique_key: None,
                 safety_overrides: None,
-                batched: Some(PartitionGrainConfig {
-                    unique_key: vec![],
-                    nondeterministic_columns_retired: (),
-                    safety_overrides: Default::default(),
-                }),
+                batched_retired: (),
+                merge_key: None,
                 tags: vec!["revenue".to_string(), "daily".to_string()],
                 target: None,
                 format: None,

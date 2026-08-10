@@ -450,7 +450,8 @@ models:
         grain: None,
         unique_key: Some(vec!["from_yaml".to_string()]),
         safety_overrides: None,
-        batched: None,
+        batched_retired: (),
+        merge_key: None,
         tags: vec![],
         target: None,
         format: None,
@@ -606,12 +607,14 @@ models:
     assert!(batched.safety_overrides.allow_having);
 }
 
-/// Declaring both the top-level `safety_overrides:` key and a non-default
-/// `batched.safety_overrides` sub-block on the same `smelt.yml` model entry
-/// is a conflict error, mirroring the SQL frontmatter refusal — never silent
-/// precedence between the two spellings.
+/// A `smelt.yml` `models.<name>.batched:` sub-block — regardless of its
+/// contents, including a `safety_overrides` key naming the exact same fact
+/// as a sibling top-level `safety_overrides:` — is a parse-time hard error;
+/// the double-declaration conflict this used to be validated after parsing
+/// is now unreachable (`docs/specs/models.md` §"Batched sub-block
+/// retirement").
 #[test]
-fn top_level_safety_overrides_conflicts_with_smelt_yml_batched_sub_block() {
+fn smelt_yml_batched_sub_block_is_hard_refused_regardless_of_contents() {
     use smelt_core::config::Config;
 
     let yaml = r#"
@@ -637,13 +640,12 @@ models:
       safety_overrides:
         allow_having: true
 "#;
-    let config: Config = serde_yaml::from_str(yaml).expect("smelt.yml must parse structurally");
-    let errors = config.validate_model_configs(&std::collections::HashMap::new());
+    let err = serde_yaml::from_str::<Config>(yaml)
+        .expect_err("smelt.yml `batched:` sub-block must be refused at parse time");
+    let message = err.to_string();
     assert!(
-        errors
-            .iter()
-            .any(|(name, msg)| name == "daily_revenue" && msg.contains("safety_overrides")),
-        "expected a safety_overrides double-declaration error, got {errors:?}"
+        message.contains("safety_overrides") && message.contains("allow_having"),
+        "fix-it must name safety_overrides: and the caller's own declared flag; got: {message}"
     );
 }
 

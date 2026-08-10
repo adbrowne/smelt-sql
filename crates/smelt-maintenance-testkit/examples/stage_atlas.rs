@@ -67,7 +67,7 @@ fn stage_value_enriched(dir: &Path) -> anyhow::Result<()> {
         recipe.dimension_source_yaml(),
     )?;
     let smelt_yml = format!(
-        "{base}models:\n  {model}:\n    batched:\n      unique_key: [{id}]\n",
+        "{base}models:\n  {model}:\n    merge_key: [{id}]\n",
         base = render::render_smelt_yml(&db_path),
         model = recipe.model_name,
         id = recipe.fact.key_column,

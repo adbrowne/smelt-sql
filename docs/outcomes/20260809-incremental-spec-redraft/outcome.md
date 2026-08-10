@@ -62,7 +62,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
 | 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | done |
-| 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | planned |
+| 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | done |
 | 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
 ## Decision log
@@ -284,6 +284,24 @@ way (timeless-oracle rule), at substantially reduced length.
   `examples/timeseries` models that carry the fact. The `.sql`-frontmatter `batched.unique_key`
   fix-it, which today prescribes exactly that grain-changing mapping, is retargeted to `merge_key:`
   in the same phase.
+
+- 2026-08-11 — Phase 9 done: `ModelConfig::batched` retired to `batched_retired: ()`
+  (always-erroring `deserialize_with`, per-key fix-it naming `merge_key:` for
+  `unique_key`); new top-level `merge_key:` parses both as a `smelt.yml` model
+  override and — newly — in `.sql` frontmatter (frontmatter wins), folding into the
+  existing internal `PartitionGrainConfig.unique_key` representation so no downstream
+  consumer changed. Found and fixed a real defect while wiring the frontmatter side:
+  `crates/smelt-core/src/frontmatter.rs`'s unified key catalogue filters any key not
+  explicitly listed before serde ever sees it, so `merge_key` silently deserialized to
+  `None` until added to `CATALOGUE` — a trap for any future frontmatter key addition,
+  worth flagging for whoever adds the next one. `examples/timeseries/smelt.yml` and
+  five Rust test fixtures (bakeoff, bakeoff_seam, maintenance_pins,
+  maintenance_conformance/gate.rs, maintenance-testkit's stage_atlas.rs) converted from
+  `batched: {unique_key: [...]}` to `merge_key: [...]`. `phases/09-check.sh` (no live
+  `batched` field, retirement sentinel wired, spec/docs-site `batched.unique_key`
+  mentions paired with `merge_key`, `merge_key` documented, no stale smelt.yml batched
+  fixtures, timeless) all green; `verify-phase.sh` ALL GREEN plus the plan's four named
+  standing-test invocations.
 
 ## Blocked
 

@@ -317,6 +317,23 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
 
+    /// The write/dedup key a column-scoped MERGE technique writes on
+    /// (`docs/specs/models.md` §"Constraint violations") — never the
+    /// identity-conferring fact `unique_key:` is, and never a driver of
+    /// grain. A single string is sugar for a one-element list. Same
+    /// precedence as `unique_key:`: SQL frontmatter wins over the
+    /// `smelt.yml` model override when both set it. Consumed and cleared
+    /// during extraction (`fold_top_level_merge_key`) into the internal
+    /// [`ModelMetadata::batched`] representation's `unique_key` field, the
+    /// same internal slot the retired `batched.unique_key` sub-block used to
+    /// populate.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::sources::opt_string_or_vec"
+    )]
+    pub merge_key: Option<Vec<String>>,
+
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
     /// §"Model-scoped declarations".
@@ -747,7 +764,7 @@ fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) 
 /// `raw_value` is the still-unvalidated YAML value under the `batched:` key.
 /// When it deserializes cleanly into [`PartitionGrainConfig`], each declared sub-key
 /// is named with its own value under the replacement spelling
-/// (`unique_key` -> top-level `unique_key:`; `safety_overrides` -> top-level
+/// (`unique_key` -> top-level `merge_key:`; `safety_overrides` -> top-level
 /// `safety_overrides:`; each `nondeterministic_columns` entry `<c>` ->
 /// `columns.<c>.contract: plausible`). When the raw value doesn't
 /// deserialize (e.g. a legacy nested field like `event_time_column`), the
@@ -787,7 +804,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
         Ok(cfg) => cfg,
         Err(_) => {
             return format!(
-                "{header}\n  - `batched.unique_key` -> top-level `unique_key:`\n  - \
+                "{header}\n  - `batched.unique_key` -> top-level `merge_key:`\n  - \
                  `batched.safety_overrides` -> top-level `safety_overrides:`\n  - \
                  `batched.nondeterministic_columns: [c]` -> `columns.c.contract: plausible`"
             );
@@ -797,7 +814,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
     let mut lines = vec![header.to_string()];
     if !cfg.unique_key.is_empty() {
         lines.push(format!(
-            "  - `batched.unique_key: {:?}` -> top-level `unique_key: {:?}`",
+            "  - `batched.unique_key: {:?}` -> top-level `merge_key: {:?}`",
             cfg.unique_key, cfg.unique_key
         ));
     }
@@ -875,6 +892,36 @@ fn fold_top_level_safety_overrides(metadata: &mut ModelMetadata) -> Result<(), M
         }
     }
     Ok(())
+}
+
+/// Fold the top-level `merge_key:` frontmatter key ([`ModelMetadata::merge_key`])
+/// into the internal `batched:` representation ([`ModelMetadata::batched`]),
+/// the same internal slot the retired `batched.unique_key` sub-block used to
+/// populate — so `Config::get_incremental_with_metadata` and every other
+/// `batched:`-shaped consumer sees it identically (`docs/specs/models.md`
+/// §"Constraint violations"). Called once, right after a
+/// `ModelMetadata` is deserialized from frontmatter, alongside
+/// [`fold_top_level_safety_overrides`].
+///
+/// Unlike `safety_overrides`, there is no double-declaration hazard here: the
+/// literal `batched:` sub-block is refused at parse time before a
+/// `ModelMetadata` exists, so `metadata.batched.unique_key` can never already
+/// be populated from user YAML when this runs.
+fn fold_top_level_merge_key(metadata: &mut ModelMetadata) {
+    let Some(merge_key) = metadata.merge_key.take() else {
+        return;
+    };
+    match &mut metadata.batched {
+        Some(existing) => {
+            existing.unique_key = merge_key;
+        }
+        None => {
+            metadata.batched = Some(PartitionGrainConfig {
+                unique_key: merge_key,
+                ..Default::default()
+            });
+        }
+    }
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -1715,6 +1762,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     };
 
     fold_top_level_safety_overrides(&mut metadata)?;
+    fold_top_level_merge_key(&mut metadata);
 
     // Populate the derived `check` config for check declarations.
     metadata.check = check_config;
@@ -1837,6 +1885,7 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
         };
 
         fold_top_level_safety_overrides(&mut metadata)?;
+        fold_top_level_merge_key(&mut metadata);
 
         // Set model name from delimiter
         metadata.name = Some(model_name);
@@ -2990,12 +3039,47 @@ SELECT dt FROM foo"#;
             .expect_err("batched.unique_key: must be refused with a fix-it");
         let message = err.to_string();
         assert!(
-            message.contains("unique_key")
+            message.contains("merge_key")
                 && message.contains("order_id")
                 && message.contains("order_date"),
-            "fix-it must name unique_key: and the caller's own values; got: {}",
+            "fix-it must name the top-level merge_key: replacement and the caller's own values; got: {}",
             message
         );
+    }
+
+    /// Top-level `merge_key:` in `.sql` frontmatter parses and folds into
+    /// the internal `batched.unique_key` representation every existing
+    /// `batched:`-shaped consumer already reads — the same internal slot the
+    /// retired `batched.unique_key` sub-block used to populate
+    /// (`docs/specs/models.md` §"Constraint violations").
+    #[test]
+    fn merge_key_parses_in_frontmatter() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+merge_key: [order_id]
+---
+SELECT dt FROM foo"#;
+        let result = extract_file_metadata(source).expect("merge_key: must parse");
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert!(
+                    metadata.merge_key.is_none(),
+                    "merge_key: is consumed and cleared during extraction"
+                );
+                let batched = metadata
+                    .batched
+                    .clone()
+                    .expect("merge_key: folds into an implicit batched: block");
+                assert_eq!(batched.unique_key, vec!["order_id".to_string()]);
+            }
+            _ => panic!("Expected Single variant"),
+        }
     }
 
     /// `batched.safety_overrides: {...}` is refused with a fix-it naming the

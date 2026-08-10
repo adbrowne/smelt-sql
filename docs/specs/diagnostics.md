@@ -134,15 +134,14 @@ Owned by `docs/specs/incremental_models.md`.
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 | `PlausibleContractOnSkeletonColumn` | Error | A `columns.<c>.contract: plausible` declaration names a column that also serves as the model's `event_time_column`, `partition_column`, or a `unique_key` member. Names the column and the skeleton role it holds — those positions govern windowing, partition placement, or dedup identity and must stay deterministic. |
 
-A `.sql` frontmatter `batched:` sub-block is refused outright — `YamlParseError` (no dedicated
-code), with a fix-it naming each declared sub-key's top-level replacement and the caller's own
-value under the new spelling (`unique_key` → top-level `unique_key:`, `safety_overrides` →
-top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`;
-`docs/specs/models.md` §"The Relation Contract"). The `smelt.yml` model-override spelling of
-`batched:` still accepts `unique_key`/`safety_overrides` unaffected by this refusal; its own
-`nondeterministic_columns` key is refused the same way — `YamlParseError`, regardless of value,
-with a fix-it pointing at `columns.<c>.contract: plausible` in the model's `.sql` frontmatter
-(there is no `smelt.yml` spelling for the contract).
+A `batched:` sub-block is refused outright on both surfaces — `.sql` frontmatter and the
+`smelt.yml` model override — `YamlParseError` (no dedicated code), with a fix-it naming each
+declared sub-key's top-level replacement and the caller's own value under the new spelling
+(`unique_key` → top-level `merge_key:`, `safety_overrides` → top-level `safety_overrides:`,
+`nondeterministic_columns` → `columns.<c>.contract: plausible`; `docs/specs/models.md`
+§"Batched sub-block retirement"). `nondeterministic_columns` has no `smelt.yml` spelling either
+way — its fix-it always points at `columns.<c>.contract: plausible` in the model's `.sql`
+frontmatter.
 
 ---
 
