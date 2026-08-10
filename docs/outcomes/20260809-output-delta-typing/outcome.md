@@ -1,7 +1,7 @@
 # Outcome: Output-delta typing — compositional incrementality across the DAG
 
 **Created:** 2026-08-09
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260809-incremental-rethink.md` §2 P-B/P-E, §3 T-C, §4.1, §6 step 4
 **Spec anchors:** `docs/specs/incremental_models.md` (graph layer, input-delta discovery), `docs/specs/model_properties.md` (delta-shape lattice)
 
@@ -44,7 +44,7 @@ the addressing of one delta type, not the universal currency.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | pending |
+| 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | planned |
 | 2 | Walk transfer rules for the output-delta verdict per column group | pending |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | pending |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
@@ -55,6 +55,8 @@ the addressing of one delta type, not the universal currency.
 ## Decision log
 
 - 2026-08-09 — **Delta type is per column group, not per model** (rethink §6 open question 1, settled with Andrew): edges are vector-typed — one typed component (shape × addressing × columns) per column group the consumer reads, projected through the consumer's sensitivity. Per-model scalar typing was rejected because the meet over groups lets one mutable group degrade a model's append-only groups to `general`, blocking composition for mixed-shape models.
+
+- 2026-08-10 — Outcome activated; phase table unchanged (no prior phase summary to reshape against). Phase 1 scoped as spec-only: the `smelt explain` edge rendering stays in phase 7 with its docs-site update, so the surface spec delta lands next to the code that produces it.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
