@@ -330,10 +330,15 @@ A property implementation must not re-derive composition by scanning the query t
   folds a per-column-group verdict; `maintenance::edge_type::type_edge` projects an upstream
   verdict through a consumer's own read columns and derived column groups into a typed
   `EdgeComponent` vector (`incremental_models.md` §"The graph layer" → "Typed edges"), carried on
-  `maintenance::propagate::Edge::components`. Neither `propagate` nor `required_inputs` reads
-  that field yet — interval math is unchanged, and keyed dirt-sets (§"The graph layer" →
-  "Keyed dirt-sets and the narrowed refusal") are not yet propagated. Tracked by
-  `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+  `maintenance::propagate::Edge::components`. Verdicts now fold **across model references** in
+  the real workspace graph: `analysis::output_delta::derive_workspace_output_deltas` derives every
+  model's own per-output-column facts via a bounded fixed-point pass over the model-ref graph, and
+  `smelt-runtime::propagation::build_forward_graph` calls `type_edge` for every real edge, so a
+  consuming model reads its upstream's own already-derived verdict rather than falling back to
+  `General`. The remaining gap is unchanged: neither `propagate` nor `required_inputs` reads
+  `Edge.components` yet — interval math is still the only dirt currency, and keyed dirt-sets
+  (§"The graph layer" → "Keyed dirt-sets and the narrowed refusal") are not yet propagated.
+  Tracked by `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **`nondeterministic_columns` is superseded by `columns.<c>.contract`** (ratified decision K3, `docs/research/20260705-refresh-as-maintenance-plan/09-spec-readiness.md`) — `models.md` owns the surface; the grammar boundary between `columns.<c>.contract` and a future column `tests:` block is deliberately deferred (`models.md` §Known Divergences decision 8). The list-form declaration is not yet removed from the parser.
 
 ## References

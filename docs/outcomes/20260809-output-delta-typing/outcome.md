@@ -47,7 +47,7 @@ the addressing of one delta type, not the universal currency.
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
-| 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | planned |
+| 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
 | 7 | Surface: explain edge rendering, docs-site update | pending |
@@ -105,6 +105,16 @@ the addressing of one delta type, not the universal currency.
   scalar per model, so a model-reference leaf resolves per column reference. A scalar would have
   meet-folded a mixed-shape upstream to its worst group, which is exactly what the 2026-08-09
   per-column-group decision rejects. Typed components stay advisory for dirt (phase 5 acts).
+
+- 2026-08-10 — Phase 4 implemented: `derive_workspace_output_deltas` folds `OutputDeltaFacts`
+  across real model references (bounded fixed-point pass), and `build_forward_graph` now calls
+  `type_edge` for every real edge — `Edge.components` is non-empty in production. Fixed a
+  pre-existing bug in-phase (blocking this phase's own success criterion 3): a `smelt.models.*`
+  ref's segments carry the literal `models` keyword, which `derive_clamp_and_locality_pass`'s addr
+  computation never stripped, so no model-edge maintenance cell had ever been derived through the
+  real graph builder for any workspace. `derive_consumer_column_groups` also gained a synthetic
+  skeleton-column group so `type_edge`'s window-axis carriage check can find a declared
+  `timeseries.partition_column`. No phase-table reshape — phase 4's scope matched the plan.
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

@@ -209,3 +209,31 @@ fn graph_layer_states_typed_edges_and_narrowed_refusal() {
          `KeyedUpsert` verdict"
     );
 }
+
+#[test]
+fn known_divergence_states_cross_model_fold() {
+    let model_properties = read("docs/specs/model_properties.md");
+    let divergences = section_body(&model_properties, "## Known Divergences / Open Questions");
+
+    let bullet_start = divergences
+        .find("Output-delta shape is derived and typed")
+        .expect("the output-delta known-divergence bullet must exist");
+    let bullet = &divergences[bullet_start..];
+    let bullet_end = bullet.find("\n- **").unwrap_or(bullet.len());
+    let bullet = &bullet[..bullet_end];
+
+    assert!(
+        bullet.contains("fold") && bullet.contains("model reference"),
+        "the known-divergence bullet must state that verdicts now fold across model references \
+         in the real workspace graph, got: {bullet:?}"
+    );
+    assert!(
+        bullet.contains("build_forward_graph"),
+        "the known-divergence bullet must name the real graph-builder caller, got: {bullet:?}"
+    );
+    assert!(
+        bullet.contains("propagate") && bullet.contains("required_inputs"),
+        "the known-divergence bullet must still state the remaining gap: neither `propagate` \
+         nor `required_inputs` reads `Edge.components` yet, got: {bullet:?}"
+    );
+}

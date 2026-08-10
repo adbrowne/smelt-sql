@@ -130,7 +130,7 @@ impl SourceFacts {
 }
 
 /// The walk verdict: per-output-column shape, in projection order.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct OutputDeltaFacts {
     pub columns: Vec<(String, OutputDelta)>,
 }
@@ -141,68 +141,134 @@ pub struct OutputDeltaFacts {
 pub struct OutputDeltaTransfer<'a> {
     pub ctx: &'a JoinContext,
     pub sources: &'a [SourceFacts],
-    /// A referenced model's own already-derived output-delta verdict, keyed
-    /// by bare model name (case-insensitive) — the model-reference leaf case
-    /// (`model_properties.md` §"Output-delta shape"). No consumer wires this
-    /// yet (a future cross-model fold reads it); an absent entry falls back
-    /// to `General`, never an optimistic guess.
-    pub model_verdicts: &'a BTreeMap<String, OutputDelta>,
+    /// A referenced model's own already-derived per-output-column
+    /// output-delta facts, keyed by bare model name (case-insensitive) — the
+    /// model-reference leaf case (`model_properties.md` §"Output-delta
+    /// shape"). Per output *column*, not a scalar per model
+    /// (`docs/outcomes/20260809-output-delta-typing/outcome.md`
+    /// 2026-08-09 decision): a scalar would meet-fold a mixed-shape
+    /// upstream to its worst group, which the per-column-group decision
+    /// rejects. [`derive_workspace_output_deltas`] folds this map across
+    /// the real workspace; an absent model or absent column falls back to
+    /// `General`, never an optimistic guess.
+    pub model_verdicts: &'a BTreeMap<String, OutputDeltaFacts>,
+}
+
+/// Leaf-seeding rule (`model_properties.md` §"Output-delta shape",
+/// base-relation row): `append_only` with a declared clock ⇒
+/// `AppendOnlyWindow`; `change_feed` with a `delta_identity` ⇒
+/// `KeyedUpsert`; everything else ⇒ `General`, fail-closed — mirrors
+/// `input_delta::input_delta_discovery`'s fail-closed default. A free
+/// function (not a method) so a caller with only a source's [`SourceFacts`]
+/// in hand — no SQL to walk, e.g. a raw `sources.*` propagation-edge
+/// upstream — can seed its shape directly.
+pub fn seed_shape_for_source(facts: &SourceFacts) -> OutputDelta {
+    match &facts.mutation_profile {
+        Some(MutationProfile::ChangeFeed) => match &facts.delta_identity {
+            Some(keys) if !keys.is_empty() => OutputDelta::KeyedUpsert { keys: keys.clone() },
+            _ => OutputDelta::General {
+                reason: format!(
+                    "source '{}' declares change_feed but no delta_identity",
+                    facts.name
+                ),
+            },
+        },
+        Some(MutationProfile::AppendOnly) => match &facts.axis {
+            Some(axis) => OutputDelta::AppendOnlyWindow { axis: axis.clone() },
+            None => OutputDelta::General {
+                reason: format!(
+                    "source '{}' is append_only but declares no clock/axis column",
+                    facts.name
+                ),
+            },
+        },
+        Some(MutationProfile::Mutable) => OutputDelta::General {
+            reason: format!("source '{}' is a mutable snapshot", facts.name),
+        },
+        None => OutputDelta::General {
+            reason: format!("source '{}' declares no mutation_profile", facts.name),
+        },
+    }
+}
+
+/// The whole-source `ColumnGroup` + shape for a declared source
+/// (`incremental_models.md` §"The graph layer" → "Typed edges"): a source's
+/// declared columns all share one uniform shape (the source-level mutation
+/// profile), unlike a model's per-select-item shapes, so this is always
+/// exactly zero or one group — empty when the source declares no columns.
+pub fn source_output_delta(
+    facts: &SourceFacts,
+    info: &smelt_core::sources::SourceInfo,
+) -> Vec<(ColumnGroup, OutputDelta)> {
+    if info.columns.is_empty() {
+        return Vec::new();
+    }
+    let shape = seed_shape_for_source(facts);
+    let group = ColumnGroup {
+        columns: info.columns.iter().map(|c| c.name.clone()).collect(),
+        mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
+    };
+    vec![(group, shape)]
 }
 
 impl OutputDeltaTransfer<'_> {
-    /// Leaf-seeding rule (`model_properties.md` §"Output-delta shape",
-    /// base-relation row): `append_only` with a declared clock ⇒
-    /// `AppendOnlyWindow`; `change_feed` with a `delta_identity` ⇒
-    /// `KeyedUpsert`; everything else ⇒ `General`, fail-closed — mirrors
-    /// `input_delta::input_delta_discovery`'s fail-closed default.
-    fn seed_for_source(&self, facts: &SourceFacts) -> OutputDelta {
-        match &facts.mutation_profile {
-            Some(MutationProfile::ChangeFeed) => match &facts.delta_identity {
-                Some(keys) if !keys.is_empty() => OutputDelta::KeyedUpsert { keys: keys.clone() },
-                _ => OutputDelta::General {
-                    reason: format!(
-                        "source '{}' declares change_feed but no delta_identity",
-                        facts.name
-                    ),
-                },
-            },
-            Some(MutationProfile::AppendOnly) => match &facts.axis {
-                Some(axis) => OutputDelta::AppendOnlyWindow { axis: axis.clone() },
-                None => OutputDelta::General {
-                    reason: format!(
-                        "source '{}' is append_only but declares no clock/axis column",
-                        facts.name
-                    ),
-                },
-            },
-            Some(MutationProfile::Mutable) => OutputDelta::General {
-                reason: format!("source '{}' is a mutable snapshot", facts.name),
-            },
-            None => OutputDelta::General {
-                reason: format!("source '{}' declares no mutation_profile", facts.name),
-            },
-        }
-    }
-
     /// Resolve a leaf relation's name (as normalized by the walk:
     /// `sources.<name>`, `models.<name>`, or a bare table name) to its
-    /// seeded [`OutputDelta`].
+    /// seeded [`OutputDelta`] — the whole-relation shape (a source's
+    /// uniform shape, or the meet across a referenced model's own derived
+    /// column shapes). Used by [`Transfer::leaf`], which has no single
+    /// column to resolve against; per-column resolution against a
+    /// referenced model's facts is [`Self::seed_for_model_column`], used by
+    /// [`Self::resolve_column_ref_shape`] instead.
     fn seed_for_leaf_name(&self, name: &str) -> OutputDelta {
         if let Some(bare) = name.strip_prefix("sources.") {
             return self.seed_for_source_name(bare);
         }
         if let Some(bare) = name.strip_prefix("models.") {
-            return self
-                .model_verdicts
-                .get(&bare.to_ascii_lowercase())
-                .cloned()
-                .unwrap_or_else(|| OutputDelta::General {
+            return match self.model_verdicts.get(&bare.to_ascii_lowercase()) {
+                Some(facts) if !facts.columns.is_empty() => facts
+                    .columns
+                    .iter()
+                    .map(|(_, shape)| shape.clone())
+                    .reduce(OutputDelta::meet)
+                    .unwrap_or_else(|| OutputDelta::General {
+                        reason: format!("referenced model '{bare}' has no output columns"),
+                    }),
+                _ => OutputDelta::General {
                     reason: format!(
                         "referenced model '{bare}' has no derived output-delta verdict available"
                     ),
-                });
+                },
+            };
         }
         self.seed_for_source_name(name)
+    }
+
+    /// Per-column resolution of a `models.<name>` reference
+    /// (`model_properties.md` §"Output-delta shape", model-reference leaf):
+    /// an absent model or a column the model's own facts do not carry both
+    /// fail closed to `General`, naming what was missing — never an
+    /// optimistic guess.
+    fn seed_for_model_column(&self, bare: &str, column: &str) -> OutputDelta {
+        match self.model_verdicts.get(&bare.to_ascii_lowercase()) {
+            Some(facts) => facts
+                .columns
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(column))
+                .map(|(_, shape)| shape.clone())
+                .unwrap_or_else(|| OutputDelta::General {
+                    reason: format!(
+                        "referenced model '{bare}' has no derived output-delta shape for \
+                         column '{column}'"
+                    ),
+                }),
+            None => OutputDelta::General {
+                reason: format!(
+                    "referenced model '{bare}' has no derived output-delta verdict available"
+                ),
+            },
+        }
     }
 
     fn seed_for_source_name(&self, bare: &str) -> OutputDelta {
@@ -211,7 +277,7 @@ impl OutputDeltaTransfer<'_> {
             .iter()
             .find(|s| s.name.eq_ignore_ascii_case(bare))
         {
-            Some(facts) => self.seed_for_source(facts),
+            Some(facts) => seed_shape_for_source(facts),
             None => OutputDelta::General {
                 reason: format!("relation '{bare}' has no declared mutation profile"),
             },
@@ -334,7 +400,10 @@ impl OutputDeltaTransfer<'_> {
                 });
         }
         match cx.aliases.get(&source_key) {
-            Some(RelationSource::Table(name)) => self.seed_for_leaf_name(name),
+            Some(RelationSource::Table(name)) => match name.strip_prefix("models.") {
+                Some(bare) => self.seed_for_model_column(bare, cref.name()),
+                None => self.seed_for_leaf_name(name),
+            },
             _ => OutputDelta::General {
                 reason: format!(
                     "column reference '{}' resolves to a relation this proof cannot classify",
@@ -510,6 +579,104 @@ fn to_maintenance_source_facts(sources: &[SourceFacts]) -> Vec<MaintenanceSource
         .collect()
 }
 
+/// Run the composition walk alone, without the [`ColumnGroup`] fold — the
+/// per-output-column verdict [`derive_output_delta`]/
+/// [`derive_workspace_output_deltas`] both build on. `model_verdicts` is the
+/// model-reference leaf's cross-model input (`OutputDeltaTransfer`'s own
+/// field); `None` when `sql` does not parse to a walkable `SELECT`.
+pub fn derive_output_delta_facts(
+    sql: &str,
+    ctx: &JoinContext,
+    sources: &[SourceFacts],
+    model_verdicts: &BTreeMap<String, OutputDeltaFacts>,
+) -> Option<OutputDeltaFacts> {
+    QueryTree::from_sql(sql).map(|tree| {
+        let transfer = OutputDeltaTransfer {
+            ctx,
+            sources,
+            model_verdicts,
+        };
+        walk(&tree, &transfer)
+    })
+}
+
+/// Every column group this model's SQL touches via [`derive_column_groups`]
+/// — the same partition [`derive_output_delta`]/
+/// [`derive_output_delta_with_model_verdicts`] fold shapes onto, exposed
+/// standalone for a caller (the propagation-edge builder) that needs a
+/// consumer's own groups without also wanting its output-delta shapes. A
+/// synthetic group covering exactly `skeleton_columns` is appended when
+/// non-empty: `derive_column_groups` deliberately excludes skeleton columns
+/// from its own payload partition (creation is shared by every column, so
+/// mutation-sensitivity only partitions the payload), but a skeleton column
+/// — most commonly a declared `timeseries.partition_column` — is still a
+/// real output column a downstream edge's window addressing needs to find
+/// "carried" (`maintenance::edge_type::type_edge`'s carriage check); without
+/// this synthetic group, that check would always fail closed for the exact
+/// column addressing usually survives on.
+pub fn derive_consumer_column_groups(
+    sql: &str,
+    sources: &[SourceFacts],
+    skeleton_columns: &BTreeSet<String>,
+) -> Vec<ColumnGroup> {
+    let maintenance_sources = to_maintenance_source_facts(sources);
+    let mut groups = derive_column_groups(sql, &maintenance_sources, skeleton_columns).groups;
+    if !skeleton_columns.is_empty() {
+        groups.push(ColumnGroup {
+            columns: skeleton_columns.iter().cloned().collect(),
+            mutation_sensitivity: BTreeSet::new(),
+            membership_sensitivity: BTreeSet::new(),
+        });
+    }
+    groups
+}
+
+/// Every bare column name referenced anywhere in `sql` — every scope's own
+/// select items, `JOIN ... ON` predicates, and `WHERE`/`HAVING` conjuncts
+/// (`crate::analysis::walk::enumerate_select_scopes`), qualifiers
+/// discarded. Used to decide which of an upstream's column groups a
+/// consumer reads at all (`maintenance::edge_type::type_edge`'s own
+/// `consumer_read_columns` parameter — a name-level, not fully-qualified,
+/// filter already). Best-effort: a scope the walk cannot normalize
+/// contributes no names rather than failing the whole derivation, since
+/// this is advisory input to edge typing, not an admission gate.
+pub fn referenced_column_names(sql: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Some(tree) = QueryTree::from_sql(sql) else {
+        return names;
+    };
+    for (sn, _resolver) in crate::analysis::walk::enumerate_select_scopes(&tree) {
+        if let Some(items) = select_stmt_items(&sn.select) {
+            for item in &items {
+                for cref in collect_column_refs(item_expr(item)) {
+                    names.insert(cref.name().to_string());
+                }
+            }
+        }
+        if let Some(from) = sn.select.from_clause() {
+            for join in from.joins() {
+                let Some(condition) = join.condition() else {
+                    continue;
+                };
+                let Some(on_expr) = condition.on_expression() else {
+                    continue;
+                };
+                for cref in collect_column_refs(&on_expr) {
+                    names.insert(cref.name().to_string());
+                }
+            }
+        }
+        let where_expr = sn.select.where_clause().and_then(|w| w.expression());
+        let having_expr = sn.select.having_clause().and_then(|h| h.expression());
+        for clause_expr in [where_expr, having_expr].into_iter().flatten() {
+            for cref in collect_column_refs(&clause_expr) {
+                names.insert(cref.name().to_string());
+            }
+        }
+    }
+    names
+}
+
 /// Derive the output-delta shape per [`ColumnGroup`] (`model_properties.md`
 /// §"Output-delta shape": derived per column group, never per model). Runs
 /// the composition walk to get a per-output-column verdict, calls the
@@ -517,23 +684,31 @@ fn to_maintenance_source_facts(sources: &[SourceFacts]) -> Vec<MaintenanceSource
 /// (`model_properties.md` §"Per-column mutation-sensitivity / column
 /// provenance"), and takes the meet of each group's member columns' shapes.
 /// A degenerate/unresolvable group — or a model the walk cannot normalize at
-/// all — is `General`, fail-closed.
+/// all — is `General`, fail-closed. A thin wrapper over
+/// [`derive_output_delta_with_model_verdicts`] with no cross-model input —
+/// every `models.*` reference falls back to `General` (no behaviour change
+/// for existing callers of this function).
 pub fn derive_output_delta(
     sql: &str,
     ctx: &JoinContext,
     sources: &[SourceFacts],
     skeleton_columns: &BTreeSet<String>,
 ) -> Vec<(ColumnGroup, OutputDelta)> {
-    let empty_model_verdicts = BTreeMap::new();
-    let facts = QueryTree::from_sql(sql).map(|tree| {
-        let transfer = OutputDeltaTransfer {
-            ctx,
-            sources,
-            model_verdicts: &empty_model_verdicts,
-        };
-        walk(&tree, &transfer)
-    });
+    derive_output_delta_with_model_verdicts(sql, ctx, sources, skeleton_columns, &BTreeMap::new())
+}
 
+/// [`derive_output_delta`]'s full form: `model_verdicts` supplies every
+/// referenced model's own already-derived per-output-column facts (the
+/// model-reference leaf case), keyed by bare model name — the SAME map
+/// [`derive_workspace_output_deltas`] folds across the real workspace.
+pub fn derive_output_delta_with_model_verdicts(
+    sql: &str,
+    ctx: &JoinContext,
+    sources: &[SourceFacts],
+    skeleton_columns: &BTreeSet<String>,
+    model_verdicts: &BTreeMap<String, OutputDeltaFacts>,
+) -> Vec<(ColumnGroup, OutputDelta)> {
+    let facts = derive_output_delta_facts(sql, ctx, sources, model_verdicts);
     let maintenance_sources = to_maintenance_source_facts(sources);
     let grouping = derive_column_groups(sql, &maintenance_sources, skeleton_columns);
 
@@ -545,6 +720,50 @@ pub fn derive_output_delta(
             (group, shape)
         })
         .collect()
+}
+
+/// One model's SQL + facts needed for the cross-model output-delta fold
+/// (`derive_workspace_output_deltas`) — mirrors `smelt-runtime`'s own
+/// `derive_clamp_and_locality`'s per-model input shape, minimal to what the
+/// walk itself reads (no skeleton/grouping inputs — those are per-column
+/// facts, not the [`ColumnGroup`] fold).
+#[derive(Debug)]
+pub struct ModelDeltaInput {
+    /// The model's canonical address (`ModelFile::canonical_path()`),
+    /// matching the key `models.<address>` references resolve against.
+    pub address: String,
+    pub sql: String,
+    pub ctx: JoinContext,
+    pub sources: Vec<SourceFacts>,
+}
+
+/// Fold [`OutputDeltaFacts`] across every model reference in the real
+/// workspace (`docs/outcomes/20260809-output-delta-typing/outcome.md` phase
+/// 4): each pass re-derives every model's facts against the PREVIOUS pass's
+/// verdict map, so a chain of `N` model-reference hops converges within `N`
+/// passes (mirrors `smelt-runtime::propagation::derive_clamp_and_locality`'s
+/// own fixed-point argument). Bounded at `inputs.len() + 1` passes rather
+/// than looping to a detected fixed point: a cyclic model-ref graph can
+/// never converge to a stable `OutputDelta::General { reason }` (the reason
+/// text keeps naming a different intermediate cause each pass), so this
+/// terminates fail-closed at `General` for the cyclic/unresolvable members
+/// rather than hang (`CLAUDE.md` §"Fail-loud discipline").
+pub fn derive_workspace_output_deltas(
+    inputs: &[ModelDeltaInput],
+) -> BTreeMap<String, OutputDeltaFacts> {
+    let max_passes = inputs.len() + 1;
+    let mut verdicts: BTreeMap<String, OutputDeltaFacts> = BTreeMap::new();
+    for _ in 0..max_passes {
+        let mut next = BTreeMap::new();
+        for input in inputs {
+            let facts =
+                derive_output_delta_facts(&input.sql, &input.ctx, &input.sources, &verdicts)
+                    .unwrap_or_default();
+            next.insert(input.address.to_ascii_lowercase(), facts);
+        }
+        verdicts = next;
+    }
+    verdicts
 }
 
 fn group_shape(group: &ColumnGroup, facts: Option<&OutputDeltaFacts>) -> OutputDelta {
@@ -1022,5 +1241,83 @@ mod tests {
             .expect("a 'wt' group exists");
         assert!(matches!(amt_group.1, OutputDelta::AppendOnlyWindow { .. }));
         assert!(matches!(wt_group.1, OutputDelta::General { .. }));
+    }
+
+    #[test]
+    fn model_reference_leaf_resolves_per_column_from_upstream_facts() {
+        let ctx = JoinContext::new();
+        let mut model_verdicts = BTreeMap::new();
+        model_verdicts.insert(
+            "upstream".to_string(),
+            OutputDeltaFacts {
+                columns: vec![
+                    (
+                        "a".to_string(),
+                        OutputDelta::AppendOnlyWindow {
+                            axis: "event_date".to_string(),
+                        },
+                    ),
+                    (
+                        "b".to_string(),
+                        OutputDelta::KeyedUpsert {
+                            keys: vec!["id".to_string()],
+                        },
+                    ),
+                ],
+            },
+        );
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &model_verdicts,
+        };
+        let tree = QueryTree::from_sql("SELECT a, b FROM smelt.models.upstream")
+            .expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        assert_eq!(
+            *shape_of(&facts, "a"),
+            OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string()
+            },
+            "column 'a' must keep its own upstream shape, not be meet-folded with 'b'"
+        );
+        assert_eq!(
+            *shape_of(&facts, "b"),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn model_reference_column_absent_from_upstream_is_general() {
+        let ctx = JoinContext::new();
+        let mut model_verdicts = BTreeMap::new();
+        model_verdicts.insert(
+            "upstream".to_string(),
+            OutputDeltaFacts {
+                columns: vec![(
+                    "a".to_string(),
+                    OutputDelta::AppendOnlyWindow {
+                        axis: "event_date".to_string(),
+                    },
+                )],
+            },
+        );
+        let transfer = OutputDeltaTransfer {
+            ctx: &ctx,
+            sources: &[],
+            model_verdicts: &model_verdicts,
+        };
+        let tree = QueryTree::from_sql("SELECT missing_col FROM smelt.models.upstream")
+            .expect("sql parses to a SELECT");
+        let facts = walk(&tree, &transfer);
+        match shape_of(&facts, "missing_col") {
+            OutputDelta::General { reason } => {
+                assert!(reason.contains("upstream"));
+                assert!(reason.contains("missing_col"));
+            }
+            other => panic!("expected General naming model + column, got {other:?}"),
+        }
     }
 }
