@@ -44,7 +44,7 @@ the addressing of one delta type, not the universal currency.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | planned |
+| 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
 | 2 | Walk transfer rules for the output-delta verdict per column group | pending |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | pending |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
@@ -57,6 +57,10 @@ the addressing of one delta type, not the universal currency.
 - 2026-08-09 — **Delta type is per column group, not per model** (rethink §6 open question 1, settled with Andrew): edges are vector-typed — one typed component (shape × addressing × columns) per column group the consumer reads, projected through the consumer's sensitivity. Per-model scalar typing was rejected because the meet over groups lets one mutable group degrade a model's append-only groups to `general`, blocking composition for mixed-shape models.
 
 - 2026-08-10 — Outcome activated; phase table unchanged (no prior phase summary to reshape against). Phase 1 scoped as spec-only: the `smelt explain` edge rendering stays in phase 7 with its docs-site update, so the surface spec delta lands next to the code that produces it.
+
+- 2026-08-10 — Phase 1 implemented: transfer-rule table rows that preserve the input shape spell
+  out all three lattice names explicitly rather than saying "preserves the input shape", so the
+  table stays machine-checkable per row (`crates/smelt-logical/tests/output_delta_spec.rs`).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 

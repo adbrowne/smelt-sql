@@ -1094,6 +1094,25 @@ partitions; each hop aligns its result outward to the receiving axis's grain. Ou
 monotone, so sufficiency composes; narrowing never does. **Widen-never-narrow** is the graph
 layer's composition law.
 
+**Typed edges.** An edge carries a **vector** of typed components, one per column group the
+downstream consumer reads: `(delta shape × addressing × column set)`, the upstream's
+output-delta verdict (`model_properties.md` §"Output-delta shape") projected through the
+consumer's own per-column mutation-sensitivity. Today's day-interval dirt is exactly the
+`AppendOnlyWindow` component under window addressing — forward propagation and backward
+resolution, below, are the window-addressed case of this general vector, and the adjoint property
+`forward(backward(P)) ⊇ P` continues to hold for that case unchanged. Widen-never-narrow governs
+every addressing, not only the window-addressed one: a component whose type cannot be projected
+through a consumer degrades to the coarsest component that consumer can act on (whole-model
+dirt), never to nothing.
+
+**Keyed dirt-sets and the narrowed refusal.** A keyed node without an admitted time axis is no
+longer categorically refused. Where its output-delta verdict is `KeyedUpsert{k}`, the edge is
+key-addressed and propagates a **keyed dirt-set** — the affected-key set a changed input's delta
+resolves to (`model_properties.md` §"Affected-key discovery") — instead of an interval. The
+`MaintenanceGraphUnsupportedNode` refusal below survives, narrowed to a `General` verdict: it
+fires only where the node's output-delta shape degrades all the way to `General`, and its message
+names the operator that degraded the type.
+
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
 validated `timeseries:` declaration supplies the clock the downstream creation cell is clamped
@@ -1152,10 +1171,12 @@ propagation with a provable horizon behind it.
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic edge
 set; a **self-referential** model (a table-graph cycle that is a DAG only when time-unrolled —
 admissible in principle iff its self-clamp is strictly time-backward, with forward dirt running
-to the frontier and backward resolution reaching the model's basis/checkpoint); a **keyed node
-without an admitted time axis** (no partition axis for interval dirt — treating it as day-axis
-would be wrong-and-quiet). A locality-admitted time-partitioned keyed output is **not** refused:
-it is a clocked node whose edges use its declared granularity, and whose outbound dirt is the
+to the frontier and backward resolution reaching the model's basis/checkpoint); and a **keyed
+node whose output-delta verdict is `General`** (no partition axis for interval dirt and no
+admitted key addressing either — treating it as day-axis would be wrong-and-quiet). A keyed node
+proven `KeyedUpsert{k}` is **not** refused on this ground — see "Keyed dirt-sets and the narrowed
+refusal", above — and neither is a locality-admitted time-partitioned keyed output: it is a
+clocked node whose edges use its declared granularity, and whose outbound dirt is the
 key→partition projection of what its runs changed — exact under locality routes 1–2, widened
 backward by `r` plus margins under route 3 (§"Key temporal locality").
 
@@ -2330,6 +2351,12 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   all-or-nothing there either, so a mid-group failure can still leave an added-but-unbackfilled
   column with an already-advanced schema snapshot. Neither case has a repair path today.
   Tracked: `docs/plans/20260809-sensitivity-precision.md` Phase 6.
+- **Edge typing is specified but the propagation layer still carries day intervals only.** The
+  typed edge (`(delta shape × addressing × column set)`) and keyed dirt-set propagation for an
+  admitted `KeyedUpsert` verdict are stated in §"The graph layer", but no output-delta verdict is
+  derived yet (`model_properties.md` §Known Divergences "Output-delta shape is specified but not
+  yet derived") and forward/backward propagation still only compute the window-addressed
+  component. Tracked by `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **Plan-consumer gaps.** The horizon-clamped partition-local mutation corner is not reachable
   from any real workspace (trigger construction emits `UpstreamMutation` only for unclocked
   sources; clocked mutable-source scan-bound derivation is deferred); dispatch cannot
