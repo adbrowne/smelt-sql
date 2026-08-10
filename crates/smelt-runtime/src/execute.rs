@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use futures::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use smelt_backend::{
     Backend, BackendError, Materialization, MaterializationStrategy, PartitionRange,
@@ -3978,8 +3978,38 @@ fn build_model_plans(
                     .map(|l| l.to_days())
                     .unwrap_or(0);
 
+                // Contract-lattice `frozen_horizon` write-eligibility clamp
+                // (`docs/specs/incremental_models.md` §"Contract relaxations
+                // (`contract:`)"): narrows the requested range's start to
+                // `end - H`, never widens. The pure transform is single-owned
+                // in `smelt-logical`; this call site only converts dates to
+                // the day-count unit it operates on.
+                let clamped_start_date = metadata
+                    .and_then(|m| m.contract.as_ref())
+                    .and_then(|c| c.frozen_horizon.as_ref())
+                    .and_then(|fh| {
+                        let h_days = fh.to_days() as i64;
+                        let start_days = start_date.num_days_from_ce() as i64;
+                        let end_days = end_date.num_days_from_ce() as i64;
+                        let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
+                            start_days, end_days, h_days,
+                        );
+                        if clamped_days > start_days {
+                            info!(
+                                "model '{model_name}': frozen_horizon ({} days) narrows the \
+                                 requested write range start to {}",
+                                h_days,
+                                NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                                    .map(|d| d.format("%Y-%m-%d").to_string())
+                                    .unwrap_or_default()
+                            );
+                        }
+                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                    })
+                    .unwrap_or(start_date);
+
                 let full_range = TimeRange {
-                    start: start_date.format("%Y-%m-%d").to_string(),
+                    start: clamped_start_date.format("%Y-%m-%d").to_string(),
                     end: end_date.format("%Y-%m-%d").to_string(),
                 };
 

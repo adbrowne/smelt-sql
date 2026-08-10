@@ -797,6 +797,29 @@ pub struct MaintenanceConfig {
     pub scan_bounds: Option<ScanBoundsConfig>,
 }
 
+/// The `contract:` block (`incremental_models.md` §"Contract relaxations
+/// (`contract:`)"): a declared relaxation of the equivalence invariant — the
+/// default point in the contract lattice. Absent means the default point
+/// (strict equivalence); `frozen_horizon` is the only accepted key this
+/// phase. `deferral` and per-cell `cells:` refinement are deliberately
+/// refused (`deny_unknown_fields`) until the phase that validates and
+/// enforces them lands — an accepted-but-unenforced relaxation key would be
+/// exactly the silent weakening the lattice exists to prevent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContractConfig {
+    /// Partitions older than `end − frozen_horizon` are never revisited by
+    /// maintenance; admitted only on a partition-grain model (checked by
+    /// `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`,
+    /// which needs the derived grain this pure serde shape does not have).
+    /// Format validity (a parseable interval) is checked at frontmatter-parse
+    /// time in `smelt_core::metadata`, raising
+    /// `MetadataError::ContractFrozenHorizonInvalid` rather than the generic
+    /// YAML parse error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_horizon: Option<DataLatency>,
+}
+
 /// `maintenance.defaults` — the per-model soft technique bias.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]

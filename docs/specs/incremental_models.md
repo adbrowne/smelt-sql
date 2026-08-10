@@ -2441,13 +2441,19 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **The contract lattice is specified and unimplemented.** §"The contract lattice" and
-  §"Contract relaxations (`contract:`)" define the default point and the two v1 relaxations
-  (`frozen_horizon`, `deferral`), each as a declaration-schema + oracle-transform + probe-emitter
-  triple, but no part of the triple exists yet: the loader accepts no `contract:` block, no
-  oracle transform is derived in `smelt-logical`, no probe emitter runs, and
-  `maintenance_conformance` is not parameterised per lattice point — every recipe today is
-  checked against the default point's strict oracle only. Tracked:
+- **`frozen_horizon`'s declaration and write clamp are implemented; its late-arrival probe,
+  `deferral`, the parameterised conformance oracle, and the `explain` surface are not.**
+  §"The contract lattice" and §"Contract relaxations (`contract:`)" define the default point and
+  the two v1 relaxations (`frozen_horizon`, `deferral`), each as a declaration-schema +
+  oracle-transform + probe-emitter triple. The loader now accepts a `contract:` block with
+  `frozen_horizon` (`deferral` and per-cell `cells:` refinement are refused, fail-loud, until
+  they are wired), `smelt-logical` validates grain admissibility
+  (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`) and narrows the
+  partition-grain write range to `end - H`. Still missing: the late-arrival diagnostic outside
+  the horizon (partitions older than `H` are still silently excluded, not yet diagnosed), the
+  `deferral` point entirely, `maintenance_conformance` parameterisation per lattice point (every
+  recipe today is checked against the default point's strict oracle only), and `smelt explain`
+  rendering the effective contract per cell. Tracked:
   `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 - **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
   resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")

@@ -469,6 +469,7 @@ impl Backend {
                 DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
                 DbCode::UnknownColumnTestKind => "unknown-column-test-kind",
                 DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
+                DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
             };
             NumberOrString::String(code_str.to_string())
         });

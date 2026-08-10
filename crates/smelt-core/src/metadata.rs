@@ -349,6 +349,13 @@ pub struct ModelMetadata {
     /// `docs/specs/incremental_models.md` §Surface "Frontmatter".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<crate::config::MaintenanceConfig>,
+
+    /// A declared relaxation of the equivalence invariant — the contract
+    /// lattice's default point is absent (`None`). See
+    /// `docs/specs/incremental_models.md` §"The contract lattice" and
+    /// §"Contract relaxations (`contract:`)".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<crate::config::ContractConfig>,
 }
 
 impl ModelMetadata {
@@ -637,6 +644,22 @@ pub enum MetadataError {
     /// contrast with the silent-drop rule for other `columns:` keys).
     #[error("ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema")]
     ColumnTestOnUnknownColumn { model: String, column: String },
+
+    /// A `contract.frozen_horizon` value fails `DataLatency::parse` —
+    /// unparseable interval syntax (`docs/specs/incremental_models.md`
+    /// §"Contract relaxations (`contract:`)"). Raised at frontmatter-parse
+    /// time by `extract_single_model`'s strict pre-validation, mirroring the
+    /// `reuse`/`state` fail-loud pattern, rather than surfacing as a generic
+    /// `YamlParseError`. Grain-admissibility (declared on a
+    /// non-partition-grain model) is a distinct check made downstream by
+    /// `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`
+    /// (needs the derived grain, unavailable to this pure parse) — both
+    /// surface under the same `ContractFrozenHorizonInvalid` diagnostic
+    /// code.
+    #[error(
+        "ContractFrozenHorizonInvalid: contract.frozen_horizon is not a valid interval — {why}"
+    )]
+    ContractFrozenHorizonInvalid { why: String },
 }
 
 /// Build the fix-it message for a refused `batched:` sub-block, naming each
@@ -1556,6 +1579,22 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     batched_subblock_fixit_message(value),
                 )));
+            // `contract:` is strictly pre-validated: an unparseable
+            // `frozen_horizon` is a dedicated `ContractFrozenHorizonInvalid`
+            // error (never a generic YAML error), and an unrecognised key
+            // (`deferral`, `cells`) is a loud unknown-field parse error —
+            // both fail-loud rather than silently stripped (fail-loud
+            // discipline; the lattice's single-owner rule).
+            } else if key_str == "contract" {
+                if let Err(e) =
+                    serde_yaml::from_value::<crate::config::ContractConfig>(value.clone())
+                {
+                    let msg = e.to_string();
+                    if msg.contains("invalid data_latency") {
+                        return Err(MetadataError::ContractFrozenHorizonInvalid { why: msg });
+                    }
+                    return Err(MetadataError::YamlParseError(e));
+                }
             }
         }
 

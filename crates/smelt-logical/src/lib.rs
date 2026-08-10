@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod backbuild;
+pub mod contract;
 pub mod data_tests;
 pub mod graph;
 pub mod logical;
@@ -20,6 +21,9 @@ pub use analysis::temporal::{
     EffectiveWindow, TemporalDependency, TemporalOffset, TemporalSource,
 };
 pub use analysis::{analyze_select, SelectAnalysis, SelectItemKind};
+pub use contract::frozen_horizon::{
+    clamp_write_range as clamp_frozen_horizon_write_range, validate_frozen_horizon,
+};
 pub use data_tests::{
     lower_column_test, resolve_not_null_verdict, resolve_unique_verdict, ScanLowering, TestVerdict,
 };

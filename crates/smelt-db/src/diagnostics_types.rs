@@ -913,6 +913,16 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+
+    // ── Contract lattice diagnostic codes ────────────────────────────────────
+    /// A `contract.frozen_horizon` is unparseable or declared on a
+    /// non-partition-grain model (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractFrozenHorizonInvalid`) and the grain-admissibility check made
+    /// by `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`.
+    /// Anchored at the top of the file (line 0, column 0).
+    ContractFrozenHorizonInvalid,
 }
 
 /// Structured metadata attached to diagnostics for code actions

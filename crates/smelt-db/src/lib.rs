@@ -145,6 +145,20 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // pure mapper does not have.
         MetadataError::UnknownColumnTestKind { .. } => None,
         MetadataError::ColumnTestOnUnknownColumn { .. } => None,
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation
+        // (a pure format check, no Salsa data needed) — handled here like
+        // `YamlParseError`, sharing its `ContractFrozenHorizonInvalid`
+        // diagnostic code with the distinct grain-admissibility check made by
+        // `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`
+        // (a dedicated arm further down in `check_file_diagnostics`, since
+        // that check needs the parsed `ModelMetadata.grain`).
+        MetadataError::ContractFrozenHorizonInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+            data: None,
+        }),
     }
 }
 
@@ -2214,6 +2228,30 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 data: None,
             })
             .accumulate(db);
+        }
+
+        // Contract-lattice `frozen_horizon` grain-admissibility check
+        // (`docs/specs/incremental_models.md` §"Contract relaxations
+        // (`contract:`)"). Format validity was already checked at
+        // frontmatter-parse time (`MetadataError::ContractFrozenHorizonInvalid`,
+        // handled above); this pure `smelt-logical` validator only checks that
+        // the declaration sits on a partition-grain model, sharing the same
+        // diagnostic code (single-owner rule: the oracle/validator, not this
+        // Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.frozen_horizon.is_some() {
+                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
+                if let Err(why) = smelt_logical::validate_frozen_horizon(grain) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractFrozenHorizonInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
         }
 
         // Declarative column test validation (`docs/specs/data_tests.md`
