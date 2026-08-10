@@ -75,8 +75,8 @@ pass (`preserved` / `weakened` / `lost`, only for `keep` rows).
 
 | id | claim | rg anchor | verdict | status |
 |---|---|---|---|---|
-| IP-01 | Row-shaped MERGE-dedup key has no `.sql` frontmatter home; only `smelt.yml`'s `batched.unique_key` override | `no \`.sql\` frontmatter home` | keep | preserved |
-| IP-02 | Two spellings of plausible-contract mechanism coexist (`columns.<c>.contract` vs `batched.nondeterministic_columns`) | `Two spellings of the plausible-contract mechanism coexist` | keep | preserved |
+| IP-01 | Row-shaped MERGE-dedup key has no `.sql` frontmatter home; only `smelt.yml`'s `batched.unique_key` override | `no \`.sql\` frontmatter home` | drop (landed: phase 9 gave the MERGE-dedup key a top-level `merge_key:` home in both `.sql` frontmatter and `smelt.yml`, closing the gap) | |
+| IP-02 | Two spellings of plausible-contract mechanism coexist (`columns.<c>.contract` vs `batched.nondeterministic_columns`) | `Two spellings of the plausible-contract mechanism coexist` | drop (landed: phase 7 retired `batched.nondeterministic_columns` fail-loud, leaving `columns.<c>.contract: plausible` as the one spelling) | |
 | IP-03 | One classification call site reads the outer SQL body only (bound-`NotDerivable` refusal gate) — lookback inside a function body with no outer filter would diverge | `reads the outer SQL body` | keep | preserved |
 | IP-04 | Window-function batch-safety check runs on unexpanded outer SQL; `OVER` inside `smelt.define` body invisible to it | `runs on unexpanded outer SQL` | keep | preserved |
 | IP-05 | Per-source clamp observability partly emitted: `--json` doesn't resolve run-relative scan window; editor-hover readout unimplemented | `Per-source clamp observability is partly emitted` | keep | preserved |
@@ -151,5 +151,5 @@ pass (`preserved` / `weakened` / `lost`, only for `keep` rows).
 | MP-30 | Landed-work recital: every other probe row built and wired, single-owner dispatch helper, cadence policy | `Every other row is now built and wired` | drop | |
 | MP-31 | Landed-work recital: output-delta shape derived/typed/acted on, keyed-edge classification wired | narrative in bullet 331 before "The remaining gap" | drop | |
 | MP-32 | Keyed dirt-set is a symbolic key-addressed channel (key columns + provenance), not a materialised key-value set; value-level affected-key discovery stays with the run-time mechanism | `is a \*\*symbolic\*\* key-addressed channel` | keep | merge:IC-14 |
-| MP-33 | `nondeterministic_columns` list-form declaration not yet removed from the parser (fossil; removal is a separate, out-of-scope row) | `is not yet removed from the parser` | keep | preserved |
+| MP-33 | `nondeterministic_columns` list-form declaration not yet removed from the parser (fossil; removal is a separate, out-of-scope row) | `is not yet removed from the parser` | drop (landed: phase 7 removed the list-form declaration from the parser fail-loud) | |
 | MP-34 | Grammar boundary between `columns.<c>.contract` and a future column `tests:` block deliberately deferred (Open Question, cross-ref `models.md`) | `deliberately deferred` | keep | preserved |

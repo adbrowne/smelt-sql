@@ -774,9 +774,23 @@ That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutab
 
 ### The reconciliation ledger
 
-Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed folds**: each run applies a source delta on top of the target's existing state rather than recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order runs, smelt records, per output region × column group, which source deltas are already reflected in that region. An already-reflected delta is refused rather than folded a second time (it would double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from `--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's ledger entry, since the recompute already incorporates everything up to that point.
+A **frontier** is the record of which typed deltas a cell has absorbed — smelt's one ledger
+concept. Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed
+folds**: each run applies a source delta on top of the target's existing state rather than
+recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order
+runs, smelt records, per output region × column group, which source deltas are already reflected
+in that region. An already-reflected delta is refused rather than folded a second time (it would
+double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from
+`--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's
+ledger entry, since the recompute already incorporates everything up to that point.
 
-The ledger is backend-resident: it lives alongside the target table for the transactional keyed-merge path, not in a separate smelt-managed store. You don't declare or configure it directly; `smelt explain <model>` shows whether a given cell routes through it via the `ledger_catch_up` flag on that cell.
+This project-wide bookkeeping is the frontier's **reconciliation ledger** realization (see
+[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)). A
+window-forward keyed model's own `MERGE` writes a second realization, the **transactional
+frontier write**, directly into the target table alongside the row data it accompanies, in the
+same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
+declare or configure either realization directly; `smelt explain <model>` shows whether a given
+cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell.
 
 ## grain: partition vs grain: key
 

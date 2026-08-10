@@ -58,7 +58,15 @@ A run acquires an exclusive advisory lock on `.smelt/lock` for its entire durati
 
 ## The reconciliation ledger
 
-`grain: key` (and `key_per_partition`) models are maintained through a merge into an existing table rather than a full recompute, and the reconciliation ledger is the correctness structure that makes repeated, possibly-overlapping runs safe. Each ledger entry keys a `(output-region x column-group)` cell to the processed-input vector that has already been folded into it. Storage is graded by the column-group's algebra:
+A **frontier** is the record of which typed deltas a cell has absorbed. The reconciliation ledger
+is the frontier's warehouse-independent realization: `grain: key` (and `key_per_partition`)
+models are maintained through a merge into an existing table rather than a full recompute, and
+the reconciliation ledger is the correctness structure that makes repeated, possibly-overlapping
+runs safe. (A window-forward keyed model's own merge writes a second realization, the
+transactional frontier write, directly into the target table -- see
+[Incremental models -- The reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger).)
+Each ledger entry keys a `(output-region x column-group)` cell to the processed-input vector that
+has already been folded into it. Storage is graded by the column-group's algebra:
 
 - **Additive** groups (a running sum, a count) record the **delta identities** already folded in -- re-folding the same delta a second time would double-count, so the ledger's job is to refuse a repeat.
 - **Idempotent** groups (a last-write-wins column, a MAX aggregate) record only a **frontier** watermark -- re-applying an already-seen delta is harmless, so the ledger only needs to know how far processing has reached.

@@ -1,7 +1,7 @@
 # Outcome: Incremental-models spec redraft
 
 **Created:** 2026-08-09
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260809-incremental-rethink.md` §5, §6 step 6
 **Spec anchors:** `docs/specs/incremental_models.md`, `docs/specs/model_properties.md`
 
@@ -63,7 +63,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
 | 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | done |
 | 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | done |
-| 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | planned |
+| 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | done |
 
 ## Decision log
 
@@ -320,6 +320,19 @@ way (timeless-oracle rule), at substantially reduced length.
   applied to IC-21), not a spec edit. Also fixed as scope: `/smelt:validate` findings that are
   genuine behaviour gaps become §Known Divergences bullets with tracking links, never code
   changes — §Out of scope forbids new behaviour, and this is the outcome's last row.
+
+- 2026-08-11 — Phase 10 done, outcome complete. Retargeted the seven unresolvable `§"…"`
+  citations (two bold-paragraph-label citations retargeted to their owning heading, one
+  cross-file citation whose qualifier sat on the wrong physical line rejoined, one missing
+  qualifier added, one heading-name typo fixed (`CLI ↔ LSP` → `CLI ↔ UI`), one boilerplate-label
+  citation retargeted to `§"Surface"`). Reclassified `phases/06-claims.md` rows IP-01/IP-02/MP-33
+  `keep` → `drop` (phases 9 and 7 closed their gaps). Synced `docs-site/docs/reference/state.md`
+  and `docs-site/docs/guide/incremental-models.md` to name the frontier and its two realizations
+  explicitly. A scoped validate pass (Surface cross-check on `merge_key:`,
+  `columns.<c>.contract`, `key_per_partition`; the standing automated checks; the timeless grep)
+  found no drift needing a new Known Divergences bullet. All six success criteria judged met —
+  final judgement recorded in `phases/10-summary.md`. `verify-phase.sh` ALL GREEN plus the
+  plan's two named standing tests.
 
 ## Blocked
 
