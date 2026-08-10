@@ -48,7 +48,7 @@ relaxation is declared, validated, probe-checked, and printed by
 |---|-------|--------|
 | 1 | Spec: the lattice framing — default point, frozen horizon, deferral; oracles and probes per point | done |
 | 2 | `frozen_horizon:` declaration, validation, write-eligibility clamp wiring | done |
-| 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | pending |
+| 3 | Late-arrival diagnostic outside the frozen horizon (delete the silent exclusion) | planned |
 | 4 | `deferral:` declaration + run skipping; ledger-proven work subsumption | pending |
 | 5 | Conformance oracle parameterised per lattice point + recipes for both relaxations | pending |
 | 6 | Surface: explain contract rendering, docs-site update | pending |
@@ -72,6 +72,19 @@ relaxation is declared, validated, probe-checked, and printed by
   into `smelt-runtime::execute::build_model_plans`. `deferral:`/`cells:` remain refused
   fail-loud. Added a dedicated new example fixture rather than editing an existing
   golden-fixture model (avoided an unrelated `explain.rs` snapshot break).
+
+- 2026-08-10 — **Lateness is observed by a frozen-band per-partition baseline, not by
+  scanning** (phase 3 plan): a partition-filtered scan never reads an already-frozen row, so the
+  probe follows `source_probes.rs`'s Establish/Verify shape — each run snapshots per-partition
+  row counts of the model's clocked sources over the band before `end − H`, and a later
+  count increase (or a wholly new frozen partition) is the genuine late arrival. The
+  landed-delta ledger was rejected as the signal: its v1 entries are the run's own already-clamped
+  window, not an arrival record. The spec's "counts scanned rows" wording is corrected accordingly
+  (spec-first edit in the phase). Baselines live in a dedicated `frozen_band_baselines.json`, not
+  the append-only posture store, whose refresh rule differs and would cross-talk.
+- 2026-08-10 — Phase table unchanged (phase 2's summary surfaced no success-criteria work outside
+  the existing rows; its carry-forwards — the unbuilt probe emitter and the missing `explain`
+  rendering — are already rows 3 and 6).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
