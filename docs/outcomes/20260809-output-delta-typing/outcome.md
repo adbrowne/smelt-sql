@@ -58,7 +58,8 @@ the addressing of one delta type, not the universal currency.
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
 | 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | done |
-| 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | pending |
+| 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | planned |
+| 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | pending |
 
 ## Decision log
 
@@ -266,6 +267,19 @@ the addressing of one delta type, not the universal currency.
   the SQL literally spells `smelt.models.<addr>`; every current fixture's bare `smelt.<addr>`
   form bypasses it for a 3+-hop chain (pre-existing since phase 4, unexercised by any current
   conformance recipe). Phase 10 (surface: explain edge rendering, docs-site update) is unblocked.
+
+- 2026-08-10 — Phase 10 planned **with a reshape**: phase 9's flagged latent gap — a
+  model-reference leaf only resolves through `model_verdicts` when the upstream's SQL literally
+  spells `smelt.models.<addr>`, so a bare `smelt.<addr>` ref inside an upstream's own SQL (the
+  form every fixture and the dag generator use) degrades to `General` for a 3+-hop chain — gets
+  its own row 11 rather than an Out-of-scope line. It is not merely a coarseness: the phase-1/2
+  transfer table registers "a model-reference leaf takes the referenced model's own verdict" as a
+  rule, so today's behaviour diverges from a registered transfer rule (criterion 1) and stops the
+  outcome's headline composition at 2 hops. Fail-closed, so no correctness bug — which is why it
+  sits after the surface row rather than before it. Phase 10 itself stays surface-only: rendering
+  the delta type per edge (model edges from phase 9's `ModelEdge.output_shape`, source edges from
+  the leaf seed so no inbound edge renders untyped), the degradation reason, the key-addressed
+  cell's sidecar discovery line, spec Surface, and docs-site.
 
 ## Blocked
 
