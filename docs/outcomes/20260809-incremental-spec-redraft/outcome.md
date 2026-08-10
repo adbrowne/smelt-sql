@@ -51,7 +51,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 3 | Redraft write addressing (repair family folded in) and the maintenance-mechanics subsections | done |
 | 4 | Redraft the shape profiles; state the composed key+time corner's single composition table | done |
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
-| 6 | Rewrite Known Divergences (both specs) as genuine gap lists | planned |
+| 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
 | 7 | Remove parser/config fossils with fail-loud diagnostics | pending |
 | 8 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
@@ -188,6 +188,17 @@ way (timeless-oracle rule), at substantially reduced length.
   Divergences and ≤ 8,000 chars (from 27.7k) for `model_properties.md`'s, with a per-bullet
   ceiling of 1,200 chars — the checkable form of criterion 3's "the 3,000-char bullets are
   dissolved".
+
+- 2026-08-11 — Phase 6 done: `incremental_models.md`'s Known Divergences (three `###`
+  subsections) cut 340→241 lines; `model_properties.md`'s (flat) cut ~27.7k→~6.7k chars, from 5
+  giant 3–5k-char bullets to 18 bullets none over 1,200 chars. 125-row claim inventory
+  (`phases/06-claims.md`), adversarial-verified 111/113 keep rows preserved on first pass (2
+  weakened, 0 lost; both weakenings restored). One standing test
+  (`smelt-logical::output_delta_spec::known_divergence_states_cross_model_fold`) required
+  restoring mechanism-naming clauses (`build_forward_graph`, `classify_keyed_edges`,
+  `Edge.components`) inside the dissolved "keyed dirt-set is symbolic" gap bullet — kept as
+  legitimate "why it's not unsound" context rather than editing the test. `verify-phase.sh` ALL
+  GREEN.
 
 ## Blocked
 

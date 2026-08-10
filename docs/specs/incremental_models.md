@@ -2055,233 +2055,161 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 
 ### The contract, plan, and graph layer
 
-- **Per-cell `deferral` is declared but not yet scheduled.** §"The contract lattice" and
-  §"Contract relaxations (`contract:`)" define the default point and the two v1 relaxations
-  (`frozen_horizon`, `deferral`), each as a declaration-schema + oracle-transform + probe-emitter
-  triple. Both triples are landed: the loader accepts a `contract:` block with `frozen_horizon`,
-  `deferral`, and `cells:`; `smelt-logical` validates grain admissibility (`frozen_horizon`) and
-  clock admissibility (`deferral`); the partition-grain write range narrows to `end - H`; the
-  baseline-comparative late-arrival probe (`ContractLateArrivalOutsideHorizon`) raises on a genuine
-  late arrival outside `H`; the ledger-derived lag probe (`ContractDeferralExceeded`) raises when a
-  cell's measured lag exceeds its declared `D`; `deferral`'s two licensed capabilities — run
-  skipping (`skipped_deferral`/`skipped_deferral_upstream`, model granularity) and ledger-proven
-  work subsumption — are scheduled by `smelt-runtime` from the same `smelt-logical` licensing
-  functions; `maintenance_conformance` asserts each recipe against its OWN lattice point's oracle
-  (default cells against strict equivalence, `frozen_horizon` cells against the `end -
-  H`-restricted `S`, `deferral` cells against the bracket `full_refresh(S_settled) ⊆ maintained ⊆
-  full_refresh(S)`), consuming the same `smelt-logical::contract` transforms rather than
-  re-deriving the restriction; and `smelt explain` prints the effective contract per cell — default
-  or the applicable relaxations with their declared parameters — in both the text report and the
-  `--json` per-cell `contract_point` object. Per-cell `deferral` (`contract.cells[].deferral`)
-  still parses and validates fail-loud, and prints as declared, but is not yet scheduled — it needs
-  per-cell frontier addressing, which the frontier record (§"The frontier record (reconciliation
-  ledger)") does not yet track (its addressing today is per-region, not per-cell) — a
-  state-shape change, not a lattice-point change. Tracked:
+- **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
+  but needs per-cell frontier addressing, which the frontier record tracks only per-region today
+  (a state-shape change, not a lattice-point change). Tracked:
   `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
-- **The `diff_patch` write pattern only routes over a per-group recompute.** A `write:` pin that
-  resolves to `diff_patch` over a live `PerGroupRecompute` repair cell (§"The repair family")
-  executes via its emitter, with the executed-vs-emitted `statement_parity` leg proven for that
-  case. A `diff_patch` pin whose underlying recompute is the region `DeleteInsert` default has no
-  runtime lowering yet — the runtime resolver that would route it fails loud by name rather than
-  falling through to a plain write, but no caller today reaches that resolver for the
-  `DeleteInsert` recompute, so the pin is presently unenforced for that case rather than refused.
-  Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
-- **Frontmatter-time grain checking has one narrow gap.** A `grain: key` model with no top-level
-  `unique_key:` (identity derived from the body `GROUP BY`) is checked against the derived key
-  only at plan derivation, not at frontmatter validation; a bare `grain: key` model with neither
-  declaration is unchecked (cross-ref `models.md` §Known Divergences).
-- **The write-pin equivalence factor is structural only.** The available-addressings rule's
-  equivalence factor is checked today as the pattern's declared required contract facts; the
-  per-cell equivalence hook (`resolve_write_pin`'s `cell_can_uphold_equivalence`) always
-  accepts. Deepening it (e.g. threading column-comparability or a suppression-specific proof) is
-  later work.
-- **An inadmissible write-*variant* pin has no pre-execution gate.** Forcing
-  `technique: suppress` on a cell whose suppression proof refuses is not checked up front — the
-  resolver silently falls back to full region recompute instead of refusing the run; `smelt
-  explain` also misses the comparability-only-inadmissible case. Extending the pre-execution
-  gate to this pin dimension: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Observed-delta consumption is partial.** Recording and key→partition projection exist for
-  the change-suppressed column-scoped MERGE family, but: `smelt run --since-upstream` does not
-  yet read the recorded delta table live; backward resolution consumes no recorded delta (every
-  ancestor requirement is the full clamp-derived slice); the keyed-fold and staged-candidate
-  write families record nothing; and the settle-bound × observed-delta composition
-  (§"Key temporal locality (the time-partitioned output)") has no live "is this slice's recorded delta empty" leg.
-  Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **No execution technique keys off a maintained-model creation cell.** The cell drives forward
-  propagation and `smelt explain`, but the propagated region is materialized by the ordinary
-  incremental run loop rather than a per-cell technique. Tracked:
+- **`diff_patch` over the region `DeleteInsert` default has no runtime lowering** — the resolver
+  fails loud by name, but no caller today reaches it, so the pin is unenforced rather than
+  refused for that case. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
+- **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving identity
+  from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan derivation, not
+  frontmatter validation (cross-ref `models.md` §Known Divergences).
+- **The write-pin equivalence factor is structural only** — the per-cell equivalence hook always
+  accepts; threading column-comparability or a suppression-specific proof is later work. Tracked:
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **An inadmissible write-*variant* pin has no pre-execution gate** — forcing
+  `technique: suppress` on a refusing cell silently falls back to full recompute instead of
+  refusing; `smelt explain` also misses this case. Tracked:
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded delta
+  table live; backward resolution consumes none; the keyed-fold and staged-candidate write
+  families record nothing; the settle-bound × observed-delta composition has no live "delta
+  empty" leg. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **No execution technique keys off a maintained-model creation cell** — the propagated region
+  materializes via the ordinary run loop, not a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **A `KeyedUpsert` upstream feeding a `grain: partition` downstream has no live key-addressed
-  dispatch.** §"Upstream model edges" describes the key-addressed route in terms of the plan
-  layer's own admission rule (an edge whose upstream output-delta shape is `KeyedUpsert` and
-  whose clock-based route does not apply); the run loop's live resolution and dispatch of that
-  cell (`resolve_live_key_addressed_model_edge_cell` /
-  `execute_key_addressed_model_edge_cell`, `smelt-runtime/src/execute.rs`), however, is wired
-  only inside the `grain: key` run branch. A clockless `KeyedUpsert` upstream feeding a `grain:
-  partition` downstream therefore never reaches that dispatch regardless of what the plan layer
-  would otherwise admit for the edge — the downstream instead maintains via its ordinary run
-  route (a full window-forward run when derivable, a whole-table rebuild when it is not, since
-  the upstream carries no clock to bound a scan against). This is a correctness-preserving gap,
-  not a soundness one: the downstream's output is still exactly the full-refresh oracle's output
-  after every run, only never incrementally folded through this particular edge shape. Tracked:
-  `docs/outcomes/20260809-output-delta-typing/outcome.md` (phase 8's conformance recipe
-  `keyed_upstream_partition_downstream_matches_oracle`,
-  `crates/smelt-cli/tests/maintenance_conformance/dags.rs`).
-- **The definition-change backfill's atomicity is conditional on the schema-evolution gate
-  actually running this run.** The fold described in §"The definition-change trigger" only
-  happens inside `schema_evolution`'s migration call; a model whose `schema_evolution:
-  strategy: full_refresh` frontmatter skips that gate entirely (columns instead arrive via a
-  full-table rebuild, where there is nothing to backfill in place) falls back to a
-  standalone, independently-dispatched `UPDATE` for `PureBackfill` fields — the same
-  non-atomic two-step the general mechanism now avoids. This standalone path is also the
-  only one exercised on a non-transactional-DDL backend (`BackendCapabilities::
-  supports_transactional_ddl == false`): the migration's own statement group is no longer
-  all-or-nothing there either, so a mid-group failure can still leave an added-but-unbackfilled
-  column with an already-advanced schema snapshot. Neither case has a repair path today.
-  Tracked: `docs/plans/20260809-sensitivity-precision.md`.
-- **Keyed dirt-sets are a symbolic channel, not a materialised key-value set.** The typed edge
-  (`(delta shape × addressing × column set)`) is derived and acted on: `propagate`/
-  `required_inputs` route an edge with an admitted `Addressing::Keyed` component through the
-  keyed dirt-set channel instead of refusing (§"The graph layer" → "Keyed dirt-sets and the
-  narrowed refusal"), and the refusal narrows to the `General`-or-absent-verdict case. The
-  remaining gap: a keyed dirt-set record carries key columns and provenance, not the affected
-  key **values** — value-level affected-key discovery stays with the run-time mechanism
-  (§"Affected-key discovery"). Tracked by
+  dispatch** — that route is wired only inside the `grain: key` run branch, so a clockless
+  `KeyedUpsert` upstream instead maintains its downstream via the ordinary run route. Not a
+  soundness gap (the oracle still matches every run), only a missed incremental fold. Tracked:
   `docs/outcomes/20260809-output-delta-typing/outcome.md`.
-- **Plan-consumer gaps.** The horizon-clamped partition-local mutation corner is not reachable
-  from any real workspace (trigger construction emits `UpstreamMutation` only for unclocked
-  sources; clocked mutable-source scan-bound derivation is deferred); dispatch cannot
-  distinguish "a mutation genuinely happened" from re-derivation (change-aware triggering is
-  `--since-upstream`'s job); the `prefer` soft-bias ladder and `scan_bounds.on_violation: warn`
-  parse but are not consumed (every refusal is an Error); the cost model between two admissible
-  techniques is unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
+- **The definition-change backfill's atomicity is conditional**: a model whose
+  `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate entirely
+  falls back to a standalone `UPDATE` for `PureBackfill` fields — the same non-atomic two-step
+  the general mechanism avoids — and this is also the only path exercised on a
+  non-transactional-DDL backend (`supports_transactional_ddl == false`). Neither case has a
+  repair path today. Tracked: `docs/plans/20260809-sensitivity-precision.md`.
+- **Keyed dirt-sets carry key columns and provenance, not affected key values** —
+  value-level affected-key discovery stays with the run-time mechanism (§"Affected-key
+  discovery"). Tracked: `docs/outcomes/20260809-output-delta-typing/outcome.md`.
+- **Plan-consumer gaps**: the horizon-clamped partition-local mutation corner is unreachable from
+  any real workspace; dispatch cannot distinguish "a mutation genuinely happened" from
+  re-derivation; the `prefer` soft-bias ladder and `scan_bounds.on_violation: warn` parse but are
+  not consumed (every refusal is an Error); the cost model between two admissible techniques is
+  unbuilt; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Emission remainders.** The additive fold's MERGE-inside-ledger-transaction interior is
-  not observable at the statement-group seam, so its parity leg uses an idempotent fixture;
-  `Backend::delete_partitions` / `insert_overwrite` still hand-author SQL for the
-  production-unreachable `InsertOverwrite` strategy (dead code, allowlisted in the structural
-  no-authoring gate).
-- **Proof-layer residues.** All seven maintenance-plan proofs are derived
-  (`model_properties.md` §Surface), with these gaps surviving: a keyed-grain output poses no
-  partition-locality question, so a locality-admitted keyed model's clamps carry an assumed
-  (underived) write-footprint mirror into propagation. `smelt-runtime`'s maintenance driver is
-  the one production caller that derives a real `ColumnAdded` trigger (it alone has I/O access
-  to the deployed-schema snapshot the trigger diffs against, read once per run before the
-  schema-evolution gate); `smelt-db`'s own diagnostics/`smelt explain` path has no such access
-  and always derives an empty trigger set, so `MaintenanceSkeletonColumnAdded` is reachable
-  (`derive_model_maintenance_plan`'s own unit coverage) but not yet surfaced as an LSP/CLI
-  diagnostic ahead of a run, nor does a skeleton-position add block the run itself today — an
-  unadmitted `ColumnAdded` cell (skeleton add, or `UpstreamRederive` with no source to scan)
-  simply leaves the ordinary region-recompute technique as the run's only dispatch, same as
-  before this trigger existed. Column-group-scoped dirt
-  coarsens to whole-partition (safe, over-running); hour granularity is declared surface but
-  propagation is day-ordinal. The built grain-alignment check validates only the declaration
-  (widen-never-narrow, `MaintenanceGranularityMismatch`); graph edges still take the
-  declaration directly. Refs: `model_properties.md` §Known Divergences;
-  `docs/plans/20260808-derived-maintenance-proofs.md`.
-- **The ledger's warehouse substrate is DuckDB-only.** An additive-graded cell on another
-  backend fails loudly (`UnsupportedFeature`); a Spark-dialect ledger builder is unbuilt.
-- **Graph-layer gaps.** Bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
-  key-level dirt representation exists — intervals are the graph's only currency; the
+- **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is not
+  observable at the statement-group seam (its parity leg uses an idempotent fixture instead);
+  `Backend::delete_partitions`/`insert_overwrite` still hand-author SQL for the
+  production-unreachable `InsertOverwrite` strategy (dead code, allowlisted). Refs:
+  `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output poses
+  no partition-locality question, so a locality-admitted keyed model's clamps carry an assumed
+  (underived) write-footprint mirror into propagation; `MaintenanceSkeletonColumnAdded` is
+  reachable (unit coverage, and via `smelt-runtime`'s maintenance driver, the only caller with
+  I/O access to derive a real `ColumnAdded` trigger) but not yet surfaced as an LSP/CLI
+  diagnostic ahead of a run (`smelt-db`'s own diagnostics/`smelt explain` path always derives an
+  empty trigger set); column-group-scoped dirt coarsens to whole-partition (safe, over-running);
+  hour granularity is declared surface but propagation is day-ordinal; the built grain-alignment
+  check validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`),
+  and graph edges still take the declaration directly. Refs: `model_properties.md` §Known
+  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
+- **The ledger's warehouse substrate is DuckDB-only (Open Question)** — an additive-graded cell
+  on another backend fails loudly; whether a Spark-dialect ledger builder is worth building
+  before a real Spark-targeted incremental workload demands it is undecided.
+- **Graph-layer gaps** (§"The graph layer"): bare `grain: key` nodes with no admitted locality
+  refuse (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt;
+  no key-level dirt representation exists (intervals are the graph's only currency); the
   `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
   self-referential model and a bare-keyed model with readers each refuse the whole-workspace
-  graph; no `--select` scoping exists).
-- **Delta detection for `--since-upstream` is explicit-only in v1.** The runner supplies landed
+  graph); no `--select` scoping exists.
+- **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies landed
   deltas on the command line; no persisted per-source watermark or automatic diffing is consumed
-  by the graph layer (§Future Extensions).
-- **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key
-  footprint chaining across history;
-  `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
-- **No out-of-band-edit tripwire (Open Question).** An observed output delta is trusted because
-  the recording state is smelt-owned and written only by smelt's own conditional-write path; an
-  external mutation to a target table between runs is not detected. Whether a tripwire (e.g. a
-  cheap table digest checked at run start) is worth its cost is open (§"The graph layer").
-- **A proposed `on_column_add: backfill | leave_null | recompute` policy knob** is noted but not
-  surface.
+  (§Future Extensions).
+- **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key footprint
+  chaining across history; `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md`
+  §8).
+- **No out-of-band-edit tripwire (Open Question)** — an external mutation to a target table
+  between runs is not detected; whether a digest tripwire is worth its cost is open.
+- **A proposed `on_column_add: backfill | leave_null | recompute` policy knob (Open Question)** is
+  noted but not surfaced.
 - **The derived model-wide horizon is under construction**, as is the data-quality check for the
   model-author lateness-flag pattern. Tracked: `docs/plans/20260704-model-updates.md`.
-- **Locality machinery gaps.** The per-input scope-map explain surface is specified but
-  unbuilt. Route 2's declared-FD sub-route is unreachable for an arbitrary non-clock-derived
-  dimension column (the NOT-NULL derivation recognises only driving-clock-derived shapes), so a
-  runnable end-to-end route-2 fixture is still missing — the once-write column family it needs
-  now exists, but that NOT-NULL derivation gap remains
-  (`docs/plans/20260705-keyed-collapse.md`). Route 2's `IN (SELECT DISTINCT …)` slice predicate
+- **Locality machinery gaps**: the per-input scope-map explain surface is specified but unbuilt;
+  Route 2's declared-FD sub-route is unreachable for an arbitrary non-clock-derived dimension
+  column, so no runnable end-to-end route-2 fixture exists yet
+  (`docs/plans/20260705-keyed-collapse.md`); Route 2's `IN (SELECT DISTINCT …)` slice predicate
   is unexercised against a real backend due to a DuckDB MERGE binder limitation (confirmed
-  v1.4.4/v1.5.4) — merges run unpruned; lifting needs a rewrite or a fixed DuckDB
-  (`docs/plans/20260715-composed-axes-conditional-maintenance.md`). Plan derivation admits
-  routes only where it can determine the driving source's granularity (runtime always can).
-  Declared-vs-derived recurrence precedence (derived first) and order-independent key-set
-  comparison are implementation choices the spec text underdetermines.
-- **`grain: key_per_partition` derives no plan.** The value parses and validates but refuses at
-  plan derivation (`MaintenanceUnsupportedGrain`); trajectory support (locality, emitted plan,
-  graph admission) tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Conditional-maintenance gaps.** `smelt explain --show-sql` renders the unconditional
-  matched arm, never the suppressed form a live run executes; the region DELETE+INSERT family
-  has no conditional variant; the whole-row (keyless) staged-candidate realisation does not
-  exist; no `write:` pin selects between keyed MERGE and staged-candidate; delta-restriction
-  admission does not yet consume an external `mutable_snapshot` source's fingerprint-sidecar
-  delta as a driving-source delta; non-DuckDB targets keep the widened-scan recompute. Refs:
-  `docs/research/20260715-conditional-maintenance-without-cdf.md`;
+  v1.4.4/v1.5.4); plan derivation admits routes only where it can determine the driving source's
+  granularity; declared-vs-derived recurrence precedence and order-independent key-set
+  comparison are implementation choices the spec text underdetermines. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Override-ladder reach.** The keyed-fold suppression consumer honours `Suppressed`
-  unconditionally — the first-build-vs-steady-state rule doesn't reach it; no real fixture
-  derives a column-scoped/keyed-fold cell under a first-build/backfill trigger, so that branch
-  is proven only at resolver level; `smelt bakeoff` measures technique-family cost only, not
-  the write-suppression dimension. Open: whether a future cost model needs region-level
-  change-ratio statistics from prior observed deltas.
-- **docs-site coverage of the plan's CLI surface is partial**; the residue is not enumerated —
-  audit and either document or drop this entry.
-- **A group merged across two mutable inputs has no group-merge-provenance policy.** A
-  partition-aligned multi-input mutable merge is admitted like a single-input case; whether
-  provenance spanning multiple mutation-sensitive inputs should force region recompute is
-  undecided.
-- **`change_feed` sources never get an `UpstreamMutation` cell** (the trigger builder checks the
-  literal `mutable_snapshot` declaration), and even where the posture is threaded through, only
-  full-input re-derivation is admitted — no live fold machinery consumes a change feed's delta
-  shape.
+- **`grain: key_per_partition` derives no plan** — it parses and validates but refuses at plan
+  derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Conditional-maintenance gaps**: `smelt explain --show-sql` renders the unconditional matched
+  arm, never the suppressed form a live run executes; the region DELETE+INSERT family has no
+  conditional variant; the whole-row (keyless) staged-candidate realisation does not exist; no
+  `write:` pin selects between keyed MERGE and staged-candidate; delta-restriction admission
+  doesn't yet consume an external `mutable_snapshot` source's fingerprint-sidecar delta;
+  non-DuckDB targets keep the widened-scan recompute. Refs:
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Override-ladder reach (Open Question)**: the keyed-fold suppression consumer honours
+  `Suppressed` unconditionally — the first-build-vs-steady-state rule doesn't reach it; no real
+  fixture derives a column-scoped/keyed-fold cell under a first-build/backfill trigger, so that
+  branch is proven only at resolver level; `smelt bakeoff` measures technique-family cost only,
+  not the write-suppression dimension; whether a
+  future cost model needs region-level change-ratio statistics from prior observed deltas is open.
+- **docs-site coverage of the plan's CLI surface is partial (Open Question)** — the residue is
+  not enumerated; audit and either document or drop this entry.
+- **A group merged across two mutable inputs has no group-merge-provenance policy (Open Question)**
+  — whether provenance spanning multiple mutation-sensitive inputs should force region recompute
+  is undecided.
+- **`change_feed` sources never get an `UpstreamMutation` cell (Open Question)**, and even where
+  the posture is threaded through, only full-input re-derivation is admitted — no live fold
+  machinery consumes a change feed's delta shape.
 - **`INTERSECT`/`EXCEPT` are unclassified set operations**: they collapse to whole-model
-  mutation-sensitivity, so every admitted cell is region recompute. A future distribution proof
+  mutation-sensitivity, so every admitted cell is region recompute; a future distribution proof
   needs per-arm-cardinality reasoning. Cross-ref `model_properties.md` §Known Divergences.
 
 ### The partition grain
 
-- **A row-shaped model's MERGE-dedup key has no `.sql` frontmatter home.** Declaring top-level
-  `unique_key:` makes an output key-shaped, which a row-shaped body cannot occupy
-  (`KeyedRequiresGroupBy`); the per-row identity for a column-scoped MERGE is declared today
-  only via the `smelt.yml` override `models.<name>.batched.unique_key`. Whether the concept
-  deserves its own frontmatter spelling is open:
+- **A row-shaped model's MERGE-dedup key has no `.sql` frontmatter home** — the per-row identity
+  for a column-scoped MERGE is declared today only via the `smelt.yml` override
+  `models.<name>.batched.unique_key`; a top-level `unique_key:` would make the output key-shaped,
+  which a row-shaped body can't occupy. Tracked:
   `docs/plans/20260719-prod-w8-composed-axes-followups.md`.
-- **Two spellings of the plausible-contract mechanism coexist.** `.sql` frontmatter uses
-  `columns.<c>.contract` only; the `smelt.yml` override's `batched.nondeterministic_columns`
-  still parses as a separate spelling (`smelt-yml.md` §"Layer split").
+- **Two spellings of the plausible-contract mechanism coexist** — `.sql` frontmatter's
+  `columns.<c>.contract` and the `smelt.yml` override's `batched.nondeterministic_columns`
+  (`smelt-yml.md` §"Layer split").
 - **One classification call site reads the outer SQL body**: the bound-`NotDerivable` refusal
   gate classifies on the outer `model.sql`, so a lookback living only inside a function body
   with no outer filter would diverge (no such case exists in the repo). Tracked:
   `docs/plans/20260530-thread-fn-registry-classification.md`.
 - **The window-function batch-safety check runs on unexpanded outer SQL** — an `OVER` inside a
-  `smelt.define` body is invisible to it. Same tracking plan.
-- **Per-source clamp observability is partly emitted.** `smelt explain --json` reports the
-  offsets but does not resolve the run-relative scan window when a run window is supplied; the
-  editor-hover readout is unimplemented. Specified ahead of a plan.
+  `smelt.define` body is invisible to it. Tracked:
+  `docs/plans/20260530-thread-fn-registry-classification.md`.
+- **Per-source clamp observability is partly emitted (Open Question)** — `smelt explain --json`
+  doesn't resolve the run-relative scan window when a run window is supplied; the editor-hover
+  readout is unimplemented; specified ahead of a tracking plan.
 - **Per-column `data_latency` is unimplemented**; the two interim mitigations
   (§"First-run and backfill") are the only options.
-- **Non-deterministic row-set-membership or grouping is out of scope** — always rejected
-  regardless of column contract; admitting it needs a frozen-per-window-membership design
+- **Non-deterministic row-set-membership or grouping is out of scope** — always rejected;
+  admitting it needs a frozen-per-window-membership design
   (`docs/research/20260703-model-updates.md` §9.1a).
 - **CTE-only `event_time_column` references are not yet detected**: a CTE alias that fails to
   project it escapes the outer-visibility check and fails at execution. Tracked:
   `docs/plans/20260616-smelt-feedback-fixes.md`.
-- **Schema evolution is unspecified** — a `partition_column` rename or output schema change has
-  no defined handling.
-- **The `smelt.metric()` interaction is unspecified** — metric expansion × time-filter injection
-  for partition-grain models consuming metrics.
+- **Schema evolution is unspecified (Open Question)** — a `partition_column` rename or output
+  schema change has no defined handling.
+- **The `smelt.metric()` interaction is unspecified (Open Question)** — metric expansion ×
+  time-filter injection for partition-grain models consuming metrics.
 - **Per-`ModelDef` overrides for generator-emitted models are not part of the closed field set
   in v1.** Tracked: `docs/plans/20260509-meta-language-overall.md`.
-- **`g_run >= g_part` auto-coarsening is not implemented** — sub-`g_part` run windows
-  hard-reject (fail-closed chosen first); auto-coarsening or reject-with-suggestion is
-  deferred.
-- **Monotone-integer `partition_column` has no end-to-end run.** The trace and bound derivation
+- **`g_run >= g_part` auto-coarsening is not implemented (Open Question)** — sub-`g_part` run
+  windows hard-reject; whether to auto-coarsen or reject-with-suggestion instead is undecided.
+- **Monotone-integer `partition_column` has no end-to-end run** — the trace and bound derivation
   admit it, but run windows, backfill chunking, scan-filter injection, and the explain clamp
   rendering are date-typed throughout. Tracked:
   `docs/plans/20260704-model-updates-l4-batched.md`.
@@ -2289,101 +2217,74 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 ### The key grain
 
 - **A window-forward keyed run with no event-time window silently full-refreshes instead of
-  refusing.** §Surface CLI requires both `--event-time-start` and `--event-time-end` for a
-  window-forward keyed model; the runtime's no-window arm
-  (`crates/smelt-runtime/src/execute.rs`, the keyed branch's fallback case) instead drops the
-  target and recreates it from the whole-source SELECT. The end state is the full-refresh
-  oracle, so nothing is silently *wrong*, but a run the spec says must refuse instead rebuilds
-  the table — including the case where only one of the two flags is supplied. No test asserts
-  the refusal, and the user documentation currently describes the fallback rather than the
-  required-flags rule.
-- **The once-write classifier has no nullability route around the fallback case.** The
-  fallback-bearing and multi-candidate spellings admit onto decomposed `(value, written)` state
-  (§"Decomposed state (rung 2) in keyed models"), but the only route to that state is the
-  FD-backed proof; the NOT-NULL derivation
-  (`crates/smelt-logical/src/analysis/not_null.rs`) proves not-null only for a partition /
-  driving-clock-derived column, so establishing that a fallback can never fire needs a declared
-  functional dependency, not a static not-null proof. The key-derived route still requires a bare
-  reference to a `unique_key` column, not an arbitrary key-derived *expression*. The admission
-  also reads whole-scope fan-out/set-operation facts rather than a per-column join trace, so any
-  fan-out or undiscriminated set operation anywhere in the model's scope refuses every candidate,
-  not only the one actually reached through it. Decision record:
+  refusing** — §Surface CLI requires both `--event-time-start` and `--event-time-end`; the
+  runtime's no-window arm instead drops and recreates the target from the whole-source SELECT
+  (including when only one flag is supplied). The end state matches the full-refresh oracle, so
+  nothing is silently wrong, but no test asserts the refusal, and user docs describe the fallback
+  rather than the required-flags rule.
+- **The once-write classifier has no nullability route around the fallback case** — the only
+  route to decomposed `(value, written)` state is the FD-backed proof, since the NOT-NULL
+  derivation proves not-null only for a partition/driving-clock-derived column; the key-derived
+  route still requires a bare `unique_key` column reference, not an arbitrary key-derived
+  *expression*; admission reads whole-scope fan-out/set-operation facts, so any fan-out or
+  undiscriminated set operation anywhere in scope refuses every candidate. Decision record:
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **A re-run-tolerant keyed model keeps no ledger at all.** §"The transactional frontier write (merge ledger)"
-  gives every window-forward model a ledger, refusal-bearing for additive folds and
-  detection/bookkeeping-bearing for the idempotent families; the runtime only ever creates the
-  ledger table for an additive-graded model (`Grade::Additive`), so a fully idempotent model has
-  no record of which windows it merged — reprocessing detection and `--auto` bookkeeping have no
-  substrate there. Nothing is unsound (re-merging those families converges), but the `--auto`
-  staleness path cannot consult a ledger that was never written.
-- **Snapshot-reconcile admits at most one source of any posture in the FROM clause** when zero
-  are clocked — a join of two or more unclocked candidates refuses
-  `KeyedSnapshotPostureUnsupported` rather than picking one. Widening this to a proven
-  multi-source snapshot scan is unbuilt.
-- **`KeyedRetractableContribution` has no implementation.** The code is specified (§Surface
-  Diagnostics, §"Enrichment joins") but no classifier, diagnostic variant, or test produces it,
-  so a retractable enrichment contribution is not refused on those grounds today.
-- **`safety_overrides:` on a key-addressed model is not a hard error.** §Surface "Key-grain
-  declaration" makes it one; frontmatter validation only checks the double-declaration case and
-  never conditions on the derived grain, so the block parses on a keyed model and is ignored.
-- **The reconciliation ledger's fold is transactional on DuckDB only.** §"The transactional
-  frontier write (merge ledger)" requires the ledger write to share the merge's backend
-  transaction; the default `Backend::fold_ledger_delta` is an explicitly best-effort
-  check-then-act across separate statements, and only the DuckDB backend overrides it with a
-  real transaction (the same DuckDB-only substrate the ledger DDL divergence above names).
-- **`smelt explain` prints neither the per-column guarantee ledger (§Surface CLI) nor the
-  derivable forward reach (§"No write-eligibility clamp")** — the cell/addressing/clamp/locality
-  and edge sections are the whole of the rendered plan today.
-- **Key temporal locality route 2 admits only a declared functional dependency.** §"Key temporal
-  locality" gives route 2 a key-derived-expression sub-route alongside the declared FD; the
-  locality derivation deliberately never consults the derivation's no-declaration branch, so a
-  provably key-derived partition projection still refuses without the declaration.
-- **The derived execution postures are internal, and one of the three is not derived at all.**
-  Re-run tolerance reaches a run only as the reconciliation ledger's grade (`Grade::Idempotent`
-  for every idempotent family, `Grade::Additive` for a model carrying an additive-fold column),
-  and order-independence is not derived as a named verdict anywhere: every window-forward run
-  applies its windows sequentially in temporal order regardless of family, which is safe but
-  forgoes the parallel / out-of-order application §"Derived execution postures" admits. Neither
-  the derived run shape nor any of the three postures is printed by `smelt explain`, which
-  §"Derived execution postures" states as their surface.
-- **The generative conformance pool cannot stage NULL payloads.** The generated row type's
-  payload field (`GenRow::val`, `crates/smelt-maintenance-testkit/src/schedule_gen.rs`) is a
-  non-nullable `i64` threaded through the schedule generators, the oracle materializer, the feed
-  replay, and the Spark twin's readers, so the once-write family's NULL direction — a key whose
-  first window carries only a NULL payload and whose real value arrives later — is covered by a
-  targeted case in `crates/smelt-cli/tests/maintenance_conformance/gate.rs` rather than by the
-  generated pool that proves every other keyed family.
-- **Locality open questions**: whether a derived recurrence bound can license slice pruning
-  under snapshot-reconcile (v1: window-forward only); relaxing the granularity-equality
-  precondition (a daily driver with weekly output partitions); slice-scoped deletion
-  (`NOT MATCHED BY SOURCE` over a provably complete slice) — interacts with the key-deletion
-  question below.
-- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped.** Each
-  family is reachable only through its hand-written SQL spelling (`MAX_BY`/`MIN_BY`,
-  `COALESCE`, `ANY_VALUE`), which is what the pattern functions would expand to. Whether they
-  ship as built-ins or as a shipped template file of `smelt.define`s is an open decision, and
-  the canonical once-write spelling is fixed alongside it. Tracked:
+- **A re-run-tolerant keyed model keeps no ledger at all unless additive-graded (Open Question)**
+  — the runtime only creates the ledger table for `Grade::Additive`, so a fully idempotent model
+  has no record of which windows it merged; nothing is unsound (re-merging converges), but
+  `--auto` staleness can't consult a ledger that was never written.
+- **Snapshot-reconcile admits at most one unclocked source in the FROM clause (Open Question)** —
+  a join of two or more unclocked candidates refuses `KeyedSnapshotPostureUnsupported` rather
+  than picking one; widening to a proven multi-source scan is unbuilt.
+- **`KeyedRetractableContribution` has no implementation (Open Question)** — the code is
+  specified but no classifier, diagnostic variant, or test produces it.
+- **`safety_overrides:` on a key-addressed model is not a hard error** — §Surface makes it one,
+  but frontmatter validation only checks the double-declaration case, so the block parses on a
+  keyed model and is ignored.
+- **The reconciliation ledger's fold is transactional on DuckDB only (Open Question)** — the
+  default `Backend::fold_ledger_delta` is best-effort check-then-act across separate statements;
+  only the DuckDB backend overrides it with a real transaction.
+- **`smelt explain` prints neither the per-column guarantee ledger nor the derivable forward
+  reach (Open Question)** — the cell/addressing/clamp/locality and edge sections are the whole
+  of the rendered plan today.
+- **Key temporal locality route 2 admits only a declared functional dependency (Open Question)**
+  — the key-derived-expression sub-route is never consulted, so a provably key-derived partition
+  projection still refuses without the declaration.
+- **The derived execution postures are internal, and one of the three is not derived at all** —
+  order-independence is not derived as a named verdict anywhere: every window-forward run applies
+  its windows sequentially regardless of family, forgoing the parallel/out-of-order application
+  §"Derived execution postures" admits. Neither the derived run shape nor any posture is printed
+  by `smelt explain`, which names that as their surface.
+- **The generative conformance pool cannot stage NULL payloads (Open Question)** — the generated
+  row type's payload field (`GenRow::val`) is a non-nullable `i64`, so the once-write family's
+  NULL direction (a key whose first window carries only a NULL payload) is covered by one
+  targeted test case rather than by the generated pool that proves every other keyed family.
+- **Locality open questions (Open Question)**: whether a derived recurrence bound can license
+  slice pruning under snapshot-reconcile (v1: window-forward only); relaxing the
+  granularity-equality precondition (a daily driver with weekly output partitions); slice-scoped
+  deletion — interacts with the key-deletion question below.
+- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped** — each
+  family is reachable only through its hand-written SQL spelling; whether they ship as built-ins
+  or a shipped `smelt.define` template file is an open decision. Tracked:
   `docs/plans/20260705-keyed-collapse.md`.
-- **Driver granularity is `day`/`week` only** — inherited by every consumer of the shared
-  driver; widening is driver work.
-- **`--auto` staleness fidelity for all-invertible models is conservative in v1**; "exactly the
-  changed windows" needs the group rung's delta-history mechanism.
-- **Self-referential keyed models are rejected** (`state += delta − decay`); admitting them
-  needs an explicit input/state distinction design.
-- **Run-pinning alignment is deferred**: `NOW()`/`CURRENT_*` are rejected outright in keyed
-  models rather than compile-time-pinned as the partition grain does.
-- **Key deletion is unresolved beyond retention.** Snapshot-reconcile retains a key present in
-  the target but absent from the incoming scan, unchanged and forever (§"The two run shapes"),
-  and no explicit mechanism deletes a departed key; window-forward has no delete signal short of
-  a change feed with delete events. Tombstones, opt-in hard delete, and the observer contract
-  for the refused matrix cells are deferred
-  (`docs/research/20260705-keyed-collapse-application.md` §5).
-- **Ladder rungs 3–4 remain specified ahead of this profile's use of them.** Group-rung
-  retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the
-  rung-2 work above; rung 3 additionally depends on the change-feed consumption design — no
-  live fold machinery consumes a change feed's delta shape today. Deferred by
+- **Driver granularity is `day`/`week` only (Open Question)** — inherited by every consumer of
+  the shared driver; widening is driver work.
+- **`--auto` staleness fidelity for all-invertible models is conservative in v1 (Open Question)**;
+  "exactly the changed windows" needs the group rung's delta-history mechanism.
+- **Self-referential keyed models are rejected (Open Question)** (`state += delta − decay`);
+  admitting them needs an explicit input/state distinction design.
+- **Run-pinning alignment is deferred (Open Question)**: `NOW()`/`CURRENT_*` are rejected
+  outright in keyed models rather than compile-time-pinned as the partition grain does.
+- **Key deletion is unresolved beyond retention** — snapshot-reconcile retains a key present in
+  the target but absent from the incoming scan, unchanged and forever, and no explicit mechanism
+  deletes a departed key; window-forward has no delete signal short of a change feed with delete
+  events. Tombstones, opt-in hard delete, and the observer contract for the refused matrix cells
+  are deferred (`docs/research/20260705-keyed-collapse-application.md` §5).
+- **Ladder rungs 3–4 remain specified ahead of this profile's use of them** — group-rung
+  retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the rung-2
+  work above; rung 3 additionally depends on the change-feed consumption design. Deferred by
   `docs/plans/20260809-keyed-frontier.md` §Scope,
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md` §"Out of scope".
 
@@ -2433,6 +2334,7 @@ its own spec diff and plan.
   prefix, not a re-runnable refresh) and admit those cells under it, rather than smuggling them
   under the executable-oracle invariant. Open: the formal statement, the opt-in surface, and
   what a conformance oracle even is for a non-replayable history.
+
 
 ## References
 
