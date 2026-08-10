@@ -899,6 +899,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         },
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
+        key_scope: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -991,6 +992,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         },
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
+        key_scope: None,
     };
     let sibling_cell = PlanCell {
         group: "{event_type, user_id}".to_string(),
@@ -1011,6 +1013,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         },
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
+        key_scope: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -1187,6 +1190,7 @@ mod write_variant_explain_surface {
             row_identity: key_identity(),
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
+            key_scope: None,
         }
     }
 

@@ -54,7 +54,7 @@ the addressing of one delta type, not the universal currency.
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
 | 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | done |
 | 5 | Keyed dirt-set propagation for admitted shapes | done |
-| 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | planned |
+| 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | pending |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | pending |
 | 9 | Surface: explain edge rendering, docs-site update | pending |
@@ -157,6 +157,22 @@ the addressing of one delta type, not the universal currency.
   of an additive keyed channel rather than a sum-typed rewrite), and the technique reused is the
   existing `Technique::PerGroupRecompute` — the repair family already means "recompute and write
   only the affected key groups", which is what folding an upstream upsert delta is.
+
+- 2026-08-10 — Phase 6 implemented: `append_model_edge_cells` admits a key-addressed
+  `PerGroupRecompute` cell (`admit_key_addressed_recompute`, reusing `derive_affected_keys`) for
+  a `KeyedUpsert`-shaped edge the existing clock-based route can't serve — a clockless upstream,
+  or a keyed-grain downstream — narrowing `ReachNotDerivable` rather than replacing it. The route
+  is taken only when the clock-based route has nothing to admit anyway (not unconditionally for
+  every `KeyedUpsert` edge): an unconditional rule broke every pre-existing clocked fixture, since
+  those downstreams never declare a `unique_key`/provable grain the new route needs but the old
+  one didn't. In-phase bug fix (blocking this phase's own real-graph test):
+  `analysis::fingerprint::relation_matches_source` only stripped a `sources.` breadcrumb, never
+  `models.`, so affected-key discovery over any `smelt.models.<addr>`-style model ref (a model
+  living directly under `models/`, no subdirectory) always resolved to "touches no columns" —
+  fixed to strip either breadcrumb (provably additive, full suite green after). No phase-table
+  reshape — phase 6's scope matched the plan; `smelt-db`'s `smelt explain` surface and phase 7's
+  lowering are unaffected and remain their own rows' scope (see `phases/06-summary.md` "For the
+  next planner").
 
 ## Blocked
 

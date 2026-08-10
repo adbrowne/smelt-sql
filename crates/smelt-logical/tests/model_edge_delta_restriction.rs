@@ -40,6 +40,7 @@ fn fact_edge() -> ModelEdge {
         clock_col: Some("event_date".to_string()),
         clock_col_aliases: vec![],
         unique_key: vec![],
+        output_shape: None,
     }
 }
 
@@ -49,6 +50,7 @@ fn dim_edge_with_key() -> ModelEdge {
         clock_col: Some("event_date".to_string()),
         clock_col_aliases: vec![],
         unique_key: vec!["id".to_string()],
+        output_shape: None,
     }
 }
 
@@ -58,6 +60,7 @@ fn dim_edge_without_key() -> ModelEdge {
         clock_col: Some("event_date".to_string()),
         clock_col_aliases: vec![],
         unique_key: vec![],
+        output_shape: None,
     }
 }
 

@@ -325,6 +325,28 @@ pub struct PlanCell {
     /// upstream maintained models. No consumer reads this yet (that is
     /// F3's sidecar-build/diff-query scope).
     pub fingerprint_projections: BTreeMap<String, FingerprintProjection>,
+    /// The key-addressed read restriction (`incremental_models.md`
+    /// §"Upstream model edges"), when this cell's technique is
+    /// [`Technique::PerGroupRecompute`] over a `KeyedUpsert`-shaped upstream
+    /// model edge rather than a partition-interval scan clamp. Additive
+    /// alongside `scans` (empty for a key-addressed cell — there is no
+    /// partition axis to clamp), the same additive-channel shape phase 5's
+    /// keyed dirt-set took over `Propagation`'s interval maps
+    /// (`docs/outcomes/20260809-output-delta-typing/outcome.md` 2026-08-10
+    /// decision log). `None` for every other cell — unaffected.
+    pub key_scope: Option<KeyScope>,
+}
+
+/// A key-addressed read restriction: recompute only the rows identified by
+/// `keys` (the upstream's own change-feed identity columns), sourced from
+/// `from` (the upstream model edge's name). Carried on [`PlanCell`] rather
+/// than folded into [`ScanClamp`] — a key set is not an interval, and the
+/// existing partition-locality proof (`derive::project_source_link`) is not
+/// posed for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyScope {
+    pub keys: Vec<String>,
+    pub from: String,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting

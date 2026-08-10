@@ -1377,6 +1377,12 @@ fn ref_model_edge(
         clock_col,
         clock_col_aliases,
         unique_key,
+        // `smelt explain`'s workspace-wide output-delta fold is not wired
+        // into this Salsa query yet (`docs/outcomes/20260809-output-delta-
+        // typing/outcome.md` phase 9's surface scope) — this stays clock-only
+        // admission until then, unaffected by this phase's plan-derivation
+        // change (exercised directly via `smelt-logical`'s own tests instead).
+        output_shape: None,
     })
 }
 

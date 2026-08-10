@@ -33,13 +33,14 @@ use std::collections::BTreeSet;
 
 use super::derive::{project_source_link, LocalityInputs, SourceLink};
 use super::{
-    Corner, MutationProfile, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp,
-    SourceFacts, Technique, Trigger,
+    Corner, KeyScope, MutationProfile, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict,
+    ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::affected_keys::{
     derive_affected_keys, AffectedKeyContext, AffectedKeys, DeltaShape,
 };
 use crate::analysis::fingerprint::{fingerprint_projection, Projection};
+use crate::analysis::join_shape::JoinContext;
 
 /// The admitted per-group repair verdict: the group key to recompute over
 /// and the bounded per-group read slice.
@@ -120,6 +121,53 @@ pub fn admit_per_group_recompute(
     })
 }
 
+/// Admit (or fail-closed refuse) the key-addressed sibling of
+/// [`admit_per_group_recompute`] for an upstream **model edge** whose own
+/// derived output-delta shape is `KeyedUpsert` (`docs/specs/
+/// incremental_models.md` §"Upstream model edges"): the slice is the
+/// upstream's own key set rather than a [`ScanClamp`] — there is no
+/// partition axis to bound a read against on either side of this fold, so
+/// obligation 4 (bounded read footprint) is not posed here at all, only
+/// obligations 6/7 (derivable grain, affected-key discovery), reusing
+/// [`derive_affected_keys`] exactly as [`admit_per_group_recompute`] does.
+/// `edge_keys` is the upstream's own change-feed identity
+/// (`OutputDelta::KeyedUpsert`'s `keys`, verbatim) — the [`DeltaShape`]'s
+/// row shape this proof projects through `sql`'s own grain. Fail-closed:
+/// when `sql` cannot resolve its own grain through `edge_keys` (the
+/// downstream does not carry the upstream's key columns, or has no
+/// derivable grain of its own at all), this refuses by name rather than
+/// admitting an unbounded key scope.
+pub fn admit_key_addressed_recompute(
+    sql: &str,
+    declared_unique_key: &[String],
+    edge_name: &str,
+    edge_keys: &[String],
+    join: &JoinContext,
+) -> Result<KeyScope, RepairRefusal> {
+    let affected_ctx = AffectedKeyContext {
+        unique_key: declared_unique_key.to_vec(),
+        join: join.clone(),
+    };
+    let delta = DeltaShape {
+        source: edge_name.to_string(),
+        columns: edge_keys.iter().cloned().collect(),
+        keyed: true,
+    };
+    let keys = match derive_affected_keys(&delta, sql, &affected_ctx) {
+        AffectedKeys::Keys { cols } => cols,
+        AffectedKeys::NotDiscoverable { reason } => {
+            return Err(RepairRefusal::KeysNotDiscoverable {
+                source: edge_name.to_string(),
+                why: reason,
+            });
+        }
+    };
+    Ok(KeyScope {
+        keys,
+        from: edge_name.to_string(),
+    })
+}
+
 /// Derive the [`DeltaShape`] a `MutationProfile::MutableSnapshot` source's
 /// delta carries: it is a whole-row snapshot diff, so — absent a physical
 /// schema at this layer — the delta is taken to carry every column of
@@ -167,6 +215,7 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
         },
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
+        key_scope: None,
     }
 }
 

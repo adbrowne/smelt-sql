@@ -4163,6 +4163,11 @@ fn model_edges_for(
             clock_col,
             clock_col_aliases,
             unique_key,
+            // Lowering/execution of a key-addressed cell is phase 7's scope
+            // (`docs/outcomes/20260809-output-delta-typing/outcome.md`) —
+            // this driver-facing edge list stays clock-only admission until
+            // then, unaffected by this phase's plan-derivation-only change.
+            output_shape: None,
         });
     }
     edges

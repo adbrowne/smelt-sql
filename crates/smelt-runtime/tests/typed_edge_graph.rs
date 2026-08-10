@@ -227,3 +227,65 @@ fn keyed_upstream_model_propagates_on_the_real_graph() {
     deltas.insert("agg".to_string(), vec![DayInterval::new(1, 2)]);
     propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
 }
+
+/// Phase 6 (`docs/outcomes/20260809-output-delta-typing/phases/06-plan.md`):
+/// the natural-fixture sibling of the test above, with the synthetic
+/// `timeseries:` block on `agg` **removed** — before this phase, a clockless
+/// upstream's model edge was an unconditional `MaintenanceReachNotDerivable`
+/// refusal (`append_model_edge_cells`'s clock-only admission), so `agg` never
+/// reached the real graph as a walkable edge at all. A `KeyedUpsert`-shaped
+/// upstream now admits a key-addressed edge regardless of a declared clock.
+#[test]
+fn clockless_keyed_upstream_is_walkable_on_the_real_graph() {
+    use smelt_logical::maintenance::propagate::propagate;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect("build graph");
+    let agg_edge = edges
+        .iter()
+        .find(|e| e.upstream == "agg")
+        .unwrap_or_else(|| panic!("expected an edge with agg as upstream, got {edges:?}"));
+    assert!(
+        agg_edge
+            .components
+            .iter()
+            .any(|c| matches!(&c.addressing, Addressing::Keyed { .. })),
+        "expected a Keyed component from the clockless keyed-upsert 'agg' model, got {:?}",
+        agg_edge.components
+    );
+
+    let mut deltas = std::collections::BTreeMap::new();
+    deltas.insert("agg".to_string(), vec![DayInterval::new(1, 2)]);
+    propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
+}

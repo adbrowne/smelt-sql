@@ -1124,6 +1124,22 @@ cell (there is no incremental delta to receive); it participates in mutation/bac
 only. For forward propagation, `--source` accepts either a declared source or an upstream
 maintained model; a model's landed delta is the output window a completed run wrote for it.
 
+An upstream maintained model whose own derived output-delta shape (§"The graph layer" → "Typed
+edges") is `KeyedUpsert` contributes a **key-addressed** edge instead: no `timeseries:` clock is
+required on the upstream at all, and a keyed-grain downstream (one with no
+`output_partition_col`) receives such a cell too — the partition axis the clock-based route
+clamps against does not exist on either side of a key-addressed fold. The cell's read
+restriction is the affected key set the upstream's delta names (§"Affected-key discovery"),
+recomputing and writing only those key groups (`Technique::PerGroupRecompute`, §"The repair
+family" — folding an upstream upsert delta is exactly "recompute and write only the affected key
+groups", the repair family's own definition). `MaintenanceReachNotDerivable` narrows
+accordingly: it now fires only for a clockless upstream whose derived shape is *not*
+key-addressed (`AppendOnlyWindow` or `General`) — a clockless `KeyedUpsert` upstream is admitted
+via the key-addressed route rather than refused. The fail-closed leg is explicit: when the
+downstream's own SQL does not carry the upstream's key columns (they cannot be resolved through
+the downstream's own grain), the edge is refused by name
+(`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a silent whole-table cell.
+
 **Forward propagation — what must run.** Runs are driven by **what landed**, per source, as
 partition intervals on that source's own axis; a cron tick is only the poller. Processing nodes
 in topological order, each node's merged dirt reflects through each outgoing edge — an upstream
@@ -2339,6 +2355,11 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   propagation and `smelt explain`, but the propagated region is materialized by the ordinary
   incremental run loop rather than a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
+- **A key-addressed model-edge cell is derived and rendered but not yet executed.** Plan
+  derivation admits the cell (§"Upstream model edges") and the propagation graph carries its
+  edge, but no lowering path (statement emission, driver dispatch) consumes it yet — a run
+  reaching such a cell has nothing to execute. Tracked:
+  `docs/outcomes/20260809-output-delta-typing/outcome.md`.
 - **The definition-change backfill's atomicity is conditional on the schema-evolution gate
   actually running this run.** The fold described in §"The definition-change trigger" only
   happens inside `schema_evolution`'s migration call; a model whose `schema_evolution:

@@ -43,6 +43,7 @@ fn admitted_column_merge_plan(source: &str) -> MaintenancePlan {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }],
         refusals: vec![],
         key_locality: None,

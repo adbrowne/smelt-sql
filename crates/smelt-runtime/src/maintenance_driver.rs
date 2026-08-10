@@ -3902,6 +3902,7 @@ mod tests {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }
     }
 
@@ -3925,6 +3926,7 @@ mod tests {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }
     }
 

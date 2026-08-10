@@ -155,10 +155,22 @@ impl Transfer for FingerprintTransfer<'_> {
 }
 
 /// Whether `relation`'s [`super::walk`] source name resolves to `source_ref`
-/// — the same bare/`sources.`-prefixed comparison
-/// `skeleton_closure::find_enrichment_join` uses.
+/// — the same bare/`sources.`- or `models.`-prefixed comparison
+/// `skeleton_closure::find_enrichment_join` uses. Both breadcrumbs are
+/// stripped (never just `sources.`): a `smelt.models.<addr>` ref's own
+/// segments carry the `models` keyword literally
+/// (`smelt-runtime::propagation::bare_name`'s doc comment), and a caller
+/// resolving a model-edge's affected-key/fingerprint provenance
+/// (`analysis::affected_keys::derive_affected_keys`) hands `source_ref` the
+/// SAME breadcrumb-stripped bare address `ModelEdge::name` already carries —
+/// widening this match to strip `models.` too never narrows an existing
+/// `sources.`-prefixed match (a relation can only carry one leading
+/// breadcrumb), so every pre-existing call site is unaffected.
 pub(crate) fn relation_matches_source(relation: &str, source_ref: &str) -> bool {
-    let bare = relation.strip_prefix("sources.").unwrap_or(relation);
+    let bare = relation
+        .strip_prefix("sources.")
+        .or_else(|| relation.strip_prefix("models."))
+        .unwrap_or(relation);
     bare.eq_ignore_ascii_case(source_ref) || relation.eq_ignore_ascii_case(source_ref)
 }
 

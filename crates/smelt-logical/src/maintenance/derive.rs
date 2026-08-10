@@ -29,6 +29,7 @@ use crate::analysis::input_delta::{
 use crate::analysis::join_shape::JoinContext;
 use crate::analysis::locality_projection::{locality_verdict, LocalityVerdict};
 use crate::analysis::model_diff::ColumnDef;
+use crate::analysis::output_delta::OutputDelta;
 use crate::analysis::source_bounds::{
     derive_cross_axis_links, derive_model_bounds, resolve_table_ref_source_name, BoundContext,
     BoundResult, CrossAxisLink, Seconds,
@@ -319,6 +320,16 @@ pub struct ModelEdge {
     /// exactly as an anchor on `clock_col` itself would. Empty when
     /// `clock_col` is `None` or has no such sibling — never a guess.
     pub clock_col_aliases: Vec<String>,
+    /// The upstream's own derived output-delta shape
+    /// (`crate::analysis::output_delta::OutputDelta`,
+    /// `incremental_models.md` §"The graph layer" → "Typed edges"), scalar
+    /// per edge — the caller's own meet across whatever per-column-group
+    /// verdicts it derived for the upstream (this admission gate does not
+    /// need the fine per-column-group resolution `type_edge` does; a coarse
+    /// scalar only ever widens which edges take the key-addressed route,
+    /// never narrows one incorrectly). `None` when the caller has not
+    /// derived one — today's default, unaffected clock-only admission.
+    pub output_shape: Option<crate::analysis::output_delta::OutputDelta>,
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
@@ -359,8 +370,87 @@ pub fn append_model_edge_cells(
     // second, independent (and always-empty) context.
     let join_ctx = model_edges_join_context(sql, model_edges);
     let identity = row_identity_with_context(declared_unique_key, sql, &join_ctx);
-    // A key-addressed downstream has no partition axis to clamp a creation
-    // cell to; its model-edge creation would be a keyed fold, deferred.
+    // P1 skeleton-source closure — a property of the model's own query
+    // shape (`model_edge_enrichment_closure`'s doc comment below), so it is
+    // shared by both the key-addressed loop right below and the
+    // partition-addressed loop further down, computed once.
+    let enrichment_closure = model_edge_enrichment_closure(sql, model_edges, &join_ctx);
+
+    // Key-addressed edges (`incremental_models.md` §"Upstream model edges"):
+    // an upstream whose own derived output-delta shape is `KeyedUpsert`
+    // contributes a key-addressed `PerGroupRecompute` cell whenever the
+    // clock-based route below has nothing to admit anyway — a clockless
+    // upstream, or a keyed-grain downstream with no partition axis to clamp
+    // against (checked BEFORE the `output_partition_col`/`clock_col` gates
+    // below). A clocked upstream feeding a partition-addressed downstream
+    // keeps today's `DeleteInsert` route unchanged — both routes are
+    // admissible for that shape, and narrowing (never widening) which edges
+    // move to the new route keeps every existing clock-based fixture's
+    // technique stable. A `KeysNotDiscoverable`/`SliceUnbounded` refusal
+    // from `admit_key_addressed_recompute` (the downstream SQL does not
+    // carry the upstream's key columns, or has no derivable grain of its
+    // own) is recorded by name — never a silent fallback to a whole-table
+    // cell.
+    for edge in model_edges {
+        let Some(OutputDelta::KeyedUpsert { keys }) = &edge.output_shape else {
+            continue;
+        };
+        let clock_route_applies = edge.clock_col.is_some() && output_partition_col.is_some();
+        if clock_route_applies {
+            continue;
+        }
+        match repair::admit_key_addressed_recompute(
+            sql,
+            declared_unique_key,
+            &edge.name,
+            keys,
+            &join_ctx,
+        ) {
+            Ok(key_scope) => {
+                plan.cells.push(PlanCell {
+                    group: "{*}".to_string(),
+                    trigger: Trigger::NewData {
+                        source: edge.name.clone(),
+                    },
+                    corner: Corner::ColumnMerge,
+                    technique: Technique::PerGroupRecompute,
+                    // Honest: this cell claims no partition-interval scan —
+                    // its bounded read is the key set on `key_scope` instead
+                    // (`PlanCell::key_scope`'s doc comment).
+                    partition_local: PartitionLocal::No {
+                        source: edge.name.clone(),
+                        why: format!(
+                            "upstream maintained model '{}' is key-addressed (a KeyedUpsert \
+                             output-delta shape) — its fold restricts to the affected key set, \
+                             not a partition interval",
+                            edge.name
+                        ),
+                    },
+                    scans: vec![],
+                    ledger_catch_up: false,
+                    row_identity: identity.clone(),
+                    skeleton_source_closure: enrichment_closure.clone(),
+                    // P4 is defined over external sources, not upstream
+                    // maintained models — matches every other model-edge
+                    // cell's own empty verdict.
+                    fingerprint_projections: BTreeMap::new(),
+                    key_scope: Some(key_scope),
+                });
+            }
+            Err(refusal) => {
+                let (source, why) = match refusal {
+                    repair::RepairRefusal::KeysNotDiscoverable { source, why } => (source, why),
+                    repair::RepairRefusal::SliceUnbounded { source, why } => (source, why),
+                };
+                plan.refusals
+                    .push(Refusal::RepairKeysNotDiscoverable { source, why });
+            }
+        }
+    }
+
+    // A key-addressed downstream has no partition axis to clamp a
+    // *partition*-addressed creation cell to — the remaining (non-
+    // `KeyedUpsert`) edges have nothing left to admit here.
     let Some(output_partition_col) = output_partition_col else {
         return;
     };
@@ -385,22 +475,20 @@ pub fn append_model_edge_cells(
     // input the locality proof composes.
     let links = derive_cross_axis_links(sql, &ctx, output_partition_col);
 
-    // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
-    // closure"; T3, `docs/plans/20260715-composed-axes-conditional-
-    // maintenance.md` Phase E3): whether every OTHER model edge this SQL
-    // joins in (relative to whichever edge is this loop's own driving
-    // trigger) provably preserves the driving side's row skeleton. This is a
-    // property of the model's own query shape, not of which edge happened to
-    // trigger the recompute, so it is derived once and shared by every
-    // edge's cell below — an edge that is itself the `FROM`-clause driving
-    // table (never found by `enrichment_join_alias`, since it is not the
-    // target of a join) contributes no conjunct of its own; only edges
-    // actually joined in are checked. `None` when no model edge is joined in
-    // at all (a single-edge model with no enrichment join to close over,
-    // matching `PlanCell::skeleton_source_closure`'s documented `None` case).
-    let enrichment_closure = model_edge_enrichment_closure(sql, model_edges, &join_ctx);
+    // `enrichment_closure` (P1 skeleton-source closure) was already derived
+    // above, before the key-addressed loop — shared, not re-derived, by this
+    // (partition-addressed) loop's cells too.
 
     for edge in model_edges {
+        if matches!(edge.output_shape, Some(OutputDelta::KeyedUpsert { .. }))
+            && edge.clock_col.is_none()
+        {
+            // Already admitted or refused by the key-addressed loop above
+            // (a clockless `KeyedUpsert` edge — `output_partition_col` is
+            // `Some` here, by this point past the early return, so the key
+            // loop's `clock_route_applies` for this edge was `false`).
+            continue;
+        }
         let Some(clock) = &edge.clock_col else {
             plan.refusals.push(Refusal::ReachNotDerivable {
                 edge: edge.name.clone(),
@@ -465,6 +553,7 @@ pub fn append_model_edge_cells(
             // verdicts (`PlanCell::fingerprint_projections`'s documented
             // empty case).
             fingerprint_projections: BTreeMap::new(),
+            key_scope: None,
         });
     }
 }
@@ -950,6 +1039,7 @@ fn derive_new_data(
                 row_identity: identity.clone(),
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
+                key_scope: None,
             });
         }
         Grain::Key { unique_key } => {
@@ -1256,6 +1346,7 @@ fn derive_new_data(
                 row_identity: identity.clone(),
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
+                key_scope: None,
             });
         }
     }
@@ -1365,6 +1456,7 @@ fn derive_mutation(
             row_identity: identity.clone(),
             skeleton_source_closure: closure.clone(),
             fingerprint_projections: BTreeMap::new(),
+            key_scope: None,
         });
     }
 }
@@ -1576,6 +1668,7 @@ fn derive_column_added(
                         row_identity: identity.clone(),
                         skeleton_source_closure: None,
                         fingerprint_projections: BTreeMap::new(),
+                        key_scope: None,
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
@@ -1661,6 +1754,7 @@ fn derive_column_added(
             row_identity: identity.clone(),
             skeleton_source_closure: None,
             fingerprint_projections: BTreeMap::new(),
+            key_scope: None,
         });
     }
 }
@@ -1685,6 +1779,7 @@ fn derive_backfill(
         row_identity: identity.clone(),
         skeleton_source_closure: None,
         fingerprint_projections: BTreeMap::new(),
+        key_scope: None,
     });
 }
 

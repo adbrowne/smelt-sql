@@ -470,13 +470,23 @@ fn derive_clamp_and_locality(
     // than hang, per root `CLAUDE.md` §"Fail-loud discipline".
     let max_passes = models.len() + 1;
     let mut composed_sources: BTreeMap<String, (SourceFacts, Granularity)> = BTreeMap::new();
+    // The workspace's output-delta verdicts, derived once — the SAME map
+    // `build_forward_graph`'s own `type_edge` call reads
+    // (`workspace_output_delta_verdicts`), so a model edge's `output_shape`
+    // (below) is never a second, independent derivation of the same fact.
+    let workspace_verdicts = workspace_output_delta_verdicts(models, source_infos);
 
     for _pass in 0..max_passes {
         let ClampAndLocality {
             clamp_days,
             locality_admitted,
             key_locality_slice,
-        } = derive_clamp_and_locality_pass(models, source_infos, &composed_sources)?;
+        } = derive_clamp_and_locality_pass(
+            models,
+            source_infos,
+            &composed_sources,
+            &workspace_verdicts,
+        )?;
 
         let mut next_composed_sources: BTreeMap<String, (SourceFacts, Granularity)> =
             BTreeMap::new();
@@ -548,6 +558,7 @@ fn derive_clamp_and_locality_pass(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
     composed_sources: &BTreeMap<String, (SourceFacts, Granularity)>,
+    workspace_verdicts: &BTreeMap<String, OutputDeltaFacts>,
 ) -> Result<ClampAndLocality> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
@@ -661,11 +672,30 @@ fn derive_clamp_and_locality_pass(
                     let unique_key = up_meta
                         .and_then(|m| m.unique_key.clone())
                         .unwrap_or_default();
+                    // The upstream's own derived output-delta shape
+                    // (`ModelEdge::output_shape`'s doc comment): the meet
+                    // across whatever per-column-group verdicts
+                    // `upstream_output_delta_groups` derives for it — the
+                    // SAME per-workspace fold `build_forward_graph`'s own
+                    // `type_edge` call reads, never re-derived differently.
+                    // `None` when the upstream contributes no groups at all
+                    // (unresolvable upstream) rather than an optimistic
+                    // guess.
+                    let output_shape = upstream_output_delta_groups(
+                        &bare,
+                        &model_by_addr,
+                        source_infos,
+                        workspace_verdicts,
+                    )
+                    .into_iter()
+                    .map(|(_, shape)| shape)
+                    .reduce(OutputDelta::meet);
                     model_edges.push(smelt_logical::maintenance::derive::ModelEdge {
                         name: bare.clone(),
                         clock_col,
                         clock_col_aliases,
                         unique_key,
+                        output_shape,
                     });
                 } else {
                     // A `full`-mode or view upstream delivers no incremental

@@ -421,6 +421,7 @@ fn resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity() {
         },
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
+        key_scope: None,
     };
 
     let err = smelt_runtime::maintenance_driver::repair_cell_key(&cell)

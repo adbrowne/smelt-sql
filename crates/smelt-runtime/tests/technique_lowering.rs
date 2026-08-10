@@ -118,6 +118,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -425,6 +426,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         },
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
+        key_scope: None,
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -2668,6 +2670,7 @@ mod write_pattern_registry_pin {
                 },
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
+                key_scope: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -4014,6 +4017,7 @@ mod in_place_update_lowering {
             },
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
+            key_scope: None,
         }
     }
 
