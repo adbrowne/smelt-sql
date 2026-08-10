@@ -41,6 +41,9 @@ way (timeless-oracle rule), at substantially reduced length.
 - Kernel externalisation: no verbs/kinds/plan-cell API surface is published
   here or in any phase this outcome's plans reshape (see Decision log
   2026-08-09) — externalisation is a separate post-redraft outcome.
+- `crates/smelt-planner/src/python_bridge.rs`'s `python`-feature-gated test breakage (a
+  `PartitionGrainConfig { enabled: … }` field that never existed) — pre-existing, unrelated to
+  this outcome's edits, feature off by default and in no standing gate.
 
 ## Phases
 
@@ -53,7 +56,7 @@ way (timeless-oracle rule), at substantially reduced length.
 | 5 | Overview / Design / Constraints / Limitations / Future Extensions / References pass: polemics and plan-vocabulary deleted, terminology aligned | done |
 | 6 | Rewrite Known Divergences (both specs) as genuine gap lists | done |
 | 7 | Retire `nondeterministic_columns`: payload rule reads `columns.<c>.contract: plausible`, list form removed from the parser fail-loud | done |
-| 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | pending |
+| 8 | Retire `grain: key_per_partition` and the dead `IncrementalStrategy` variants (`Append`, `InsertOverwrite`) fail-loud | planned |
 | 9 | Retire the `smelt.yml` `models.<name>.batched:` sub-block (its remaining `unique_key` / `safety_overrides` keys) | pending |
 | 10 | docs-site terminology sync; whole-file `§"…"` citation sweep; validate + timeless greps clean | pending |
 
@@ -235,6 +238,19 @@ way (timeless-oracle rule), at substantially reduced length.
   `verify-phase.sh` ALL GREEN. Left `smelt-planner/src/python_bridge.rs`'s python-feature-gated
   test alone — pre-existing unrelated breakage (`enabled` field that never existed on the real
   type), feature off by default, not part of any standing gate.
+
+- 2026-08-11 — Phase 8 planned with no phase-row reshape: the phase-7 summary's three "for the next
+  planner" items are either already owned (rows 9 and 10) or not criterion-serving — the
+  `python_bridge.rs` pre-existing `python`-feature breakage is recorded under §Out of scope rather
+  than given a row. One scope decision the plan fixes, since the outcome statement leaves it open:
+  `key_per_partition` is retired from the **declared** surface only. `Grain::KeyPerPartition`
+  survives as the label `derive_grain` computes from (clock + identity + `partition_column ∈ key`),
+  which `smelt explain` reports and `MaintenanceUnsupportedGrain` refuses at plan derivation —
+  deleting the derived label would either erase a real shape from the classification or require
+  implementing its plan, both new behaviour (§Out of scope). Consequence:
+  `examples/timeseries_broken_key_per_partition` must *derive* the grain (adding a top-level
+  `unique_key` containing the partition column) instead of declaring it, so the two standing
+  `UnsupportedGrain` tests keep exercising the same refusal.
 
 ## Blocked
 
