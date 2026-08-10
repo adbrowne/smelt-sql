@@ -47,7 +47,7 @@ the addressing of one delta type, not the universal currency.
 | 1 | Spec: output-delta types, transfer rules, typed edges, the narrowed keyed refusal | done |
 | 2 | Walk transfer rules for the output-delta verdict per column group | done |
 | 3 | Edge typing in the propagation layer; adjoint property preserved for window addressing | done |
-| 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | pending |
+| 4 | Consumer-side fold over an upstream keyed-upsert delta (model-edge change-feed) | planned |
 | 5 | Keyed dirt-set propagation for admitted shapes | pending |
 | 6 | Conformance recipes: end-to-end incremental chains vs full-refresh oracle | pending |
 | 7 | Surface: explain edge rendering, docs-site update | pending |
@@ -97,6 +97,14 @@ the addressing of one delta type, not the universal currency.
   property are unchanged and re-pinned by 3 new tests. `SourceFacts::from_source_info` lands but
   is not yet called from production code — that, and wiring `type_edge` into
   `build_forward_graph`, are phase 4's job alongside the consumer-side fold.
+
+- 2026-08-10 — Phase 4 planned; no phase-table reshape (phase 3's scope matched its plan and its
+  two "for the next planner" items — the cross-model verdict fold and a real `type_edge` caller —
+  are exactly phase 4's body). One design call taken in-plan rather than blocked:
+  `OutputDeltaTransfer::model_verdicts` becomes **per output column** (`OutputDeltaFacts`), not a
+  scalar per model, so a model-reference leaf resolves per column reference. A scalar would have
+  meet-folded a mixed-shape upstream to its worst group, which is exactly what the 2026-08-09
+  per-column-group decision rejects. Typed components stay advisory for dirt (phase 5 acts).
 
 <!-- Dated one-liners appended by plan/implement steps. -->
 
