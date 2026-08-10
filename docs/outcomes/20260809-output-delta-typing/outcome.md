@@ -57,7 +57,8 @@ the addressing of one delta type, not the universal currency.
 | 6 | Key-addressed model-edge cells: clockless keyed upstream, keyed-downstream fold (plan derivation) | done |
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
-| 9 | Surface: explain edge rendering, docs-site update | pending |
+| 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | planned |
+| 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | pending |
 
 ## Decision log
 
@@ -235,6 +236,21 @@ the addressing of one delta type, not the universal currency.
   the divergence wording narrowed to what's directly verifiable (run-loop dispatch gating, not
   an unverifiable "plan admits a cell" claim — see `phases/08-summary.md` "For the next
   planner").
+
+- 2026-08-10 — Phase 9 planned **with a reshape**: the old single row 9 ("surface: explain edge
+  rendering, docs-site update") assumed `smelt explain` already sees a typed edge and only needs
+  to render it. Phase 8's discovery says otherwise and is verified —
+  `crates/smelt-db/src/lib.rs`'s `ref_model_edge` hard-codes `output_shape: None`, so the plan
+  report behind `smelt explain`/diagnostics never derives a `KeyedUpsert` edge at all and
+  `append_model_edge_cells`' key-addressed loop silently skips there. Rendering a field that is
+  structurally always `None` would satisfy criterion 5 in letter only, so the row splits: 9
+  wires the derivation into the Salsa layer (making `smelt explain`'s plan report agree with the
+  run loop's), 10 renders the delta type and its degradation reason and updates docs-site.
+  Design call taken in-plan rather than blocked: the Salsa side assembles `ModelDeltaInput`s for
+  the transitively-referenced models and makes ONE call to the existing pure
+  `derive_workspace_output_deltas`, rather than recursing a Salsa query per model reference — the
+  pure fold is already bounded-pass cycle-safe, whereas Salsa recursion over a cyclic model-ref
+  graph would panic.
 
 ## Blocked
 
