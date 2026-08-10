@@ -32,6 +32,7 @@ Inbound edges: sources.raw.events
       clock:    (none)
       identity: event_id
       derived grain: key
+      delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
 
 Probes (0):
 

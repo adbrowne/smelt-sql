@@ -180,10 +180,26 @@ fn write_relation_contract(out: &mut String, indent: &str, contract: &RelationCo
     }
 }
 
+/// Render one [`OutputDelta`] verdict as the `delta type:` line's value
+/// (`docs/specs/incremental_models.md` §Surface "CLI"): the three lattice
+/// names spelled out verbatim, with a `general` verdict additionally naming
+/// the construct or world-fact that degraded it.
+fn format_output_delta(delta: &smelt_logical::analysis::output_delta::OutputDelta) -> String {
+    use smelt_logical::analysis::output_delta::OutputDelta;
+    match delta {
+        OutputDelta::AppendOnlyWindow { .. } => "append-only within window".to_string(),
+        OutputDelta::KeyedUpsert { .. } => "keyed upsert".to_string(),
+        OutputDelta::General { reason } => format!("general (degraded by: {reason})"),
+    }
+}
+
 /// Find `bare_name`'s [`SourceInfo`] among `source_infos` — same bare-name
 /// convention `smelt_runtime::execute::build_maint_source_facts` uses
 /// (strip a leading `sources` address segment).
-fn find_source_info<'a>(source_infos: &'a [SourceInfo], bare_name: &str) -> Option<&'a SourceInfo> {
+pub fn find_source_info<'a>(
+    source_infos: &'a [SourceInfo],
+    bare_name: &str,
+) -> Option<&'a SourceInfo> {
     source_infos.iter().find(|info| {
         let bare = match info.address_segments.split_first() {
             Some((first, rest)) if first == "sources" => rest.join("."),
@@ -219,6 +235,11 @@ fn find_source_info<'a>(source_infos: &'a [SourceInfo], bare_name: &str) -> Opti
 /// the repair stanza's affected-key discovery mechanism line; every other
 /// section of this report reads neither this parameter nor a source's
 /// mutation profile.
+/// `edge_delta_types` is this model's already-derived per-inbound-edge
+/// output-delta verdict (`docs/specs/incremental_models.md` §Surface "CLI"),
+/// keyed by the same `name` an [`InboundEdgeContract`] carries — never
+/// re-derived here; an edge absent from this slice prints no `delta type:`
+/// row rather than a fabricated one.
 #[allow(clippy::too_many_arguments)]
 pub fn build_maintenance_plan_report(
     model_name: &str,
@@ -230,6 +251,7 @@ pub fn build_maintenance_plan_report(
     source_infos: &[SourceInfo],
     probes: &[smelt_runtime::probe_plan::ProbePlanEntry],
     cadence: smelt_core::config::ProbeCadence,
+    edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -570,27 +592,46 @@ pub fn build_maintenance_plan_report(
                         let _ = writeln!(out, "      repair read bound: (not derived)");
                     }
                 }
-                match trigger_source
-                    .as_deref()
-                    .and_then(|src| find_source_info(source_infos, src))
-                {
-                    Some(info) => {
-                        let src_facts = smelt_db::queries::maintenance::source_facts(
-                            trigger_source.as_deref().unwrap_or_default(),
-                            Some(info),
-                            false,
-                        );
-                        let mechanism = match discovery_posture(src_facts.mutation) {
-                            RepairDiscoveryPosture::ClampedScan => "clamped current-source scan",
-                            RepairDiscoveryPosture::SidecarDiff => {
-                                "group-grain fingerprint-sidecar diff (mutable_snapshot, \
-                                 obligation 7)"
-                            }
-                        };
-                        let _ = writeln!(out, "      affected-key discovery: {mechanism}");
-                    }
-                    None => {
-                        let _ = writeln!(out, "      affected-key discovery: (not derived)");
+                // Key-addressed model-edge cell (`incremental_models.md`
+                // §"Upstream model edges"): `cell.key_scope` names the third
+                // discovery posture — the group-grain fingerprint-sidecar
+                // diff over the upstream's own output table
+                // (`smelt_runtime::maintenance_driver::
+                // resolve_key_addressed_affected_keys`), not a declared
+                // source's mutation profile, so `find_source_info` (which
+                // only resolves a declared `sources.*` name) is never
+                // consulted for this branch.
+                if cell.key_scope.is_some() {
+                    let _ = writeln!(
+                        out,
+                        "      affected-key discovery: group-grain fingerprint-sidecar diff \
+                         over the upstream's own output table"
+                    );
+                } else {
+                    match trigger_source
+                        .as_deref()
+                        .and_then(|src| find_source_info(source_infos, src))
+                    {
+                        Some(info) => {
+                            let src_facts = smelt_db::queries::maintenance::source_facts(
+                                trigger_source.as_deref().unwrap_or_default(),
+                                Some(info),
+                                false,
+                            );
+                            let mechanism = match discovery_posture(src_facts.mutation) {
+                                RepairDiscoveryPosture::ClampedScan => {
+                                    "clamped current-source scan"
+                                }
+                                RepairDiscoveryPosture::SidecarDiff => {
+                                    "group-grain fingerprint-sidecar diff (mutable_snapshot, \
+                                     obligation 7)"
+                                }
+                            };
+                            let _ = writeln!(out, "      affected-key discovery: {mechanism}");
+                        }
+                        None => {
+                            let _ = writeln!(out, "      affected-key discovery: (not derived)");
+                        }
                     }
                 }
 
@@ -757,6 +798,9 @@ pub fn build_maintenance_plan_report(
             };
             let _ = writeln!(out, "  - {} ({})", edge.name, provider);
             write_relation_contract(&mut out, "      ", &edge.contract);
+            if let Some((_, shape)) = edge_delta_types.iter().find(|(name, _)| name == &edge.name) {
+                let _ = writeln!(out, "      delta type: {}", format_output_delta(shape));
+            }
         }
     }
     let _ = writeln!(out);

@@ -187,6 +187,7 @@ Inbound edges: sources.raw.events
       clock:    event_time_column=event_date partition_column=event_date granularity=Day
       identity: (none)
       derived grain: partition
+      delta type: append-only within window
 
 Probes (2):
   cadence: per_run

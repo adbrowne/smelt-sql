@@ -430,6 +430,46 @@ async fn explain_maintenance_plan(
     let (own_contract, edges) =
         smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
 
+    // Per-inbound-edge output-delta verdict (`docs/specs/incremental_models.md`
+    // §Surface "CLI"): a model edge reads the same `ModelEdge::output_shape`
+    // the run loop's admission derives (`smelt_db::model_edges_for`, phase 9
+    // of `docs/outcomes/20260809-output-delta-typing/outcome.md`); a source
+    // edge is seeded straight from its declared mutation profile
+    // (`output_delta::seed_shape_for_source`) — never re-derived, only
+    // matched to the `edges` list already built above so `smelt explain`'s
+    // rendering and this vector agree on which name labels which edge.
+    let edge_delta_types: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)> = {
+        let model_edges = smelt_db::model_edges_for(&db, ws, file);
+        edges
+            .iter()
+            .filter_map(|edge| match edge.provider {
+                smelt_cli::explain::RelationContractProvider::Model => {
+                    let bare_edge_name = edge.name.strip_prefix("models.").unwrap_or(&edge.name);
+                    model_edges
+                        .iter()
+                        .find(|me| {
+                            me.name.strip_prefix("models.").unwrap_or(&me.name) == bare_edge_name
+                        })
+                        .and_then(|me| me.output_shape.clone())
+                        .map(|shape| (edge.name.clone(), shape))
+                }
+                smelt_cli::explain::RelationContractProvider::Source => {
+                    let bare_name = edge.name.strip_prefix("sources.").unwrap_or(&edge.name);
+                    smelt_cli::explain::find_source_info(&source_infos, bare_name).map(|info| {
+                        let facts =
+                            smelt_logical::analysis::output_delta::SourceFacts::from_source_info(
+                                bare_name, info,
+                            );
+                        (
+                            edge.name.clone(),
+                            smelt_logical::analysis::output_delta::seed_shape_for_source(&facts),
+                        )
+                    })
+                }
+            })
+            .collect()
+    };
+
     let maintenance_cfg = model
         .metadata
         .as_deref()
@@ -486,6 +526,7 @@ async fn explain_maintenance_plan(
         &source_infos,
         &probe_entries,
         config.probes.cadence,
+        &edge_delta_types,
     )
     .with_context(|| {
         format!(

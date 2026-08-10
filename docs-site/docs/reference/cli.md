@@ -1172,6 +1172,20 @@ both render through the identical `clock:` / `identity:` / `derived grain:` rows
 that provider declares neither fact — a source with no `timeseries:` and no `unique_key:` is
 legal and simply has nothing to summarize, never an error.
 
+Each edge additionally prints a `delta type:` row — the shape of change that edge's own upstream
+emits: `append-only within window` (every change lands as new rows within a bounded window,
+never revising an already-emitted row), `keyed upsert` (a change instead revises the row
+identified by a key set), or `general` (neither addressing holds, naming the construct or
+world-fact that degraded it — an unregistered operator such as a window function, a
+row-multiplying join, or a source declaring no `mutation_profile`). A source edge is typed by its
+own declared mutation profile; a model edge is typed by the upstream model's own derived verdict.
+An edge with no derivable verdict (e.g. the upstream isn't itself `refresh: incremental`) prints
+no `delta type:` row at all, rather than a fabricated one. A per-group recompute cell reading a
+`keyed upsert` upstream model edge (key-addressed, no partition clamp of its own) prints the
+group-grain fingerprint-sidecar diff **over the upstream's own output table** as its
+affected-key discovery mechanism, alongside the clamped current-source scan and the
+`mutable_snapshot` source sidecar diff.
+
 Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
 compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
@@ -1277,6 +1291,7 @@ Inbound edges: sources.raw.events
       clock:    (none)
       identity: event_id
       derived grain: key
+      delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
 ```
 
 ---

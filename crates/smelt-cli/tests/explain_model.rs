@@ -76,6 +76,41 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
 
+    // Mirrors `commands::explain::explain_maintenance_plan`'s own
+    // `edge_delta_types` assembly (`docs/outcomes/20260809-output-delta-
+    // typing/outcome.md` phase 10).
+    let edge_delta_types: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)> = {
+        let model_edges = smelt_db::model_edges_for(&db, ws, file);
+        edges
+            .iter()
+            .filter_map(|edge| match edge.provider {
+                smelt_cli::explain::RelationContractProvider::Model => {
+                    let bare_edge_name = edge.name.strip_prefix("models.").unwrap_or(&edge.name);
+                    model_edges
+                        .iter()
+                        .find(|me| {
+                            me.name.strip_prefix("models.").unwrap_or(&me.name) == bare_edge_name
+                        })
+                        .and_then(|me| me.output_shape.clone())
+                        .map(|shape| (edge.name.clone(), shape))
+                }
+                smelt_cli::explain::RelationContractProvider::Source => {
+                    let bare_name = edge.name.strip_prefix("sources.").unwrap_or(&edge.name);
+                    smelt_cli::explain::find_source_info(&source_infos, bare_name).map(|info| {
+                        let facts =
+                            smelt_logical::analysis::output_delta::SourceFacts::from_source_info(
+                                bare_name, info,
+                            );
+                        (
+                            edge.name.clone(),
+                            smelt_logical::analysis::output_delta::seed_shape_for_source(&facts),
+                        )
+                    })
+                }
+            })
+            .collect()
+    };
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -87,6 +122,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &source_infos,
             &[],
             smelt_core::config::ProbeCadence::PerRun,
+            &edge_delta_types,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -925,6 +961,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         &[],
         smelt_core::config::ProbeCadence::PerRun,
+        &[],
     )
     .expect("build_maintenance_plan_report");
 
@@ -1046,6 +1083,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         &[],
         smelt_core::config::ProbeCadence::PerRun,
+        &[],
     )
     .expect("build_maintenance_plan_report");
 
@@ -1232,6 +1270,7 @@ mod write_variant_explain_surface {
             &[],
             &[],
             smelt_core::config::ProbeCadence::PerRun,
+            &[],
         )
     }
 

@@ -58,7 +58,7 @@ the addressing of one delta type, not the universal currency.
 | 7 | Lowering + execution of a key-addressed model-edge cell (statement emission, driver) | done |
 | 8 | Conformance recipes: end-to-end keyed chain vs full-refresh oracle | done |
 | 9 | `smelt-db` derives typed model edges (`ModelEdge.output_shape`) so explain/diagnostics see keyed edges | done |
-| 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | planned |
+| 10 | Surface: explain edge delta-type rendering, degradation reasons, docs-site update | done |
 | 11 | Model-reference leaf resolves a bare `smelt.<addr>` upstream ref through `model_verdicts` (3+-hop chains) | pending |
 
 ## Decision log
@@ -280,6 +280,22 @@ the addressing of one delta type, not the universal currency.
   the delta type per edge (model edges from phase 9's `ModelEdge.output_shape`, source edges from
   the leaf seed so no inbound edge renders untyped), the degradation reason, the key-addressed
   cell's sidecar discovery line, spec Surface, and docs-site.
+
+- 2026-08-10 — Phase 10 implemented: `build_maintenance_plan_report` renders a `delta type:` row
+  per inbound edge (`crates/smelt-cli/src/explain.rs`), fed by a new `edge_delta_types` vector
+  `commands/explain.rs` assembles from `smelt_db::model_edges_for`'s `ModelEdge.output_shape`
+  (model edges) and `output_delta::seed_shape_for_source` over each source's own `SourceInfo`
+  (source edges) — never re-derived. The key-addressed `PerGroupRecompute` repair stanza now
+  names the group-grain fingerprint-sidecar-over-the-upstream's-output-table mechanism instead
+  of falling through to "not derived" (its trigger source is a model, not a declared source, so
+  the existing `find_source_info` lookup always missed). Spec Surface updated; the now-closed
+  "still generic" Known Divergences entry deleted. 6 new tests, all real-fixture (a generated
+  clockless-keyed-chain project plus one hand-authored tempdir project), pin the three lattice
+  labels, the degradation-reason substring for both a source and a model-edge cause, absence
+  when no verdict is derivable, and the sidecar discovery line. Golden fixture and the generated
+  web-analytics tutorial page updated to match. No phase-table reshape — phase 9's own flagged
+  gap (bare `smelt.<addr>` model-reference leaves bypassing `model_verdicts`) is unaffected by
+  this phase and remains phase 11's scope as already placed.
 
 ## Blocked
 

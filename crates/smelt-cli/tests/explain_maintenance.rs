@@ -80,6 +80,42 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
 
+    // Mirrors `commands::explain::explain_maintenance_plan`'s own
+    // `edge_delta_types` assembly (`docs/outcomes/20260809-output-delta-
+    // typing/outcome.md` phase 10) so this test helper exercises the real
+    // production wiring rather than a stubbed empty slice.
+    let edge_delta_types: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)> = {
+        let model_edges = smelt_db::model_edges_for(&db, ws, file);
+        edges
+            .iter()
+            .filter_map(|edge| match edge.provider {
+                smelt_cli::explain::RelationContractProvider::Model => {
+                    let bare_edge_name = edge.name.strip_prefix("models.").unwrap_or(&edge.name);
+                    model_edges
+                        .iter()
+                        .find(|me| {
+                            me.name.strip_prefix("models.").unwrap_or(&me.name) == bare_edge_name
+                        })
+                        .and_then(|me| me.output_shape.clone())
+                        .map(|shape| (edge.name.clone(), shape))
+                }
+                smelt_cli::explain::RelationContractProvider::Source => {
+                    let bare_name = edge.name.strip_prefix("sources.").unwrap_or(&edge.name);
+                    smelt_cli::explain::find_source_info(&source_infos, bare_name).map(|info| {
+                        let facts =
+                            smelt_logical::analysis::output_delta::SourceFacts::from_source_info(
+                                bare_name, info,
+                            );
+                        (
+                            edge.name.clone(),
+                            smelt_logical::analysis::output_delta::seed_shape_for_source(&facts),
+                        )
+                    })
+                }
+            })
+            .collect()
+    };
+
     Some(
         build_maintenance_plan_report(
             &canonical,
@@ -91,6 +127,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &source_infos,
             &[],
             smelt_core::config::ProbeCadence::PerRun,
+            &edge_delta_types,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -556,6 +593,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         &[],
         &[],
         smelt_core::config::ProbeCadence::PerRun,
+        &[],
     )
     .expect("build_maintenance_plan_report");
 
@@ -578,5 +616,259 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
     assert!(
         !report.contains("write mechanism: diff_patch"),
         "a non-repair cell must print no repair stanza: {report}"
+    );
+}
+
+// =============================================================================
+// Output-delta edge typing (`docs/outcomes/20260809-output-delta-typing/
+// outcome.md` phase 10; `docs/specs/incremental_models.md` §Surface "CLI"):
+// each inbound edge's rendered `delta type:` row and its degradation
+// reason, plus the key-addressed repair cell's upstream-sidecar discovery
+// line.
+// =============================================================================
+
+/// Stage a project with a clocked keyed upstream (`dag_kchain_a`, `KeyedAgg`
+/// over the append-only `events` source, grouped by `id` — no clock of its
+/// own) feeding a keyed-fold downstream (`dag_kchain_b`) — the generated
+/// [`smelt_maintenance_testkit::dag::keyed_chain_dag`] fixture phase 6/7/8
+/// already prove end-to-end for execution; here it is only staged (no run)
+/// to exercise `smelt explain`'s own report.
+fn stage_keyed_chain_project(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    use smelt_maintenance_testkit::dag::{keyed_chain_dag, stage_dag};
+
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    let dag = keyed_chain_dag();
+    stage_dag(&dag, &project_dir, &db_path).expect("stage keyed chain dag");
+    project_dir
+}
+
+/// `dag_kchain_a` (clockless, `KeyedUpsert`-shaped via its own `GROUP BY id`
+/// over an append-only source) is `dag_kchain_b`'s only inbound edge — its
+/// block must print `delta type: keyed upsert`.
+#[test]
+fn explain_renders_keyed_upsert_edge_delta_type() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project(&tmp);
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("dag_kchain_a (model)"),
+        "expected dag_kchain_a as an inbound model edge: {report}"
+    );
+    assert!(
+        report.contains("delta type: keyed upsert"),
+        "expected the clockless keyed upstream's edge to be typed keyed upsert: {report}"
+    );
+}
+
+/// `user_daily_spend` in `examples/timeseries` reads the clocked,
+/// `append_only` `sources.raw.transactions` — the common case's edge must
+/// still print `delta type: append-only within window` (no regression from
+/// the new row).
+#[test]
+fn explain_renders_append_only_window_edge_delta_type() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "user_daily_spend")
+        .expect("user_daily_spend has a maintenance plan");
+
+    assert!(
+        report.contains("sources.raw.transactions (source)"),
+        "expected sources.raw.transactions as an inbound source edge: {report}"
+    );
+    assert!(
+        report.contains("delta type: append-only within window"),
+        "expected the clocked append-only source edge to be typed append-only within window: \
+         {report}"
+    );
+}
+
+/// Stage a project with: a clocked append-only `events` source; an
+/// `undeclared` source with no `mutation_profile`; `windowed_upstream`
+/// (refresh: incremental, a window-function output column — an operator the
+/// walk cannot classify as addressable); `general_consumer` (reads
+/// `windowed_upstream`); `source_consumer` (reads `sources.undeclared`);
+/// `view_upstream` (plain view, no `refresh: incremental` at all); and
+/// `view_consumer` (reads `view_upstream`) — one project reused across the
+/// `general`/absent-verdict edge-typing tests below.
+fn stage_delta_type_project(tmp: &tempfile::TempDir) -> std::path::PathBuf {
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("models/sources")).expect("create dirs");
+
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: delta_type_fixture\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    )
+    .expect("write smelt.yml");
+
+    std::fs::write(
+        project_dir.join("models/sources/events.yml"),
+        "description: clocked append-only test source\n\
+         mutation_profile: append_only\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         columns:\n\
+         - name: d\n  type: DATE\n\
+         - name: id\n  type: INTEGER\n\
+         - name: val\n  type: INTEGER\n",
+    )
+    .expect("write events.yml");
+
+    std::fs::write(
+        project_dir.join("models/sources/undeclared.yml"),
+        "description: test source declaring no mutation_profile\n\
+         columns:\n\
+         - name: d\n  type: DATE\n\
+         - name: id\n  type: INTEGER\n\
+         - name: val\n  type: INTEGER\n",
+    )
+    .expect("write undeclared.yml");
+
+    let ts_frontmatter = "---\ntimeseries:\n  event_time_column: d\n  partition_column: d\n  \
+                           granularity: day\nrefresh: incremental\ngrain: partition\n---\n";
+
+    std::fs::write(
+        project_dir.join("models/windowed_upstream.sql"),
+        format!(
+            "{ts_frontmatter}SELECT d, id, val, ROW_NUMBER() OVER (PARTITION BY id ORDER BY d) \
+             AS rn\nFROM smelt.sources.events\n"
+        ),
+    )
+    .expect("write windowed_upstream.sql");
+
+    std::fs::write(
+        project_dir.join("models/general_consumer.sql"),
+        format!("{ts_frontmatter}SELECT d, id, val, rn\nFROM smelt.windowed_upstream\n"),
+    )
+    .expect("write general_consumer.sql");
+
+    std::fs::write(
+        project_dir.join("models/source_consumer.sql"),
+        format!("{ts_frontmatter}SELECT d, id, val\nFROM smelt.sources.undeclared\n"),
+    )
+    .expect("write source_consumer.sql");
+
+    std::fs::write(
+        project_dir.join("models/view_upstream.sql"),
+        "SELECT d, id, val FROM smelt.sources.events\n",
+    )
+    .expect("write view_upstream.sql");
+
+    std::fs::write(
+        project_dir.join("models/view_consumer.sql"),
+        format!("{ts_frontmatter}SELECT d, id, val\nFROM smelt.view_upstream\n"),
+    )
+    .expect("write view_consumer.sql");
+
+    project_dir
+}
+
+/// `windowed_upstream`'s `rn` column is a window-function output — the walk
+/// cannot classify it as addressable, so `general_consumer`'s inbound edge to
+/// it must print `delta type: general` naming the window-function construct.
+#[test]
+fn explain_names_construct_that_degraded_edge_delta_type() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_delta_type_project(&tmp);
+
+    let report = build_report_for(&project_dir, "general_consumer")
+        .expect("general_consumer has a maintenance plan");
+
+    assert!(
+        report.contains("windowed_upstream (model)"),
+        "expected windowed_upstream as an inbound model edge: {report}"
+    );
+    assert!(
+        report.contains("delta type: general (degraded by:") && report.contains("window-function"),
+        "expected a general verdict naming the window-function construct: {report}"
+    );
+}
+
+/// `sources.undeclared` declares no `mutation_profile` — the fail-closed
+/// seed must be visible (`general`), not silently skipped, and the reason
+/// must name the missing declaration.
+#[test]
+fn explain_renders_source_edge_delta_type() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_delta_type_project(&tmp);
+
+    let report = build_report_for(&project_dir, "source_consumer")
+        .expect("source_consumer has a maintenance plan");
+
+    assert!(
+        report.contains("sources.undeclared (source)"),
+        "expected sources.undeclared as an inbound source edge: {report}"
+    );
+    assert!(
+        report.contains("delta type: general (degraded by:")
+            && report.contains("declares no mutation_profile"),
+        "expected a general verdict naming the missing mutation_profile declaration: {report}"
+    );
+}
+
+/// `view_upstream` is a plain view (no `refresh: incremental`) — it
+/// contributes no [`smelt_db::model_edges_for`] entry, so `view_consumer`'s
+/// edge to it must print no `delta type:` row at all rather than a
+/// fabricated one.
+#[test]
+fn explain_edge_without_derived_shape_prints_no_delta_row() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_delta_type_project(&tmp);
+
+    let report = build_report_for(&project_dir, "view_consumer")
+        .expect("view_consumer has a maintenance plan");
+
+    assert!(
+        report.contains("view_upstream (model)"),
+        "expected view_upstream as an inbound model edge: {report}"
+    );
+    let edge_block_start = report
+        .find("view_upstream (model)")
+        .expect("view_upstream edge block present");
+    let edge_block = &report[edge_block_start..];
+    let edge_block_end = edge_block
+        .find("\n\n")
+        .map(|i| edge_block_start + i)
+        .unwrap_or(report.len());
+    assert!(
+        !report[edge_block_start..edge_block_end].contains("delta type:"),
+        "a non-incremental upstream's edge must print no delta type row: {report}"
+    );
+}
+
+/// `dag_kchain_b`'s `PerGroupRecompute` cell over the clockless keyed
+/// upstream `dag_kchain_a` is key-addressed (`cell.key_scope`) — its repair
+/// stanza's affected-key discovery line must name the group-grain
+/// fingerprint-sidecar diff over the upstream's own output table, not the
+/// declared-source discovery mechanism (`dag_kchain_a` is a model, not a
+/// declared source).
+#[test]
+fn explain_key_addressed_cell_prints_upstream_sidecar_discovery() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project(&tmp);
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("technique: PerGroupRecompute"),
+        "expected a key-addressed PerGroupRecompute cell: {report}"
+    );
+    assert!(
+        report.contains(
+            "affected-key discovery: group-grain fingerprint-sidecar diff over the upstream's \
+             own output table"
+        ),
+        "expected the upstream-sidecar discovery mechanism, not a declared-source posture: \
+         {report}"
     );
 }
