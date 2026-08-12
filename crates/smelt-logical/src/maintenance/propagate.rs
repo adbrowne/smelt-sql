@@ -211,7 +211,7 @@ impl PartitionGrain {
 
 /// Route-aware day-margin projection for a locality-admitted composed
 /// node's own inbound (driving-source → composed-output) edge
-/// (`incremental_models.md` §"What the composed shape uniquely enables"):
+/// (`incremental_shapes.md` §"What the composed shape uniquely enables"):
 /// routes 1–2 project **exactly** — [`locality::LocalitySlice::DeltaValues`]
 /// (route 2, key-determined) carries no margin at all, and
 /// [`locality::LocalitySlice::Window`] (route 1 key-embedded, or route 3

@@ -64,7 +64,7 @@ concerns land in one model:
   CAST(arrival_time AS DATE) - INTERVAL '3 days' AND CAST(arrival_time AS
   DATE)` — a Form B filter the planner reads as a genuine 3-day lookback on
   the `bronze.raw_events` source, *derived* from the SQL rather than
-  declared in YAML (`docs/specs/incremental_models.md` §"Derive lookback from
+  declared in YAML (`docs/specs/incremental_shapes.md` §"Derive lookback from
   the model's SQL, not from frontmatter"). Run `smelt explain
   silver.events_parsed --json` (whole-project form, not the single-model
   report) to see it surfaced: `source_bounds.bronze.raw_events` reports
@@ -559,7 +559,7 @@ incremental model:
   partitions by `device_id`, which does not include the model's
   `partition_column` (`session_start_date`); it is admitted because each frame is
   a bounded `RANGE BETWEEN INTERVAL` (see
-  `docs/specs/incremental_models.md` § "Batch safety classification").
+  `docs/specs/incremental_shapes.md` § "Batch safety classification").
 - **The write window covers the lookback partition.** The outer Form B filter
   (`WHERE event_date BETWEEN session_start_date AND session_start_date + INTERVAL '1 day'`)
   references `session_start_date`, a column produced by the function — resolvable

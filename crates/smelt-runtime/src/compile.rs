@@ -111,7 +111,7 @@ pub fn build_source_bound_map(
 /// This is the batched-local consumer of the same `BoundContext` /
 /// `derive_and_classify_bounds` walk `build_source_bound_map` uses — there is
 /// no second, independent bound derivation. `Err` means a source's bound is
-/// `NotDerivable` (fail-closed, `incremental_models.md` §"Partition-grain constraints" #10): the
+/// `NotDerivable` (fail-closed, `incremental_shapes.md` §"Partition-grain constraints" #10): the
 /// caller must surface this as a hard refusal, never approximate a chunk
 /// shape from it.
 ///
@@ -448,7 +448,7 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
 }
 
 /// Whether `model` is **self-referential** — it reads its own prior output
-/// via `smelt.<self>` (`docs/specs/incremental_models.md` §"Window independence
+/// via `smelt.<self>` (`docs/specs/incremental_shapes.md` §"Window independence
 /// and self-referential models"). The single shared predicate for every
 /// runtime consumer (the first-run bootstrap dispatch in `execute.rs`, both
 /// windowed and unwindowed arms, and the output-schema fixpoint in
@@ -601,7 +601,7 @@ pub struct SqlCompiler {
     fn_bodies: Option<Arc<FnBodyMap>>,
     /// Names of models classified as state-bearing (`AggregatorColumn.state`
     /// carries a decomposed state shape on at least one column,
-    /// `docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// `docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models"). Consulted by `presentation_projection` so a
     /// downstream `SELECT *` over one of these models never surfaces its
     /// `__part` state columns. Empty until rows 5-6 of
@@ -773,7 +773,7 @@ impl UpstreamSchemas {
         let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
 
         // Self-referential models: refine `model_schemas`'s own self-entry by
-        // a bounded local fixpoint (`docs/specs/incremental_models.md` §"First-run
+        // a bounded local fixpoint (`docs/specs/incremental_shapes.md` §"First-run
         // and backfill" — "First-run bootstrap for a self-referential
         // model"). `resolved_model_schema` (Salsa) cannot help here: its
         // `cycle_initial` BREAKS a genuine self-referential cycle with an
@@ -1019,7 +1019,7 @@ impl SqlCompiler {
     /// Provide the set of model names classified as state-bearing, so a
     /// downstream `SELECT *` reading one of them gets its `__part` state
     /// columns hidden by `presentation_projection`
-    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models" → "Presentation projection").
     pub(crate) fn set_state_bearing_models(&mut self, models: std::collections::BTreeSet<String>) {
         self.state_bearing_models = models;
@@ -1048,7 +1048,7 @@ impl SqlCompiler {
     /// Hide decomposed state columns behind a presentation projection
     /// before this SQL reaches ref-name rewriting/printing, so a refusal
     /// can still name the user's `smelt.models.*` path
-    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models" → "Presentation projection"). A no-op (returns `sql`
     /// unchanged) when no state-bearing model is in scope.
     fn hide_state_columns(&self, sql: &str) -> Result<String> {
@@ -2335,7 +2335,7 @@ GROUP BY user_id
 
     /// A compiler carrying a state-bearing model map compiles a downstream
     /// `SELECT *` into the presented column list instead of a bare `*`
-    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models" → "Presentation projection").
     #[test]
     fn compile_hides_state_columns_from_downstream_star() {

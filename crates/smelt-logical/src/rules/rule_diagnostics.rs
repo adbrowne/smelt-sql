@@ -166,7 +166,7 @@ impl PlannerRule for IncrementalRule {
         }
 
         // Advisory surfacing of the unified bound map's roll-up
-        // (`incremental_models.md` §"Batch safety classification"): a
+        // (`incremental_shapes.md` §"Batch safety classification"): a
         // `NotDerivable` source is flagged here so the editor sees it, but
         // (per `check_batched_bound_derivable`'s doc comment) the actual
         // fail-closed enforcement with the `--allow-downgrade` escape hatch
@@ -205,7 +205,7 @@ impl PlannerRule for IncrementalRule {
 ///
 /// **Advisory, not blocking** — mirrors [`IncrementalRule`]'s existing
 /// severity policy (see its doc comment): the actual fail-closed enforcement
-/// of `incremental_models.md` §"Partition-grain constraints" #10 ("No silent downgrade to
+/// of `incremental_shapes.md` §"Partition-grain constraints" #10 ("No silent downgrade to
 /// full-refresh") happens at the CLI/runtime layer
 /// (`smelt_runtime::safety::check_bound_derivation`), which hard-refuses by
 /// default and honours the explicit `--allow-downgrade` escape hatch. This
@@ -685,7 +685,7 @@ mod tests {
         // is a SELECT alias and a GROUP BY key), but a LIMIT clause makes it
         // not batch-safe → the incremental safety classifier rejects it.
         // (A group-aligned HAVING here would now be legitimately admitted —
-        // `incremental_models.md` §"Safety checks" — so LIMIT, which never
+        // `incremental_shapes.md` §"Safety checks" — so LIMIT, which never
         // commutes with the partition filter, is used instead.)
         let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.src \
                    GROUP BY event_date LIMIT 10";

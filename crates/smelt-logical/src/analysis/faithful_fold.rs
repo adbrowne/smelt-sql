@@ -138,7 +138,7 @@ pub fn faithful_fold(
     // Condition (2): combiner algebra. The admitted set is `is_monoid`,
     // widened to also admit:
     // - the order-monotone overwrite family (`Monotone::Order` — `MAX_BY`/
-    //   `MIN_BY`, `incremental_models.md` §"The column-family catalogue"):
+    //   `MIN_BY`, `incremental_shapes.md` §"The column-family catalogue"):
     //   it is a semilattice fold, not a commutative monoid (`is_monoid`
     //   stays `false` for it, `discriminants.rs`), but its sub-multiset
     //   fold IS well-defined under the same sequential-application

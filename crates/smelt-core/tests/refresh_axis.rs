@@ -145,7 +145,7 @@ fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
 /// be established is decided later, by the locality gate in plan
 /// derivation (`smelt_logical::maintenance::locality::establish_locality`),
 /// not by this pure frontmatter check
-/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)"). The combination now reaches plan derivation
 /// instead of failing here.
 #[test]

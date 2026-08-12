@@ -287,7 +287,7 @@ impl SourceRecipe {
     /// additionally declaring a `key_recurrence` bound
     /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
     /// Phase A6) — route 3's declared fallback
-    /// (`incremental_models.md` §"Key temporal locality", route 3).
+    /// (`incremental_shapes.md` §"Key temporal locality", route 3).
     pub(crate) fn events_with_key_recurrence(key: Vec<String>, window: &str) -> Self {
         let mut source = Self::events(KeyShape::Single);
         source.key_recurrence = Some(KeyRecurrenceDecl {
@@ -332,7 +332,7 @@ impl SourceRecipe {
     /// block (unlike [`Self::events`]'s [`Self::source_yaml`], which always
     /// declares one for an `AppendOnly` posture) — an append-only source
     /// with no declared clock anywhere in the model derives the
-    /// snapshot-reconcile run shape (`incremental_models.md` §"The two run
+    /// snapshot-reconcile run shape (`incremental_shapes.md` §"The two run
     /// shapes") exactly like [`Self::mutable_dimension`] does, over a
     /// posture that would otherwise (incorrectly) pass the faithful-fold
     /// source-posture obligation on its own. `KeyedRecipe::
@@ -376,7 +376,7 @@ pub struct GrainDecl {
 /// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
 /// already-staged recipe's model body
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-/// `incremental_models.md` §"The definition-change trigger"). Both variants
+/// `definition_deltas.md` §"The verdict per column group"). Both variants
 /// are deliberately narrow, hand-picked shapes — not a generated construct
 /// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
 /// change invalidates the interval store; the run pipeline always compiles
@@ -987,14 +987,14 @@ pub enum KeyedCombiner {
     /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
     /// `Grade::Additive` reconciliation-ledger family: entries record delta
     /// identities and a repeat fold of an already-processed window is
-    /// refused (`KeyedReprocessedWindow`, `incremental_models.md` §"Reprocessing").
+    /// refused (`KeyedReprocessedWindow`, `incremental_shapes.md` §"Reprocessing").
     Additive,
     /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
     /// not a group). The `Grade::Idempotent` family: entries record only a
     /// frontier watermark, so re-folding a window is harmless.
     Idempotent,
     /// `MAX_BY(val, d)` — the order-monotone overwrite family
-    /// (`incremental_models.md` §"The column-family catalogue",
+    /// (`incremental_shapes.md` §"The column-family catalogue",
     /// `crates/smelt-logical/src/rules/cumulative.rs`
     /// `classify_order_monotone_column`). Also `Grade::Idempotent`
     /// (incumbent-wins re-merge of an already-reflected delta converges).
@@ -1008,7 +1008,7 @@ pub enum KeyedCombiner {
     OrderMonotone,
     /// `ANY_VALUE(val)` — the plain-overwrite family
     /// (`docs/plans/20260809-keyed-frontier.md` Phase 3;
-    /// `incremental_models.md` §"The column-family catalogue"). Admitted
+    /// `incremental_shapes.md` §"The column-family catalogue"). Admitted
     /// ONLY under the snapshot-reconcile run shape — a
     /// [`KeyedRecipe::new_window_forward`] recipe must never draw this
     /// variant (`arb_keyed_combiner` deliberately excludes it); only
@@ -1021,7 +1021,7 @@ pub enum KeyedCombiner {
     PlainOverwrite,
     /// `COALESCE(MAX(val))` — the once-write family
     /// (`docs/plans/20260809-keyed-frontier.md` Phase 4;
-    /// `incremental_models.md` §"The column-family catalogue"). Admitted
+    /// `incremental_shapes.md` §"The column-family catalogue"). Admitted
     /// window-forward only under the once-write provenance proof — this
     /// recipe declares a `functional_dependencies: [{key: [id], determines:
     /// val}]` entry ([`render_keyed_model_file`]) so the FD-backed route
@@ -1033,7 +1033,7 @@ pub enum KeyedCombiner {
     /// generated data; a dedicated recipe/schedule is required instead.
     OnceWrite,
     /// `COALESCE(MAX(val), 0) AS once_val` — the once-write family's
-    /// fallback-bearing spelling (`incremental_models.md` §"The
+    /// fallback-bearing spelling (`incremental_shapes.md` §"The
     /// column-family catalogue", row 6). Admits onto hidden `(value,
     /// written)` state (`decompose_once_write`) rather than
     /// [`KeyedCombiner::OnceWrite`]'s stateless `COALESCE(target, delta)`
@@ -1045,13 +1045,13 @@ pub enum KeyedCombiner {
     /// ([`KeyedRecipe::new_window_forward_once_write_with`]).
     OnceWriteFallback,
     /// `COALESCE(MAX(val), MIN(val)) AS once_val` — the once-write family's
-    /// multi-candidate spelling (`incremental_models.md` §"The
+    /// multi-candidate spelling (`incremental_shapes.md` §"The
     /// column-family catalogue", row 6). Admits onto hidden
     /// `(value, written)` state per candidate. Deliberately excluded from
     /// [`arb_keyed_combiner`], same reason as [`KeyedCombiner::OnceWrite`].
     OnceWriteMultiCandidate,
     /// `AVG(val) AS avg_val` — the decomposed-fold family
-    /// (`incremental_models.md` §"The column-family catalogue", row 7):
+    /// (`incremental_shapes.md` §"The column-family catalogue", row 7):
     /// admits onto hidden additive `(sum, count)` state via
     /// `CrossPartitionCombiner::Recomputed`. No per-key world-fact is
     /// required (unlike once-write), so this variant DOES join
@@ -1188,7 +1188,7 @@ pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
 /// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
 /// [`Self::new_window_forward`] uses the clocked append-only `events` shape
 /// (the run-shape derivation's window-forward posture,
-/// `incremental_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// `incremental_shapes.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
 /// uses the unclocked `mutable_snapshot` dimension shape (selecting the
 /// snapshot-reconcile posture, refused today — `incremental_models.md` §Known
 /// Divergences "The key grain": "the snapshot-reconcile executor is unbuilt").
@@ -1338,7 +1338,7 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction (design §5 "Key-recurrence control": "where ordering-
 /// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
 /// made unique by construction so the documented ties carve-out cannot fire
-/// spuriously" — `incremental_models.md` §"Ordering ties"). [`KeyedCombiner::
+/// spuriously" — `incremental_shapes.md` §"Ordering ties"). [`KeyedCombiner::
 /// OrderMonotone`] itself uses the driving source's own clock column as its
 /// ordering expression (already strictly monotone across a generated
 /// [`KeyedSchedule`] by construction, without needing this generator) — this
@@ -1354,10 +1354,10 @@ pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
 // Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
 // covering all three key-temporal-locality routes
 // (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
-// `incremental_models.md` §"Key temporal locality").
+// `incremental_shapes.md` §"Key temporal locality").
 // ---------------------------------------------------------------------
 
-/// The three key-temporal-locality routes (`incremental_models.md` §"Key
+/// The three key-temporal-locality routes (`incremental_shapes.md` §"Key
 /// temporal locality") a composed recipe may establish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposedRoute {
@@ -1982,7 +1982,7 @@ mod tests {
     /// generator discipline for order-monotone combiners — a sample of
     /// generated ordering-key vectors of every sampled length is always
     /// pairwise distinct, so the documented ties carve-out
-    /// (`incremental_models.md` §"Ordering ties") can never fire spuriously
+    /// (`incremental_shapes.md` §"Ordering ties") can never fire spuriously
     /// against generated data.
     #[test]
     fn ordering_keys_are_unique_by_construction() {

@@ -732,7 +732,7 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
-    // Internal state columns (`incremental_models.md` §"Decomposed state
+    // Internal state columns (`incremental_shapes.md` §"Decomposed state
     // (rung 2) in keyed models", `docs/outcomes/20260809-rung2-state-shapes`
     // row 9): one entry per presented column that folds through hidden
     // decomposed state, read straight off `result.state_columns` — this
@@ -754,7 +754,7 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out);
     }
 
-    // Key temporal locality (`incremental_models.md` §"Key temporal
+    // Key temporal locality (`incremental_shapes.md` §"Key temporal
     // locality (the time-partitioned output)"): for an admitted `grain:
     // key` + `timeseries:` model, print the established route/slice and
     // the derived settle bound. Route 2's settle bound is honestly `Never`
@@ -778,7 +778,7 @@ pub fn build_maintenance_plan_report(
             }
         };
         // Observed-delta key→partition projection form
-        // (`incremental_models.md` §"What the composed shape uniquely
+        // (`incremental_shapes.md` §"What the composed shape uniquely
         // enables" — "Exact key→partition dirt projection"; §Known
         // Divergences): routes 1–2 project a recorded observed delta to
         // *exact* touched partitions (a stored row's partition value is a
@@ -1362,7 +1362,7 @@ pub struct ExplainMaintenanceJson {
     pub cells: Vec<ExplainCellJson>,
     pub properties: PropertySet,
     /// One entry per presented column that folds through hidden decomposed
-    /// state (`incremental_models.md` §"Decomposed state (rung 2) in keyed
+    /// state (`incremental_shapes.md` §"Decomposed state (rung 2) in keyed
     /// models"), empty for a model with none — an append-stable addition to
     /// this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]

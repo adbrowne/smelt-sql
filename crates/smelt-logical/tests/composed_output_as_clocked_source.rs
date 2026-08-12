@@ -1,4 +1,4 @@
-//! `incremental_models.md` §"Key temporal locality (the time-partitioned
+//! `incremental_shapes.md` §"Key temporal locality (the time-partitioned
 //! output)" — "The output as a clocked source": an admitted composed
 //! (`grain: key` + `timeseries:`) output must be visible to the rest of the
 //! DAG exactly like a declared source — downstream partition-grain models

@@ -193,7 +193,7 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
 
 /// `redelivered_window_refuses_for_additive_keyed` (plan Phase 5 TDD list):
 /// re-running a folded window refuses (`KeyedReprocessedWindow`) before the
-/// action re-runs (`incremental_models.md` §"Reprocessing"; `incremental_models.md`
+/// action re-runs (`incremental_shapes.md` §"Reprocessing"; `incremental_models.md`
 /// §"The reconciliation ledger" — never-fold-twice).
 #[tokio::test]
 async fn redelivered_window_refuses_for_additive_keyed() {

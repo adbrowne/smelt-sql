@@ -239,7 +239,7 @@ LEFT JOIN smelt.sources.refunds r ON e.user_id = r.user_id AND e.d = r.refund_da
 }
 
 /// `G-08`: windowed running total via a self-referential batched model
-/// (`docs/specs/incremental_models.md` §"Window independence and
+/// (`docs/specs/incremental_shapes.md` §"Window independence and
 /// self-referential models"), wrapped in a subquery.
 pub fn running_balance_self_ref() -> ModelShape {
     ModelShape {

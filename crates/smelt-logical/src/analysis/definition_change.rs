@@ -1,7 +1,6 @@
 //! Definition-change column classification
 //! (`docs/specs/model_properties.md` §"Definition-change column
-//! classification"): the verdict `incremental_models.md` §"The
-//! definition-change trigger" needs when a model gains one output column.
+//! classification"): the verdict `definition_deltas.md` §"The verdict per column group" needs when a model gains one output column.
 //!
 //! [`classify_definition_change`] composes three independently-owned proofs
 //! rather than re-implementing any of them:

@@ -1,6 +1,6 @@
 //! Real-fixture, DuckDB-backed coverage for key temporal locality's
 //! **route 3** (recurrence-bounded, declared `r`) transactional runtime
-//! check (`docs/specs/incremental_models.md` §"Key temporal locality (the
+//! check (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 //! time-partitioned output)"; `docs/plans/20260715-composed-axes-
 //! conditional-maintenance.md` Phase A4).
 //!

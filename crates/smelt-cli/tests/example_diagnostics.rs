@@ -2710,13 +2710,13 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
 /// Before the fix, `validate_timeseries` returned `KeyedForbidsTimeseries`
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
 /// so the LSP showed no error even though keyed models must not declare
-/// `timeseries:` without key temporal locality (`incremental_models.md` §"Key-grain output shape").
+/// `timeseries:` without key temporal locality (`incremental_shapes.md` §"Key-grain output shape").
 ///
 /// The diagnostic now comes from the key-temporal-locality gate in plan
 /// derivation (`smelt_logical::maintenance::locality::establish_locality`),
 /// not frontmatter validation — the message must name all three routes and
 /// the nearest missing fact
-/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {

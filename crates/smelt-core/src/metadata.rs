@@ -547,7 +547,7 @@ pub enum MetadataError {
     /// made by the locality gate in plan derivation
     /// (`smelt_logical::maintenance::locality::establish_locality`) and
     /// surfaced from there instead (see
-    /// `docs/specs/incremental_models.md` §"Key temporal locality (the
+    /// `docs/specs/incremental_shapes.md` §"Key temporal locality (the
     /// time-partitioned output)"). The variant is kept here so the
     /// `MetadataError` type remains the shared vocabulary every consumer's
     /// exhaustive match already handles.
@@ -1034,7 +1034,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // Keyed + timeseries: is NOT rejected here. Admission depends on
     // whether key temporal locality can be established (three routes:
     // key-embedded, key-determined, recurrence-bounded —
-    // `docs/specs/incremental_models.md` §"Key temporal locality (the
+    // `docs/specs/incremental_shapes.md` §"Key temporal locality (the
     // time-partitioned output)"), a decision that needs the model's derived
     // `unique_key`/partition-column provenance, not just the frontmatter
     // shape. That decision is made by the single locality-gate entry point
@@ -1151,7 +1151,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // Rule: a `columns.<c>.contract: plausible` declaration must not name a
     // column that governs windowing, partition placement, or dedup identity
     // — those roles must stay deterministic regardless of any opt-in
-    // (`incremental_models.md` §"Partition-grain constraints" #12;
+    // (`incremental_shapes.md` §"Partition-grain constraints" #12;
     // §"Non-determinism and the payload rule"). Ports the bar the retired
     // `batched.nondeterministic_columns` list form used to enforce.
     let declared_unique_key = metadata.unique_key.as_deref().unwrap_or(&[]);
@@ -3279,7 +3279,7 @@ GROUP BY device_id, user_id"#;
     /// frontmatter validation — whether key temporal locality can be
     /// established is a plan-derivation decision (the locality gate in
     /// `smelt_logical::maintenance::locality`), not a frontmatter shape
-    /// check (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// check (`docs/specs/incremental_shapes.md` §"Key temporal locality
     /// (the time-partitioned output)").
     #[test]
     fn test_keyed_with_timeseries_reaches_plan_derivation() {

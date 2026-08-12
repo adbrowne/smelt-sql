@@ -125,7 +125,7 @@ pub enum Grain {
     Partition,
     /// A stored row is the end-state per key. `unique_key` is required
     /// (composite-valued); `timeseries:` is admitted only when key temporal
-    /// locality is established (`docs/specs/incremental_models.md` §"Key temporal
+    /// locality is established (`docs/specs/incremental_shapes.md` §"Key temporal
     /// locality").
     Key,
     /// A stored row is the trajectory: one row per `(key, partition)`.
@@ -638,7 +638,7 @@ impl<'de> Deserialize<'de> for DataLatency {
 ///
 /// Variant declaration order is increasing coarseness (`Hour` finest, `Year`
 /// coarsest) and derives `PartialOrd`/`Ord` on that basis — `g_run >= g_part`
-/// comparisons (`incremental_models.md` §"Run window vs partition granularity")
+/// comparisons (`incremental_shapes.md` §"Run window vs partition granularity")
 /// read this as a plain enum comparison rather than a bespoke arithmetic
 /// table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]

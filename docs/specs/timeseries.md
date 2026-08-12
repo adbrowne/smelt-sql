@@ -102,17 +102,17 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 
 ### Interaction with the partition grain (`grain: partition`)
 
-A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `incremental_models.md` §"The partition grain (`grain: partition`)") must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForPartitionGrain`.
+A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `incremental_shapes.md` §"The partition grain (`grain: partition`)") must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForPartitionGrain`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
 ### Interaction with the key grain (`grain: key`)
 
-A `grain: key` model (the shape profile detailed in `incremental_models.md` §"The key grain (`grain: key`)") may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `incremental_models.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A key-grain model without an admitted block has non-timeseries output (a lookup).
+A `grain: key` model (the shape profile detailed in `incremental_shapes.md` §"The key grain (`grain: key`)") may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `incremental_shapes.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A key-grain model without an admitted block has non-timeseries output (a lookup).
 
 ### Validation rules
 
-1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `grain: key` model, where it may instead be an aggregate projection admitted by key temporal locality; `incremental_models.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
+1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `grain: key` model, where it may instead be an aggregate projection admitted by key temporal locality; `incremental_shapes.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 2. **Event-time column projection.** For a model, `event_time_column` must appear in the model's output. For a source, it must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.

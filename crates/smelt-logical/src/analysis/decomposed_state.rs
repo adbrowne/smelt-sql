@@ -22,7 +22,7 @@ use smelt_types::SqlFunction;
 /// per-partition expression that accumulates it (e.g. `SUM(x)` for the `sum`
 /// half of `AVG`'s `(sum, count)` decomposition), and the cross-partition
 /// combiner the keyed `MERGE` folds it with (`docs/specs/
-/// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
+/// incremental_shapes.md` §"Decomposed state (rung 2) in keyed models",
 /// "Combiner over state"). Reuses `CrossPartitionCombiner` rather than a
 /// second combiner vocabulary — a state column's fold is not conceptually
 /// different from a stateless presented column's fold.
@@ -138,7 +138,7 @@ pub fn decompose_to_state(
 
 /// The population/sample divisor and its NULL-below-minimum-`n` threshold
 /// for one variance/stddev-family function
-/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
 /// models"): population divides by `n` and is `NULL` at `n <= 0`; sample
 /// divides by `n - 1` and is `NULL` at `n <= 1`. `wrap_sqrt` is set for the
 /// `STDDEV_*` forms, not the `VAR*`/`VARIANCE` forms.
@@ -203,7 +203,7 @@ fn decompose_variance_family(
 
 /// `ARG_MAX(v, o)` / `ARG_MIN(v, o)` -> `(v, o)` hidden state; `π` presents
 /// the bare `v` state column, the ordering value is never presented
-/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
 /// models").
 fn decompose_arg_by(
     is_max: bool,
@@ -243,7 +243,7 @@ fn decompose_arg_by(
 /// One `COALESCE`-first-non-null candidate reduction backing a once-write
 /// column's decomposed state — the *bare* per-partition reduction (e.g.
 /// `MAX(col)`), never fallback-tainted
-/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
 /// models").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnceWriteCandidate {
@@ -254,7 +254,7 @@ pub struct OnceWriteCandidate {
 /// Decompose a once-write column's fallback-bearing or multi-candidate
 /// spelling into hidden `(value, written)` state per candidate, plus a
 /// presentation view that applies the fallback/preference order fresh on
-/// every read (`docs/specs/incremental_models.md` §"Decomposed state (rung
+/// every read (`docs/specs/incremental_shapes.md` §"Decomposed state (rung
 /// 2) in keyed models"). `candidates` is in the caller's declared preference
 /// order. `fallback`, if present, is applied only when no candidate is
 /// written. `same_row_columns` are columns of the model's own output row
@@ -756,7 +756,7 @@ mod tests {
     }
 
     /// `AVG`'s `(sum, count)` state columns both fold additively —
-    /// `docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// `docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models".
     #[test]
     fn avg_state_columns_carry_sum_combiners() {

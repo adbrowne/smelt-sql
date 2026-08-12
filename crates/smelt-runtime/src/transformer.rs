@@ -114,7 +114,7 @@ pub fn inject_source_filters(
 ///
 /// `pub(crate)`: also used by `maintenance_driver.rs` to compute a
 /// locality-admitted keyed fold's target-scan slice bounds
-/// (`docs/specs/incremental_models.md` §"Key temporal locality") — the same
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality") — the same
 /// date arithmetic, so it is shared rather than re-implemented.
 pub(crate) fn subtract_seconds_from_date(date: &str, secs: u64) -> String {
     if secs == 0 {

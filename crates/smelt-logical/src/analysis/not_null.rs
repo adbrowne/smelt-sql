@@ -1,5 +1,5 @@
 //! Conservative "provably NOT NULL from a key's first stored row" derivation
-//! (`docs/specs/incremental_models.md` §"Key temporal locality", structural
+//! (`docs/specs/incremental_shapes.md` §"Key temporal locality", structural
 //! precondition 2) for a **non-key** `timeseries.partition_column`.
 //!
 //! Lives under `analysis/` (rather than `maintenance/locality.rs`, which

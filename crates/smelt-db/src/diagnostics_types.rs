@@ -739,7 +739,7 @@ pub enum DiagnosticCode {
     KeyedSnapshotPostureUnsupported,
     /// A fold-family column (additive, extremal/lattice, or order-monotone
     /// overwrite) is refused under the derived snapshot-reconcile run shape
-    /// (`docs/specs/incremental_models.md` §"Admission matrix").
+    /// (`docs/specs/incremental_shapes.md` §"Admission matrix").
     KeyedSnapshotSourceUnsupportedColumn,
     /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
     /// (v1 supports exactly one driving source).
@@ -747,7 +747,7 @@ pub enum DiagnosticCode {
     /// A `refresh: keyed` SELECT could not be parsed for classification.
     KeyedSqlNotParseable,
     /// A `refresh: keyed` `COALESCE`-shaped once-write column has no
-    /// once-write provenance proof (`incremental_models.md` §"The
+    /// once-write provenance proof (`incremental_shapes.md` §"The
     /// column-family catalogue"). Names the column and the three fixes:
     /// key-derived form, declared functional dependency, or remodelling.
     KeyedOnceWriteUnproven,
@@ -882,7 +882,7 @@ pub enum DiagnosticCode {
     /// Emitted (Error) when a model's definition-change `Trigger::
     /// ColumnAdded` names a column that occupies a row-membership/identity
     /// (skeleton) position — a grain change, never a column backfill
-    /// (EX-39, `incremental_models.md` §"The definition-change trigger").
+    /// (EX-39, `definition_deltas.md` §"The verdict per column group").
     /// Anchored at the model SQL body start.
     MaintenanceSkeletonColumnAdded,
     /// Emitted (Error) when a model's declared `timeseries.granularity`

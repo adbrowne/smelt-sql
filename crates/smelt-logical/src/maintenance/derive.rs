@@ -144,7 +144,7 @@ pub struct FoldSpec {
 /// Whether `source` contributes to `sql`'s cumulative fold — i.e. appears as
 /// an argument to one of the fold's own aggregate expressions
 /// (`model_properties.md` §"Faithful-fold conditions";
-/// `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" binds
+/// `docs/specs/incremental_shapes.md` §"The key grain (`grain: key`)" binds
 /// the `NewData` append-only obligation to exactly the sources this
 /// classifier answers `true` for, not every source the model references).
 /// [`FoldSpec`] itself carries no source attribution (`add_columns` is
@@ -945,7 +945,7 @@ fn derive_maintenance_plan_impl(
     // rather than re-deriving the predicate here: `triggers` IS that
     // predicate's own output, so this is one source of truth, not a second
     // copy that could drift. Consulted by `derive_new_data`'s key-grain
-    // branch (`incremental_models.md` §"The key grain (`grain: key`)") to
+    // branch (`incremental_shapes.md` §"The key grain (`grain: key`)") to
     // waive the append-only obligation for a source maintained by a covered
     // enrichment cell instead of folded.
     let covered_by_mutation: BTreeSet<String> = triggers
@@ -1057,7 +1057,7 @@ fn derive_new_data(
                 // an UNCLOCKED source, WITH a proven non-empty key (a real
                 // `GROUP BY`, not a degenerate/malformed declaration), is
                 // exactly the plain-overwrite/snapshot-reconcile shape
-                // (`docs/specs/incremental_models.md` §"The two run
+                // (`docs/specs/incremental_shapes.md` §"The two run
                 // shapes"; `docs/plans/20260809-keyed-frontier.md` Phase
                 // 3) — a model whose only non-key columns are
                 // `ANY_VALUE(...)` (or none at all). That shape is not
@@ -1115,7 +1115,7 @@ fn derive_new_data(
             // only the failure *reason*, never the verdict.
             let discovery = input_delta_discovery(source_shape(facts));
 
-            // Narrowing (`incremental_models.md` §"The key grain
+            // Narrowing (`incremental_shapes.md` §"The key grain
             // (`grain: key`)"), applied BEFORE the faithful-fold proof is
             // consulted — this is derive-layer waiver POLICY, not part of
             // the proof: the append-only obligation binds a
@@ -1245,7 +1245,7 @@ fn derive_new_data(
                 } = faithful_fold(*combiner, false, &posture, discovery)
                 {
                     // The once-write family (`COALESCE`,
-                    // `incremental_models.md` §"The column-family
+                    // `incremental_shapes.md` §"The column-family
                     // catalogue") is not a commutative monoid and not
                     // order-monotone either, so this ALGEBRA leg — and only
                     // this leg — would fail-closed-refuse it. Its admission
@@ -1272,7 +1272,7 @@ fn derive_new_data(
                     return;
                 }
             }
-            // Run-shape gate (`docs/specs/incremental_models.md` §"The two
+            // Run-shape gate (`docs/specs/incremental_shapes.md` §"The two
             // run shapes"; plan/classifier agreement with
             // `rules::cumulative::classify_cumulative`'s
             // `KeyedSnapshotSourceUnsupportedColumn`), consulted last —

@@ -1,5 +1,5 @@
 //! Named-diagnostic coverage for the reconciliation ledger's never-fold-
-//! twice refusal (`docs/specs/incremental_models.md` §"Reprocessing" /
+//! twice refusal (`docs/specs/incremental_shapes.md` §"Reprocessing" /
 //! §Surface diagnostics table `KeyedReprocessedWindow`).
 //!
 //! Fixture: `device_daily` is a `grain: key` model with a `SUM` combiner —

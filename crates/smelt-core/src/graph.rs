@@ -688,7 +688,7 @@ mod tests {
     }
 
     /// A self-referencing model (`smelt.<self>`, e.g. a running-balance batched
-    /// model — `incremental_models.md` §"Window independence and self-referential
+    /// model — `incremental_shapes.md` §"Window independence and self-referential
     /// models") must not be flagged as a circular dependency: the self-edge is
     /// not a topological dependency, and whether it actually *converges*
     /// partition-by-partition is a separate, later planner check (BL7), not

@@ -210,7 +210,7 @@ pub fn derive_fold_spec(
                 let name = func.name()?;
                 let combiner = SqlFunction::from_name(&name.to_uppercase())?;
                 // `ANY_VALUE` is the plain-overwrite family
-                // (`docs/specs/incremental_models.md` §"The column-family
+                // (`docs/specs/incremental_shapes.md` §"The column-family
                 // catalogue") — not a fold-family combiner at all (no
                 // target/delta combine, incoming row always wins), so it never
                 // enters a `FoldSpec`. A model whose non-key columns are ONLY
@@ -313,7 +313,7 @@ pub fn derive_fold_spec(
 /// granularity, when the caller can determine it (used only by a `grain:
 /// key` model that also declares its own `timeseries:` block, to check the
 /// key-temporal-locality gate's granularity-equality structural
-/// precondition — `incremental_models.md` §"Key temporal locality").
+/// precondition — `incremental_shapes.md` §"Key temporal locality").
 /// `None` fails that precondition closed (an unproven match is never
 /// admitted); the runtime execution path (`smelt-runtime::cumulative`,
 /// which has the driving source's `TimeseriesConfig` directly from the
@@ -324,7 +324,7 @@ pub fn derive_fold_spec(
 /// `resolve_driving_source`'s resolved `driving.name` use) — consulted only
 /// by key temporal locality's route 3 (recurrence-bounded) as the declared
 /// fallback when no bound is statically derivable from the model's own SQL
-/// (`docs/specs/incremental_models.md` §"Key temporal locality"). Build via
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality"). Build via
 /// [`build_key_recurrences`], the sibling of [`build_source_facts`] over the
 /// same `(ref_string, source_info)` pairs.
 /// `deployed_column_names` is the model's previously-deployed output
@@ -333,8 +333,7 @@ pub fn derive_fold_spec(
 /// `smelt-db` itself does no I/O, per the Salsa-purity rule). An empty
 /// slice means "no known deployed schema" and derives no `Trigger::
 /// ColumnAdded` at all — the same fail-closed posture as before this
-/// parameter existed (`docs/specs/incremental_models.md` §"The
-/// definition-change trigger"); every existing `smelt-db`-internal caller
+/// parameter existed (`docs/specs/definition_deltas.md` §"The verdict per column group"); every existing `smelt-db`-internal caller
 /// (diagnostics, `smelt explain`) has no such snapshot to hand and passes
 /// `&[]` unchanged. `smelt-runtime`'s maintenance driver is the one caller
 /// with real I/O access to the deployed-schema store, and is the only one
@@ -442,7 +441,7 @@ pub fn derive_model_maintenance_plan(
             // plan is derived at all — the single entry point deciding
             // keyed+timeseries admissibility
             // (`smelt_logical::maintenance::locality::establish_locality`,
-            // `docs/specs/incremental_models.md` §"Key temporal locality").
+            // `docs/specs/incremental_shapes.md` §"Key temporal locality").
             if let Some(own_ts) = metadata.timeseries.as_ref() {
                 // The driving source is the single alias-scoped FROM/JOIN
                 // input that both is a referenced source and declares its
@@ -530,7 +529,7 @@ pub fn derive_model_maintenance_plan(
     // The definition-change trigger's inputs: `None`/unclassifiable and
     // "no deployed snapshot supplied" both fall back to "no old columns, no
     // added columns" — fail-closed, never a guessed `ColumnAdded` trigger
-    // (`incremental_models.md` §"The definition-change trigger").
+    // (`definition_deltas.md` §"The verdict per column group").
     let (old_columns, added_columns) = if deployed_column_names.is_empty() {
         (Vec::new(), Vec::new())
     } else {
@@ -711,7 +710,7 @@ pub fn cell_column_group_violations(
 
 /// The single clocked referenced source's own declared granularity — for
 /// the key-temporal-locality gate's granularity-equality structural
-/// precondition (`incremental_models.md` §"Key temporal locality"). `None`
+/// precondition (`incremental_shapes.md` §"Key temporal locality"). `None`
 /// when zero or more than one referenced source declares a `timeseries:`
 /// block: an ambiguous or absent driving source fails that precondition
 /// closed rather than guess.
@@ -833,8 +832,7 @@ pub enum MaintenanceRefusal {
     },
     /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
     /// row-membership/identity (skeleton) position, a grain change rather
-    /// than a column backfill (EX-39, `incremental_models.md` §"The
-    /// definition-change trigger").
+    /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
     SkeletonColumnAdded {
         column: String,
     },
@@ -1064,7 +1062,7 @@ pub fn write_pin_diagnostics(
 /// `driving_source_granularity`'s "exactly one clocked candidate" rule, so
 /// a `grain: key` model may take a composed upstream model's own output as
 /// its driving source exactly as it would a declared source
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source").
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
@@ -1456,7 +1454,7 @@ mod tests {
     /// A `grain: key` model that also declares a `timeseries:` block, but
     /// whose `partition_column` is not a `unique_key` column and has no
     /// resolvable driving source, is refused by the key-temporal-locality
-    /// gate (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// gate (`docs/specs/incremental_shapes.md` §"Key temporal locality
     /// (the time-partitioned output)") — no route admits it.
     #[test]
     fn keyed_with_timeseries_refuses_via_locality_gate() {
@@ -1508,7 +1506,7 @@ mod tests {
     /// `partition_column` (`event_date`) is a `unique_key` column, the
     /// single referenced source is clocked at the same (day) granularity —
     /// the model derives an ordinary plan with no `LocalityNotEstablished`
-    /// refusal (`docs/specs/incremental_models.md` §"Key temporal
+    /// refusal (`docs/specs/incremental_shapes.md` §"Key temporal
     /// locality").
     #[test]
     fn keyed_with_timeseries_admits_via_route1_key_embedded() {

@@ -198,7 +198,7 @@ pub fn find_item_expr_by_alias_or_position(
 
 /// The verdict for whether a SELECT scope's own `GROUP BY` / `DISTINCT` key
 /// is a superset of the model's `partition_column` — the shared
-/// partition-alignment signal (`incremental_models.md` §"Safety checks") that
+/// partition-alignment signal (`incremental_shapes.md` §"Safety checks") that
 /// licenses group-aligned `HAVING`/`DISTINCT` admission
 /// (`rules::incremental`) and is available to other per-scope consumers
 /// (UNION-branch / window admission) as the same reusable check.
@@ -275,7 +275,7 @@ pub fn resolve_scope_group_by(
 /// containing the projected `partition_col` expression — found among
 /// `select`'s **own** select-list items, so a subquery/UNION-branch body is
 /// judged by its own projections and its own `GROUP BY`, never the outer
-/// query's (`incremental_models.md` §"Safety checks").
+/// query's (`incremental_shapes.md` §"Safety checks").
 pub fn scope_group_by_alignment(
     select: &smelt_parser::SelectStmt,
     partition_col: &str,

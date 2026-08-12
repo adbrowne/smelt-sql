@@ -654,7 +654,7 @@ pub fn stage_keyed(
 
 /// [`stage_keyed`], additionally staging a downstream consumer model
 /// `models/<model>_downstream.sql` = `SELECT * FROM smelt.<model>`
-/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
 /// models": state columns must stay invisible to a `ref()`-mediated
 /// consumer, not just a direct `information_schema` probe of the physical
 /// table). No frontmatter on the downstream model — `refresh: Full` is the

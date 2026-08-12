@@ -173,7 +173,7 @@ pub trait WindowedKeyedRule: Send + Sync {
 
     /// Build the out-of-slice match probe SQL for a **checked** route-3
     /// (recurrence-bounded, declared `r`) slice
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 3) — the single-owner emitter is
     /// `smelt_logical::maintenance::emit::emit_recurrence_bound_probe`;
     /// this method's only job is supplying it the rule's own `unique_key`
@@ -221,7 +221,7 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// with the action via [`Backend::fold_ledger_delta`]. A step whose delta is
 /// already reflected — a reprocessed window — refuses the run with a
 /// `KeyedReprocessedWindow`-shaped error
-/// (`docs/specs/incremental_models.md` §"Reprocessing") instead of silently
+/// (`docs/specs/incremental_shapes.md` §"Reprocessing") instead of silently
 /// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
 /// warehouse table is ever created for them.
 #[allow(clippy::too_many_arguments)]
@@ -273,7 +273,7 @@ pub async fn run_windowed_keyed_maintenance(
         };
         // Resolve this step's concrete target-scan slice predicate from the
         // caller's established `LocalitySlice` (`docs/specs/
-        // incremental_models.md` §"Key temporal locality"). The two routes
+        // incremental_shapes.md` §"Key temporal locality"). The two routes
         // resolve to structurally different predicates:
         //   - route 1 (`Window`): the step's own partition value, widened
         //     by the derived margins. Date arithmetic is shared with the
@@ -323,7 +323,7 @@ pub async fn run_windowed_keyed_maintenance(
         };
 
         // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
-        // is admitted only **checked** (`incremental_models.md` §"Key
+        // is admitted only **checked** (`incremental_shapes.md` §"Key
         // temporal locality": "A declared `r` is admitted only checked"):
         // before this step's merge action ever runs, probe the target for
         // any delta key that also matches a stored row outside the slice —
@@ -989,8 +989,7 @@ pub fn resolve_live_column_scoped_cell(
 
 /// Resolve a live `Trigger::ColumnAdded` cell that resolves to
 /// `Technique::InPlaceUpdate` (`docs/plans/20260809-sensitivity-precision.md`
-/// Phase 6, `docs/specs/incremental_models.md` §"The definition-change
-/// trigger") — the production entry point for the definition-change
+/// Phase 6, `docs/specs/definition_deltas.md` §"The verdict per column group") — the production entry point for the definition-change
 /// trigger, distinct from [`resolve_live_column_scoped_cell`]/
 /// [`resolve_live_membership_recompute_cell`] above (which only ever
 /// inspect `NewData`/`UpstreamMutation` cells).
@@ -1065,7 +1064,7 @@ pub fn resolve_live_in_place_update_cell(
 /// same posture `schema_evolution`'s own `ALTER TABLE ... ADD COLUMN`
 /// (which must already have run first, physically creating the column) —
 /// not a windowed catch-up over a moving horizon (`docs/specs/
-/// incremental_models.md` §"The definition-change trigger": "instantiating
+/// definition_deltas.md` §"The verdict per column group": "instantiating
 /// their ledger entries at `S = ∅`").
 ///
 /// The statement is built and executed exactly once via
@@ -4118,7 +4117,7 @@ mod tests {
     /// `LocalitySlice::DeltaValues` through to `merge_sql` as a
     /// `TargetSlicePredicate::DeltaValues` over the step's *own* delta
     /// relation, never a margin-based range
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 2: "the slice is the delta's own partition values — exact
     /// regardless of key age").
     struct CapturingRule {

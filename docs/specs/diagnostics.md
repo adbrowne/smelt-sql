@@ -126,7 +126,7 @@ Owned by `docs/specs/timeseries.md`.
 
 ### Partition grain
 
-Owned by `docs/specs/incremental_models.md`.
+Owned by `docs/specs/incremental_shapes.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
@@ -147,7 +147,7 @@ frontmatter.
 
 ### Keyed refresh mode
 
-Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
+Owned by `docs/specs/incremental_shapes.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
 unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, and
 `KeyedForbidsPartitionGrain` are **retired outright, not renamed**:
@@ -164,20 +164,20 @@ unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_shapes.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |
 | `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `grain: key` model's SELECT. |
 | `KeyedSqlNotParseable` | Error | A `grain: key` model's SELECT could not be parsed for column-family classification. |
 | `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `grain: key` model's FROM (exactly one is admitted under window-forward). |
-| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns (`incremental_models.md` §"The column-family catalogue"). Names the column, the unproven candidate(s), and the three fixes: a key-derived expression, a declared functional dependency, or remodelling the column out into its own model. |
-| `KeyedStateColumnCollision` | Error | A decomposed-state column name (`<output>__<part>`, `incremental_models.md` §"Decomposed state (rung 2) in keyed models") collides with a declared or projected user column. Names both and the reserved suffix. |
+| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns (`incremental_shapes.md` §"The column-family catalogue"). Names the column, the unproven candidate(s), and the three fixes: a key-derived expression, a declared functional dependency, or remodelling the column out into its own model. |
+| `KeyedStateColumnCollision` | Error | A decomposed-state column name (`<output>__<part>`, `incremental_shapes.md` §"Decomposed state (rung 2) in keyed models") collides with a declared or projected user column. Names both and the reserved suffix. |
 | `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen), and the repair family cannot admit a per-group recompute for the retraction (`incremental_models.md` §"The repair family"). Names the failing repair obligation. Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change (`incremental_models.md` §"The repair family"). Names the failing repair obligation and points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | A `grain: key` model has no clocked driving source, AND no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source joined, none clocked) — genuinely unsupportable, not a "not yet" refusal (`incremental_models.md` §"The two run shapes"). |
+| `KeyedSnapshotPostureUnsupported` | Error | A `grain: key` model has no clocked driving source, AND no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source joined, none clocked) — genuinely unsupportable, not a "not yet" refusal (`incremental_shapes.md` §"The two run shapes"). |
 
 ---
 
@@ -494,7 +494,7 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceReachNotDerivable` | Error | A required scan bound is neither derivable nor declared. |
 | `MaintenanceScanUnbounded` | Error | A scan or write footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists. |
 | `MaintenanceUnboundedFootprint` | Error | A targeted write was requested for a cell whose write footprint is unbounded (e.g. a stored trajectory under late data). |
-| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
+| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. Owned by `definition_deltas.md` §"Skeleton changes are a new relation". |
 | `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
 | `MaintenanceGranularityMismatch` | Error | A declared `timeseries.granularity` narrows past what the model's own `partition_column` projection actually derives (a `date_trunc`-style grouping check) — a safe widen (declared coarser than or equal to the derived unit) is never flagged. |
 | `MaintenanceWriteAddressingRefused` | Error | A `maintenance.cells[].write` pin names a physical addressing that cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a region write on a cell whose footprint escapes any partition set); names the cell and the refused pattern. |

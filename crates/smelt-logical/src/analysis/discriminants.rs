@@ -64,7 +64,7 @@ impl Discriminants {
     /// than `!decomposable` alone, so an order-monotone combiner
     /// (`ArgMax`/`ArgMin`, `decomposable == false` but `monotone ==
     /// Monotone::Order`) still reaches the state-shape match
-    /// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in
+    /// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
     /// keyed models").
     pub fn is_holistic_or_unknown(&self) -> bool {
         *self == Self::holistic_or_unknown()
@@ -102,7 +102,7 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
         // belongs here, not with the idempotent bit/bool lattice combiners
         // below: XOR is its own inverse (`x XOR d XOR d == x`), which makes
         // it a group and — critically — NOT idempotent. It is the additive
-        // fold family (`docs/specs/incremental_models.md` §"The
+        // fold family (`docs/specs/incremental_shapes.md` §"The
         // column-family catalogue"), and every consumer that grades
         // re-foldability off these facts must treat it as such.
         Sum | Count | BitXor => Discriminants {
@@ -140,7 +140,7 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
         // Order-monotone: the presented value may switch, but only in step
         // with a monotone ordering key (a semilattice fold) — the
         // order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
-        // `incremental_models.md` §"The column-family catalogue").
+        // `incremental_shapes.md` §"The column-family catalogue").
         ArgMax | ArgMin => Discriminants {
             is_monoid: false,
             needs_inverse: false,
@@ -160,7 +160,7 @@ mod tests {
 
     /// `BIT_XOR` is a group (self-inverse), so it is graded with `SUM`/
     /// `COUNT`, never with the idempotent bit/bool lattice combiners — the
-    /// additive fold family (`docs/specs/incremental_models.md` §"The
+    /// additive fold family (`docs/specs/incremental_shapes.md` §"The
     /// column-family catalogue").
     #[test]
     fn sum_count_and_bit_xor_are_invertible_monoids() {

@@ -9,7 +9,7 @@
 //! `(v, o)` state (`docs/outcomes/20260809-rung2-state-shapes` row 5) — no
 //! companion projection is required; only the wrong-arity shape refuses.
 //!
-//! Spec: `docs/specs/incremental_models.md` §"The column-family catalogue",
+//! Spec: `docs/specs/incremental_shapes.md` §"The column-family catalogue",
 //! §"Statement emission (single owner)".
 
 use smelt_db::queries::maintenance::derive_fold_spec;
@@ -65,7 +65,7 @@ fn max_by_self_companion_is_admitted() {
 }
 
 /// Plan/classifier agreement for the snapshot-reconcile run shape
-/// (`docs/specs/incremental_models.md` §"The two run shapes"): a keyed
+/// (`docs/specs/incremental_shapes.md` §"The two run shapes"): a keyed
 /// model with a `SUM` (additive-fold) column, over a source declared
 /// `mutation_profile: append_only` but with NO clocked source anywhere in
 /// the model (`SourceFacts::partition_col` is `None` for every declared

@@ -1,6 +1,6 @@
 //! Real-fixture, DuckDB-backed coverage for key temporal locality's
 //! **route 1** (key-embedded) target-scan slice pruning
-//! (`docs/specs/incremental_models.md` §"Key temporal locality (the
+//! (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 //! time-partitioned output)"; `docs/plans/20260715-composed-axes-
 //! conditional-maintenance.md` Phase A2).
 //!
@@ -309,7 +309,7 @@ mutation_profile:
 
     // Route 1 (key-embedded): `event_date` is both the model's own
     // `timeseries.partition_column` and a `unique_key` column (GROUP BY 1,
-    // 2) — the composed shape (`docs/specs/incremental_models.md` §"Key
+    // 2) — the composed shape (`docs/specs/incremental_shapes.md` §"Key
     // temporal locality"). No lookback construct in the SQL, so the
     // derived read margin is zero: the slice for a given step is exactly
     // that step's own date.

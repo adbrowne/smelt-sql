@@ -4,7 +4,7 @@
 //! conditional-maintenance.md` Phase W1).
 //!
 //! `silver.events_deduped` is the flagship composed shape
-//! (`docs/specs/incremental_models.md` §"Key temporal locality (the
+//! (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 //! time-partitioned output)"): key-addressed (one row per `event_id`) *and*
 //! time-partitioned (`first_seen_date`), admitted via **route 3**
 //! (recurrence-bounded) over `sources.raw.events`'s declared
@@ -20,7 +20,7 @@
 //! real datagen dataset (with redelivery enabled) through day-by-day
 //! `smelt run` windows and comparing the final table state to a single
 //! full-window run. It also asserts the downstream pushdown promise
-//! (`incremental_models.md` §"What the composed shape uniquely enables" —
+//! (`incremental_shapes.md` §"What the composed shape uniquely enables" —
 //! "Propagation admissibility"): a partition-grain consumer of the composed
 //! model (`silver.sessions`) still gets a genuine derived scan clamp against
 //! it, not an unbounded full-table read — the clock propagates through the
@@ -308,7 +308,7 @@ fn test_events_deduped_establishes_declared_recurrence_bound_route() {
 }
 
 /// The composed shape's downstream-propagation promise
-/// (`docs/specs/incremental_models.md` §"What the composed shape uniquely
+/// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely
 /// enables" — "Propagation admissibility"): `silver.sessions`, a
 /// partition-grain consumer of the composed `silver.events_deduped`, still
 /// gets a genuine derived scan clamp against it — the clock propagates

@@ -59,7 +59,7 @@ GROUP BY 1, 2
 /// A model with a **misaligned** HAVING in the outer body: its scope's
 /// GROUP BY (`user_id`) does not include the partition column, so group
 /// composition on a batched run can differ from a full refresh — refused
-/// (`incremental_models.md` §"Safety checks").
+/// (`incremental_shapes.md` §"Safety checks").
 const SQL_HAVING_MISALIGNED: &str = r#"---
 materialization: table
 refresh: incremental
@@ -82,7 +82,7 @@ HAVING COUNT(*) > 5
 /// includes the partition column, so every group is scoped to a single
 /// partition and the DELETE+INSERT contract makes the filter safe —
 /// admitted since the group-aligned HAVING/DISTINCT admission
-/// (`incremental_models.md` §"Safety checks": rejected *unless* the scope's own
+/// (`incremental_shapes.md` §"Safety checks": rejected *unless* the scope's own
 /// GROUP BY key is a superset of `partition_column`).
 const SQL_HAVING_ALIGNED: &str = r#"---
 materialization: table
@@ -194,7 +194,7 @@ fn test_outer_having_refused() {
 
 /// A partition-aligned HAVING (its scope's GROUP BY includes the partition
 /// column) is admitted — the group-aligned admission of
-/// `incremental_models.md` §"Safety checks", end-to-end.
+/// `incremental_shapes.md` §"Safety checks", end-to-end.
 #[test]
 fn test_partition_aligned_having_admitted() {
     let tmp = TempDir::new().unwrap();

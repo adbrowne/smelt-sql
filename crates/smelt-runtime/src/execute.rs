@@ -1710,8 +1710,7 @@ pub async fn execute_project(
         // and non-keyed branches below — a one-time migration-style
         // backfill over the model's existing rows, orthogonal to whichever
         // window/creation/mutation technique the rest of this run
-        // dispatches (`docs/specs/incremental_models.md` §"The
-        // definition-change trigger"). The cell was already resolved once,
+        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
         // above, before the migration gate ran — reused here, never
         // re-derived. Any column the migration gate already folded into
         // its own `StatementGroup` (`migration_backfilled_columns`) is
@@ -1881,7 +1880,7 @@ pub async fn execute_project(
             };
 
             // Classify up front, regardless of window presence, so the
-            // derived run shape (`docs/specs/incremental_models.md` §"The
+            // derived run shape (`docs/specs/incremental_shapes.md` §"The
             // two run shapes") can gate which branch below is even
             // reachable — a classifier rejection must REFUSE the model
             // (§"Key-grain constraints" #4 — "The catalogue is closed and
@@ -2442,7 +2441,7 @@ pub async fn execute_project(
                                 // axis — only a composed clock-and-identity
                                 // output that ALSO declares its own
                                 // `timeseries:` establishes one
-                                // (`incremental_models.md` §"Key temporal
+                                // (`incremental_shapes.md` §"Key temporal
                                 // locality"). No derivable keyed cell
                                 // reaches `PartitionLocal::Yes` today (the
                                 // non-keyed branch's own comment on this
@@ -2889,7 +2888,7 @@ pub async fn execute_project(
                     };
 
                 // First-run bootstrap for a self-referential model
-                // (`docs/specs/incremental_models.md` §"First-run and backfill"
+                // (`docs/specs/incremental_shapes.md` §"First-run and backfill"
                 // — "First-run bootstrap for a self-referential model"):
                 // when the target doesn't exist yet, `CREATE TABLE … AS
                 // SELECT …` over the first batch cannot resolve the
@@ -3733,7 +3732,7 @@ pub async fn execute_project(
                 // the very prior state the SELECT reads before the SELECT
                 // ever runs. This arm is the unwindowed sibling of the
                 // incremental path's own first-run bootstrap
-                // (`docs/specs/incremental_models.md` §"First-run and
+                // (`docs/specs/incremental_shapes.md` §"First-run and
                 // backfill" — "First-run bootstrap for a self-referential
                 // model"): drop, bootstrap an EMPTY target from the
                 // resolved output schema, then `INSERT` the compiled
@@ -4352,7 +4351,7 @@ fn build_model_plans(
                     request.per_partition,
                 )
                 .map_err(|diag| {
-                    // Fail-closed last line of defense (`incremental_models.md` §"Partition-grain constraints" #10):
+                    // Fail-closed last line of defense (`incremental_shapes.md` §"Partition-grain constraints" #10):
                     // even under `--allow-downgrade` (which only warns at the earlier
                     // `check_bound_derivation` gate), the batch-safety roll-up here must
                     // still refuse rather than silently approximate a chunk shape —
@@ -4423,7 +4422,7 @@ fn build_model_plans(
 }
 
 /// Create the EMPTY target table for a **self-referential** model's first
-/// run (`docs/specs/incremental_models.md` §"First-run and backfill" —
+/// run (`docs/specs/incremental_shapes.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"). Shared by both
 /// dispatch arms in `execute_project` — the windowed incremental batch loop
 /// (bootstrap-then-DELETE+INSERT) and the unwindowed full-refresh arm
@@ -5028,7 +5027,7 @@ fn build_state_bearing_models(
 /// `crate::cumulative::CumulativeClassification::driving_source.name`'s own
 /// full-address form, not `SourceFacts::name`'s bare form). Consumed only
 /// by key temporal locality's route 3 (recurrence-bounded) as the declared
-/// fallback (`docs/specs/incremental_models.md` §"Key temporal locality") —
+/// fallback (`docs/specs/incremental_shapes.md` §"Key temporal locality") —
 /// `crate::cumulative::execute_cumulative_aggregate` looks up its own
 /// driving source's entry here.
 pub fn build_source_key_recurrence_map(

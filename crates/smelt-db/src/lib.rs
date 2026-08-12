@@ -1266,7 +1266,7 @@ fn ref_source_info(
 
 /// Resolve `ref_str` to a locality-admitted composed model's own output as
 /// a [`smelt_logical::maintenance::SourceFacts`] candidate driving source
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source": "a downstream keyed model
 /// may take it as its clocked driving source"). `None` when the ref does
 /// not resolve to a maintained `grain: key` model whose own `timeseries:`
@@ -1771,7 +1771,7 @@ pub fn maintenance_plan_report(
     // below via `derive_model_maintenance_plan`) is already agnostic to
     // provenance, so publish every referenced upstream model that clears
     // the locality gate into the same `SourceFacts` candidate list a
-    // declared source populates (`incremental_models.md` §"Key temporal
+    // declared source populates (`incremental_shapes.md` §"Key temporal
     // locality (the time-partitioned output)" — "The output as a clocked
     // source"). Scoped to `grain: key` models only — a `grain: partition`
     // downstream's pushdown against a composed upstream is already derived

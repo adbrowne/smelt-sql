@@ -1,5 +1,5 @@
 //! Execution loops for `refresh: keyed` table models, one per derived run
-//! shape (`docs/specs/incremental_models.md` §"The two run shapes").
+//! shape (`docs/specs/incremental_shapes.md` §"The two run shapes").
 //!
 //! **Window-forward** (`execute_cumulative_aggregate`), for a run window
 //! `[run_start, run_end)`:
@@ -163,7 +163,7 @@ impl WindowedKeyedRule for CumulativeClassification {
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
     /// combiner belongs to the **additive fold** family — `Sum` or `BitXor`
-    /// (`docs/specs/incremental_models.md` §"The column-family catalogue")
+    /// (`docs/specs/incremental_shapes.md` §"The column-family catalogue")
     /// — since re-merging an already-reflected delta does not converge for
     /// either (`docs/specs/incremental_models.md` §"The reconciliation
     /// ledger" — "Storage is graded by algebra"). `Sum` double-counts
@@ -298,7 +298,7 @@ pub async fn execute_cumulative_aggregate(
     // This function is only reachable via the window-forward run shape —
     // the caller (`execute.rs`'s keyed dispatch) refuses a windowed run for
     // a snapshot-reconcile model before ever reaching here
-    // (`docs/specs/incremental_models.md` §"The two run shapes"). A `None`
+    // (`docs/specs/incremental_shapes.md` §"The two run shapes"). A `None`
     // here would be an internal invariant violation, not a model error —
     // fail loud rather than silently treating it as anything else.
     let driving_ts = classification
@@ -319,7 +319,7 @@ pub async fn execute_cumulative_aggregate(
     );
 
     // 1b. When the model declares its own `timeseries:` block, key temporal
-    //     locality (`docs/specs/incremental_models.md` §"Key temporal
+    //     locality (`docs/specs/incremental_shapes.md` §"Key temporal
     //     locality") must be established before any merge is emitted — the
     //     single seam (`smelt_logical::maintenance::locality::establish_
     //     locality`) is a pure function, so calling it here (in addition to
@@ -382,7 +382,7 @@ pub async fn execute_cumulative_aggregate(
     //    reconciliation ledger"), transactionally with the write
     //    (`Backend::fold_ledger_delta`); a step whose delta identity (its
     //    own partition value) is already reflected refuses the run instead
-    //    of double-counting (`docs/specs/incremental_models.md` §"Reprocessing" —
+    //    of double-counting (`docs/specs/incremental_shapes.md` §"Reprocessing" —
     //    `KeyedReprocessedWindow`). An `Idempotent`-graded cell (no
     //    additive column) needs no ledger — re-merging a window is
     //    harmless — and no warehouse ledger table is ever created for it.
@@ -416,7 +416,7 @@ pub async fn execute_cumulative_aggregate(
     let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
 
     // The hidden decomposed-state columns every state-bearing aggregator
-    // column carries (`docs/specs/incremental_models.md` §"Decomposed state
+    // column carries (`docs/specs/incremental_shapes.md` §"Decomposed state
     // (rung 2) in keyed models") — derived once, like `suppression` above.
     // Empty for every column family admitted before this mechanism existed,
     // in which case `state_augmented_projection` below is a no-op.
@@ -489,14 +489,14 @@ pub async fn execute_cumulative_aggregate(
 }
 
 /// Execute a single keyed model under the snapshot-reconcile run shape
-/// (`docs/specs/incremental_models.md` §"The two run shapes"): no
+/// (`docs/specs/incremental_shapes.md` §"The two run shapes"): no
 /// `[run_start, run_end)` window — the whole source is re-scanned every
 /// run. First run (target does not yet exist) creates the table from the
 /// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
 /// scan into the existing target via [`build_cumulative_merge_sql`]
 /// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
 /// target but absent from the incoming scan is retained unchanged — the
-/// documented carve-out, `incremental_models.md` §"End-state equivalence").
+/// documented carve-out, `incremental_shapes.md` §"End-state equivalence").
 /// No reconciliation ledger: `classification`'s plain-overwrite columns are
 /// idempotent by construction (re-running an unchanged snapshot converges),
 /// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
@@ -700,7 +700,7 @@ fn collect_refs_from_sql(sql: &str) -> Vec<String> {
 /// This is the single entry point both run-pipeline paths use to enforce the
 /// classifier — including the **no-window full-refresh** path. A classifier
 /// rejection must refuse the model rather than silently materialise forbidden
-/// SQL (`incremental_models.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
+/// SQL (`incremental_shapes.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
 /// classifier is fail-closed").
 ///
 /// `model_has_timeseries` is whether the model's own frontmatter declares a
@@ -842,7 +842,7 @@ mod tests {
     }
 
     /// A locality-admitted model's `MERGE` carries a target-side partition
-    /// predicate over the slice (`docs/specs/incremental_models.md` §"Key
+    /// predicate over the slice (`docs/specs/incremental_shapes.md` §"Key
     /// temporal locality") — a non-time-partitioned keyed model's SQL (the
     /// `None` case above) stays byte-unchanged; passing `Some` only adds the
     /// extra `AND` clause, nothing else in the statement shifts.
@@ -900,7 +900,7 @@ mod tests {
     }
 
     /// Route 2 (key-determined) locality carries a `DeltaValues` slice
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 2) — the target scan is pruned to exactly the partition-column
     /// values the step's own delta relation carries, read off that same
     /// relation rather than a caller-precomputed range.

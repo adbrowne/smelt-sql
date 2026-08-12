@@ -203,7 +203,7 @@ fn keyed_fold_slice_escapes_quoted_literal_bounds() {
 }
 
 /// Route 2 (key-determined) locality slices the target scan by the delta's
-/// own partition values (`docs/specs/incremental_models.md` §"Key temporal
+/// own partition values (`docs/specs/incremental_shapes.md` §"Key temporal
 /// locality", route 2), rendered as an `IN (SELECT DISTINCT … FROM
 /// (<delta>))` predicate rather than route 1's literal `BETWEEN` range —
 /// no widening, no caller-precomputed bounds.
@@ -357,7 +357,7 @@ fn column_scoped_merge_dialect_invariant_shape() {
 }
 
 /// The route-3 (recurrence-bounded, declared `r`) out-of-slice match probe
-/// (`docs/specs/incremental_models.md` §"Key temporal locality", route 3):
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route 3):
 /// a single read-only `SELECT` counting keys the delta shares with a
 /// stored target row whose partition column lies before the slice's lower
 /// bound, plus up to 5 sample violating keys.
@@ -578,7 +578,7 @@ fn staged_candidate_conditional_recompute_panics_on_empty_key() {
     );
 }
 
-/// A state-bearing fold set (`docs/specs/incremental_models.md` §"Decomposed
+/// A state-bearing fold set (`docs/specs/incremental_shapes.md` §"Decomposed
 /// state (rung 2) in keyed models"): `emit_keyed_fold` assembles the `SET`
 /// clause from whatever `(column, expr)` pairs it is handed — the state
 /// columns' own combiner expressions, plus the presented column set to `π`

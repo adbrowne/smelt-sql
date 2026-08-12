@@ -639,7 +639,7 @@ async fn region_recompute_statements_come_from_the_emitter() {
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/incremental_models.md` §"First-run and backfill" — "First-run
+/// (`docs/specs/incremental_shapes.md` §"First-run and backfill" — "First-run
 /// bootstrap for a self-referential model"): building from scratch (no
 /// pre-seeded target table) must emit exactly ONE statement group before
 /// any region `DELETE`+`INSERT` — a plain `CREATE TABLE main.running_balance
@@ -1207,7 +1207,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
 /// The slice-predicated keyed-fold family: a `refresh: keyed` model that
 /// also declares its own `timeseries:` block, admitted through key temporal
 /// locality's route 1 (key-embedded — `partition_column` is itself a
-/// `unique_key` column, `docs/specs/incremental_models.md` §"Key temporal
+/// `unique_key` column, `docs/specs/incremental_shapes.md` §"Key temporal
 /// locality (the time-partitioned output)"; `docs/plans/20260715-composed-
 /// axes-conditional-maintenance.md` Phase A2). The established
 /// [`smelt_logical::maintenance::locality::LocalitySlice`] licenses a
@@ -1430,7 +1430,7 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
 }
 
 /// Statement-parity leg for the **checked route-3** (recurrence-bounded,
-/// declared `r`) merge (`docs/specs/incremental_models.md` §"Key temporal
+/// declared `r`) merge (`docs/specs/incremental_shapes.md` §"Key temporal
 /// locality", route 3; `docs/plans/20260715-composed-axes-conditional-
 /// maintenance.md` Phase A4): the out-of-slice match probe and the merge
 /// itself are each byte-identical to a direct call of their single-owner

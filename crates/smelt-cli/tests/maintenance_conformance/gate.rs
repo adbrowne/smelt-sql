@@ -937,7 +937,7 @@ fn update_row_keyed_snapshot(
 
 /// Delete a snapshot-reconcile [`KeyedRecipe`]'s staged dimension row — the
 /// genuine-departure case: `id` must be RETAINED, unchanged, in the
-/// maintained table after the next run (`incremental_models.md` §"The two
+/// maintained table after the next run (`incremental_shapes.md` §"The two
 /// run shapes" — snapshot-reconcile never deletes a departed key).
 fn delete_row_keyed_snapshot(
     project: &LinkCProject,
@@ -1162,7 +1162,7 @@ pub fn classify_keyed(
 /// The maintained table's PRESENTED columns only, as `(name, data_type)`
 /// pairs in physical column order — excludes any physical column whose name
 /// contains the reserved `__` decomposed-state marker
-/// (`docs/specs/incremental_models.md` §"Decomposed state (rung 2) in keyed
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
 /// models"). A state-bearing model's physical table carries its hidden
 /// state columns alongside the presented ones (`MAX_BY`/`MIN_BY`, row 5);
 /// a bare `SELECT *` against the live table — unlike a `ref()`-mediated
@@ -1232,7 +1232,7 @@ fn all_physical_column_names(project: &LinkCProject, model_name: &str) -> Vec<St
 /// Float-aware, not exact, because DuckDB's own `STDDEV_SAMP` uses a
 /// numerically stable (Welford-style) accumulation pass while the
 /// decomposed `(n, Σx, Σx²)` state this outcome derives recomputes variance
-/// from the raw sums (`incremental_models.md` §"Decomposed state (rung 2) in
+/// from the raw sums (`incremental_shapes.md` §"Decomposed state (rung 2) in
 /// keyed models") — the two agree only to floating-point noise (~1e-12),
 /// so an exact `EXCEPT ALL` would flake. [`harness_self_check`]'s
 /// `float_equivalence_comparison_tolerates_last_bit_only` pins this
@@ -1252,7 +1252,7 @@ fn rounded_select_list(columns: &[(String, String)]) -> String {
 }
 
 /// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
-/// "Keyed-grain carve-outs"; `incremental_models.md` §"End-state equivalence"):
+/// "Keyed-grain carve-outs"; `incremental_shapes.md` §"End-state equivalence"):
 /// materialize `S_k` (the union, across every run so far, of that run's own
 /// window's rows — exactly [`STracker::s_at`]'s definition, which coincides
 /// with "every delta row a window-forward keyed run has folded so far" since
@@ -1291,7 +1291,7 @@ pub async fn assert_keyed_equivalence(
 /// smelt.<model_name>` consumer (`stage_keyed_recipe_with_downstream`,
 /// model file `<model_name>_downstream.sql`) materializes with EXACTLY the
 /// upstream's presented columns (no `__`-marked names — `presentation_projection`
-/// rewrites the wildcard at compile time, `incremental_models.md` §"Decomposed
+/// rewrites the wildcard at compile time, `incremental_shapes.md` §"Decomposed
 /// state (rung 2) in keyed models") and multiset-equals the upstream's
 /// presented contents — the end-to-end DuckDB witness for the hiding
 /// mechanism (unit-tested at compile time in row 4) proven against a real
@@ -1419,13 +1419,13 @@ fn keyed_pool_upholds_end_state_equivalence() {
 
 /// `retained_departed_keys_adjusts_the_oracle` (plan Phase 5 TDD list):
 /// snapshot-reconcile schedules generating deletes compare against oracle
-/// rows ∪ retained departed keys (`incremental_models.md` §"End-state
+/// rows ∪ retained departed keys (`incremental_shapes.md` §"End-state
 /// equivalence"). Two halves: (1) an ADDITIVE-combiner (fold-family) keyed
 /// recipe over an unclocked (zero-clocked-driving-source) source still
 /// refuses its *targeted* keyed-fold cell fail-loud
 /// (`Refusal::NoAdmissibleTechnique`/`Refusal::ScanUnbounded`, named on the
 /// plan itself — `maintenance-plan purity`: consumed, not re-derived) —
-/// the snapshot-reconcile run shape (`incremental_models.md` §"The two run
+/// the snapshot-reconcile run shape (`incremental_shapes.md` §"The two run
 /// shapes") is supportable now (Phase 3, `docs/plans/20260809-keyed-
 /// frontier.md`), but a fold-family column is refused under it per the
 /// admission matrix (double-count/observer-semantics reasons) regardless —
@@ -1510,7 +1510,7 @@ fn retained_departed_keys_adjusts_the_oracle() {
 /// while keeping it unclocked — a posture that passes the faithful-fold
 /// source-posture obligation on its own — so the ONLY thing that can still
 /// refuse a `SUM` fold here is the whole-model run-shape check: this model
-/// has no clocked source anywhere (`incremental_models.md` §"The two run
+/// has no clocked source anywhere (`incremental_shapes.md` §"The two run
 /// shapes"), deriving snapshot-reconcile, under which every fold-family
 /// column is refused (double-count) regardless of source posture. Before
 /// the gate landed, `derive_new_data`'s `Grain::Key` arm admitted a
@@ -1627,7 +1627,7 @@ async fn order_monotone_redelivery_is_idempotent_no_ledger_refusal() {
 /// `once_write_multi_candidate_pool_upholds_end_state_equivalence`): the
 /// shared key `1` recurs across windows with the SAME value throughout —
 /// the once-write provenance proof's own world-fact precondition
-/// (`incremental_models.md` §"The column-family catalogue") — plus a late
+/// (`incremental_shapes.md` §"The column-family catalogue") — plus a late
 /// redelivery of the already-merged first window.
 fn once_write_constant_payload_schedule() -> KeyedSchedule {
     let d1 = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
@@ -1952,7 +1952,7 @@ async fn downstream_select_star_consumer_sees_only_presented_columns() {
 /// literal fallback (`COALESCE(MAX(val), -1)`), the first window would have
 /// written `-1` into the target and locked it in forever — the divergence
 /// the classifier's NULL-preservation obligation refuses
-/// (`incremental_models.md` §"The column-family catalogue").
+/// (`incremental_shapes.md` §"The column-family catalogue").
 ///
 /// Written as a targeted (non-generative) case rather than widened into the
 /// generated pool: `GenRow::val` is a non-nullable `i64` threaded through
@@ -2027,7 +2027,7 @@ async fn once_write_null_payload_then_value_upholds_equivalence() {
 }
 
 /// The once-write family's own distinguishing mechanics
-/// (`docs/specs/incremental_models.md` §"The column-family catalogue" —
+/// (`docs/specs/incremental_shapes.md` §"The column-family catalogue" —
 /// `COALESCE(target, delta)`, "the target's value wins once set"): a later
 /// redelivery of an already-folded window carrying a DIFFERENT value for
 /// the same key must NOT overwrite the first-written value — unlike the
@@ -2198,7 +2198,7 @@ impl KeyedEnrichedRecipe {
     /// `unique_key:` (the `RowIdentity::Key` precondition,
     /// `incremental_models.md` §"Per-cell write addressing") and the
     /// dimension declared `allow_full_scan` (its `ColumnScopedMerge` cell's
-    /// admission precondition — `incremental_models.md` §"Admission matrix"),
+    /// admission precondition — `incremental_shapes.md` §"Admission matrix"),
     /// mirroring `crates/smelt-runtime/tests/technique_lowering.rs`'s
     /// `keyed_column_scoped_merge_e2e::MODEL_FILE`.
     fn model_file(&self) -> String {
@@ -4058,7 +4058,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
 // ---------------------------------------------------------------------
 // Phase 9: definition-change steps — `ConformanceStep::RewriteModel`
 // (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-// `incremental_models.md` §"The definition-change trigger"). Asserts TODAY's
+// `definition_deltas.md` §"The verdict per column group"). Asserts TODAY's
 // contract only: whatever technique executes for a window always compiles
 // and runs the model's CURRENT on-disk SQL (`link_c_harness::LinkCProject`'s
 // per-run re-discovery), so a rewrite followed by a re-run of the affected
@@ -4548,7 +4548,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
 // Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
 // covering all three key-temporal-locality routes
 // (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
-// `incremental_models.md` §"Key temporal locality").
+// `incremental_shapes.md` §"Key temporal locality").
 //
 // Route 1 (key-embedded) is driven through the real `execute_project`
 // pipeline, exactly like the keyed pool above. Routes 2 (key-determined)
@@ -5077,7 +5077,7 @@ async fn drive_composed_route2_and_assert(
     // exercises the real merge mechanics this test actually asserts
     // (write-once `pdate`, additive `total`) against real DuckDB; only the
     // target-scan **pruning** optimisation itself goes unexercised
-    // (`incremental_models.md` §"Key temporal locality": "pruning is not a
+    // (`incremental_shapes.md` §"Key temporal locality": "pruning is not a
     // write clamp" — every delta row still merges with or without it).
     let slice: Option<&LocalitySlice> = None;
 

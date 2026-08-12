@@ -142,7 +142,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 
 ## Design
 
-**Opt-in, file-based, gitignored.** State is a posture a project opts into (`virtual_environments.md` §`state.mode`), not a baseline requirement. Storing it as plain JSON files under `.smelt/` (rather than a required embedded database) keeps a stateless project zero-cost and keeps state human-inspectable and easy to delete — a half-broken state store must never be harder to recover from than dropping a directory. Rationale: `incremental_models.md` §"Partition-grain design" "smelt does not own state"; research §6.
+**Opt-in, file-based, gitignored.** State is a posture a project opts into (`virtual_environments.md` §`state.mode`), not a baseline requirement. Storing it as plain JSON files under `.smelt/` (rather than a required embedded database) keeps a stateless project zero-cost and keeps state human-inspectable and easy to delete — a half-broken state store must never be harder to recover from than dropping a directory. Rationale: `incremental_shapes.md` §"Partition-grain design" "smelt does not own state"; research §6.
 
 **Persist the SQL, treat the fingerprint as ephemeral.** Storing the expanded logical SQL that built each table — and recomputing fingerprints fresh on both sides at decision time — makes the fingerprint algorithm free to change between releases with no migration code and no version-stable-form contract. A stored hash would force a versioned normal form and golden cross-version tests; storing the SQL makes the comparison apples-to-apples by construction. Rationale: `output_fingerprint.md` §Design; research §5.6, Open Question 15.
 

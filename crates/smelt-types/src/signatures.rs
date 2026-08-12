@@ -4270,7 +4270,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // arg_max(value, key) → value: return the value from the row with the maximum key.
     // Accepts any value type T and any key type K (must be orderable at runtime).
     // `MAX_BY` is DuckDB/Postgres's alias for the same order-monotone-overwrite
-    // combiner (`incremental_models.md` §"The column-family catalogue").
+    // combiner (`incremental_shapes.md` §"The column-family catalogue").
     insert(
         Signature::new(
             "ARG_MAX",

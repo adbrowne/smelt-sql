@@ -255,7 +255,7 @@ SELECT event_id, event_date FROM smelt.raw_view
     );
 }
 
-/// `incremental_models.md` §"Key temporal locality (the time-partitioned
+/// `incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source": a downstream **keyed**
 /// model may take a locality-admitted composed upstream **model's own
 /// output** as its clocked driving source, exactly as it would a declared

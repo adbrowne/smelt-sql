@@ -193,7 +193,7 @@ fn events_enriched_shows_creation_cells_for_both_model_upstreams() {
 /// the DELETE range and output clamp at the skew-inverted window and the
 /// source-scan pushdown filter (against `silver.events_deduped`, the
 /// composed keyed+timeseries dedupe stage — `docs/specs/
-/// incremental_models.md` §"Key temporal locality") widened a further two
+/// incremental_shapes.md` §"Key temporal locality") widened a further two
 /// days backward beyond it (`[2026-04-07, 2026-04-11)`, `sessionize`'s own
 /// `max_lookback` reach applied on top of the already-widened output
 /// window, per the two-layer widened-scan design). No backend is opened —
@@ -332,7 +332,7 @@ fn key_per_partition_shows_unsupported_grain_refusal_not_keyed_cells() {
 /// composed model (`grain: key` + `timeseries:`, route 1 key-embedded).
 /// `examples/timeseries/models/user_spend_rollup.sql` is an ordinary
 /// `grain: partition` downstream that reads it with a genuine bounded
-/// lookback. `incremental_models.md` §"Key temporal locality (the
+/// lookback. `incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)" — "The output as a clocked source": the
 /// composed output must be visible to the rest of the DAG exactly like a
 /// declared source, so the downstream's compiled SQL must carry ordinary
@@ -423,7 +423,7 @@ fn downstream_partition_grain_model_gets_pushdown_against_a_composed_upstream() 
 
 /// Phase A5: `smelt explain` prints the locality verdict (route, slice
 /// form) and the derived settle bound for a composed model
-/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)" — "The output's **settle bound**").
 /// `examples/timeseries/models/user_daily_spend.sql` admits route 1
 /// (key-embedded: `spend_date` is itself a `unique_key` column).

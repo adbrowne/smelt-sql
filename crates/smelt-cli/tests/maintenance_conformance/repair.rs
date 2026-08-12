@@ -213,7 +213,7 @@ async fn assert_repair_equivalence(project: &LinkCProject, recipe: &RepairRecipe
     // The PRESENTED columns only (`customer_id`, the combiner's own value
     // alias, plus its ordering-companion alias when it has one) — `SELECT
     // *` would also pull in a decomposed combiner's hidden `__`-marked
-    // state columns (`incremental_models.md` §"Decomposed state (rung 2) in
+    // state columns (`incremental_shapes.md` §"Decomposed state (rung 2) in
     // keyed models"), which the oracle body never projects.
     let select_list = match recipe.combiner.ordering_alias() {
         Some(ord) => format!("customer_id, {}, {ord}", recipe.combiner.agg_and_alias().1),

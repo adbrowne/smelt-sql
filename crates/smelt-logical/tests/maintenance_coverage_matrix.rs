@@ -416,7 +416,7 @@ fn ex27_row_number_dedup_refuses_today() {
 // `faithful_fold`'s obligation-3 combiner-algebra condition now admits it
 // alongside `is_monoid` monoids — a semilattice fold is well-defined under
 // the same sequential-application discipline the window-forward driver
-// already enforces (`incremental_models.md` §"The two run shapes"). The
+// already enforces (`incremental_shapes.md` §"The two run shapes"). The
 // catalogue verdict updates: EX-35 now HOLDS (fold cell admitted), not
 // recompute-only.
 // ---------------------------------------------------------------------------

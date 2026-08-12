@@ -336,7 +336,7 @@ GROUP BY event_id
 
 /// The production `Trigger::ColumnAdded` derivation
 /// (`docs/plans/20260809-sensitivity-precision.md` Phase 6,
-/// `docs/specs/incremental_models.md` §"The definition-change trigger"):
+/// `docs/specs/definition_deltas.md` §"The verdict per column group"):
 /// `derive_model_maintenance_plan`'s new `deployed_column_names` parameter
 /// diffs the model's currently-projected columns against a supplied
 /// deployed-schema snapshot and, when the diff finds a genuinely new

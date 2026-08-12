@@ -1,6 +1,6 @@
 //! Classifier for the `refresh: incremental` + `grain: key` shape.
 //!
-//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec.
+//! See `docs/specs/incremental_shapes.md` §"The key grain (`grain: key`)" for the normative spec.
 //! This module classifies the direct-monoid families (additive fold,
 //! extremal/lattice fold), the order-monotone overwrite family
 //! (`MAX_BY`/`MIN_BY`, `docs/plans/20260809-keyed-frontier.md` Phase 1),
@@ -53,7 +53,7 @@ pub struct AggregatorColumn {
     pub cross_partition_combiner: CrossPartitionCombiner,
     /// The hidden decomposed state this column folds through instead of
     /// folding its own presented value directly (`docs/specs/
-    /// incremental_models.md` §"Decomposed state (rung 2) in keyed
+    /// incremental_shapes.md` §"Decomposed state (rung 2) in keyed
     /// models"). `Some` for the order-monotone overwrite family
     /// (`MAX_BY`/`MIN_BY`) and the once-write family's fallback-bearing or
     /// multi-candidate spellings; `None` for the once-write family's
@@ -85,7 +85,7 @@ pub enum CrossPartitionCombiner {
     /// in Postgres as well; the `#` infix operator is Postgres-only.
     BitXor,
     /// The order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
-    /// `incremental_models.md` §"The column-family catalogue"): the delta's
+    /// `incremental_shapes.md` §"The column-family catalogue"): the delta's
     /// value wins iff its ordering value strictly beats the target's stored
     /// ordering value — incumbent wins on a tie (§"Ordering ties"). Storage
     /// decision (`docs/outcomes/20260809-rung2-state-shapes` row 5):
@@ -106,13 +106,13 @@ pub enum CrossPartitionCombiner {
         prefer_greater: bool,
     },
     /// The plain-overwrite family (`ANY_VALUE(...)`,
-    /// `incremental_models.md` §"The column-family catalogue"): the delta's
+    /// `incremental_shapes.md` §"The column-family catalogue"): the delta's
     /// value always wins — the incoming row is the current observation, no
     /// target comparison is made. Admitted only under the snapshot-reconcile
     /// run shape (Phase 3, `docs/plans/20260809-keyed-frontier.md`); refused
     /// window-forward (`KeyedUnknownCombiner`).
     PlainOverwrite,
-    /// The once-write family (`COALESCE`, `incremental_models.md` §"The
+    /// The once-write family (`COALESCE`, `incremental_shapes.md` §"The
     /// column-family catalogue"): `COALESCE(target.c, delta.c)` — the
     /// target's value wins once set; the delta only ever fills a `NULL`
     /// target. Admitted only under the once-write provenance proof
@@ -122,7 +122,7 @@ pub enum CrossPartitionCombiner {
     /// (`docs/plans/20260809-keyed-frontier.md` Phase 4).
     OnceWrite,
     /// The decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
-    /// `incremental_models.md` §"The column-family catalogue"): the
+    /// `incremental_shapes.md` §"The column-family catalogue"): the
     /// presented column has no target/delta fold of its own — it is always
     /// recomputed as `π(merged state)` from the column's hidden state
     /// columns (`analysis::decomposed_state::DecomposedState::
@@ -189,7 +189,7 @@ impl CrossPartitionCombiner {
 /// ([`classify_cumulative`]) and the plan-layer fold derivation
 /// (`smelt_db::queries::maintenance::derive_fold_spec`) so both admit/refuse
 /// a `COALESCE`-shaped once-write column identically
-/// (`docs/specs/incremental_models.md` §"The column-family catalogue").
+/// (`docs/specs/incremental_shapes.md` §"The column-family catalogue").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnceWriteAdmission {
     /// The projection is not a direct `COALESCE(...)` call at all — not this
@@ -584,7 +584,7 @@ pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
 
 /// A diagnostic code emitted by the keyed classifier.
 ///
-/// Mirrors `incremental_models.md` §"Key-grain diagnostic codes".
+/// Mirrors the key-grain codes in `incremental_shapes.md` §"Diagnostics".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum KeyedDiagnostic {
     KeyedRequiresGroupBy,
@@ -603,11 +603,11 @@ pub enum KeyedDiagnostic {
     /// source could be resolved to derive the snapshot-reconcile run shape
     /// either — e.g. the FROM clause joins more than one candidate source
     /// with none of them clocked. Genuinely unsupportable, not a "not yet"
-    /// refusal (`docs/specs/incremental_models.md` §"The two run shapes").
+    /// refusal (`docs/specs/incremental_shapes.md` §"The two run shapes").
     KeyedSnapshotPostureUnsupported,
     /// A fold-family projection (additive, extremal/lattice, or
     /// order-monotone overwrite) under the snapshot-reconcile run shape
-    /// (`docs/specs/incremental_models.md` §"Admission matrix"): these
+    /// (`docs/specs/incremental_shapes.md` §"Admission matrix"): these
     /// families consume events, not observations — re-folding a mutable
     /// snapshot double-counts (additive) or computes a history observation
     /// instead of the current value (observer semantics, the other
@@ -621,7 +621,7 @@ pub enum KeyedDiagnostic {
         candidates: Vec<String>,
     },
     KeyedSqlNotParseable,
-    /// A `COALESCE`-shaped once-write column (`incremental_models.md` §"The
+    /// A `COALESCE`-shaped once-write column (`incremental_shapes.md` §"The
     /// column-family catalogue") has no once-write provenance proof: the
     /// coalesced value is neither key-derived nor backed by a declared
     /// functional dependency the fan-out proof does not positively
@@ -835,7 +835,7 @@ pub struct CumulativeClassification {
 
 impl CumulativeClassification {
     /// Whether this classification derived the snapshot-reconcile run shape
-    /// (`docs/specs/incremental_models.md` §"The two run shapes") — zero
+    /// (`docs/specs/incremental_shapes.md` §"The two run shapes") — zero
     /// clocked sources in the FROM clause. Derived from the classifier's own
     /// resolved [`DrivingSource`], never a second independent check.
     pub fn is_snapshot_reconcile(&self) -> bool {
@@ -864,7 +864,7 @@ pub struct DrivingSource {
     /// `Some` for the window-forward run shape (the source's own declared
     /// `timeseries:` block, the driving-fact/anchor proof); `None` for the
     /// snapshot-reconcile run shape — zero clocked sources in the FROM
-    /// clause (`docs/specs/incremental_models.md` §"The two run shapes").
+    /// clause (`docs/specs/incremental_shapes.md` §"The two run shapes").
     /// The run shape is derived from this field, never declared.
     pub timeseries: Option<TimeseriesConfig>,
 }
@@ -997,7 +997,7 @@ pub fn classify_cumulative(
     let unique_key = group_by_unique_key_from_analysis(&analysis);
 
     // Find the driving source and derive the run shape (`docs/specs/
-    // incremental_models.md` §"The two run shapes") BEFORE walking the
+    // incremental_shapes.md` §"The two run shapes") BEFORE walking the
     // projection list — every column family's admission depends on which
     // run shape the model derives (the admission matrix is a `(column
     // family × run shape)` table), so the run shape must be known first.
@@ -1131,7 +1131,7 @@ pub fn classify_cumulative(
                 // projection either way: the catalogue's overwrite families
                 // are only ever expressed as aggregate calls (`MAX_BY(...)`,
                 // `ANY_VALUE(...)`), never a bare passthrough column
-                // (`docs/specs/incremental_models.md` §"The column-family
+                // (`docs/specs/incremental_shapes.md` §"The column-family
                 // catalogue").
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
@@ -1142,7 +1142,7 @@ pub fn classify_cumulative(
                     // single bare column, so `COALESCE(MAX(a || b))` over a
                     // composite projection would itself refuse
                     // `KeyedOnceWriteUnproven` (`docs/specs/
-                    // incremental_models.md` §"The column-family
+                    // incremental_shapes.md` §"The column-family
                     // catalogue"). The `MAX_BY`/`ANY_VALUE` spellings take
                     // an arbitrary expression and stay offered either way.
                     let projection_text = text.trim();
@@ -1192,7 +1192,7 @@ pub fn classify_cumulative(
                     .filter(|n| SqlFunction::from_name(n).is_some_and(|f| f.is_aggregate()));
 
                 // The plain-overwrite family (`ANY_VALUE`,
-                // `incremental_models.md` §"The column-family catalogue"):
+                // `incremental_shapes.md` §"The column-family catalogue"):
                 // admitted only under snapshot-reconcile; refused
                 // window-forward naming the `MAX_BY` fix.
                 if agg_name.as_deref() == Some("ANY_VALUE") {
@@ -1391,7 +1391,7 @@ pub fn classify_cumulative(
 
     // Rule: GROUP BY must not contain the driving source's partition column
     // — narrowed to models with no `timeseries:` block of their own
-    // (`docs/specs/incremental_models.md` §"Key temporal locality"). A
+    // (`docs/specs/incremental_shapes.md` §"Key temporal locality"). A
     // keyed model whose GROUP BY includes the partition column AND that
     // declares its own `timeseries:` is not this rule's concern: it is a
     // candidate for the key-embedded locality route (route 1 —
@@ -1440,7 +1440,7 @@ pub fn classify_cumulative(
 
 /// Classify one `MAX_BY(value, ordering)`/`MIN_BY(value, ordering)`
 /// projection (`ArgMax`/`ArgMin`, `Monotone::Order`) — the order-monotone
-/// overwrite family (`incremental_models.md` §"The column-family
+/// overwrite family (`incremental_shapes.md` §"The column-family
 /// catalogue").
 ///
 /// **Storage decision** (`docs/outcomes/20260809-rung2-state-shapes` row 5).
@@ -1524,7 +1524,7 @@ fn classify_order_monotone_column(
 }
 
 /// Classify one `AVG`/`STDDEV_*`/`VAR_*` projection — the decomposed-fold
-/// family (`incremental_models.md` §"The column-family catalogue"). Mirrors
+/// family (`incremental_shapes.md` §"The column-family catalogue"). Mirrors
 /// [`classify_order_monotone_column`]'s shape: verify the projection is a
 /// *direct* call, then hand its argument(s) to
 /// `analysis::decomposed_state::decompose_to_state` and admit on `Ok` with
@@ -1583,7 +1583,7 @@ fn classify_decomposed_fold_column(
 }
 
 /// The `(family name, refusal reason)` the admission matrix
-/// (`docs/specs/incremental_models.md` §"Admission matrix") names for a
+/// (`docs/specs/incremental_shapes.md` §"Admission matrix") names for a
 /// fold-family aggregator refused under the snapshot-reconcile run shape.
 /// `agg_upper` is one of `combiner_for`'s allowlisted names — the additive
 /// family (`SUM`/`COUNT`/`BIT_XOR`) double-counts on a re-fold; the
@@ -1822,7 +1822,7 @@ GROUP BY device_id, user_id, event_date"#;
     /// locality route (`partition_column` is a `unique_key` column) and is
     /// decided by the locality gate
     /// (`maintenance::locality::establish_locality`), not refused here
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality").
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality").
     #[test]
     fn test_group_by_contains_partition_column_not_refused_when_model_has_timeseries() {
         let sql = r#"SELECT

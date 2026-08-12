@@ -491,7 +491,7 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
     }
 
     /// `BIT_XOR` is an **additive fold** — a commutative *group*, not an
-    /// idempotent lattice (`docs/specs/incremental_models.md` §"The
+    /// idempotent lattice (`docs/specs/incremental_shapes.md` §"The
     /// column-family catalogue"). Because XOR is self-inverse, re-merging an
     /// already-reflected delta computes `x XOR d XOR d == x`: it CANCELS the
     /// window's contribution instead of converging, so `incremental_state(S)

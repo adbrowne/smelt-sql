@@ -1,5 +1,5 @@
 //! Key temporal locality gate
-//! (`docs/specs/incremental_models.md` §"Key temporal locality (the
+//! (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 //! time-partitioned output)").
 //!
 //! A keyed model (`grain: key`) may time-partition its output with a
@@ -65,7 +65,7 @@ pub struct LocalityInputs<'a> {
     /// The model's own `timeseries.granularity`.
     pub granularity: Granularity,
     /// Whether `partition_column` is provably NOT NULL from a key's first
-    /// stored row (`incremental_models.md` §"Key temporal locality" —
+    /// stored row (`incremental_shapes.md` §"Key temporal locality" —
     /// structural precondition 2). Supplied by the caller today rather than
     /// derived by a walk-based prover; a caller admitting route 1 derives it
     /// conservatively as "`partition_column` is itself a `unique_key`
@@ -120,7 +120,7 @@ pub struct LocalityInputs<'a> {
 }
 
 /// The established locality slice a `merge_into` target scan may be pruned
-/// to (`incremental_models.md` §"Key temporal locality"). The two routes
+/// to (`incremental_shapes.md` §"Key temporal locality"). The two routes
 /// this module implements license two structurally different slices:
 ///
 /// - Route 1 (key-embedded) derives a **window**: margins around a run
@@ -198,7 +198,7 @@ pub enum LocalitySlice {
     /// caller must run the out-of-slice match probe before the merge and
     /// fail the run transactionally (`KeyedRecurrenceBoundViolated`) on any
     /// violation. A declaration can bound work; it can never silently drop
-    /// data (`incremental_models.md` §"Key temporal locality").
+    /// data (`incremental_shapes.md` §"Key temporal locality").
     RecurrenceBounded {
         /// The output's partition column the slice predicate ranges over.
         partition_column: String,
@@ -231,7 +231,7 @@ impl LocalitySlice {
 }
 
 /// How long a written slice of a locality-admitted output may still change
-/// before it is safe to treat as final (`incremental_models.md` §"Key
+/// before it is safe to treat as final (`incremental_shapes.md` §"Key
 /// temporal locality (the time-partitioned output)": "The output's **settle
 /// bound**"). Derived once from the admitted [`LocalitySlice`] by
 /// [`settle_bound`] — never re-derived by a consumer (`smelt explain`, a
@@ -268,7 +268,7 @@ pub enum SettleBound {
 }
 
 /// Derive the **settle bound** for an admitted [`LocalitySlice`]
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)": "under route 1 a slice settles with the source's lateness
 /// margin; under route 3 after `r` plus the margins; under route 2 it never
 /// settles"). Pure function of the already-established slice — this module
@@ -354,7 +354,7 @@ fn refuse(nearest_missing_fact: impl Into<String>) -> LocalityRefusal {
 
 /// The single "exactly one clocked candidate, else undecided" rule for
 /// deriving a model's driving-source granularity — the granularity-equality
-/// structural precondition (`incremental_models.md` §"Key temporal
+/// structural precondition (`incremental_shapes.md` §"Key temporal
 /// locality") needs a single answer for "what granularity is the driving
 /// source clocked at", and this is undecidable (not merely unknown) when
 /// zero or more than one candidate declares a clock: zero means
@@ -366,7 +366,7 @@ fn refuse(nearest_missing_fact: impl Into<String>) -> LocalityRefusal {
 /// `candidates` is every clocked granularity a caller has gathered from its
 /// own candidate pool — declared `sources:` entries, a referenced upstream
 /// model's own locality-admitted composed output, or both concatenated
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source": a downstream keyed model's
 /// candidate pool spans both declared sources and composed upstream
 /// outputs, but the "exactly one" rule applies over the union, not each
@@ -563,7 +563,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
 
     // Route 2: key-determined — the partition projection is a per-key
     // constant under the once-write provenance proof
-    // (`incremental_models.md` §"Key temporal locality", route 2): a
+    // (`incremental_shapes.md` §"Key temporal locality", route 2): a
     // declared functional dependency over a column present non-null on
     // every input row (the "present non-null" half of that obligation is
     // the structural precondition already checked above —
@@ -600,7 +600,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
     // admission criterion (a recurrence bound `r`, static or declared) and
     // does not depend on once-write provenance at all (an extremal or
     // overwrite partition projection is exactly what route 3's own "Row
-    // movement" clause licenses — `incremental_models.md` §"Key temporal
+    // movement" clause licenses — `incremental_shapes.md` §"Key temporal
     // locality"). The captured reason is only actually surfaced if route 3
     // *also* fails to establish locality below, so a genuinely undecidable
     // model still gets route 2's more specific diagnosis rather than the
@@ -656,7 +656,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
 
     // Route 3: recurrence-bounded — a key-recurrence bound `r` holds: every
     // pair of input rows sharing a key lies within `r` of each other on the
-    // event-time axis (`incremental_models.md` §"Key temporal locality",
+    // event-time axis (`incremental_shapes.md` §"Key temporal locality",
     // route 3). Two sub-routes, tried in the order the spec lists them:
     //
     // 1. Statically derived from the model's own SQL where decidable. This
@@ -1058,7 +1058,7 @@ mod tests {
     /// merges — a late/out-of-order redelivery with an earlier true event
     /// date changes the folded value on re-merge — so it belongs to the
     /// extremal-fold family, which is distinct from once-write provenance
-    /// (`incremental_models.md` §"Key temporal locality", "Row movement":
+    /// (`incremental_shapes.md` §"Key temporal locality", "Row movement":
     /// only route 3, not route 2, may see a partition value move). Proving
     /// that the model's own `GROUP BY` key is a subset of its `unique_key`
     /// only establishes that `first_seen_date` is a deterministic function
@@ -1250,7 +1250,7 @@ mod tests {
     /// "declared source vs. model output". A `SourceFacts` entry that
     /// happens to represent a locality-admitted composed model's own output
     /// (rather than a declared `sources:` YAML entry) resolves identically —
-    /// this is the mechanism `incremental_models.md` §"Key temporal
+    /// this is the mechanism `incremental_shapes.md` §"Key temporal
     /// locality": "a downstream keyed model may take it as its clocked
     /// driving source" rests on (`docs/plans/20260715-composed-axes-
     /// conditional-maintenance.md` Phase A5).
@@ -1409,7 +1409,7 @@ mod tests {
 
     // ---- Settle bound (Phase A5) ---------------------------------------
     //
-    // `incremental_models.md` §"Key temporal locality (the time-partitioned
+    // `incremental_shapes.md` §"Key temporal locality (the time-partitioned
     // output)": "under route 1 a slice settles with the source's lateness
     // margin; under route 3 after `r` plus the margins; under route 2 it
     // never settles."

@@ -1,7 +1,7 @@
 //! Phase 1 (`docs/plans/20260809-keyed-frontier.md`) — order-monotone
 //! overwrite family (`MAX_BY`/`MIN_BY`) classification.
 //!
-//! See `docs/specs/incremental_models.md` §"The column-family catalogue" and
+//! See `docs/specs/incremental_shapes.md` §"The column-family catalogue" and
 //! §"Ordering ties" for the normative spec these tests pin.
 
 use std::collections::HashMap;
@@ -340,7 +340,7 @@ GROUP BY device_id"#;
 /// A refusal must never suggest a spelling that itself refuses. The
 /// once-write family's admitted reduction (`COALESCE(MAX(<col>))`) requires a
 /// bare column reference as the `MAX` argument
-/// (`docs/specs/incremental_models.md` §"The column-family catalogue"), so a
+/// (`docs/specs/incremental_shapes.md` §"The column-family catalogue"), so a
 /// composite projection like `a || b` must NOT be offered that spelling —
 /// only the `MAX_BY`/`ANY_VALUE` fixes, which do accept an expression.
 #[test]
@@ -398,7 +398,7 @@ GROUP BY device_id"#;
 /// Zero clocked driving sources derives the snapshot-reconcile run shape
 /// (Phase 3, `docs/plans/20260809-keyed-frontier.md`) instead of refusing
 /// the whole model: a plain `ANY_VALUE(...)` projection (the plain-overwrite
-/// family, `incremental_models.md` §"The column-family catalogue") admits
+/// family, `incremental_shapes.md` §"The column-family catalogue") admits
 /// cleanly, and the classification records no clocked timeseries.
 #[test]
 fn zero_clocked_sources_derives_snapshot_reconcile() {

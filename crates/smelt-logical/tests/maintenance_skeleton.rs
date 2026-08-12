@@ -7,8 +7,7 @@ use smelt_logical::maintenance::skeleton::{skeleton_columns, skeleton_roles, Ske
 /// `GROUP BY` keys and `SELECT DISTINCT` dedup keys occupy a
 /// row-membership position — they must classify as skeleton (not
 /// `Payload`), because a field added there is a grain change, never a
-/// column backfill (`incremental_models.md` §"The definition-change
-/// trigger").
+/// column backfill (`definition_deltas.md` §"The verdict per column group").
 #[test]
 fn group_by_and_dedup_columns_are_skeleton() {
     let sql = "SELECT pay_date, SUM(amount) AS revenue, COUNT(*) AS order_count \

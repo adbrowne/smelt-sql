@@ -103,7 +103,7 @@ pub enum ConformanceStep {
     /// later step names always reflects the rewritten body. This is
     /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
     /// `UpstreamRederive` definition-change classification
-    /// (`incremental_models.md` §"The definition-change trigger") — that
+    /// (`definition_deltas.md` §"The verdict per column group") — that
     /// classification is unbuilt (no `derive_model_maintenance_plan` caller
     /// reads a prior definition to classify an added column against it).
     RewriteModel { edit: ModelEdit },

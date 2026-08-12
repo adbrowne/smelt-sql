@@ -1414,7 +1414,7 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
 /// Phase 1 (`docs/plans/20260809-keyed-frontier.md`): the order-monotone
 /// overwrite family's (`MAX_BY`/`MIN_BY`) rendered `MERGE` compares ordering
 /// values with strict `>` — incumbent wins on a tie
-/// (`docs/specs/incremental_models.md` §"Ordering ties") — and carries the
+/// (`docs/specs/incremental_shapes.md` §"Ordering ties") — and carries the
 /// ordering column (the companion running-`MAX` tracking column, Phase 1's
 /// storage decision) in the same statement.
 #[test]
@@ -1484,7 +1484,7 @@ fn max_by_merge_renders_incumbent_comparison() {
 /// family's (`COALESCE`) rendered `MERGE` sets each column to
 /// `COALESCE(target.<col>, delta.<col>)` — the target's already-set value
 /// wins; the delta only ever fills a `NULL` target
-/// (`docs/specs/incremental_models.md` §"The column-family catalogue").
+/// (`docs/specs/incremental_shapes.md` §"The column-family catalogue").
 #[test]
 fn once_write_renders_coalesce_target_first() {
     use smelt_core::config::{Granularity, TimeseriesConfig};
@@ -1537,7 +1537,7 @@ fn once_write_renders_coalesce_target_first() {
 /// (incoming row wins, no target comparison), and — critically — no
 /// `DELETE` of departed keys: a key present in the target but absent from
 /// the incoming scan is retained unchanged
-/// (`docs/specs/incremental_models.md` §"The two run shapes").
+/// (`docs/specs/incremental_shapes.md` §"The two run shapes").
 #[test]
 fn snapshot_reconcile_merges_whole_source_no_window() {
     use smelt_core::config::TimeseriesConfig;
@@ -1893,7 +1893,7 @@ mod column_scoped_merge_e2e {
 ///
 /// **The fixture shape this module is forced into, and why.** A `grain:
 /// key` body must satisfy `classify_cumulative`'s aggregate/`GROUP BY`
-/// grammar (`incremental_models.md` §"Key-grain declaration"): every
+/// grammar (`incremental_shapes.md` §"Key-grain declaration"): every
 /// non-aggregate `SELECT` item must be a literal `GROUP BY` key. That
 /// makes a mutable dimension's own attribute column unreachable as a plain
 /// enrich-only payload group two ways at once — selecting it forces it
@@ -3998,8 +3998,7 @@ mod in_place_update_lowering {
 
     /// A `PureBackfill` cell: `val_doubled AS val * 2` depends only on an
     /// already-stored `val` column — no upstream read, an in-place `UPDATE`
-    /// is admissible (`docs/specs/incremental_models.md` §"The
-    /// definition-change trigger").
+    /// is admissible (`docs/specs/definition_deltas.md` §"The verdict per column group").
     fn admitted_in_place_update_plan() -> PlanCell {
         PlanCell {
             group: "{val_doubled}".to_string(),

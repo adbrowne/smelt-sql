@@ -347,7 +347,7 @@ pub(crate) fn render_in_place_update(
 }
 
 /// A target-scan slice predicate for a locality-admitted keyed fold
-/// (`docs/specs/incremental_models.md` §"Key temporal locality"): restricts
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality"): restricts
 /// the `MERGE`'s `ON` condition to target rows the write provably cannot
 /// touch outside of. The two shapes mirror the two routes
 /// [`crate::maintenance::locality::LocalitySlice`] can derive:
@@ -399,7 +399,7 @@ pub enum TargetSlicePredicate {
 /// (no branch reads it yet).
 ///
 /// `slice` is the target-scan slice predicate a locality-admitted model
-/// (`incremental_models.md` §"Key temporal locality") licenses: an extra
+/// (`incremental_shapes.md` §"Key temporal locality") licenses: an extra
 /// `AND target.<partition_column> BETWEEN '<lower>' AND '<upper>'` clause on
 /// the `ON` condition, restricting which target rows the `MERGE` needs to
 /// scan/match. It is provably safe — a target row outside the slice cannot
@@ -1592,7 +1592,7 @@ pub fn emit_create_table_as(
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/incremental_models.md` §"First-run and backfill" —
+/// (`docs/specs/incremental_shapes.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"): the target does not
 /// exist yet, and the model's own first-batch SELECT reads that same target
 /// via `smelt.<self>`, so `CREATE TABLE … AS SELECT …` cannot resolve it —
@@ -1663,7 +1663,7 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
 }
 
 // ── Decomposed-state column fold expansion (`docs/specs/
-// incremental_models.md` §"Decomposed state (rung 2) in keyed models",
+// incremental_shapes.md` §"Decomposed state (rung 2) in keyed models",
 // "Combiner over state") ─────────────────────────────────────────────────
 
 /// Expand one [`AggregatorColumn`](crate::rules::cumulative::AggregatorColumn)
@@ -1760,7 +1760,7 @@ fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> Stri
 }
 
 // ── Decomposed state (rung 2) select augmentation (`docs/specs/
-// incremental_models.md` §"Decomposed state (rung 2) in keyed models") ────
+// incremental_shapes.md` §"Decomposed state (rung 2) in keyed models") ────
 
 /// Why [`state_augmented_projection`] could not append the state columns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1778,7 +1778,7 @@ pub enum StateAugmentRefusal {
 /// across every state-bearing `AggregatorColumn`); the caller applies this
 /// to the compiled delta SELECT so the stored table and the delta agree on
 /// columns before `CREATE TABLE AS` / `MERGE ... WHEN NOT MATCHED THEN
-/// INSERT *` (`docs/specs/incremental_models.md` §"Decomposed state (rung 2)
+/// INSERT *` (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2)
 /// in keyed models"). `state_columns.is_empty()` returns `sql` unchanged —
 /// the stateless shape every column family admitted before this mechanism
 /// existed still produces.
@@ -1836,7 +1836,7 @@ pub enum PresentationRefusal {
     /// A wildcard's relation could not be resolved while a state-bearing
     /// model was in scope. Passing it through unrewritten risks leaking
     /// state columns into the consumer's schema, so this refuses instead of
-    /// guessing (`docs/specs/incremental_models.md` §"Decomposed state
+    /// guessing (`docs/specs/incremental_shapes.md` §"Decomposed state
     /// (rung 2) in keyed models" → "Presentation projection").
     UnresolvableWildcard {
         /// The offending wildcard's own source text (`*` or

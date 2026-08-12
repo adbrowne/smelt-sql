@@ -151,7 +151,7 @@ edge (upstream dependency) — a declared source or an upstream maintained model
 the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
 so the reader knows which provider filled them; a row prints `(none)` when that provider declares
 neither fact. For every presented column that folds through decomposed state
-(`incremental_models.md` §"Decomposed state (rung 2) in keyed models"), the report also lists that
+(`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the report also lists that
 column's hidden state columns and the presentation expression `π` that recomputes the presented
 value from them, labelled as internal state and explicitly not part of the model's public schema;
 a model with no decomposed-state columns prints no such section. The report is read-only and plain

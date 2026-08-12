@@ -8,7 +8,7 @@ timeseries:
   granularity: day
 ---
 -- Per-(user_id, spend_date) keyed aggregate — the composed shape
--- (`docs/specs/incremental_models.md` §"Key temporal locality (the
+-- (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 -- time-partitioned output)"): a key-addressed output that also carries a
 -- `timeseries:` partition column, admitted because `spend_date` (the
 -- partition column) is itself a `unique_key` column — key temporal

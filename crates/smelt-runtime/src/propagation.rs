@@ -156,7 +156,7 @@ fn source_grain(info: &SourceInfo) -> Result<PartitionGrain> {
 /// [`build_forward_graph`] from the SAME derivation `smelt explain` reads —
 /// never re-derived here) for every `grain: key` model in the workspace.
 /// A `grain: key` model whose locality gate admitted (the composed shape,
-/// `incremental_models.md` §"Key temporal locality (the time-partitioned
+/// `incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)") is a clocked node at its declared `timeseries.granularity`
 /// like any other node (§"The graph layer": "A locality-admitted
 /// time-partitioned keyed output is not refused"); a **bare** keyed model —
@@ -786,7 +786,7 @@ fn derive_clamp_and_locality_pass(
             &model_edges,
             driving_source_granularity,
             // Route 3's declared `key_recurrence` fallback (B3,
-            // `incremental_models.md` §"Key temporal locality" route 3): the
+            // `incremental_shapes.md` §"Key temporal locality" route 3): the
             // SAME `(bare name, key_recurrence)` list `smelt-db`'s own
             // `derive_model_maintenance_plan_with_edges` call site builds
             // via `build_key_recurrences` over the declared `sources.*`
@@ -1054,7 +1054,7 @@ pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckd
 
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
-/// (`docs/specs/incremental_models.md` §"What the composed shape uniquely
+/// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely
 /// enables" — exact `--landed` for model edges, Phase D3). For such an
 /// origin:
 /// - **absent** from `observed` (no entry for `(model, window_start,

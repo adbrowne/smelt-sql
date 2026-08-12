@@ -13,7 +13,7 @@ timeseries:
 -- for comparison. Three model upstreams, all maintained:
 -- `silver.events_deduped` (this model's own `event_date` clock, read 1:1 —
 -- the composed keyed+timeseries dedupe stage, `docs/specs/
--- incremental_models.md` §"Key temporal locality (the time-partitioned
+-- incremental_shapes.md` §"Key temporal locality (the time-partitioned
 -- output)"; its own settle bound and clock propagate through exactly like a
 -- declared source), `silver.sessions` (clock-anchored cut, clocked by
 -- `session_start_date`, joined across the session boundary), and
