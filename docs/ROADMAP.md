@@ -21,6 +21,19 @@ The items below are the current priority queue, top to bottom. See completed ite
 
 The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation, the feature-sweep bug ledger, and the silent-failures hardening that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
 
+**Spec re-architecture (2026-08-12):** the incremental-models spec was rewritten from scratch
+per [`docs/research/20260811-delta-signatures-and-definition-deltas.md`](research/20260811-delta-signatures-and-definition-deltas.md)
+and split into three files: [`incremental_models.md`](specs/incremental_models.md) (delta
+signatures as the front door, the equivalence invariant, contract lattice, plan, frontier,
+graph layer), [`incremental_shapes.md`](specs/incremental_shapes.md) (the partition/key shape
+profiles — the demoted "four corners"), and [`definition_deltas.md`](specs/definition_deltas.md)
+(definition changes as deltas; plan-and-approve `smelt migrate`; the previously-unrecorded
+unwired-backbuild gap now recorded). Verified claim-preserving via the claim-inventory method
+(486 claims graded) plus adversarial IVM-expert and data-engineer reviews; both contract-lattice
+oracles were restated (the deferral oracle was vacuous as previously written; frozen horizon is
+now stated per output partition). Next steps are the research doc's §6 sequencing — scheduler
+consumes delta signatures; wire backbuild behind `smelt migrate`; lattice v2; proofs-as-product.
+
 **Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
 
 ### 1. Type-System Axes — Collation

@@ -1,5 +1,36 @@
 # TODO
 
+## Follow-ups from the 2026-08-12 incremental spec re-architecture
+
+The spec set (`incremental_models.md` + `incremental_shapes.md` + `definition_deltas.md`) is
+committed; these are the loose ends the redraft deliberately left for follow-up work:
+
+- **docs-site sync**: user docs still describe the four-corners framing and `smelt backbuild`;
+  a docs-site pass should follow the new front door (delta signatures) and the verb renames
+  once a wiring plan exists. `docs-site` was deliberately untouched by the spec redraft.
+- **`/smelt:validate` run** over the three new specs to baseline drift.
+- **`smelt migrate` / `smelt rebuild` wiring plan** (research §6 step 2): wire the backbuild
+  layer behind plan-and-approve; extend the conformance harness with a definition-edit step
+  kind; rename the CLI verb; build the approval (plan-hash) store.
+- **Sidecar per-consuming-edge audit** (`sources.md` §Known Divergences, new entry): verify
+  the built fingerprint sidecar upholds the per-consumer comparandum requirement under a
+  shared projection-identity partition.
+- **Frozen-horizon append-only gate**: the spec now refuses `frozen_horizon` on a
+  non-append-only driving source (`ContractFrozenHorizonInvalid`); the implementation does not
+  yet check this leg.
+- **Deferral oracle restatement**: the conformance gate's oracle transform should be checked
+  against the restated landed-vs-processed form (`incremental_models.md` §"The contract
+  lattice") — the previous spec text was vacuous and a comparator built from it checks
+  nothing.
+- **Stale citations flagged by the sweep** (could not be confidently re-pointed; each names a
+  heading that no longer exists anywhere): `materialized_view.md` §"The composition contract"
+  (×2), `run_state.md` §"Failure mode", `timeseries.md` §"Granularity values", `models.md` +
+  `rules/incremental.rs:708` + one e2e test §"Non-determinism and the payload rule",
+  `maintenance_conformance/gate.rs` §"Per-slice…" (×2), `propagate.rs` §"Row movement",
+  `propagation.rs` §"The clamp both directions", `refresh_axis.rs` §"The declared shape axis".
+  These pre-date the redraft; fix opportunistically.
+
+
 ## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells — RESOLVED (2026-08-09)
 
 Resolved by `docs/plans/20260809-sensitivity-precision.md` (Phases 2–5): membership sensitivity is
