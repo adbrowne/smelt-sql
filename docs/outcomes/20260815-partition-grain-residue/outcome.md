@@ -23,8 +23,7 @@ backfill chunking, scan-filter injection, and the `smelt explain` clamp renderin
 non-date type, not only date-typed grids. Per-source clamp observability finishes: `smelt explain
 --json` resolves the run-relative scan window when a concrete run window is supplied, and the
 editor-hover readout ships. A `partition_column` rename gets a real refusal diagnostic with a
-fixture. The `smelt.metric()` × time-filter-injection interaction is specified and implemented for
-partition-grain models consuming metrics.
+fixture.
 
 ## Success criteria (checkable)
 
@@ -44,14 +43,16 @@ partition-grain models consuming metrics.
 6. `smelt explain --json`'s per-cell `source_bounds` resolves the run-relative scan window given a
    concrete run window; editor hover on a `smelt.<path>` reference shows the same clamp.
 7. A `partition_column` rename gets a named diagnostic and a fixture exercising the refusal path.
-8. `smelt.metric()` × time-filter-injection for partition-grain models is specified in
-   `incremental_shapes.md` and implemented.
-9. `/smelt:validate incremental_shapes` reports no drift for every bullet this outcome closes; all
+8. `/smelt:validate incremental_shapes` reports no drift for every bullet this outcome closes; all
    standing gates green.
 
 ## Out of scope
 
-- None — this outcome exists specifically because these bullets had no other live owner
+- The `smelt.metric()` × time-filter-injection interaction is explicitly named "unspecified" (not
+  merely unimplemented) by `incremental_shapes.md` — deciding what it should do is a design call,
+  not an implementation gap against already-decided text. It stays in
+  `docs/outcomes/20260815-definition-delta-migrate` §"Out of scope" pending sign-off.
+- Otherwise none — this outcome exists specifically because these bullets had no other live owner
   (`docs/outcomes/20260815-definition-delta-migrate`'s scope statement). If the phase-1 audit
   finds a bullet is genuinely still owned by a live, actively-progressing plan outside
   `docs/outcomes/`, record that finding in the decision log rather than silently dropping the
@@ -68,8 +69,7 @@ partition-grain models consuming metrics.
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
-| 8 | `smelt.metric()` × time-filter-injection: spec + implementation | pending |
-| 9 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
 

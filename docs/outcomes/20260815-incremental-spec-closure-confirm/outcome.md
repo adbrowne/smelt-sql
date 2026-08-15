@@ -1,38 +1,41 @@
-# Outcome: Confirm zero open questions / known divergences across the incremental spec family
+# Outcome: Confirm every closeable-without-design divergence is closed, and everything left is honestly flagged
 
 **Created:** 2026-08-15
 **Status:** queued
-**Source:** the full 2026-08-15 incremental-spec build-out — `docs/outcomes/20260815-definition-delta-migrate`
-and the nine outcomes it spawned (`keyed-open-questions-buildout`, `partition-grain-residue`,
-`key-locality-and-deletion`, `ladder-rungs-3-4`, `lattice-v2`, `proofs-as-product`,
-`scd2-watermark-observer-contract`, `retraction-and-changefeed`,
-`refresh-mode-consolidation-audit`)
+**Source:** `docs/outcomes/20260815-definition-delta-migrate` and the two outcomes it spawned
+(`keyed-grain-residue`, `partition-grain-residue`)
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
 `docs/specs/incremental_shapes.md`, `docs/specs/model_properties.md`
 
 ## The outcome
 
-This is the closing audit for the whole 2026-08-15 program, run only once every outcome listed
-above (and the migrate outcome itself) reaches `done`. It does not implement anything new — it
-confirms, with a checkable artifact, that `definition_deltas.md`, `incremental_models.md`,
-`incremental_shapes.md`, and `model_properties.md` carry zero `§Known Divergences` bullets and zero
-`(Open Question)` tags left over from the 2026-08-15 baseline. Every bullet that existed at that
-baseline is accounted for: either its owning outcome closed it (bullet removed, verified against
-the repo not the outcome's own say-so), or it was deliberately reclassified into `§Future
-Extensions` as accepted forward work with no divergence framing — never silently dropped, never
-left half-true.
+This is the closing audit for the 2026-08-15 program, run only once `definition-delta-migrate`,
+`keyed-grain-residue`, and `partition-grain-residue` all reach `done`. It does not implement
+anything new and does **not** claim zero remaining `(Open Question)` tags — several were
+deliberately left open because closing them means choosing new admission width or new surface that
+this program declined to decide unilaterally (`docs/outcomes/20260815-definition-delta-migrate`
+§"Out of scope"). What it does confirm, with a checkable artifact: every `§Known Divergences`
+bullet that was closeable *without* a fresh product decision is actually closed (verified against
+the repo, not an outcome's own say-so), and every bullet left open is still accurately described in
+the spec as an open, undecided question — none of them silently reads as settled, and none of them
+went stale (still-live bullets that got fixed as a side effect of other work, but never had their
+divergence entry removed).
 
 ## Success criteria (checkable)
 
 1. A written closure report (`closure-report.md` in this outcome's directory) enumerates every
    `§Known Divergences` bullet and `(Open Question)` tag that existed across the four anchor specs
-   at the 2026-08-15 baseline (reconstructed from git history at commit `6cef4627` or the nearest
-   available baseline), and states each one's disposition: closed by outcome `<name>` (with the
-   commit that removed it), or reclassified to `§Future Extensions` (with the rationale).
-2. `rg -n '\(Open Question\)'` across all four spec files returns nothing.
-3. Each spec's `§Known Divergences` section is either absent, empty, or contains only bullets
-   created *after* the 2026-08-15 baseline (a regression introduced by this program's own
-   implementation work must be closed here too, not waved through).
+   at the 2026-08-15 baseline (reconstructed from git history), and states each one's disposition:
+   closed (with the commit), or still open with the reason it needs a product decision this
+   program didn't make.
+2. Every bullet `docs/outcomes/20260815-keyed-grain-residue` and
+   `docs/outcomes/20260815-partition-grain-residue` claim to close is actually removed from
+   `incremental_shapes.md` §Known Divergences, not just addressed in code.
+3. Every bullet still named in `docs/outcomes/20260815-definition-delta-migrate` §"Out of scope"
+   as needing sign-off is spot-checked against the current spec text: still accurately worded,
+   still tagged `(Open Question)` where it should be, and not accidentally fixed by unrelated work
+   without its divergence entry being removed (a bullet whose underlying behaviour changed but
+   whose spec text wasn't updated is itself a drift bug to report and fix here).
 4. `/smelt:validate definition_deltas`, `/smelt:validate incremental_models`, `/smelt:validate
    incremental_shapes`, and `/smelt:validate model_properties` all report no drift.
 5. The full standing-gate suite is green: `bash .claude/scripts/verify-phase.sh`,
@@ -40,27 +43,26 @@ left half-true.
    `cargo test -p smelt-runtime --test statement_parity`,
    `cargo test -p smelt-logical --test walk_coverage`,
    `cargo test -p smelt-runtime --test execute_parity`.
-6. If any bullet from the baseline inventory has no clean disposition (its owning outcome shipped
-   something narrower than the bullet, or got blocked), that residue is named explicitly in the
-   closure report and this outcome does **not** claim completion until it's resolved one way or
-   the other — a residue is a finding to act on, not something to paper over with prose.
+6. If any bullet claimed-closed by an owning outcome has no clean disposition (the outcome shipped
+   something narrower than claimed, or got blocked), that residue is named explicitly in the
+   closure report and this outcome does **not** claim completion until it's resolved — reopen the
+   owning outcome, don't paper over it here.
 
 ## Out of scope
 
-- Nothing. This outcome's entire job is confirming the other nine (plus the migrate outcome)
-  actually closed what they claimed; if it finds a gap, the fix belongs to the owning outcome
-  (reopen it) or, for a genuinely new finding, a fresh outcome queued behind this one — not a
-  quiet edit inside this closure outcome's own phases.
+- Deciding any of the still-open `(Open Question)` bullets. That's the explicit boundary this
+  whole program drew; this outcome's job is to confirm the boundary is honestly documented, not to
+  cross it.
 
 ## Phases
 
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | pending |
-| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / reclassified / residual | pending |
-| 3 | Resolve any residual bullets: reopen the owning outcome, or queue a new outcome, or (rarely) fix directly if truly trivial | pending |
+| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | pending |
+| 3 | Resolve any residual or drifted bullets: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
-| 5 | Write `closure-report.md`; final `rg '(Open Question)'` sweep and standing-gate run | pending |
+| 5 | Write `closure-report.md`; final standing-gate run | pending |
 
 ## Decision log
 

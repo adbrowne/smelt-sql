@@ -30,14 +30,19 @@ still-live bullet in `definition_deltas.md`, `incremental_models.md`, and `incre
 covers not just the migrate/rebuild mechanism but closing out the remaining Known Divergences of
 all three anchor specs — implementation gaps get a phase that closes them; open questions where
 intent itself is undecided get a phase that decides them (recording the decision in the spec, the
-same pattern phase 1 already used) wherever the decision is small enough to make in-outcome; a
-short list of genuinely large product calls — including everything the specs themselves framed as
-deliberately-future — is queued as its own outcome rather than silently decided, silently dropped,
-or left as an unowned aspiration (§"Out of scope" below names each one and the outcome that now
-owns it; `docs/outcomes/20260815-incremental-spec-closure-confirm` is the final audit that nothing
-from the 2026-08-15 baseline was missed). "Implemented" therefore does mean "built," including for
-ideas the spec author had previously declined to commit to — the 2026-08-15 build-everything
-decision supersedes that earlier caution.
+same pattern phase 1 already used) wherever the decision is small enough to make in-outcome.
+
+**Boundary, re-affirmed 2026-08-15 (see decision log).** A bullet only gets a phase — here or in a
+spawned outcome — when the spec has already decided the target behaviour and only the
+implementation is missing, or when the decision needed is small enough to make in the same sitting
+(phase 18/19's pattern: record the call, drop the "(Open Question)" tag, move on). A bullet the
+spec itself flags as undecided (an explicit `(Open Question)` tag, or a `§Future Extensions` entry
+stating "not decided ... via its own spec diff") is **not** implemented here or in any spawned
+outcome — deciding it is a product call this program does not make unilaterally. Every such bullet
+is named below with the reason it's excluded, not silently dropped.
+`docs/outcomes/20260815-incremental-spec-closure-confirm` is the final audit confirming that
+boundary was actually honoured: every closeable bullet closed, every excluded bullet still
+accurately described as open.
 
 ## Success criteria (checkable)
 
@@ -204,63 +209,91 @@ decision supersedes that earlier caution.
 
 `docs/outcomes/` is the only currently-live tracking layer — every `docs/plans/*` file predating
 it is either fully done, superseded by a later outcome/spec, or (rarely) genuinely orphaned.
-Genuinely orphaned bullets that are within the three anchor specs are now pulled into scope
-(phases 10–19 above), not excluded.
+Genuinely orphaned bullets that are within the three anchor specs, and closeable *without* a new
+product decision, are pulled into scope (phases 10–19 above, plus the two spawned outcomes below)
+— not excluded. What's left here is either (a) material each spec itself frames as
+deliberately-undecided future work (its own `§Future Extensions`, or a bullet naming a not-yet-
+scoped next ladder rung / lattice point), which "implemented" cannot honestly mean for ideas the
+author declined to commit to, or (b) an `(Open Question)` bullet whose resolution would widen
+admission or add new surface the spec doesn't currently describe.
 
-**2026-08-15 revision — build-everything decision.** Every item this section previously deferred
-("needs explicit sign-off" or "deliberately future, no spec diff exists yet") is now queued as its
-own outcome rather than left unowned — nothing below is dropped or waiting on a future decision;
-each line names the outcome that now owns it. This outcome's own scope stays as phases 1–19 define
-it (the migrate/rebuild mechanism plus the sweep of bullets small enough to close in-outcome); the
-outcomes below are separate because each is large enough that folding it into this already-19-phase
-outcome would make the whole thing unreviewable, not because the work itself is optional.
-`docs/outcomes/20260815-incremental-spec-closure-confirm` runs last, once every outcome named below
-(and this one) is `done`, and confirms the anchor specs carry zero remaining Known Divergences or
-Open Question bullets.
+**2026-08-15 revision, reversed same day.** An earlier revision of this section queued nine new
+outcomes to *build* everything below, including the deliberately-future material. That was reverted
+after review: several of those items are explicitly undecided by the specs' own words (`(Open
+Question)` tags, or `§Future Extensions`' "not decided ... via its own spec diff"), and building
+against an undecided intent means inventing the decision on the spot — exactly what the spec-first
+rule and this outcome's original discipline exist to prevent. Two outcomes survive from that
+revision because their content turned out to be genuine known-divergences (spec already decided,
+only implementation missing) once re-checked bullet-by-bullet against the spec text:
+`docs/outcomes/20260815-keyed-grain-residue` and `docs/outcomes/20260815-partition-grain-residue`.
+`docs/outcomes/20260815-incremental-spec-closure-confirm` still runs last, but now confirms only
+that every closeable bullet is closed and every excluded bullet is still honestly described as
+open — not that the excluded bullets themselves are gone.
+
+**Deliberately future, per the specs' own framing — no spec diff exists to implement against:**
 
 - **Lattice v2** (retention, reconciliation points, declared indifference, per-column-group
-  freshness) — `docs/outcomes/20260815-lattice-v2`.
+  freshness) — `incremental_models.md` §Future Extensions; research doc §6 step 3, sequenced
+  after this step because it consumes this step's approved-destructive-legs machinery. No
+  outcome exists yet.
 - **Proofs as product** (`smelt prove`, `must_hold:`, proof-diff in CI, `smelt explain`'s
-  guarantee-summary rewrite, the delta-signature headline and per-column guarantee summary both
-  anchor specs flag as unprinted) — `docs/outcomes/20260815-proofs-as-product`, sequenced last
-  among the new outcomes because it needs to print whatever the others change about what there is
-  to prove.
+  guarantee-summary rewrite, the delta-signature headline and per-column guarantee summary
+  `incremental_models.md` and `incremental_shapes.md` both flag as unprinted) —
+  `incremental_models.md` §Future Extensions; research doc §6 step 4, deliberately last because
+  steps 1–3 (including this outcome) change what the proofs say.
 - **Smelt-maintained SCD2 via succession-pattern recognition**, **automatic watermark-diffed
   `--since-upstream`**, and **the observer / prefix-consistency contract for non-replayable
-  combinations** — `docs/outcomes/20260815-scd2-watermark-observer-contract`. The
-  cross-model-runs-need-an-explicit-`--landed`-flag residue of the scheduler-currency bullet
-  (phase 10) is this same automatic-watermark item under another name — closed there, not
-  duplicated as a gap.
-- **Eclipse-detection breadth**, **row-local derivation for mid-catch-up groups**, and
-  **retraction handling / change-feed consumption as a first-class delta shape** —
-  `docs/outcomes/20260815-retraction-and-changefeed`. (Phase 18 still gives `change_feed` sources
-  an `UpstreamMutation` cell for admission consistency — that small decision lands here; the real
-  fold machinery is this new outcome's job.)
+  combinations** — all three named explicitly in `incremental_models.md` §Future Extensions as
+  "not decided ... may not be relied on or implemented against until it graduates ... via its own
+  spec diff". The cross-model-runs-need-an-explicit-`--landed`-flag residue of the
+  scheduler-currency bullet (phase 10) is this same automatic-watermark item under another name —
+  left here, not duplicated as a gap.
+- **Eclipse-detection breadth** (algebraic identities, join reorderings) and **row-local
+  derivation for mid-catch-up groups** — `definition_deltas.md` §Future Extensions.
+- **Retraction handling / change-feed consumption as a first-class delta shape** —
+  `definition_deltas.md` §"What stays data-side". (Phase 18 does give `change_feed` sources an
+  `UpstreamMutation` cell for consistency with every other mutation-sensitive source — that's a
+  small, decidable admission-rule fix, not building retraction/change-feed folding.)
 - **Ladder rungs 3–4** (group-rung retraction, the bounded-domain multiset) —
-  `docs/outcomes/20260815-ladder-rungs-3-4`, sequenced against
-  `20260815-retraction-and-changefeed`'s change-feed design since rung 3 depends on it.
+  `incremental_shapes.md` "Ladder rungs 3–4 remain specified ahead of this profile's use of
+  them", explicitly deferred by the (`done`) `rung2-state-shapes` outcome's own §"Out of scope".
+  Rung 2 is what shipped; rungs 3–4 are the next rung, not a rung-2 gap. `KeyedRetractableContribution`'s
+  classifier/diagnostic plumbing is a genuine known-divergence closed in `20260815-keyed-grain-residue`
+  — the retraction *fold path itself* still needs rung 3, which stays here.
 - **Locality open questions** (slice pruning under snapshot-reconcile, relaxing the
   granularity-equality precondition, slice-scoped deletion), **key deletion beyond retention**
-  (tombstones, opt-in hard delete), key temporal locality route 2's declared-FD-only admission,
-  the wider locality-machinery gaps, and `key_per_partition`'s missing plan derivation —
-  `docs/outcomes/20260815-key-locality-and-deletion`.
-- **`docs/plans/20260704-model-updates.md`'s D1/D2/D3 rows** (`refresh: latest_value`, `refresh:
-  versioned`, `refresh: materialized_view`) — `docs/outcomes/20260815-refresh-mode-consolidation-audit`,
-  audit-first since whether each mode's scope survived the spec-family consolidation under a
-  different name is a real question, not a mechanical rename sweep.
-- **`g_run >= g_part` auto-coarsening vs. reject-with-suggestion**, **snapshot-reconcile
-  multi-unclocked-source admission**, **`KeyedRetractableContribution` implementation**,
-  **re-run-tolerant non-additive ledger presence**, **once-write nullability route for a
-  key-derived expression**, **pattern functions as built-ins vs. a shipped template**, **driver
-  granularity below `day`/`week`**, **`--auto` staleness fidelity beyond conservative v1**,
-  **self-referential keyed models**, **run-pinning alignment for `NOW()`/`CURRENT_*` in keyed
-  models**, **the reconciliation ledger's transactional fold on non-DuckDB backends**, the
-  unprinted derived execution postures, and the generative conformance pool's NULL-payload gap —
-  `docs/outcomes/20260815-keyed-open-questions-buildout`.
-- **The partition grain's remaining stale-plan-tracked residues** (classification call site,
-  window-function batch-safety, CTE-only `event_time_column`, per-`ModelDef` overrides,
-  monotone-integer end-to-end run, per-source clamp observability, `partition_column` rename,
-  `smelt.metric()` interaction) — `docs/outcomes/20260815-partition-grain-residue`.
+  (tombstones, opt-in hard delete), key temporal locality route 2's declared-FD-only admission
+  (explicitly tagged `(Open Question)` — the key-derived-expression sub-route the spec never
+  commits to), the wider locality-machinery gaps (route 3's DuckDB-binder-limited slice predicate,
+  and granularity-determination/recurrence-precedence choices the spec text itself says are
+  "underdetermined"), and `key_per_partition`'s missing plan derivation (the shape is *named* in
+  §Overview but has no described execution model — designing one from scratch, not filling a gap
+  in an existing one) — `incremental_shapes.md`, deferred to
+  `docs/research/20260705-keyed-collapse-application.md` §5 as a design surface not yet drafted.
+
+**Genuinely large product calls — flagged for explicit sign-off, not decided here:**
+
+- **`docs/plans/20260704-model-updates.md`'s still-pending rows** (`C3`/`C4`: group-rung
+  retraction and the bounded-domain multiset — same as ladder rungs 3–4 above; `D1`/`D2`/`D3`:
+  `refresh: latest_value`, `refresh: versioned`, `refresh: materialized_view` classifiers and
+  execution) target spec files that were deleted and consolidated into
+  `incremental_shapes.md`/`incremental_models.md`. Whether D1–D3's scope survived that
+  consolidation under a different name, was dropped as a decided non-surface, or is still
+  genuinely wanted is unclear without checking each mode's fate individually — a real question,
+  not a mechanical rename sweep.
+- **`g_run >= g_part` auto-coarsening vs. reject-with-suggestion** (partition grain — explicitly
+  "(Open Question) ... whether to auto-coarsen or reject-with-suggestion instead is undecided"),
+  **snapshot-reconcile multi-unclocked-source admission**, **once-write nullability route for a
+  key-derived expression (not just a bare column — widens the catalogue's four fixed spellings)**,
+  **pattern functions (`smelt.latest`/`smelt.once`/`smelt.current`) as built-ins vs. a shipped
+  template**, **driver granularity below `day`/`week`**, **`--auto` staleness fidelity beyond
+  conservative v1**, **self-referential keyed models**, and **run-pinning alignment for
+  `NOW()`/`CURRENT_*` in keyed models (today a deliberate hard refusal,
+  `KeyedForbidsNondeterministic`, not merely an unfilled gap)** — all real design decisions with
+  behavioural consequences (admission width, correctness posture, or a new surface keyword), not
+  a small in-spec call like phase 18's list. Recommend scoping these as their own outcome(s) once
+  a product owner is ready to decide them, rather than folding a design pass into an
+  implementation-only outcome.
 
 ## Phases
 
@@ -315,6 +348,28 @@ Open Question bullets.
   immediately after this outcome. This outcome's own phase table (1–19) is unchanged by this
   decision — it still owns only the migrate/rebuild mechanism plus the sweep already scoped into
   it.
+
+- **2026-08-15, scope decision reversed.** User pushback: "build everything" conflated
+  implementing already-decided spec text with inventing decisions the specs themselves mark
+  undecided (`(Open Question)` tags, `§Future Extensions`' explicit "not decided ... via its own
+  spec diff"). Re-triaged every bullet in the nine spawned outcomes against the actual spec
+  wording rather than the outcome's own framing. Result: `20260815-lattice-v2`,
+  `20260815-proofs-as-product`, `20260815-scd2-watermark-observer-contract`,
+  `20260815-retraction-and-changefeed`, `20260815-ladder-rungs-3-4`, and
+  `20260815-refresh-mode-consolidation-audit` deleted outright — every bullet they owned is
+  genuinely undecided-by-spec and returns to the "Out of scope" lists above.
+  `20260815-key-locality-and-deletion` deleted too — on closer reading its surviving candidate
+  items (route 2's key-derived sub-route, `key_per_partition`'s execution model) turned out to be
+  explicitly open or undesigned rather than implementation gaps, leaving nothing genuinely
+  build-only in it. `20260815-keyed-open-questions-buildout` (renamed `keyed-grain-residue`) and
+  `20260815-partition-grain-residue` survive, trimmed to only the bullets where the spec already
+  states the target behaviour in normative prose elsewhere (e.g. `KeyedRetractableContribution`'s
+  semantics are already fully stated in §"Enrichment joins" and the Diagnostics table; the merge
+  ledger's "every window-forward keyed model" and "transactional with the write it describes"
+  are already unqualified normative statements the implementation just doesn't meet yet).
+  `20260815-incremental-spec-closure-confirm` retargeted from "confirm zero Open Questions" to
+  "confirm every closeable bullet is closed and every excluded bullet is still honestly open."
+  `.claude/outcome-backlog` and this section rewritten to match.
 
 ## Blocked
 
