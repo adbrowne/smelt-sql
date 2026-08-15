@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-16
 owners: [andrew]
 ---
 
@@ -1229,7 +1229,12 @@ per-model backend table a window-forward keyed model's merge writes transactiona
 (`incremental_shapes.md` §"The transactional frontier write (merge ledger)"). No divergence
 entry may describe one realisation as lacking a concept the other tracks — per-cell addressing
 is simply unbuilt for the frontier record's realisation (§Known Divergences), not a foreign
-concept.
+concept. Both realisations are **correctness structures** under `state.md`'s classification:
+their normative residency is engine-resident, transactional with the write each describes
+(`state.md` §"The residency rule"), and their availability on a given backend is what the
+degradation contract resolves against (`state.md` §"The degradation contract"). This spec owns
+the frontier's semantics; `state.md` owns where a realisation may live and what happens when
+none is available.
 
 #### The frontier record (reconciliation ledger)
 
@@ -1367,7 +1372,8 @@ always-correct form (widen-never-narrow). The record is warehouse-resident, alon
 reconciliation ledger, and written in the **same backend transaction as the write it records**
 — a delta visible without its write, or a write without its delta, breaks propagation
 soundness. **Trust boundary:** an observed delta is trusted because the state is smelt-owned,
-written only by smelt's own conditional-write path; there is no out-of-band-edit tripwire — an
+written only by smelt's own conditional-write path — the general form of this trust argument
+is `state.md` §"The residency rule"; there is no out-of-band-edit tripwire — an
 external mutation to the target table between runs is not detected (an explicit Open
 Question, §Known Divergences). Empty and absent are distinct: an empty recorded delta means
 the run executed and changed nothing (a real, propagatable fact); an absent record means no
@@ -1787,9 +1793,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
   Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
-- **The ledger's warehouse substrate is DuckDB-only (Open Question)** — an additive-graded
-  cell on another backend fails loudly; whether a Spark-dialect ledger builder is worth
-  building before a real Spark-targeted incremental workload demands it is undecided.
+- **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
+  cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
+  the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
+  recompute family, explain-visible), and whether a Spark-dialect ledger builder is worth
+  building before a real Spark-targeted incremental workload demands it remains undecided.
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
   (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
   key-level dirt representation exists (intervals are the graph's only currency); the
@@ -1973,5 +1981,7 @@ none of it may be relied on or implemented against until it graduates into
   every analysis stage here); `functions.md` (the pattern-function surface);
   `materialized_view.md` (the engine-owned shape profile — where beyond-the-ladder shapes and
   hand-written SCD2 go); `multi_backend.md` (backend capability flags a strategy checks);
+  `state.md` (state-ownership doctrine: the frontier realisations' correctness
+  classification, residency rule, and the availability-downgrade contract);
   `schema_evolution.md`, `run_state.md`, `virtual_environments.md`, `diagnostics.md`,
   `architecture.md`, `cli.md`.

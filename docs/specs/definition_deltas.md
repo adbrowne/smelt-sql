@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-16
 owners: [andrew]
 ---
 
@@ -490,6 +490,8 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   correctness oracle); `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the
   unification and the plan-and-approve workflow).
 - **Related specs**: `incremental_models.md` (deltas, frontier, plan, emitters, lattice);
-  `incremental_shapes.md` (the shape profiles migrations run against); `model_properties.md`
+  `state.md` (the frontier's correctness classification and residency rule — migration
+  catch-up state inherits it); `incremental_shapes.md` (the shape profiles migrations run
+  against); `model_properties.md`
   (the per-column classification proof); `schema_evolution.md` (declared-schema DDL);
   `diagnostics.md` (code catalogue); `cli.md` (verb surface).

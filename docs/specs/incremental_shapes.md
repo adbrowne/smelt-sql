@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-08-12
+last_reviewed: 2026-08-16
 owners: [andrew]
 ---
 
@@ -562,12 +562,17 @@ mechanism, even sharing the `partition_column` name.
 
 #### State ownership
 
-smelt does not track watermarks, offsets, or run history for partition-grain models — the
-backend owns computational state (DuckDB: table state + transactions; Delta/Spark: transaction
-log + MERGE; Flink: checkpoints). Optional run-state tracking with gap detection is opt-in via
-`state.mode: intervals` (`virtual_environments.md`; layout owned by `run_state.md`). The one
-deliberate exception is the key grain's transactional merge ledger (§"The transactional
-frontier write (merge ledger)").
+The project-wide doctrine — which state structures smelt keeps, the correctness/observability
+split, residency, and optionality — is owned by `state.md`; this section states only its
+partition-grain instance. smelt does not track watermarks, offsets, or run history for
+partition-grain models — the backend owns computational state (DuckDB: table state +
+transactions; Delta/Spark: transaction log + MERGE; Flink: checkpoints). Optional run-state
+tracking with gap detection is opt-in via `state.mode: intervals` (`virtual_environments.md`;
+layout owned by `run_state.md`). The key grain's transactional merge ledger (§"The
+transactional frontier write (merge ledger)") is not an exception to this: it is a
+correctness structure under `state.md` §"The residency rule" — engine-resident and
+transactional with the write it describes — which is exactly what "the backend owns
+computational state" requires.
 
 #### `partition_column` validation
 
@@ -634,9 +639,9 @@ interrupted run resumes correctly by re-running the same range. **Re-run-toleran
 window may be re-merged (a no-op); the frontier serves reprocessing detection and `--auto`
 bookkeeping, not refusal. Snapshot-reconcile models keep no frontier — each run is
 self-contained. This realisation is backend-resident and transactional with the write it
-describes — a **correctness structure**, distinct from the opt-in run-state observability
-surface (`run_state.md`); it does not violate the state-ownership doctrine (§"State
-ownership").
+describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
+state-structure inventory"), distinct from the opt-in run-state observability surface
+(`run_state.md`), and the model realisation of `state.md` §"The residency rule".
 
 #### Admission matrix (column family × source shape)
 
@@ -890,9 +895,9 @@ observable (§"Observing the per-source clamp") as the deliberate counterpart.
 
 **smelt does not own state — scoped to the partition grain.** Owning a watermark store was
 rejected: it duplicates engine state and opens a sync-correctness window. The key grain's
-transactional merge ledger is the one deliberate exception across the family —
-backend-resident, written in the same transaction as the merge it describes, so it cannot drift
-from the state it records. Consequence: a backend may only select a physical strategy that
+transactional merge ledger is not a counterexample but the doctrine's model correctness
+structure (`state.md` §"The residency rule") — backend-resident, written in the same
+transaction as the merge it describes, so it cannot drift from the state it records. Consequence: a backend may only select a physical strategy that
 preserves the declared shape's invariants — `DeleteInsert` is the only one plan derivation
 selects today. (`docs/research/20260705-keyed-collapse-application.md` D7.)
 
@@ -991,9 +996,10 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
    otherwise (`models.md` §"Constraint violations").
 3. **Strategy is not on the model.** The backend chooses the physical strategy for the
    recompute-a-region quadrant's execution.
-4. **smelt does not manage computational state** (partition-grain-scoped doctrine); watermarks,
-   offsets, and run history live in the backend. The key grain's transactional merge ledger is
-   the one deliberate exception (§"Key-grain design"). A backend may select only a physical
+4. **smelt does not manage computational state** (partition-grain-scoped doctrine; project-wide
+   classification in `state.md`); watermarks, offsets, and run history live in the backend.
+   The key grain's transactional merge ledger is a correctness structure, engine-resident by
+   rule (§"Key-grain design"; `state.md` §"The residency rule"). A backend may select only a physical
    strategy that preserves the declared shape's invariants; `DeleteInsert` is the only one plan
    derivation selects today.
 5. **Output-filter injection is per-model; source-filter pushdown is per-reference.**
@@ -1223,7 +1229,8 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Legacy reference**: `docs/DESIGN.md` §"Incremental Table Builds" — superseded for current
   behavior; useful for design rationale
 - **Related specs**: `incremental_models.md` (the shared machinery this spec's profiles
-  compose); `definition_deltas.md`; `model_properties.md`; `model_transforms.md`; `models.md`;
+  compose); `state.md` (state-ownership doctrine; the merge ledger's correctness
+  classification); `definition_deltas.md`; `model_properties.md`; `model_transforms.md`; `models.md`;
   `timeseries.md`; `sources.md`; `expansion.md`; `functions.md`; `materialized_view.md`;
   `multi_backend.md`; `run_state.md`; `virtual_environments.md`; `diagnostics.md`;
   `architecture.md`; `cli.md`.
