@@ -3,6 +3,16 @@
 # the first entry whose outcome.md **Status:** is neither `done` nor `blocked`,
 # then advances to the next. Scaffold + append via /smelt:outcome.
 docs/outcomes/20260815-definition-delta-migrate
+docs/outcomes/20260815-keyed-open-questions-buildout
+docs/outcomes/20260815-partition-grain-residue
+docs/outcomes/20260815-key-locality-and-deletion
+docs/outcomes/20260815-retraction-and-changefeed
+docs/outcomes/20260815-ladder-rungs-3-4
+docs/outcomes/20260815-lattice-v2
+docs/outcomes/20260815-scd2-watermark-observer-contract
+docs/outcomes/20260815-refresh-mode-consolidation-audit
+docs/outcomes/20260815-proofs-as-product
+docs/outcomes/20260815-incremental-spec-closure-confirm
 docs/outcomes/20260809-rung2-state-shapes
 docs/outcomes/20260809-repair-family
 docs/outcomes/20260809-probe-backed-facts
