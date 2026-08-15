@@ -78,7 +78,7 @@ that outcome specified this mechanism and recorded it as unwired; this one wires
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | pending |
+| 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | pending |
 | 3 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests | pending |
@@ -89,6 +89,19 @@ that outcome specified this mechanism and recorded it as unwired; this one wires
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
+
+- **2026-08-15, phase 1.** Plan-hash scope: hash the plan data structure the emitters consume
+  (verdicts, techniques, input facts — source declarations, backend capabilities), not only
+  rendered SQL text; exclude region *enumeration*, which is resolved at apply time from the
+  frontier so `--apply` stays reachable on an actively-loading warehouse. Diagnostic
+  rename/split: rename `MaintenanceSkeletonColumnAdded` to `MaintenanceSkeletonChanged` (one
+  code, not a split add/changed pair) — add and change trigger identical refusal and
+  remediation, and every other `Maintenance*` code names the refused condition, not its
+  trigger. Both landed in `docs/specs/definition_deltas.md` §Design and §Known Divergences;
+  §Surface and body prose now use the target names. The code-side rename and the sibling-spec
+  sweep (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
+  `schema_evolution.md`, `diagnostics.md`) are deferred to phase 7, since renaming a
+  diagnostic code is itself a code change out of scope for this docs-only phase.
 
 ## Blocked
 

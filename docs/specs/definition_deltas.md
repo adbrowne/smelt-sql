@@ -125,7 +125,7 @@ Catalogued in `diagnostics.md`; semantics owned here.
 
 | Code | Fires when |
 |---|---|
-| `MaintenanceSkeletonColumnAdded` | A definition delta adds or changes a field in a skeleton position — identity, grouping, dedup, or ordering — so the change alters which rows exist or the model's grain. Refused as an in-place migration; the honest plan is a rebuild (§"Skeleton changes are a new relation"). |
+| `MaintenanceSkeletonChanged` | A definition delta adds or changes a field in a skeleton position — identity, grouping, dedup, or ordering — so the change alters which rows exist or the model's grain. Refused as an in-place migration; the honest plan is a rebuild (§"Skeleton changes are a new relation"). |
 
 ## Semantics
 
@@ -289,7 +289,7 @@ frontier, the same emitters. Concretely:
 A change that alters which rows exist or the model's grain — a field added to or changed in an
 identity, grouping, dedup, or ordering position — is honestly a **new relation**, not a
 migration of the old one. It is refused as an in-place migration
-(`MaintenanceSkeletonColumnAdded`), and the plan presents the rebuild as the only route. There
+(`MaintenanceSkeletonChanged`), and the plan presents the rebuild as the only route. There
 is deliberately no "best-effort" in-place path: a skeleton change invalidates the premise that
 stored rows correspond to the new definition's rows.
 
@@ -369,6 +369,31 @@ operator read. Hashing the plan and refusing on drift makes approval refer to ex
 and is what makes the CI exit-code contract honest — "unapproved migration pending" is a durable
 state, not a race. (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §7.)
 
+**The plan hash covers the plan data structure, not only rendered SQL.** The hash is taken over
+the plan data structure the emitters consume — verdicts, techniques, and the input facts they
+were derived from (source declarations, backend capabilities) — not merely the rendered statement
+text. Hashing only rendered SQL was rejected: two structurally different derivations can render
+identical statement text incidentally (for example, the same `UPDATE` shape justified by
+different declared uniqueness facts), and a hash that cannot distinguish them would let approval
+bind to the wrong justification. The hash excludes facts that routine data arrival changes: region
+*enumeration* is resolved at apply time from the frontier's own record ("nothing yet" over every
+existing region, including regions that appeared after the plan was printed), not fixed at plan
+time — otherwise `--apply` would be unreachable on any actively-loading warehouse, refusing on
+every new partition. The printed region range is illustrative freshness, not hashed content. This
+refines the plan-hash decision above rather than introducing a second one.
+(`docs/research/20260811-delta-signatures-and-definition-deltas.md` §7.)
+
+**The skeleton-change diagnostic is one code, not a split add/changed pair.**
+`MaintenanceSkeletonColumnAdded` is renamed to `MaintenanceSkeletonChanged`, covering a
+skeleton-position field that is added or changed alike. Both trigger the identical refusal and
+the identical remediation (a rebuild is the only honest plan — §"Skeleton changes are a new
+relation"), so a split pair would carry two codes for one decision path. This matches how every
+other `Maintenance*` code names the refused condition rather than the trigger that produced it
+(`MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`) — none of them split by
+which edit produced the violation. Splitting was rejected because a CI or LSP consumer matching
+on the code would have to handle both identically anyway, doubling the catalogue surface for no
+behavioural distinction.
+
 **Two verbs, disjoint by construction.** Ranged data-side re-runs (`smelt rebuild`) and
 definition-delta migration (`smelt migrate`) share no name and no flags. A single overloaded
 verb was rejected: the two operations differ in destructiveness, approval posture, and what
@@ -423,20 +448,17 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `schema_evolution.md`" names; the unification should subsume it, not inherit it.
 - **The conformance harness has no definition-edit step kind yet** — the oracle extension in
   §"The oracle" is specified ahead of the harness work.
-- **No approval store exists** — the plan-hash persistence §Surface requires is unbuilt.
-- **Open question — plan-hash scope.** Whether the hash covers the rendered statements only or
-  also the input facts the plan was derived from (source declarations, backend capabilities) is
-  undecided; current best-known answer: hash the plan data structure the emitters consume,
-  which captures both — **excluding** facts that routine data arrival changes. Region
-  *enumeration* is resolved at apply time from the frontier ("nothing yet" over every existing
-  region, including regions that appeared after the plan was printed) and the printed region
-  range is illustrative freshness, not hashed content; otherwise `--apply` would be
-  unreachable on any actively-loading warehouse, refusing on every new partition.
-- **The diagnostic name is narrower than its rule.** §Diagnostics fires
-  `MaintenanceSkeletonColumnAdded` on a skeleton-position field *added or changed*; the code
-  name reflects the live mechanism, which derives add-only triggers. Whether to rename the
-  code (`MaintenanceSkeletonChanged`) or split the changed-field case is a wiring-plan
-  decision; renaming is a diagnostic-API change and needs its own sweep.
+- **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
+  data structure per §Design "The plan hash covers the plan data structure, not only rendered
+  SQL", is unbuilt. Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
+- **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
+  `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
+  the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
+  add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
+  sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
+  `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7.
 
 ## Future Extensions
 
