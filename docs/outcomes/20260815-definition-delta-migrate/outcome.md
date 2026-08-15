@@ -22,6 +22,21 @@ it already is for the maintenance ladder. This outcome closes the gap the increm
 redraft (`docs/outcomes/20260809-incremental-spec-redraft/outcome.md`) deliberately left open:
 that outcome specified this mechanism and recorded it as unwired; this one wires it.
 
+**Scope statement, revised 2026-08-15.** `docs/outcomes/` is the only currently-live tracking
+layer, and every other outcome in it is `done`; the `docs/plans/*` files that predate it are
+themselves done, superseded, or citing spec sections that no longer exist. That means every
+still-live bullet in `definition_deltas.md`, `incremental_models.md`, and `incremental_shapes.md`
+§Known Divergences has, in practice, no current owner but this outcome. This outcome therefore
+covers not just the migrate/rebuild mechanism but closing out the remaining Known Divergences of
+all three anchor specs — implementation gaps get a phase that closes them; open questions where
+intent itself is undecided get a phase that decides them (recording the decision in the spec, the
+same pattern phase 1 already used) wherever the decision is small enough to make in-outcome; a
+short list of genuinely large product calls is called out explicitly rather than silently decided
+or silently dropped (§"Out of scope" and the phase table below). Deliberately-undecided forward
+material each spec itself frames as future work (`§Future Extensions`, or a bullet naming a next
+ladder rung / lattice point not yet scoped) stays out — "implemented" cannot mean "invented and
+decided on the spot" for ideas the spec author explicitly declined to commit to yet.
+
 ## Success criteria (checkable)
 
 1. `smelt migrate` exists as a CLI verb: given a model whose definition changed, it invokes the
@@ -47,32 +62,252 @@ that outcome specified this mechanism and recorded it as unwired; this one wires
    diagnostic is surfaced ahead of a run (LSP + `smelt explain`), not only reachable via the
    maintenance driver's own I/O path.
 7. A docs-site migration guide page ships (`definition_deltas.md` §References currently says
-   "none yet — lands with the wiring plan").
+   "none yet — lands with the wiring plan"). `docs-site/docs/guide/backbuild-synthesis.md` —
+   today's "no CLI command for this yet" placeholder for this exact mechanism — is rewritten in
+   place (not left beside a new page) to document `smelt migrate`/`--apply` end to end, and its
+   "Naming: two things called 'backbuild'" callout is removed now that the two verbs have
+   disjoint names.
 8. `/smelt:validate definition_deltas` reports no drift; every Known Divergences bullet this
    outcome claims to close is actually removed from `definition_deltas.md`, not just addressed
-   in code.
+   in code. In addition, every other spec that names `smelt backbuild`, references
+   `MaintenanceSkeletonColumnAdded`, or records "no `smelt migrate` command exists" as a
+   divergence is swept so it matches the shipped surface — not a full clean `/smelt:validate`
+   of those files (they carry unrelated divergences this outcome doesn't own), but these
+   specific bullets:
+   - `docs/specs/cli.md` — verb table (line 25), `smelt run` vs `smelt backbuild` section (336,
+     340), `--dry-run` behaviour (356, 364, 367, 510), and the `incremental_models.md`
+     cross-reference (582) all rename to `smelt rebuild`.
+   - `docs/specs/model_selection.md` — the positional-selector callout (line 54) renames to
+     `smelt rebuild`.
+   - `docs/specs/architecture.md` — the `walk_coverage` module-path reference and the backbuild
+     emitter-parity paragraphs (415, 424, 484, 513) update their prose to the `smelt rebuild`
+     name where they mean the CLI verb (the `backbuild/` crate module path and "backbuild
+     synthesis" as the definition-delta mechanism's name may stay, since those aren't the
+     renamed verb — resolve which is which per bullet, don't blanket-replace).
+   - `docs/specs/models.md` (line 244, 346) and `docs/specs/seeds.md` (line 180) — both record
+     "the `smelt migrate` assist does not exist" / "no `smelt migrate` command exists" as an
+     open divergence; both bullets are removed once `smelt migrate` ships (phase 2) and rechecked
+     against what it actually does for a retired-`refresh:`-value fix-it and a seed-migration
+     assist respectively — if `smelt migrate` doesn't cover those cases, the bullets are
+     reworded to say so precisely rather than deleted wholesale.
+   - The diagnostic-rename sibling sweep already named in the decision log above
+     (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
+     `schema_evolution.md`, `diagnostics.md`) lands in phase 7 as previously decided.
 9. All standing gates green, including the new/extended conformance suite, `statement_parity`,
    and `walk_coverage`.
+10. The orphaned scheduler-dispatch gap closes: a `KeyedUpsert` upstream feeding a
+    `grain: partition` downstream derives a key-addressed repair cell today (`output-delta-typing`
+    shipped the derivation), but the run loop dispatches it only inside the `grain: key` run
+    branch — the `grain: partition` branch falls back to the ordinary (correct, non-incremental)
+    run route. Wire dispatch so a `grain: partition` downstream also takes the key-addressed
+    route when one is derivable, and remove `incremental_models.md` §Known Divergences' "The
+    scheduler does not yet consume delta signatures end to end" bullet (narrowing or deleting it
+    to whatever residue remains — the clockless-cross-model-watermark and value-level-discovery
+    clauses are a different, still-open piece of that bullet and stay).
+11. Per-cell frontier addressing lands, closing two divergences that both name it as their
+    blocker: **per-cell `deferral` is scheduled** (not just parsed/validated/printed —
+    `incremental_models.md` "Per-cell `deferral` is not yet scheduled"), and **`diff_patch` over
+    the region `DeleteInsert` default gets a runtime lowering** rather than failing loud by name
+    unreached (`incremental_models.md` "`diff_patch` over the region `DeleteInsert` default has
+    no runtime lowering"). Both bullets' cited trackers (`contract-lattice-v1`, `repair-family`)
+    are `done` outcomes that left exactly this residue.
+12. The write-pin equivalence factor stops being structural-only: the per-cell equivalence hook
+    threads real column-comparability (or a suppression-specific proof) instead of always
+    accepting, and an inadmissible write-*variant* pin gets a pre-execution gate — forcing
+    `technique: suppress` on a refusing cell refuses rather than silently falling back to full
+    recompute, and `smelt explain` shows the refusal. Closes both `incremental_models.md`
+    "write-pin equivalence factor is structural only" and "inadmissible write-*variant* pin has no
+    pre-execution gate".
+13. Observed-delta consumption stops being partial: `--since-upstream` reads the recorded delta
+    table live; backward resolution, the keyed-fold write family, and the staged-candidate write
+    family all record and consume observed deltas; the settle-bound × observed-delta composition
+    gets its "delta empty" leg. Closes `incremental_models.md` "Observed-delta consumption is
+    partial".
+14. The maintained-model-creation cell gets a real execution technique (not the ordinary run
+    loop), closing "No execution technique keys off a maintained-model creation cell". The
+    frontmatter-time grain-checking gap closes too: a `grain: key` model deriving identity from
+    `GROUP BY` (no top-level `unique_key:`) is checked at frontmatter validation, not only plan
+    derivation (cross-ref `models.md`).
+15. The plan-consumer and graph-layer gaps close: the horizon-clamped partition-local mutation
+    quadrant is reachable from a real workspace fixture; dispatch distinguishes "a mutation
+    genuinely happened" from re-derivation; the `prefer` soft-bias ladder and
+    `scan_bounds.on_violation: warn` are consumed (not every refusal is `Error`); `AppendOnly`
+    sources get an `UpstreamMutation` cell; bare `grain: key` nodes with no admitted locality get
+    a real fixture past `MaintenanceGraphUnsupportedNode`; time-unrolled self-edges are built; a
+    key-level dirt representation exists in the graph layer (not only intervals);
+    `examples/web_analytics` is fully `--since-upstream`-compatible end to end; `--select` scoping
+    exists. Closes `incremental_models.md`'s "Plan-consumer gaps" and "Graph-layer gaps" bullets.
+    The cost model between two admissible techniques (also named in "Plan-consumer gaps") is
+    explicitly **not** required here — building a real cost model is its own body of work; this
+    criterion only requires that where no cost model exists, the choice is principled and
+    documented (e.g. a fixed preference order), not left as "unbuilt" with no fallback stated.
+16. The maintenance-plan proof residues close: a locality-admitted keyed model's clamps carry a
+    derived (not assumed) write-footprint mirror into propagation; column-group-scoped dirt no
+    longer coarsens to whole-partition where the finer grain is derivable; hour-granularity
+    propagation matches its declared surface (not day-ordinal); `INTERSECT`/`EXCEPT` get a real
+    per-arm-cardinality classification (not blanket whole-model mutation-sensitivity). Closes
+    `incremental_models.md`'s "Locality and diagnostic residues" and "`INTERSECT`/`EXCEPT` are
+    unclassified set operations" bullets (cross-ref `model_properties.md` §Known Divergences,
+    swept where it names the same residue).
+17. The conditional-maintenance gaps close: `smelt explain --show-sql` renders the suppressed
+    form a live run actually executes (not only the unconditional matched arm); the region
+    DELETE+INSERT family gets a conditional variant; the whole-row (keyless) staged-candidate
+    realisation exists; a `write:` pin selects between keyed MERGE and staged-candidate;
+    delta-restriction admission consumes an external `mutable_snapshot` source's
+    fingerprint-sidecar delta. Non-DuckDB targets keeping the widened-scan recompute is
+    acceptable to leave as a stated backend-capability gap, not a defect, provided it's declared
+    via the capability struct rather than silently falling back. Closes `incremental_models.md`'s
+    "Conditional-maintenance gaps" bullet.
+18. The remaining decidable Open Questions across all three specs are resolved and the decisions
+    recorded in the owning spec (§Design + §Known Divergences update), following the phase-1
+    precedent — each decision below is small enough to make without further product input:
+    - **No out-of-band-edit tripwire**: decided not worth a digest tripwire in v1 (cost exceeds
+      benefit for a rare, self-inflicted failure mode) — `incremental_models.md` records the
+      decision and drops the "(Open Question)" tag, replacing it with a stated non-goal.
+    - **`on_column_add` policy knob**: superseded by `smelt migrate`'s per-group verdict (backfill
+      in place / re-derive / skeleton change already answers "what happens when a column is
+      added"); the proposed standalone knob is dropped from `incremental_models.md` as redundant
+      once phase 2 ships, not left as a parallel undecided proposal.
+    - **docs-site CLI-surface coverage audit**: the residue is enumerated (a checklist, not a
+      re-audit each time) and either documented or explicitly dropped; folds into phase 8's
+      docs-site pass rather than staying an open-ended "(Open Question)".
+    - **Group-merge-provenance policy** (a group merged across two mutable inputs): decided to
+      force region recompute — the conservative, always-correct default every other
+      mutation-sensitivity rule in this spec already takes; recorded in `model_properties.md`
+      and/or `incremental_models.md` wherever the provenance rule lives.
+    - **`change_feed` sources and `UpstreamMutation`**: decided to give `change_feed` sources an
+      `UpstreamMutation` cell like every other mutation-sensitive source (consistency with the
+      existing rule), while leaving "only full-input re-derivation is admitted" as the honestly
+      still-open residue (live fold machinery for a change feed's delta shape is materially larger
+      work — Future Extensions territory, not decided here).
+    Genuinely large product calls are deliberately **not** decided here and are named instead in
+    §"Out of scope — needs explicit sign-off" below.
+19. Two small, decidable `incremental_shapes.md` key-grain correctness gaps close: a window-forward
+    keyed run started with only one (or neither) of `--event-time-start`/`--event-time-end` refuses
+    with a named diagnostic instead of silently dropping and recreating the target from a
+    whole-source SELECT ("A window-forward keyed run with no event-time window silently
+    full-refreshes instead of refusing"); and `safety_overrides:` on a key-addressed model becomes
+    a hard configuration error at frontmatter validation, matching what §"Key-grain declaration
+    (`grain: key`)" already states rather than parsing silently and being ignored ("`safety_overrides:`
+    on a key-addressed model is not a hard error"). Both bullets are removed from
+    `incremental_shapes.md` §Known Divergences.
+20. `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` are run and
+    every Known Divergences bullet this outcome's phases 10–19 close is actually removed from the
+    respective spec (not just addressed in code) — the same discipline success criterion 8
+    already applies to `definition_deltas.md`. Bullets this outcome deliberately does not close
+    (the "Out of scope" list) stay, worded accurately rather than pointing at a done outcome as if
+    it still owned them.
 
 ## Out of scope
 
-- Lattice v2 (retention, reconciliation points) — research doc §6 step 3, sequenced after this
-  step because it consumes this step's approved-destructive-legs machinery. Separate outcome.
-- Proofs as product (`smelt prove`, `must_hold:`, proof-diff in CI, `smelt explain`'s
-  guarantee-summary rewrite) — research doc §6 step 4, deliberately last because steps 1–3
-  change what the proofs say.
-- The scheduler-consumes-delta-types work (research doc §6 step 1) — tracked by
-  `docs/outcomes/20260809-output-delta-typing/outcome.md`; this outcome does not touch dispatch
-  currency.
-- `incremental_shapes.md`'s own Known Divergences (partition-grain lookback classification,
-  keyed-grain nullability routes, etc.) — these predate the spec split and are already tracked
-  by their own plans (`20260530-thread-fn-registry-classification`, `20260705-keyed-collapse`,
-  `20260715-composed-axes-conditional-maintenance`, etc.); this outcome does not re-scope them.
-- Eclipse-detection breadth (algebraic identities, join reorderings) and row-local derivation
-  for mid-catch-up groups — `definition_deltas.md` §Future Extensions, explicitly future work
-  past the verdict set this outcome wires.
-- Retraction handling / change-feed consumption — `definition_deltas.md` §"What stays
-  data-side", explicitly out of this mechanism's scope.
+`docs/outcomes/` is the only currently-live tracking layer — every `docs/plans/*` file predating
+it is either fully done, superseded by a later outcome/spec, or (rarely) genuinely orphaned.
+Genuinely orphaned bullets that are within the three anchor specs are now pulled into scope
+(phases 10–19 above), not excluded. What's left here is either (a) material each spec itself
+frames as deliberately-undecided future work (its own `§Future Extensions`, or a bullet that
+names a not-yet-scoped next ladder rung / lattice point), which "implemented" cannot honestly
+mean for ideas the author declined to commit to, or (b) a genuinely large product call this
+outcome should not decide unilaterally:
+
+**Deliberately future, per the specs' own framing — no spec diff exists to implement against:**
+
+- **Lattice v2** (retention, reconciliation points, declared indifference, per-column-group
+  freshness) — `incremental_models.md` §Future Extensions; research doc §6 step 3, sequenced
+  after this step because it consumes this step's approved-destructive-legs machinery. No
+  outcome exists yet.
+- **Proofs as product** (`smelt prove`, `must_hold:`, proof-diff in CI, `smelt explain`'s
+  guarantee-summary rewrite, the delta-signature headline and per-column guarantee summary
+  `incremental_models.md` and `incremental_shapes.md` both flag as unprinted) —
+  `incremental_models.md` §Future Extensions; research doc §6 step 4, deliberately last because
+  steps 1–3 (including this outcome) change what the proofs say.
+- **Smelt-maintained SCD2 via succession-pattern recognition**, **automatic watermark-diffed
+  `--since-upstream`**, and **the observer / prefix-consistency contract for non-replayable
+  combinations** — all three named explicitly in `incremental_models.md` §Future Extensions as
+  "not decided ... may not be relied on or implemented against until it graduates ... via its own
+  spec diff". The cross-model-runs-need-an-explicit-`--landed`-flag residue of the
+  scheduler-currency bullet (phase 10) is this same automatic-watermark item under another name —
+  left here, not duplicated as a gap.
+- **Eclipse-detection breadth** (algebraic identities, join reorderings) and **row-local
+  derivation for mid-catch-up groups** — `definition_deltas.md` §Future Extensions.
+- **Retraction handling / change-feed consumption as a first-class delta shape** —
+  `definition_deltas.md` §"What stays data-side". (Note: phase 18 does give `change_feed`
+  sources an `UpstreamMutation` cell for consistency with every other mutation-sensitive source —
+  that's a small, decidable admission-rule fix, not building retraction/change-feed folding.)
+- **Ladder rungs 3–4** (group-rung retraction, the bounded-domain multiset) —
+  `incremental_shapes.md` "Ladder rungs 3–4 remain specified ahead of this profile's use of
+  them", explicitly deferred by the (`done`) `rung2-state-shapes` outcome's own §"Out of scope".
+  Rung 2 is what shipped; rungs 3–4 are the next rung, not a rung-2 gap.
+- **Locality open questions** left genuinely open by design (slice pruning under
+  snapshot-reconcile, relaxing the granularity-equality precondition, slice-scoped deletion) and
+  **key deletion beyond retention** (tombstones, opt-in hard delete) — `incremental_shapes.md`,
+  both explicitly deferred to `docs/research/20260705-keyed-collapse-application.md` §5 as a
+  design surface not yet drafted, not an implementation gap against a decided spec.
+
+**Genuinely large product calls — flagged for explicit sign-off, not decided here:**
+
+- **`docs/plans/20260704-model-updates.md`'s still-pending rows** (`C3`/`C4`: group-rung
+  retraction and the bounded-domain multiset — same as ladder rungs 3–4 above; `D1`/`D2`/`D3`:
+  `refresh: latest_value`, `refresh: versioned`, `refresh: materialized_view` classifiers and
+  execution) target spec files (`cumulative_aggregate.md`, `latest_value_models.md`,
+  `versioned_models.md`, `materialized_view.md`) that were deleted and consolidated into
+  `keyed_models.md` and then `incremental_shapes.md`/`incremental_models.md`. Whether D1–D3's
+  scope survived that consolidation under a different name, was dropped as a decided
+  non-surface, or is still genuinely wanted is unclear without checking each mode's fate
+  individually — that's a real question, not a mechanical rename sweep, and belongs to whoever
+  owns the incremental roadmap next, not a silent decision inside this outcome.
+- **`g_run >= g_part` auto-coarsening vs. reject-with-suggestion**, **snapshot-reconcile
+  multi-unclocked-source admission**, **`KeyedRetractableContribution` implementation**,
+  **re-run-tolerant non-additive ledger presence**, **once-write nullability route for a
+  key-derived expression (not just a bare column)**, **pattern functions
+  (`smelt.latest`/`smelt.once`/`smelt.current`) as built-ins vs. a shipped template**, **driver
+  granularity below `day`/`week`**, **`--auto` staleness fidelity beyond conservative v1**,
+  **self-referential keyed models**, **run-pinning alignment for `NOW()`/`CURRENT_*` in keyed
+  models**, and **the reconciliation ledger's transactional fold on non-DuckDB backends** — all
+  `incremental_shapes.md` "(Open Question)" bullets under §"The key grain", each a real design
+  decision with behavioural consequences (admission width, correctness posture, or a new surface
+  keyword), not a small in-spec call like phase 18's list. Recommend scoping these as their own
+  outcome(s) once this one's phases are underway, rather than folding a second large design pass
+  into an already-large outcome.
+
+**Implementation residues named only by a pre-outcome tracking plan, currency unverified — flagged
+for a scoping pass, not silently absorbed:** the scope statement's "no current owner but this
+outcome" logic applies to these too, but each is nontrivial engineering (function-registry-threaded
+classification, generator-emitted-model override plumbing, an end-to-end monotone-integer run path,
+locality scope-map surfacing) that doesn't fit the phase-18/19 pattern of a same-sitting fix or
+decision. Rather than adding five more open-ended engineering phases to an already-19-phase outcome,
+these are named here so nothing is silently dropped; the recommendation is to re-check each cited
+plan's actual status first (several may already be superseded or partially landed) and then either
+resume it standalone or cut a fresh outcome, not fold it into this one's phase table:
+
+- **Partition grain**: the outer-SQL-only classification call site and the unexpanded-outer-SQL
+  window-function batch-safety check (both `docs/plans/20260530-thread-fn-registry-classification.md`);
+  CTE-only `event_time_column` references escaping the outer-visibility check
+  (`docs/plans/20260616-smelt-feedback-fixes.md`); per-`ModelDef` overrides for generator-emitted
+  models not in the v1 closed field set (`docs/plans/20260509-meta-language-overall.md` — the
+  overall plan is `done`, but this specific item's disposition under it is unverified); the
+  monotone-integer `partition_column`'s missing end-to-end run — trace/bound derivation admit it
+  but backfill chunking, scan-filter injection, and the explain clamp stay date-typed
+  (`docs/plans/20260704-model-updates-l4-batched.md`).
+- **Partition grain, no cited tracker**: per-source clamp observability partly emitted
+  (`smelt explain --json` doesn't resolve the run-relative scan window; editor hover unimplemented);
+  the `partition_column`-rename residual of schema evolution (refusal path with no fixture or
+  diagnostic surfaced ahead of a run); the `smelt.metric()` × time-filter-injection interaction,
+  genuinely unspecified rather than merely unimplemented.
+- **Key grain**: key temporal locality route 2's declared-FD-only admission (the key-derived-
+  expression sub-route is never consulted) and the wider locality-machinery gaps (per-input
+  scope-map explain surface; route 3's `IN (SELECT DISTINCT …)` slice predicate unexercised
+  against a real backend per a confirmed DuckDB MERGE binder limitation; granularity-determination
+  and declared-vs-derived-recurrence-precedence choices the spec text underdetermines) — both
+  tracked by `docs/plans/20260705-keyed-collapse.md` and
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`; the `key_per_partition` derived
+  grain's missing plan derivation (refuses `MaintenanceUnsupportedGrain` with no trajectory-support
+  implementation), also tracked by the 20260715 plan.
+- **Key grain, no cited tracker**: the derived execution postures are internal and
+  order-independence specifically is never derived as a named verdict anywhere (every
+  window-forward run applies windows sequentially regardless of family), and neither the derived
+  run shape nor any posture is printed by `smelt explain`; the generative conformance pool's
+  once-write NULL-payload direction is covered by one hand-written test rather than the generated
+  pool that proves every other keyed family, because `GenRow::val` is a non-nullable `i64`.
 
 ## Phases
 
@@ -81,12 +316,23 @@ that outcome specified this mechanism and recorded it as unwired; this one wires
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | pending |
 | 3 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
-| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests | pending |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
-| 8 | docs-site migration guide page | pending |
-| 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
+| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
+| 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
+| 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
+| 11 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
+| 12 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
+| 13 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
+| 14 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity | pending |
+| 15 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping | pending |
+| 16 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 17 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 18 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 19 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 20 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 10–19 close, alongside the existing `definition_deltas` validate in phase 9 | pending |
 
 ## Decision log
 
