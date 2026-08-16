@@ -68,13 +68,34 @@ this outcome runs first in the programme.
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
-| 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
+| 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | planned |
 | 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
 | 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
 | 7 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` | pending |
 | 8 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
+
+- **2026-08-16 (phase 4 plan).** No reshape of the remaining rows. Planning phase 4 established
+  that `state.md` §Known Divergences overstates the gap: the **additive** grading is already
+  engine-resident (`_smelt_ledger`, whose `PRIMARY KEY` *is* the never-fold-twice key, committed
+  with the fold by `Backend::fold_ledger_delta`'s DuckDB transactional override). Only the
+  **idempotent/frontier** grading still lives in `.smelt/reconciliation.json`, and nothing in
+  production reads that file — phase 4 moves a write, not a decision. Criterion 2's residual work
+  is therefore exactly the frontier record's move plus the legacy-file import; the phase 4 plan
+  also corrects the false Known Divergences bullets rather than leaving them for phase 7's sweep
+  (a bullet that is false the moment the code lands is drift, not deferred work).
+- **2026-08-16 (phase 4 plan).** Two engine tables, not one graded table: the frontier record gets
+  its own `_smelt_frontier` rather than a `grade` column on `_smelt_ledger`. Adding a column would
+  require a warehouse-side migration of every existing `_smelt_ledger`, and both paths key the
+  whole-row group `{*}`, so a frontier reset's intersecting-region `DELETE` would otherwise wipe
+  additive delta-identity rows. Also: no `state_version` bump for the removal of
+  `reconciliation.json` — the file is consumed and deleted as a legacy artifact rather than being a
+  layout version difference, and no binary in either direction ever read it for a decision.
+- **2026-08-16 (phase 4 plan).** On a dialect with no ledger builder (everything but DuckDB; a
+  Spark builder is out of scope for this outcome) phase 4 skips the frontier record with a
+  `tracing::warn!` and leaves any legacy file in place. That interim say-so becomes phase 5's
+  recorded, explain-visible `MaintenanceStateDowngraded` — kept inside the outcome, not deferred.
 
 - **2026-08-16 (phase 3 implement).** Phase 3 landed: the second pre-existing
   red-gate class is fixed (`section_body` in `output_delta_spec.rs`/
