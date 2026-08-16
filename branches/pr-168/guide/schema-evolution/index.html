@@ -3179,6 +3179,14 @@
 <li><strong>Plans operations</strong> -- safe changes produce ALTER TABLE statements; unsafe changes trigger a full refresh.</li>
 <li><strong>Executes DDL</strong> -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, and Spark+Parquet each have their own code paths.</li>
 </ol>
+<div class="admonition note">
+<p class="admonition-title">Note</p>
+<p>On a maintained (incremental) model, <code>ALTER TABLE ADD COLUMN</code> and its backfill always run in
+the same atomic step — never a separately-dispatched backfill that could observe the column
+added but not yet populated. A backend without transactional DDL (Spark) never takes that
+two-step path: it rebuilds the table when you pass <code>--allow-full-refresh</code>, and otherwise
+refuses the run and tells you which flag to pass.</p>
+</div>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
 <p>Schema evolution is configured in the model's <strong>SQL frontmatter</strong>. The <code>schema_evolution</code> and <code>columns</code> keys are frontmatter-only — they have no effect if placed under <code>models.&lt;name&gt;:</code> in <code>smelt.yml</code>.</p>
 <h3 id="frontmatter-example">Frontmatter example<a class="headerlink" href="#frontmatter-example" title="Permanent link">&para;</a></h3>
@@ -3214,7 +3222,7 @@
 <td><code>schema_evolution.strategy</code></td>
 <td>string</td>
 <td><code>alter_and_backfill</code></td>
-<td>How to handle schema changes. <code>alter_and_backfill</code> uses ALTER TABLE when possible; <code>full_refresh</code> always drops and recreates.</td>
+<td>How to handle schema changes. <code>alter_and_backfill</code> uses ALTER TABLE when possible; <code>full_refresh</code> always drops and recreates — on a maintained model this always rebuilds on a detected change rather than skipping migration.</td>
 </tr>
 </tbody>
 </table>
