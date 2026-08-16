@@ -100,12 +100,13 @@ pub enum ConformanceStep {
     /// invalidates the interval store's coverage bookkeeping for this
     /// model — the run pipeline itself always uses the CURRENT on-disk SQL
     /// regardless, so a full DELETE+INSERT recompute of whichever window a
-    /// later step names always reflects the rewritten body. This is
-    /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
-    /// `UpstreamRederive` definition-change classification
-    /// (`definition_deltas.md` §"The verdict per column group") — that
-    /// classification is unbuilt (no `derive_model_maintenance_plan` caller
-    /// reads a prior definition to classify an added column against it).
+    /// later step names always reflects the rewritten body. This step
+    /// asserts the run pipeline's OWN current-on-disk-SQL contract — it is
+    /// deliberately not routed through `smelt migrate`'s per-group verdict/
+    /// technique classification (`definition_deltas.md` §"The verdict per
+    /// column group"); the migrate-gated recovery leg is separate, staged
+    /// later (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+    /// 06-plan.md`).
     RewriteModel { edit: ModelEdit },
     /// Delete `.smelt/` from the staged project directory in place
     /// (`docs/outcomes/20260816-state-residency/phases/08-plan.md`;
@@ -151,7 +152,10 @@ pub enum StateResidencyOp {
 /// run the catch-up before the row even lands. A [`ConformanceStep::DropStateDir`]/
 /// [`ConformanceStep::FreshClone`] step is likewise NOT eligible: a residency
 /// step is order-dependent by construction (it must land after the run whose
-/// survival it is proving).
+/// survival it is proving). A [`ConformanceStep::RewriteModel`] step is
+/// likewise NOT eligible: the rewrite must land before whatever run step
+/// observes it, and the recovery step immediately after it is scoped to
+/// recovering FROM that specific rewrite.
 pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
     !schedule.0.iter().any(|s| {
         matches!(
@@ -159,6 +163,7 @@ pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
             ConformanceStep::AppendLateRow(_)
                 | ConformanceStep::DropStateDir
                 | ConformanceStep::FreshClone
+                | ConformanceStep::RewriteModel { .. }
         )
     })
 }
@@ -280,6 +285,58 @@ fn build_schedule(
     }
 
     ConformanceSchedule(steps)
+}
+
+/// The generative counterpart of `gate.rs`'s hand-written
+/// `column_add_between_runs_recovers_equivalence` (`docs/outcomes/
+/// 20260816-definition-delta-migrate-v2/phases/05-plan.md`): builds the same
+/// base schedule [`arb_schedule_for`] would (same window/late-row generation,
+/// so every non-rewrite behaviour this function's schedules exercise is
+/// identical to the existing generator's), then splices a
+/// [`ConformanceStep::RewriteModel`] + [`ConformanceStep::FullRefreshRun`]
+/// pair at a generated index strictly after the first `RunWindow` and no
+/// later than the last window's own `RunWindow` step — i.e. before the
+/// trailing late-row/catch-up steps `build_schedule` appends, so the rewrite
+/// always lands on a schedule prefix that has already produced a settled
+/// run. The `edit` is drawn from `recipe.evolution` (never a construct-
+/// inapplicable edit — `render_model_body_with_edit` panics on those); when
+/// `recipe.evolution` is empty the strategy yields the plain
+/// [`arb_schedule_for`]-equivalent schedule unchanged, with no rewrite
+/// spliced in.
+pub fn arb_schedule_with_definition_edit(
+    recipe: &ModelRecipe,
+) -> impl Strategy<Value = ConformanceSchedule> {
+    let base = base_date();
+    let source = recipe.source.clone();
+    let evolution = recipe.evolution.clone();
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        let source = source.clone();
+        let evolution = evolution.clone();
+        let edit_choices = evolution.len().max(1);
+        (
+            proptest::collection::vec(
+                proptest::collection::vec(arb_payload_value(), 1..=2),
+                n_windows,
+            ),
+            proptest::collection::vec(any::<bool>(), n_windows),
+            1..=n_windows,
+            0..edit_choices,
+        )
+            .prop_map(move |(window_vals, gets_late, splice_at, edit_idx)| {
+                let mut schedule = build_schedule(base, &source, &window_vals, &gets_late);
+                if let Some(&edit) = evolution.get(edit_idx) {
+                    let idx = splice_at.min(schedule.0.len());
+                    schedule.0.splice(
+                        idx..idx,
+                        [
+                            ConformanceStep::RewriteModel { edit },
+                            ConformanceStep::FullRefreshRun,
+                        ],
+                    );
+                }
+                schedule
+            })
+    })
 }
 
 /// One step of a generated mixed (fact + mutable dimension) schedule
@@ -860,6 +917,136 @@ mod tests {
             checked > 0,
             "no admitted recipe with a bounded scan was reached across the deterministic \
              sample — generator/derivation regression"
+        );
+    }
+
+    /// `definition_edit_schedule_stages_rewrite_then_recovery`
+    /// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+    /// 05-plan.md` test 1): for an evolvable recipe (non-empty `evolution`),
+    /// [`arb_schedule_with_definition_edit`] always stages exactly one
+    /// `RewriteModel` step, preceded by at least one `RunWindow`, followed
+    /// immediately by a `FullRefreshRun` recovery step.
+    #[test]
+    fn definition_edit_schedule_stages_rewrite_then_recovery() {
+        let mut runner = TestRunner::deterministic();
+        let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+        let mut checked = 0;
+
+        for _ in 0..30 {
+            let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+            if recipe.evolution.is_empty() {
+                continue;
+            }
+            let schedule = arb_schedule_with_definition_edit(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+
+            let rewrite_positions: Vec<usize> = schedule
+                .0
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| matches!(s, ConformanceStep::RewriteModel { .. }).then_some(i))
+                .collect();
+            assert_eq!(
+                rewrite_positions.len(),
+                1,
+                "expected exactly one RewriteModel step for evolvable recipe {recipe:?}: \
+                 {schedule:?}"
+            );
+            let pos = rewrite_positions[0];
+            assert!(
+                schedule.0[..pos]
+                    .iter()
+                    .any(|s| matches!(s, ConformanceStep::RunWindow { .. })),
+                "RewriteModel at index {pos} must be preceded by at least one RunWindow: \
+                 {schedule:?}"
+            );
+            assert!(
+                matches!(
+                    schedule.0.get(pos + 1),
+                    Some(ConformanceStep::FullRefreshRun)
+                ),
+                "RewriteModel at index {pos} must be followed immediately by a \
+                 FullRefreshRun recovery step: {schedule:?}"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked > 0,
+            "no evolvable recipe was reached across the deterministic sample — \
+             generator/pool regression"
+        );
+    }
+
+    /// `definition_edit_schedule_is_not_permutable` (phase 5 plan test 2):
+    /// [`is_permutable`] returns `false` for any schedule containing a
+    /// `RewriteModel` step.
+    #[test]
+    fn definition_edit_schedule_is_not_permutable() {
+        let mut runner = TestRunner::deterministic();
+        let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+        let mut checked = 0;
+
+        for _ in 0..30 {
+            let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+            if recipe.evolution.is_empty() {
+                continue;
+            }
+            let schedule = arb_schedule_with_definition_edit(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+            assert!(
+                !is_permutable(&schedule),
+                "a schedule containing a RewriteModel step must not be permutable: {schedule:?}"
+            );
+            checked += 1;
+        }
+
+        assert!(
+            checked > 0,
+            "no evolvable recipe was reached across the deterministic sample — \
+             generator/pool regression"
+        );
+    }
+
+    /// `definition_edit_schedule_draws_only_applicable_edits` (phase 5 plan
+    /// test 3): the drawn `ModelEdit` is always a member of
+    /// `recipe.evolution` — never an edit `render_model_body_with_edit`
+    /// panics on for that recipe's construct (e.g. `AddGroupingColumn` for a
+    /// row-shaped construct).
+    #[test]
+    fn definition_edit_schedule_draws_only_applicable_edits() {
+        let mut runner = TestRunner::deterministic();
+        let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+        let mut checked = 0;
+
+        for _ in 0..30 {
+            let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+            let schedule = arb_schedule_with_definition_edit(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+
+            for step in &schedule.0 {
+                if let ConformanceStep::RewriteModel { edit } = step {
+                    assert!(
+                        recipe.evolution.contains(edit),
+                        "drawn edit {edit:?} is not in recipe {recipe:?}'s own evolution set \
+                         {:?}: {schedule:?}",
+                        recipe.evolution
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "no RewriteModel step was ever drawn across the deterministic sample — \
+             generator regression"
         );
     }
 }

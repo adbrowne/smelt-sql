@@ -466,15 +466,13 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `docs/plans/20260809-sensitivity-precision.md`. The
   `schema_evolution.md` full-refresh escape bypassing the gate is the divergence §"Boundary with
   `schema_evolution.md`" names; the unification should subsume it, not inherit it.
-- **The conformance harness has no definition-edit step kind yet** — the oracle extension in
-  §"The oracle" is specified ahead of the harness work.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
   add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
   sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
   `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 6.
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 8.
 
 ## Future Extensions
 

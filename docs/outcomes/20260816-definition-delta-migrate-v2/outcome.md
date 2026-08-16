@@ -68,7 +68,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
-| 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | planned |
+| 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | pending |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
@@ -175,6 +175,17 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   that generator and a mid-schedule rewrite is order-dependent by construction, so folding it in
   would silently change their meaning. `is_permutable` gains `RewriteModel` to its exclusion list
   regardless.
+
+- **2026-08-17 (phase 5 implementation).** Landed `arb_schedule_with_definition_edit` (the new
+  sibling generator) plus two standing gate tests: `definition_edit_pool_upholds_equivalence`
+  (generic leg over the deterministic sample) and `definition_edit_grouping_column_upholds_equivalence`
+  (the `AddGroupingColumn` skeleton-widening leg, pinned by manual splice rather than left to the
+  generator's random edit draw — the aggregate constructs' evolution also contains
+  `AddPayloadColumn`, so leaving it to the draw would only probabilistically cover the
+  skeleton-widening leg). Both gate tests admitted and passed cleanly on the first run; no
+  diagnosis or generator narrowing was needed. Spec delta applied: the "no definition-edit step
+  kind" divergence bullet removed; the diagnostic-rename bullet's stale phase pointer fixed
+  (6 → 8).
 
 ## Blocked
 

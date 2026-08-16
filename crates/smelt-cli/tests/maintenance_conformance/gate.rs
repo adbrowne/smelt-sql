@@ -30,7 +30,7 @@ use smelt_maintenance_testkit::recipe::{
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
 use smelt_maintenance_testkit::schedule_gen::{
-    arb_mixed_schedule, arb_schedule_for, boundary_rows_for,
+    arb_mixed_schedule, arb_schedule_for, arb_schedule_with_definition_edit, boundary_rows_for,
     check_profile as check_mixed_schedule_profile, read_source_snapshot, scan_clamp_for,
     ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep, StateResidencyOp,
 };
@@ -4248,6 +4248,155 @@ fn column_add_between_runs_recovers_equivalence() {
              equivalence against the rewritten body's own oracle, and stay recovered through \
              a subsequent windowed run",
         );
+}
+
+/// `definition_edit_pool_upholds_equivalence`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/05-plan.md`
+/// test 4): the standing generative gate for the definition-edit leg — the
+/// generative counterpart of the hand-written
+/// `column_add_between_runs_recovers_equivalence` above. Deterministic seed,
+/// [`case_count`] cases over [`RecipePool::partition_append_only`], admitted
+/// recipes only; drives [`arb_schedule_with_definition_edit`]'s schedule
+/// through [`drive_and_assert`], which already asserts S-restricted
+/// equivalence against the CURRENT on-disk body's own oracle after every
+/// step (including the steps after a `RewriteModel`, per
+/// `assert_equivalence_with_edit`'s `current_edit` threading). Asserts
+/// `rewritten_cases > 0` so a generator that silently stops emitting
+/// rewrites (e.g. every drawn recipe carrying empty `evolution`) fails the
+/// gate rather than passing vacuously.
+#[test]
+fn definition_edit_pool_upholds_equivalence() {
+    let n = case_count();
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut admitted_cases = 0;
+    let mut rewritten_cases = 0;
+
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        let schedule = arb_schedule_with_definition_edit(&recipe)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+
+        match verdict {
+            Verdict::Refused(_) => continue,
+            Verdict::Admitted(_) => {
+                admitted_cases += 1;
+                if schedule
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, ConformanceStep::RewriteModel { .. }))
+                {
+                    rewritten_cases += 1;
+                }
+                rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "case {i}: recipe {recipe:?} schedule {schedule:?} \
+                             equivalence check failed: {e}"
+                        )
+                    });
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic sample admitted zero cases — generator/derivation regression"
+    );
+    assert!(
+        rewritten_cases > 0,
+        "N={n} deterministic sample staged zero RewriteModel steps across {admitted_cases} \
+         admitted cases — the definition-edit generator silently stopped emitting rewrites"
+    );
+}
+
+/// `definition_edit_grouping_column_upholds_equivalence` (phase 5 plan test
+/// 5): the `AddGroupingColumn` (skeleton-widening) leg over the aggregate
+/// constructs specifically, PINNED to that edit rather than left to
+/// [`arb_schedule_with_definition_edit`]'s draw — the aggregate constructs'
+/// `evolution` also contains `AddPayloadColumn`, so leaving the edit to the
+/// draw would only probabilistically cover the skeleton-widening leg.
+#[test]
+fn definition_edit_grouping_column_upholds_equivalence() {
+    let n = case_count();
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![
+            ConstructKind::AdditiveAgg,
+            ConstructKind::IdempotentAgg,
+            ConstructKind::DecomposedAgg,
+            ConstructKind::HolisticAgg,
+        ],
+    };
+    let recipe_strat = arb_recipe(pool);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut admitted_cases = 0;
+
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        assert!(
+            recipe.evolution.contains(&ModelEdit::AddGroupingColumn),
+            "case {i}: aggregate recipe {recipe:?} must carry AddGroupingColumn in its evolution"
+        );
+        let base_schedule = arb_schedule_for(&recipe)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        // Pin the edit: splice RewriteModel{AddGroupingColumn} + FullRefreshRun
+        // right after the first RunWindow, mirroring
+        // `arb_schedule_with_definition_edit`'s own splice placement.
+        let mut steps = base_schedule.0;
+        steps.splice(
+            1..1,
+            [
+                ConformanceStep::RewriteModel {
+                    edit: ModelEdit::AddGroupingColumn,
+                },
+                ConformanceStep::FullRefreshRun,
+            ],
+        );
+        let schedule = ConformanceSchedule(steps);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+
+        match verdict {
+            Verdict::Refused(_) => continue,
+            Verdict::Admitted(_) => {
+                admitted_cases += 1;
+                rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "case {i}: recipe {recipe:?} schedule {schedule:?} \
+                             equivalence check failed: {e}"
+                        )
+                    });
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic sample admitted zero aggregate cases — \
+         generator/derivation regression"
+    );
 }
 
 /// Real deployed-schema column names for a staged recipe's model, read
