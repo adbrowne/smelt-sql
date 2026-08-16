@@ -64,12 +64,14 @@ run shape.
 |---|-------|--------|
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
-| 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals; dispatch composition when a model receives several components in one tick (lifts phase 2's single-edge substitution gate) | pending |
-| 4 | Live observed-delta consumption: `--since-upstream` reads the recorded delta table; settle-bound × observed-delta "delta empty" leg | pending |
-| 5 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
-| 6 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
-| 7 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
-| 8 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
+| 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | planned |
+| 4 | Dispatch composition in the run loop: a model receiving several components in one tick dispatches each (lifts phase 2's single-edge substitution gate); propagated key restrictions reach the key-addressed cell | pending |
+| 5 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
+| 6 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
+| 7 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
+| 8 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
+| 9 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
+| 10 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -110,6 +112,19 @@ run shape.
   select-item expression text, not output alias, so grouping by a projected alias fails grain
   proof entirely rather than dropping just that column — flagged for a future phase, see
   `phases/02-summary.md` "For the next planner". No reshape of the phase table.
+
+- 2026-08-16 (phase 3 planning): reshape — old row 3 split into two (3: key-valued dirt
+  representation + pure composition + plumbing, in `smelt-logical`/`smelt-runtime::propagation`;
+  4: dispatch composition in the run loop, lifting phase 2's substitution gate). One phase
+  cannot honestly carry both the graph-layer currency change and the run-loop dispatch change.
+  Live *keyed-seed* resolution (the backend sidecar read that fills the seeds) folded into the
+  live-consumption row (now 5) beside the observed-delta read — both are the same "read the
+  warehouse instead of trusting the command line" work, and criterion 2's "value-level discovery
+  feeds the scheduler" is only met once that lands. Added row 8 for the
+  `group_by_output_keys` alias gap phase 2's summary flagged: it serves criteria 1/7 (grouped
+  recipes with derived columns currently hard-refuse grain proof), so it stays inside the
+  outcome rather than being deferred out; placed before the conformance extension so recipes may
+  use alias grouping. Old rows 4–8 renumbered 5–10; nothing dropped.
 
 ## Blocked
 
