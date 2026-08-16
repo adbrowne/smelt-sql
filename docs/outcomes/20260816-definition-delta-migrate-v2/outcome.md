@@ -67,7 +67,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
-| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | planned |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
@@ -135,6 +135,16 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   narrowings land as Known Divergences bullets rather than silent gaps. Exit code `3`'s spec
   wording widens from "unapproved" to "a non-trivial migration remains pending" so it covers the
   refused-to-execute case too.
+
+- **2026-08-17 (phase 4 planning).** No phase reshape — the phase-3 summary's carry-forwards
+  (CLI-level resume durability test, `atom_label` fragility, destructive-leg probes) are all
+  already covered by later rows or by the outcome-level Known Divergences, not new work. Decided
+  for phase 4: the rename is **hard, with no `backbuild` alias** — the project carries no
+  backward-compatibility constraint and criterion 3 asks for the verb end to end, so a stale
+  invocation gets clap's unrecognized-subcommand error. A standing docs ratchet
+  (`no_backbuild_verb_in_user_docs`) keeps the verb from creeping back into `docs-site/docs` or
+  `docs/specs`; the `backbuild/` module path, "backbuild synthesis" mechanism name, and
+  `guide/backbuild-synthesis.md` (rewritten in place by phase 8) are deliberately untouched.
 
 ## Blocked
 
