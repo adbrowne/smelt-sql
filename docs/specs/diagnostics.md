@@ -523,6 +523,16 @@ Owned by `docs/specs/incremental_models.md` §"The contract lattice".
 
 ---
 
+### State
+
+Owned by `docs/specs/state.md` §"Diagnostics".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `ProbeBaselineUnavailable` | Advisory | A declared fact's probe had no recorded baseline to compare against (absent posture, or the fact's first observation) and the run established a baseline instead of comparing. Shared by source-posture probes (`sources.md` §Semantics 4) and the frozen-horizon contract point (`incremental_models.md` §"The contract lattice"). |
+
+---
+
 ## Known divergences
 
 - **Five of the ten plan/graph `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, `MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`, `MaintenanceWritePatternUnavailable`, and `MaintenanceSkeletonColumnAdded` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`), the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`), and the open write-pattern registry's `resolve_write_pin` (`crates/smelt-logical/src/maintenance/mod.rs`). `MaintenanceSkeletonColumnAdded` fires only when the query has a real deployed-schema snapshot to diff against — `smelt-db`'s own Salsa query has no I/O access to that snapshot, so it only reaches its own `file_diagnostics()` mapping from a caller that plumbs one in (today, none does; `smelt-runtime`'s maintenance driver — the production `ColumnAdded` derivation site — reports the same refusal as a run error instead). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`. `MaintenanceRepairKeysNotDiscoverable` and `MaintenanceRepairSliceUnbounded` likewise have no `DiagnosticCode` variant yet — the repair family they belong to has no deriving proof, technique, or emitter (`incremental_models.md` §Known Divergences "The contract, plan, and graph layer"). Landing: `docs/outcomes/20260809-repair-family/outcome.md`.

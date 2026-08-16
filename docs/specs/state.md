@@ -99,6 +99,7 @@ the posture.
 |---|---|
 | `MaintenanceStateDowngraded` | Advisory, plan derivation: a cell's derived technique requires a state structure with no available realisation on the target backend, and the cell was downgraded to its recompute-family equivalent. Names the cell, the original technique, the missing structure, and the reason (§"The degradation contract"). Printed by `smelt explain`; surfaced as a warning-level diagnostic, never an error. |
 | `DeclaredContractRequiresState` | Validation, fail-loud: a declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture or backend cannot supply it. Names the declaration and the missing structure. |
+| `ProbeBaselineUnavailable` | Advisory, run-time: a declared fact's probe had no recorded baseline to compare against — absent posture (`state.mode: stateless`) or the fact's first observation — and the run established a baseline instead of comparing. Names the source or model, the partition set, and why the baseline was absent. Shared by every absent-baseline probe (source postures, §"The optionality rule"; the frozen-horizon contract point, `incremental_models.md` §"The contract lattice"); never an error, because an absent baseline changes only what a probe can verify, never what a maintained table equals. |
 
 `smelt explain <model>` prints every downgraded cell with both the executed technique and the
 technique that *would* run were the missing structure available — the downgrade is a visible
@@ -261,11 +262,16 @@ lands.
   a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
   DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
   `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
-- **Structure-level degradation behaviours are unevenly specified.** `--resume` (refuses) and
-  forward propagation (falls back to full dirty set, `run_state.md` §Known Divergences) have
-  named behaviours; schema snapshots, source postures, and probe baselines do not yet have
-  their absent-state behaviour specified by their owning specs, as the optionality rule
-  requires. Each owner spec needs one sentence.
+- **Structure-level degradation behaviours are specified but not yet honoured by the runtime.**
+  `--resume` (refuses) and forward propagation (falls back to full dirty set, `run_state.md`
+  §Known Divergences) both have named and implemented behaviours. Schema snapshots
+  (`schema_evolution.md` §Semantics "Stored schemas"), source postures (`sources.md` §Semantics
+  4), and probe baselines (`incremental_models.md` §"The contract lattice") now have their
+  absent-state behaviour specified — all three degrade-and-say-so via the shared
+  `ProbeBaselineUnavailable` diagnostic (§Surface "Diagnostics") — but the implementation does
+  not yet match: `ProbeBaselineUnavailable` has no `DiagnosticCode` variant, and baselines are
+  still written unconditionally rather than gated on `state.mode`. Tracked by
+  `docs/outcomes/20260816-state-residency/outcome.md`.
 - **Open question — opting out of warehouse bookkeeping tables.** The residency rule puts
   smelt-owned tables (merge ledger, sidecar) in the user's warehouse. A user who refuses any
   smelt-authored objects in the target schema has no knob today; the shape of that knob (and

@@ -108,7 +108,7 @@ When a model is materialized by `smelt run` or `smelt build`, smelt writes the d
 - `model_hash`: SHA-256 of the model SQL at deploy time
 - `columns`: Array of `{name, data_type, nullable}` objects
 
-If `.smelt/schemas/` does not exist, `smelt diff` reports all models as `new`.
+With no stored snapshot for a model — `.smelt/schemas/` never written, a snapshot deleted, or excluded under `state.mode: stateless` — `smelt diff` reports that model `new` and a migration proceeds as a first deployment; smelt never refuses and never infers a migration from an absent snapshot (the absent-state behaviour `state.md` §"The optionality rule" requires: degrade-and-say-so). Under `stateless`, no snapshot is ever written, so every run sees every model as `new` — this changes only what `smelt diff` can *tell* the operator, never what the deployed table equals.
 
 ### Stale schema cleanup
 

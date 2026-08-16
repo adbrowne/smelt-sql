@@ -752,11 +752,20 @@ maintenance scan the clamp bounds), and the next run compares it against the sou
 state. A frozen-band partition whose row count increased, or that is new since the baseline,
 is a genuine late arrival, and the probe raises `ContractLateArrivalOutsideHorizon`, naming
 the partition, the added row count, and `H` — closing the one accepted silent-data behaviour
-of the default point for every model that opts in. The first run has nothing to compare
-against, so it only establishes the baseline. Count comparison is sound only where the source
-is `append_only` (row counts non-decreasing); declaring `frozen_horizon` on a model whose
-driving source has any other declared mutation profile is refused at declaration time
-(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind.
+of the default point for every model that opts in. An absent baseline — the first run, a
+deleted `.smelt/`, or a posture that excludes it (`state.mode: stateless`) — degrades the
+probe to baseline-establish-only, reported `ProbeBaselineUnavailable` (`state.md` §"Diagnostics");
+`ContractLateArrivalOutsideHorizon` cannot fire without a baseline to compare against. This
+split — `frozen_horizon` degrades where `contract.deferral` (below) refuses — follows directly
+from `state.md` §"The optionality rule": the frozen-band baseline is an **observability**
+structure (§"The state-structure inventory"), so its absence only narrows what the probe can
+verify, never what the maintained table equals, whereas `contract.deferral`'s lag is measured
+from the reconciliation ledger — a **correctness** structure whose absence no posture can
+license working around (`DeclaredContractRequiresState`, `state.md` §"Diagnostics"). Count comparison is sound
+only where the source is `append_only` (row counts non-decreasing); declaring `frozen_horizon`
+on a model whose driving source has any other declared mutation profile is refused at
+declaration time (`ContractFrozenHorizonInvalid`, naming the posture) rather than probed
+blind.
 
 **Deferral (`D`).** The oracle bounds the lag between the landed and processed sets (§"The
 equivalence invariant", landed vs processed): at every scheduled evaluation, every input in
