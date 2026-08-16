@@ -70,10 +70,11 @@ run shape.
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
-| 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
-| 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
-| 11 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
-| 12 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
+| 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | planned |
+| 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | pending |
+| 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
+| 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
+| 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -292,6 +293,28 @@ run shape.
   `run.rs::run_since_upstream` now loads the landed-delta store and calls the watermark-aware
   pairing. Spec + docs-site updated; both flagged Known Divergences bullets narrowed to the
   residue that remains (automatic snapshot diffing only). No reshape of the phase table.
+
+- 2026-08-16 (phase 9 planning): reshape — old row 9 split into two (9: the signature headline —
+  derived delta signature, addressing, grain label, run shape, printed first in text and `--json`;
+  10: the per-column guarantee ledger and pre-execution refusal surfacing). They are different
+  derivations, not one rendering change: the headline reads verdicts the output-delta layer
+  already produces and needs only a pure formatter plus one plumbed field, while the guarantee
+  ledger needs a per-column composition of effective contract × settle bound that exists nowhere
+  today, and refusal surfacing is a behavioural gate rather than a print. Phase 3/5/6's
+  "one phase cannot honestly carry both" precedent applies; nothing left the outcome (criterion 5
+  is met only when both rows land). Old rows 10–12 renumbered 11–13. Three things pinned for row 9
+  so the implementer does not rediscover them. (1) The headline's *derivation* is single-owned in
+  `smelt-logical` (a pure formatter over per-group `OutputDelta` + `Addressing`, beside
+  `maintenance/edge_type.rs`'s existing projection rules) — the CLI formats nothing itself, so
+  text and `--json` cannot drift. (2) The model's own per-group verdicts must come from the SAME
+  `derive_output_delta_with_model_verdicts` call shape `ref_model_edge` uses for an edge's
+  `output_shape`, extracted to a shared helper — two independent folds would let a model's own
+  headline disagree with how its consumers type it. (3) The run shape is read off the keyed
+  classification `smelt-db`'s `maintenance_plan_report` already runs
+  (`CumulativeClassification::is_snapshot_reconcile`), never re-derived from "does it have a
+  clock" at the CLI. Also noted: phase 8's summary flagged a stale keyed-seed clause in the
+  scheduler-currency Known Divergences bullet — that belongs to row 13's close-out sweep, not
+  here.
 
 ## Blocked
 
