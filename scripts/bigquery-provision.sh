@@ -6,7 +6,8 @@
 #
 # Creates (idempotently): the BigQuery + IAM APIs, a test dataset whose tables
 # self-expire after 24h, a least-privilege service account (project-scoped
-# jobUser + dataset-scoped WRITER only), and a budget alert.
+# bigquery.user — jobs plus datasets it creates itself — and dataset-scoped
+# WRITER on the one test dataset), and a budget alert.
 #
 # It does NOT mint or encrypt the service-account key — that step needs a
 # human-typed passphrase and lives in scripts/bigquery-setup.sh.
@@ -63,12 +64,29 @@ else
      --project="$PROJECT" --display-name="smelt integration tests"
 fi
 
-say "Grant: roles/bigquery.jobUser at PROJECT scope (run jobs, no data access)"
+say "Grant: roles/bigquery.user at PROJECT scope (run jobs, create own datasets)"
+# bigquery.user = jobUser plus bigquery.datasets.create. The test suites isolate
+# each run in its own dataset, which jobUser alone cannot create.
+#
+# This stays least-privilege in the way that matters: the role confers NO access
+# to datasets the service account did not create. It becomes OWNER of datasets
+# it creates itself and nothing else, so writing to a pre-existing dataset it was
+# never granted is still refused — which is exactly what the negative check in
+# bigquery-verify.sh asserts, and why that check remains meaningful under it.
 "$GCLOUD" projects add-iam-policy-binding "$PROJECT" \
    --member="serviceAccount:${SA}" \
-   --role="roles/bigquery.jobUser" \
+   --role="roles/bigquery.user" \
    --condition=None >/dev/null
 echo "granted"
+
+# Drop the narrower jobUser binding if an earlier run left one; bigquery.user
+# supersedes it, and leaving both makes the effective grant harder to read.
+if "$GCLOUD" projects remove-iam-policy-binding "$PROJECT" \
+     --member="serviceAccount:${SA}" \
+     --role="roles/bigquery.jobUser" \
+     --condition=None >/dev/null 2>&1; then
+  echo "removed superseded roles/bigquery.jobUser binding"
+fi
 
 say "Grant: WRITER on dataset $DATASET ONLY (not project-wide)"
 _cur="$(mktemp)"; _new="$(mktemp)"

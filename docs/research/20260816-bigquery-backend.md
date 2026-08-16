@@ -77,9 +77,10 @@ UID. Any file the developer can read, such a session can read, so "hide the cred
 an achievable goal. The design instead layers two real boundaries under two speed bumps.
 
 **Blast radius (real).** A dedicated GCP project, and a service account holding only
-`roles/bigquery.jobUser` at project scope plus dataset-scoped `WRITER` on the single test
-dataset. Full compromise then means writing to one test dataset and running queries billed to
-one capped project.
+`roles/bigquery.user` at project scope plus dataset-scoped `WRITER` on the single test
+dataset. `bigquery.user` confers no access to datasets the account did not create — it runs jobs
+and owns datasets it creates itself — so full compromise means writing to one test dataset plus
+datasets the attacker creates, and running queries billed to one capped project.
 
 *Rejected: user application-default credentials.* `gcloud auth application-default login` is the
 conventional path and the worst option available here — the resulting token carries the
@@ -230,7 +231,7 @@ Phase 0 is complete. The following exists in GCP and does not need re-deriving:
 | APIs | `bigquery.googleapis.com`, `iam.googleapis.com` |
 | Dataset | `smelt_test`, location `US`, 24h default table expiration |
 | Service account | `smelt-bq-test@smelt-bq-test-20260816.iam.gserviceaccount.com` |
-| Grants | `roles/bigquery.jobUser` (project scope); `WRITER` on `smelt_test` only |
+| Grants | `roles/bigquery.user` (project scope); `WRITER` on `smelt_test` only |
 | Credential store | `~/.config/gcloud-smelt-bq` (isolated `CLOUDSDK_CONFIG`) |
 
 Scripts, in the order they run: `bigquery-login.sh` (browser OAuth, human),
@@ -282,19 +283,20 @@ refresh, making it the first backend whose `supports_native_ivm: false` describe
 than the engine. And `SHA256` returns `BYTES` rather than a hex string, so every fingerprint
 expression needs a `TO_HEX` wrap that neither other dialect requires.
 
-**The least-privilege grant excludes dataset creation.** The service account holds `jobUser`
-plus `WRITER` on one dataset, which does not include `bigquery.datasets.create` — so the
-dataset-per-run isolation described above is unavailable to it, and the suites fall back to
-table-level isolation inside the granted dataset. Widening the grant is a real option (the
-project is dedicated and capped), but it was not taken unilaterally.
+**Dataset creation needed a grant the original posture withheld.** `jobUser` plus `WRITER` on
+one dataset does not include `bigquery.datasets.create`, so dataset-per-run isolation was
+unavailable. The grant is now `roles/bigquery.user`, which adds exactly that permission and
+nothing else that matters here: it confers no access to datasets the account did not create, so
+the negative control — writing to a pre-existing un-granted dataset must be refused — remains
+meaningful under it. The suites keep the table-level fallback for anyone running under a
+narrower grant.
 
 ## Open questions
 
 - **Phase 3's true size** — mechanical versus semantic split of the type-divergence surface.
   Answered by phase 2.
-- **Whether to widen the service-account grant to allow dataset creation**, restoring
-  dataset-per-run isolation, or to keep table-level isolation inside the one granted dataset.
-  The project is dedicated and capped, so the widening is small; the current fallback works.
+- **Whether the emulator earns a place as a fast inner loop** — see below; the dataset-creation
+  question is settled (`roles/bigquery.user`).
 - **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the
   manual console step permanently, or find a budgets path that does not require
   application-default credentials.

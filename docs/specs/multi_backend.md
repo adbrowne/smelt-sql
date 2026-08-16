@@ -328,12 +328,13 @@ resolves nested widening to a table rewrite.
   therefore resolves to a full refresh rather than a migration — surfaced as a refusal naming
   the reason, never as emitted DDL the warehouse would reject. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
-- **Per-run dataset isolation requires a permission the least-privilege service account lacks.**
-  The isolation model below assumes each run creates its own dataset, but creating one needs
-  `bigquery.datasets.create`, which a service account granted `WRITER` on a single dataset does
-  not hold. When dataset creation is refused the suites isolate by table name inside the granted
-  dataset instead. Both paths are safe for concurrent runs; only teardown differs (a dataset drop
-  versus a table drop). Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **Per-run dataset isolation depends on a grant the runner may not hold.** Creating a dataset
+  per run needs `bigquery.datasets.create`; a principal granted only `WRITER` on one dataset
+  cannot, and the suites then isolate by table name inside the granted dataset instead. Both
+  paths are safe for concurrent runs and only teardown differs (a dataset drop versus a table
+  drop), so the fallback is a supported mode rather than a degraded one — but the two modes leave
+  different residue behind a crash, which is why created datasets carry a default table
+  expiration. Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **BigQuery has no CI tier.** Spark parity runs per-PR on changed paths and nightly in full;
   BigQuery runs **only when a developer runs it by hand** against their own GCP project, gated on
   `SMELT_BQ_PROJECT`. A BigQuery regression therefore does not surface on `main` on any schedule.
