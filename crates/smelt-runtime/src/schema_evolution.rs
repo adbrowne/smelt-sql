@@ -335,6 +335,64 @@ pub async fn check_and_migrate(
     }
 }
 
+/// The route a maintained model's definition change takes, per
+/// `docs/specs/definition_deltas.md` §"The atomicity rule": exactly one of
+/// these, decided once per run before anything is written — never a
+/// separately-dispatched `ADD COLUMN` followed by a standalone `UPDATE`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DefinitionChangeRoute {
+    /// Today's atomic path: `ALTER TABLE ADD COLUMN` and its backfill run in
+    /// one `StatementGroup` via `check_and_migrate`.
+    AtomicGroup,
+    /// The table is rebuilt from the new definition instead of migrated in
+    /// place — either the model declared `strategy: full_refresh` (the
+    /// declaration is the consent), or the backend lacks transactional DDL
+    /// and the run opted in with `--allow-full-refresh`.
+    FullRebuild,
+    /// Nothing is applied: a non-transactional backend without
+    /// `--allow-full-refresh` cannot run the two-step atomically, so the run
+    /// refuses rather than risk a partially-applied migration. The recorded
+    /// definition is left untouched, so the next invocation re-derives the
+    /// identical pending change — refusal is the repair path.
+    Refuse { message: String },
+}
+
+/// Decide which route (§"The atomicity rule") a maintained model's
+/// definition change takes this run. Pure — no backend or I/O access — so
+/// every route can be exercised without a live connection.
+///
+/// `has_pending_column_add` should be `false` for an ordinary run with no
+/// definition change: routing must never fire when there is nothing to
+/// migrate.
+pub fn resolve_definition_change_route(
+    strategy: &smelt_core::metadata::SchemaEvolutionStrategy,
+    supports_transactional_ddl: bool,
+    has_pending_column_add: bool,
+    allow_full_refresh: bool,
+) -> DefinitionChangeRoute {
+    if !has_pending_column_add {
+        return DefinitionChangeRoute::AtomicGroup;
+    }
+    if matches!(
+        strategy,
+        smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
+    ) {
+        return DefinitionChangeRoute::FullRebuild;
+    }
+    if supports_transactional_ddl {
+        return DefinitionChangeRoute::AtomicGroup;
+    }
+    if allow_full_refresh {
+        return DefinitionChangeRoute::FullRebuild;
+    }
+    DefinitionChangeRoute::Refuse {
+        message: "Schema migration cannot be applied atomically on this backend \
+            (no transactional DDL). Use --allow-full-refresh to rebuild the table \
+            from its new definition, or run `smelt run --full-refresh <model>`."
+            .to_string(),
+    }
+}
+
 /// Save the deployed schema after a successful model execution.
 ///
 /// Called after first deployment or after full refresh.
@@ -450,5 +508,90 @@ mod tests {
             }
             _ => panic!("Expected Spark backend"),
         }
+    }
+
+    use smelt_core::metadata::SchemaEvolutionStrategy;
+
+    #[test]
+    fn route_default_strategy_transactional_backend_is_atomic_group() {
+        let route = resolve_definition_change_route(
+            &SchemaEvolutionStrategy::AlterAndBackfill,
+            true,
+            true,
+            false,
+        );
+        assert_eq!(route, DefinitionChangeRoute::AtomicGroup);
+    }
+
+    #[test]
+    fn route_full_refresh_strategy_is_full_rebuild() {
+        // Declared strategy wins regardless of backend capability or the
+        // --allow-full-refresh flag.
+        for supports_transactional_ddl in [true, false] {
+            for allow_full_refresh in [true, false] {
+                let route = resolve_definition_change_route(
+                    &SchemaEvolutionStrategy::FullRefresh,
+                    supports_transactional_ddl,
+                    true,
+                    allow_full_refresh,
+                );
+                assert_eq!(route, DefinitionChangeRoute::FullRebuild);
+            }
+        }
+    }
+
+    #[test]
+    fn route_non_transactional_backend_refuses_without_opt_in() {
+        let route = resolve_definition_change_route(
+            &SchemaEvolutionStrategy::AlterAndBackfill,
+            false,
+            true,
+            false,
+        );
+        assert!(matches!(route, DefinitionChangeRoute::Refuse { .. }));
+    }
+
+    #[test]
+    fn route_non_transactional_backend_with_allow_full_refresh_is_full_rebuild() {
+        let route = resolve_definition_change_route(
+            &SchemaEvolutionStrategy::AlterAndBackfill,
+            false,
+            true,
+            true,
+        );
+        assert_eq!(route, DefinitionChangeRoute::FullRebuild);
+    }
+
+    #[test]
+    fn refusal_message_names_the_recovery_flag() {
+        let route = resolve_definition_change_route(
+            &SchemaEvolutionStrategy::AlterAndBackfill,
+            false,
+            true,
+            false,
+        );
+        match route {
+            DefinitionChangeRoute::Refuse { message } => {
+                assert!(
+                    message.contains("--allow-full-refresh"),
+                    "refusal message must name the recovery flag: {message}"
+                );
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_is_atomic_group_when_there_is_no_pending_column_add() {
+        // Regression guard: an ordinary run with no definition change must
+        // never route to a rebuild or a refusal, even on a non-transactional
+        // backend with a declared full_refresh strategy.
+        let route = resolve_definition_change_route(
+            &SchemaEvolutionStrategy::FullRefresh,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(route, DefinitionChangeRoute::AtomicGroup);
     }
 }

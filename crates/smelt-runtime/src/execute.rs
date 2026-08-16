@@ -1707,159 +1707,158 @@ pub async fn execute_project(
         // and executed as part of the migration's own `StatementGroup`
         // below — the standalone dispatch after this gate must skip these
         // (idempotency: never re-run the same backfill twice).
-        let mut migration_backfilled_columns: Vec<String> = Vec::new();
+        // Set when the migration gate below folds the `InPlaceUpdate` cell's
+        // backfill into its own `StatementGroup` — used only for the
+        // strategy label reported downstream. There is no longer a
+        // standalone fallback dispatch: `docs/specs/definition_deltas.md`
+        // §"The atomicity rule" forbids a separately-dispatched backfill on
+        // any backend or strategy, so a pending column add either goes
+        // through the atomic migration group below, or the run is routed to
+        // a full rebuild / refused before anything is written.
+        let mut used_in_place_update = false;
         if plan.incremental.is_some() {
             let evolution_strategy = plan
                 .model_file
                 .metadata
                 .as_deref()
                 .and_then(|m| m.schema_evolution.as_ref())
-                .map(|se| &se.strategy);
-            let use_alter = !matches!(
-                evolution_strategy,
-                Some(smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh)
-            );
+                .map(|se| se.strategy.clone())
+                .unwrap_or_default();
 
-            if use_alter {
-                if let Ok(true) = backend
-                    .table_exists(schema, &plan.model_file.db_name_owned())
-                    .await
-                {
-                    let inferred_columns = {
-                        let db_guard = db.lock().await;
-                        infer_deployed_columns(&db_guard, &plan.model_file)
-                    };
-                    if !inferred_columns.is_empty() {
-                        let db_table_name = plan.model_file.db_name_owned();
-                        let (column_defaults, mut backfill_exprs) =
-                            extract_evolution_maps(plan.model_file.metadata.as_deref());
-                        // Fold the derived `InPlaceUpdate` cell's own
-                        // backfill assignments into the SAME map the
-                        // declared `backfill:` directive mechanism already
-                        // uses — `check_and_migrate`/`plan_migration_for_
-                        // backend` (`schema_tracking.rs`) emits the
-                        // `ADD COLUMN` and its `UPDATE ... SET` into ONE
-                        // `StatementGroup`, so routing the derived
-                        // assignment through this map makes it atomic with
-                        // the migration for free, reusing the existing
-                        // atomic mechanism rather than re-authoring it.
-                        // A user's explicit `default:`/`backfill:`
-                        // directive always wins (checked first) — the
-                        // derived assignment only fills a gap the user
-                        // left undeclared.
-                        if let Some((_cell, assignments)) = &in_place_update_cell {
-                            for (col, expr) in assignments {
-                                if !column_defaults.contains_key(col)
-                                    && !backfill_exprs.contains_key(col)
-                                {
-                                    backfill_exprs.insert(col.clone(), expr.clone());
-                                }
-                            }
+            if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                let inferred_columns = {
+                    let db_guard = db.lock().await;
+                    infer_deployed_columns(&db_guard, &plan.model_file)
+                };
+                if !inferred_columns.is_empty() {
+                    let db_table_name = plan.model_file.db_name_owned();
+
+                    // Whether this run has a schema change pending for this
+                    // model — decided from the deployed-schema snapshot
+                    // BEFORE anything is written, so the atomicity route
+                    // below (`docs/specs/definition_deltas.md` §"The
+                    // atomicity rule") never fires on an ordinary run with
+                    // no definition change.
+                    let has_pending_column_add = file_store
+                        .load_schema(&db_table_name)
+                        .ok()
+                        .flatten()
+                        .map(|deployed| {
+                            !smelt_state::schema_tracking::diff_schemas(
+                                &deployed.columns,
+                                &inferred_columns,
+                            )
+                            .is_empty()
+                        })
+                        .unwrap_or(false);
+
+                    let route = crate::schema_evolution::resolve_definition_change_route(
+                        &evolution_strategy,
+                        backend.capabilities().supports_transactional_ddl,
+                        has_pending_column_add,
+                        request.allow_full_refresh,
+                    );
+
+                    match route {
+                        crate::schema_evolution::DefinitionChangeRoute::Refuse { message } => {
+                            return Err(anyhow::anyhow!(message));
                         }
-                        let target_config = config
-                            .targets
-                            .get(model_target)
-                            .expect("target config must exist");
-                        let table_format = config.get_format(
-                            &plan.name,
-                            plan.model_file.metadata.as_deref(),
-                            target_config,
-                        );
-                        let ddl_backend =
-                            ddl_backend_for_dialect(backend.dialect(), table_format, None);
-                        let schema_evolution_retry =
-                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                        match check_and_migrate(
-                            backend,
-                            file_store,
-                            &db_table_name,
-                            &plan.sql,
-                            schema,
-                            &inferred_columns,
-                            request.allow_column_removal,
-                            request.allow_full_refresh,
-                            request.dry_run,
-                            &column_defaults,
-                            &backfill_exprs,
-                            Some(&ddl_backend),
-                            &schema_evolution_retry,
-                        )
-                        .await
-                        {
-                            Ok(result) => {
-                                if let SchemaEvolutionResult::Migrated {
-                                    backfilled_columns,
-                                    ..
-                                } = &result
-                                {
-                                    migration_backfilled_columns = backfilled_columns.clone();
-                                }
-                                match crate::safety::should_force_full_refresh(
-                                    &result,
-                                    &plan.name,
-                                    request.allow_column_removal,
-                                    request.allow_full_refresh,
-                                ) {
-                                    Ok(should_refresh) => force_full_refresh = should_refresh,
-                                    Err(e) => {
-                                        return Err(e);
+                        crate::schema_evolution::DefinitionChangeRoute::FullRebuild => {
+                            force_full_refresh = true;
+                        }
+                        crate::schema_evolution::DefinitionChangeRoute::AtomicGroup => {
+                            let (column_defaults, mut backfill_exprs) =
+                                extract_evolution_maps(plan.model_file.metadata.as_deref());
+                            // Fold the derived `InPlaceUpdate` cell's own
+                            // backfill assignments into the SAME map the
+                            // declared `backfill:` directive mechanism already
+                            // uses — `check_and_migrate`/`plan_migration_for_
+                            // backend` (`schema_tracking.rs`) emits the
+                            // `ADD COLUMN` and its `UPDATE ... SET` into ONE
+                            // `StatementGroup`, so routing the derived
+                            // assignment through this map makes it atomic with
+                            // the migration for free, reusing the existing
+                            // atomic mechanism rather than re-authoring it.
+                            // A user's explicit `default:`/`backfill:`
+                            // directive always wins (checked first) — the
+                            // derived assignment only fills a gap the user
+                            // left undeclared.
+                            if let Some((_cell, assignments)) = &in_place_update_cell {
+                                for (col, expr) in assignments {
+                                    if !column_defaults.contains_key(col)
+                                        && !backfill_exprs.contains_key(col)
+                                    {
+                                        backfill_exprs.insert(col.clone(), expr.clone());
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Schema evolution check failed: {}. Continuing with incremental.",
-                                    e
-                                );
+                            let target_config = config
+                                .targets
+                                .get(model_target)
+                                .expect("target config must exist");
+                            let table_format = config.get_format(
+                                &plan.name,
+                                plan.model_file.metadata.as_deref(),
+                                target_config,
+                            );
+                            let ddl_backend =
+                                ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                            let schema_evolution_retry =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            match check_and_migrate(
+                                backend,
+                                file_store,
+                                &db_table_name,
+                                &plan.sql,
+                                schema,
+                                &inferred_columns,
+                                request.allow_column_removal,
+                                request.allow_full_refresh,
+                                request.dry_run,
+                                &column_defaults,
+                                &backfill_exprs,
+                                Some(&ddl_backend),
+                                &schema_evolution_retry,
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    if let SchemaEvolutionResult::Migrated {
+                                        backfilled_columns,
+                                        ..
+                                    } = &result
+                                    {
+                                        if in_place_update_cell.is_some()
+                                            && !backfilled_columns.is_empty()
+                                        {
+                                            used_in_place_update = true;
+                                        }
+                                    }
+                                    match crate::safety::should_force_full_refresh(
+                                        &result,
+                                        &plan.name,
+                                        request.allow_column_removal,
+                                        request.allow_full_refresh,
+                                    ) {
+                                        Ok(should_refresh) => force_full_refresh = should_refresh,
+                                        Err(e) => {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Schema evolution check failed: {}. Continuing with incremental.",
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
                 }
-            }
-        }
-
-        // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
-        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
-        // Runs once per incremental model per run, common to both the keyed
-        // and non-keyed branches below — a one-time migration-style
-        // backfill over the model's existing rows, orthogonal to whichever
-        // window/creation/mutation technique the rest of this run
-        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
-        // above, before the migration gate ran — reused here, never
-        // re-derived. Any column the migration gate already folded into
-        // its own `StatementGroup` (`migration_backfilled_columns`) is
-        // skipped — dispatching it again here would be a redundant,
-        // non-atomic re-run of a backfill that already committed
-        // atomically with its `ADD COLUMN`
-        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
-        // standalone path remains the ONLY route when the migration gate
-        // did not run at all this run (e.g. `schema_evolution: strategy:
-        // full_refresh` on the model, or the target table not yet
-        // existing) — see `docs/specs/incremental_models.md` §"Known
-        // Divergences" for that residual non-atomicity.
-        let mut used_in_place_update = false;
-        if let Some((_cell, assignments)) = &in_place_update_cell {
-            let remaining: Vec<(String, String)> = assignments
-                .iter()
-                .filter(|(col, _)| !migration_backfilled_columns.iter().any(|c| c == col))
-                .cloned()
-                .collect();
-            if remaining.len() != assignments.len() {
-                used_in_place_update = true; // some/all columns already backfilled atomically above
-            }
-            if !remaining.is_empty() {
-                let retry_policy =
-                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                crate::maintenance_driver::execute_in_place_update(
-                    backend,
-                    schema,
-                    &plan.model_file.db_name_owned(),
-                    &remaining,
-                    &retry_policy,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-                used_in_place_update = true;
             }
         }
 

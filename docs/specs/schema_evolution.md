@@ -199,6 +199,24 @@ For Spark + Parquet, most changes that require DDL result in `FullRefresh`. For 
 
 DuckDB uses `struct_pack()` expressions to rewrite struct columns during ALTER TABLE for nested type changes and struct field additions or removals.
 
+### Routing on a maintained model
+
+On an incremental (maintained) model, a detected schema change is also a definition delta
+(`definition_deltas.md` §"Boundary with `schema_evolution.md`"), and `definition_deltas.md`
+§"The atomicity rule" governs which of three routes the run takes — never a standalone `ALTER
+TABLE` followed by a separately-dispatched backfill `UPDATE`, on any backend or strategy:
+
+- `schema_evolution.strategy: alter_and_backfill` (the default) on a backend with transactional
+  DDL takes the `AlterTable` action above, with the column's backfill folded into the same
+  statement group.
+- `schema_evolution.strategy: full_refresh` always rebuilds the table from the new definition on
+  a detected change — the declared strategy is the consent to rebuild, so the model is never left
+  on its old definition the way skipping migration entirely would leave it.
+- A backend without transactional DDL takes the same rebuild route when the run passes
+  `--allow-full-refresh`, and otherwise refuses the run with an error naming that flag (or
+  `smelt run --full-refresh <model>`) as the recovery — nothing is written, so the next
+  invocation re-derives the identical pending change.
+
 ### DuckDB ALTER TABLE for structs
 
 When a struct column requires changes (field addition, removal, or nested type widening), DuckDB generates:

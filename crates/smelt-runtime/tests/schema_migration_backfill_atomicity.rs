@@ -395,3 +395,387 @@ async fn failing_backfill_expression_rolls_back_the_whole_group_no_orphan_column
          physical column being real: {saved:?}"
     );
 }
+
+/// Phase 7 (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+/// 07-plan.md`): closes the atomicity divergence's two escapes — a model
+/// declaring `schema_evolution: strategy: full_refresh`, and a backend
+/// without transactional DDL — by routing both to a real repair path
+/// (`DefinitionChangeRoute`) instead of the old standalone-backfill
+/// fallback. These tests drive the real `execute_project` entry point (not
+/// `check_and_migrate` directly), the way production actually runs.
+mod atomic_route_e2e {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn write(dir: &Path, rel: &str, content: &str) {
+        let path = dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn build_db_and_graph(
+        project_dir: &Path,
+        config: &smelt_core::config::Config,
+    ) -> (
+        Arc<tokio::sync::Mutex<smelt_db::Database>>,
+        Arc<tokio::sync::Mutex<smelt_core::graph::DependencyGraph>>,
+    ) {
+        use smelt_core::ModelDiscovery;
+        let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+        let sql_models = discovery.discover_models().expect("discover_models");
+
+        let mut db = smelt_db::Database::default();
+        let project = db.set_project_input(project_dir.to_path_buf(), String::new());
+        let source_files: Vec<_> = sql_models
+            .iter()
+            .map(|m| {
+                db.set_source_file(m.path.clone(), m.content.clone(), project_dir.to_path_buf())
+            })
+            .collect();
+        db.set_workspace(source_files, vec![project]);
+        db.set_active_target(
+            config
+                .target
+                .clone()
+                .map(|t| std::sync::Arc::from(t.as_str())),
+        );
+
+        let graph =
+            smelt_core::graph::DependencyGraph::build(sql_models, None).expect("build graph");
+
+        (
+            Arc::new(tokio::sync::Mutex::new(db)),
+            Arc::new(tokio::sync::Mutex::new(graph)),
+        )
+    }
+
+    fn select_request(models: &[&str]) -> smelt_runtime::types::ExecuteRequest {
+        smelt_runtime::types::ExecuteRequest {
+            target: "dev".to_string(),
+            select: models.iter().map(|s| s.to_string()).collect(),
+            exclude: vec![],
+            start: None,
+            end: None,
+            batch_size_days: None,
+            per_partition: false,
+            full_refresh: false,
+            dry_run: false,
+            enforce_safety: false,
+            allow_column_removal: false,
+            allow_full_refresh: false,
+            ephemeral_seed_ctes: vec![],
+            run_checks: false,
+            checks: vec![],
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
+        }
+    }
+
+    struct DuckDbBackendFactory {
+        db_path: std::path::PathBuf,
+    }
+
+    impl smelt_runtime::execute::BackendFactory for DuckDbBackendFactory {
+        fn create<'a>(
+            &'a self,
+            _target_name: &'a str,
+            target_config: &'a smelt_core::config::Target,
+            _project_dir: &'a Path,
+        ) -> smelt_runtime::execute::BackendFuture<'a> {
+            let path = self.db_path.clone();
+            let schema = target_config.schema.clone();
+            Box::pin(async move {
+                let backend = smelt_backend_duckdb::DuckDbBackend::new(&path, &schema)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
+                Ok(Box::new(backend) as Box<dyn smelt_backend::Backend>)
+            })
+        }
+    }
+
+    async fn run(
+        project_dir: &Path,
+        db_path: &Path,
+        config: &Arc<smelt_core::config::Config>,
+        models: &[&str],
+        start: &str,
+        end: &str,
+        run_id: &str,
+    ) -> anyhow::Result<smelt_runtime::types::RunOutcome> {
+        let (db, graph) = build_db_and_graph(project_dir, config);
+        let mut request = select_request(models);
+        request.start = Some(start.to_string());
+        request.end = Some(end.to_string());
+        smelt_runtime::execute_project(
+            run_id.to_string(),
+            request,
+            Arc::clone(config),
+            graph,
+            db,
+            project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.to_path_buf(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    const SMELT_YML: &str = "\
+name: atomic_route_e2e\nversion: 1\npaths:\n  - models\n\
+targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+default_materialization: table\nstate:\n  mode: intervals\n";
+
+    const SOURCE_YAML: &str = "\
+description: events source
+columns:
+  - name: event_id
+    type: INTEGER
+  - name: event_timestamp
+    type: TIMESTAMP
+  - name: val
+    type: INTEGER
+mutation_profile:
+  kind: append_only
+";
+
+    const MODEL_V1_SQL: &str = "\
+---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+schema_evolution:\n  strategy: full_refresh\n\
+timeseries:\n  partition_column: event_date\n  event_time_column: event_timestamp\n  \
+granularity: day\n---\n\
+SELECT event_id, CAST(event_timestamp AS DATE) AS event_date, val\n\
+FROM smelt.sources.events\n";
+
+    const MODEL_V2_SQL: &str = "\
+---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+schema_evolution:\n  strategy: full_refresh\n\
+timeseries:\n  partition_column: event_date\n  event_time_column: event_timestamp\n  \
+granularity: day\n---\n\
+SELECT event_id, CAST(event_timestamp AS DATE) AS event_date, val, val * 2 AS val_doubled\n\
+FROM smelt.sources.events\n";
+
+    fn stage_project(project_dir: &Path, model_sql: &str) {
+        write(project_dir, "smelt.yml", SMELT_YML);
+        write(project_dir, "models/sources/events.yml", SOURCE_YAML);
+        write(project_dir, "models/daily_events.sql", model_sql);
+    }
+
+    async fn seed_events(db_path: &Path) {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(db_path, "main")
+            .await
+            .expect("open duckdb");
+        use smelt_backend::Backend;
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_events (\
+                 event_id INTEGER, event_timestamp TIMESTAMP, val INTEGER)",
+            )
+            .await
+            .expect("create events source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_events VALUES \
+                 (1, TIMESTAMP '2025-01-10 08:00:00', 10), \
+                 (2, TIMESTAMP '2025-01-10 09:00:00', 20), \
+                 (3, TIMESTAMP '2025-01-11 08:00:00', 30)",
+            )
+            .await
+            .expect("seed events");
+    }
+
+    fn extract_i64(batches: &[duckdb::arrow::array::RecordBatch]) -> i64 {
+        batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<duckdb::arrow::array::Int64Array>()
+            .expect("count column must be Int64")
+            .value(0)
+    }
+
+    /// Test 7: an incremental model with `schema_evolution: strategy:
+    /// full_refresh` plus an added column rebuilds the whole table from the
+    /// new definition — every row carries `val_doubled`, the row count is
+    /// unchanged, and the deployed schema snapshot advances. Driven through
+    /// `execute_project`, never `check_and_migrate` directly.
+    #[tokio::test]
+    async fn full_refresh_strategy_rebuilds_and_never_dispatches_a_standalone_backfill() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_project(&project_dir, MODEL_V1_SQL);
+        seed_events(&db_path).await;
+
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+        run(
+            &project_dir,
+            &db_path,
+            &config,
+            &["daily_events"],
+            "2025-01-10",
+            "2025-01-12",
+            "full-refresh-route-run-1",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("first run must succeed: {e}"));
+
+        write(&project_dir, "models/daily_events.sql", MODEL_V2_SQL);
+
+        let outcome = run(
+            &project_dir,
+            &db_path,
+            &config,
+            &["daily_events"],
+            "2025-01-10",
+            "2025-01-12",
+            "full-refresh-route-run-2",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("second run (under the definition change) must succeed: {e}"));
+        assert!(
+            outcome.models.contains_key("daily_events"),
+            "daily_events must have run: {outcome:?}"
+        );
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        use smelt_backend::Backend;
+
+        let total = extract_i64(
+            &backend
+                .execute_sql("SELECT COUNT(*) FROM main.daily_events")
+                .await
+                .expect("count total"),
+        );
+        assert_eq!(
+            total, 3,
+            "row count must be unchanged — no duplication from the rebuild"
+        );
+
+        let mismatched = extract_i64(
+            &backend
+                .execute_sql(
+                    "SELECT COUNT(*) FROM main.daily_events \
+                     WHERE val_doubled IS NULL OR val_doubled != val * 2",
+                )
+                .await
+                .expect("count mismatched"),
+        );
+        assert_eq!(
+            mismatched, 0,
+            "every row must carry val_doubled after the full-refresh rebuild, not just new rows"
+        );
+
+        let config2 = smelt_core::config::Config::load(&project_dir).expect("reload smelt.yml");
+        let file_store =
+            smelt_state::file_store::FileStore::new(&project_dir, "dev", config2.state.mode);
+        let saved = file_store
+            .load_schema("daily_events")
+            .expect("load_schema must not error")
+            .expect("schema must be saved after the rebuild");
+        assert!(
+            saved.columns.iter().any(|c| c.name == "val_doubled"),
+            "the stored schema must advance to include val_doubled: {saved:?}"
+        );
+    }
+
+    /// Test 8: pinning that the atomic path (default strategy, transactional
+    /// backend) is unchanged by this phase's routing — the existing
+    /// `derived_backfill_folds_into_migration_group_and_backfills_every_row`
+    /// test (above, in the parent module) already asserts this directly
+    /// against `check_and_migrate`; this is the same claim asserted through
+    /// the real `execute_project` entry point deleting the fallback dispatch
+    /// changed nothing on the atomic path.
+    #[tokio::test]
+    async fn default_strategy_still_folds_the_backfill_into_the_migration_group() {
+        const DEFAULT_MODEL_V1_SQL: &str = "\
+---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+timeseries:\n  partition_column: event_date\n  event_time_column: event_timestamp\n  \
+granularity: day\n---\n\
+SELECT event_id, CAST(event_timestamp AS DATE) AS event_date, val\n\
+FROM smelt.sources.events\n";
+        const DEFAULT_MODEL_V2_SQL: &str = "\
+---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+timeseries:\n  partition_column: event_date\n  event_time_column: event_timestamp\n  \
+granularity: day\n---\n\
+SELECT event_id, CAST(event_timestamp AS DATE) AS event_date, val, val * 2 AS val_doubled\n\
+FROM smelt.sources.events\n";
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_project(&project_dir, DEFAULT_MODEL_V1_SQL);
+        seed_events(&db_path).await;
+
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+        run(
+            &project_dir,
+            &db_path,
+            &config,
+            &["daily_events"],
+            "2025-01-10",
+            "2025-01-12",
+            "atomic-route-run-1",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("first run must succeed: {e}"));
+
+        write(
+            &project_dir,
+            "models/daily_events.sql",
+            DEFAULT_MODEL_V2_SQL,
+        );
+
+        let outcome = run(
+            &project_dir,
+            &db_path,
+            &config,
+            &["daily_events"],
+            "2025-01-11",
+            "2025-01-12",
+            "atomic-route-run-2",
+        )
+        .await
+        .unwrap_or_else(|e| panic!("second run (under the definition change) must succeed: {e}"));
+        assert!(
+            outcome.models.contains_key("daily_events"),
+            "daily_events must have run: {outcome:?}"
+        );
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        use smelt_backend::Backend;
+
+        let total = extract_i64(
+            &backend
+                .execute_sql("SELECT COUNT(*) FROM main.daily_events")
+                .await
+                .expect("count total"),
+        );
+        assert_eq!(total, 3, "row count must be unchanged");
+
+        let mismatched = extract_i64(
+            &backend
+                .execute_sql(
+                    "SELECT COUNT(*) FROM main.daily_events \
+                     WHERE val_doubled IS NULL OR val_doubled != val * 2",
+                )
+                .await
+                .expect("count mismatched"),
+        );
+        assert_eq!(
+            mismatched, 0,
+            "the pre-existing row (from before the definition change) must be backfilled \
+             atomically with the migration, the same as the direct check_and_migrate test above"
+        );
+    }
+}

@@ -333,10 +333,26 @@ never to revisit. The plan-and-approve gate is where that conflict is resolved, 
 
 A backfill-in-place group's physical column and its backfilled values are created by the **same
 statement group** as the schema migration adding the column — never a separately-dispatched
-write that could observe the column added but not yet backfilled. On a backend with
-transactional DDL, a group failure leaves neither the column nor the values, and the next apply
-retries the whole group. There is no window in which the deployed schema outruns the column's
-real values.
+write that could observe the column added but not yet backfilled. This holds unconditionally,
+on every backend and every declared `schema_evolution` strategy: no run may ever apply a
+definition change as a separately-dispatched `ADD COLUMN` followed by a standalone `UPDATE`.
+
+A model's definition change routes to exactly one of three outcomes, decided once per run before
+anything is written:
+
+- **Atomic group** — the default strategy on a backend with transactional DDL: today's single
+  `StatementGroup` carrying the `ADD COLUMN` and its backfill together. A group failure leaves
+  neither the column nor the values, and the next apply retries the whole group. There is no
+  window in which the deployed schema outruns the column's real values.
+- **Full rebuild** — a model declaring `schema_evolution: strategy: full_refresh` routes here
+  unconditionally: the declaration is the consent to rebuild the table from the new definition
+  rather than migrate it in place, so there is no in-place backfill step to make atomic. A
+  non-transactional backend also routes here when the run opts in with `--allow-full-refresh`.
+- **Refuse** — a non-transactional backend without that opt-in refuses the run: nothing is
+  applied, the recorded definition is left untouched, and the error names the recovery
+  (`smelt run --full-refresh <model>` or `--allow-full-refresh`). Refusal *is* the repair path —
+  because nothing was written, the next invocation re-derives the identical pending change rather
+  than needing separate reconciliation.
 
 ### Downstream of a migration
 
@@ -356,8 +372,9 @@ strategy, and the stored-schema format for *declared-schema* changes. This spec 
 migration of a **maintained model's stored data** across a change in its defining SQL. Where
 both apply — an added column on an incremental model is both a schema change and a definition
 delta — the definition-delta path governs, because only it carries the frontier bookkeeping and
-the plan-and-approve gate. (`schema_evolution.md`'s `strategy: full_refresh` escape currently
-bypasses that gate — a recorded divergence, §Known Divergences.)
+the plan-and-approve gate. `schema_evolution.md`'s `strategy: full_refresh` does not escape that
+gate: it selects the full-rebuild route §"The atomicity rule" names, so the declared strategy and
+the atomicity rule agree rather than one bypassing the other.
 
 ### What stays data-side
 
@@ -465,14 +482,6 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   destructive candidate as a group's first candidate refuses to execute that group (and, by the
   all-groups-admitted-first rule, the whole plan) rather than running it unverified. Tracked:
   `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
-- **The atomicity rule is conditional in practice.** A model whose
-  `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
-  a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
-  rule" forbids — and that path is also the only one exercised on a backend without
-  transactional DDL. Neither case has a repair path today. Tracked:
-  `docs/plans/20260809-sensitivity-precision.md`. The
-  `schema_evolution.md` full-refresh escape bypassing the gate is the divergence §"Boundary with
-  `schema_evolution.md`" names; the unification should subsume it, not inherit it.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's

@@ -76,7 +76,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
-| 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | planned |
+| 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
 | 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
@@ -250,6 +250,22 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   on backends that already have transactions. Also noted: the deleted block's comment cites an
   `incremental_models.md` §Known Divergences bullet that does not exist — a stale pointer, fixed
   in this phase rather than left for phase 10's validate pass.
+
+- **2026-08-17 (phase 7 implementation).** Landed `DefinitionChangeRoute` /
+  `resolve_definition_change_route` in `crates/smelt-runtime/src/schema_evolution.rs` and wired it
+  into `execute.rs`'s schema-evolution gate, replacing the `use_alter` boolean. Deleted the
+  standalone `execute_in_place_update` fallback call site (the emitter stays, owned by `smelt
+  migrate --apply` and the maintenance driver). Decided: the routing's `has_pending_column_add`
+  input is computed from an actual schema diff against the loaded deployed snapshot, not just
+  `InPlaceUpdate`-cell presence — this also fixes the `full_refresh` strategy's previously-silent
+  "declared rebuild intent not honoured" bug for every kind of schema change, not only
+  backfill-needing column adds (in scope per this phase's own framing of the bug in the prior
+  planning entry). Spec updated: `definition_deltas.md` §"The atomicity rule" states the rule
+  unconditionally and names all three routes; the "atomicity rule is conditional" Known
+  Divergences bullet is deleted; `schema_evolution.md` gained §"Routing on a maintained model".
+  Discovered, not fixed (pre-existing, orthogonal): the derived `InPlaceUpdate` backfill
+  expression carries the model SQL's FROM-alias verbatim, which is invalid inside the folded
+  `UPDATE` — every existing fixture in the repo avoids aliasing to route around it.
 
 ## Blocked
 
