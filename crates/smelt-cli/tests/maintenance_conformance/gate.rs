@@ -32,7 +32,7 @@ use smelt_maintenance_testkit::s_tracker::STracker;
 use smelt_maintenance_testkit::schedule_gen::{
     arb_mixed_schedule, arb_schedule_for, boundary_rows_for,
     check_profile as check_mixed_schedule_profile, read_source_snapshot, scan_clamp_for,
-    ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep,
+    ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep, StateResidencyOp,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
 use smelt_planner::{
@@ -72,6 +72,20 @@ fn case_count() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CASES)
+}
+
+/// Delete `.smelt/` from `project`'s directory in place — the
+/// [`ConformanceStep::DropStateDir`]/[`StateResidencyOp::DropStateDir`]
+/// implementation, exposed separately (rather than inlined in the match arm)
+/// so `state_deletion.rs`'s anti-vacuity test
+/// (`drop_state_dir_step_actually_removes_the_directory`) can call it
+/// directly and assert it actually removes the directory — an unobservable
+/// no-op here would let the whole residency leg pass while proving nothing
+/// (`docs/outcomes/20260816-state-residency/phases/08-plan.md` test 1).
+pub fn drop_state_dir(project: &LinkCProject) -> anyhow::Result<()> {
+    let dir = project.project_dir.join(".smelt");
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("remove_dir_all({}): {e}", dir.display()))
 }
 
 /// Stage `recipe` into a fresh temp project + DuckDB file, returning the
@@ -120,6 +134,12 @@ pub async fn drive_and_assert(
     recipe: &ModelRecipe,
     schedule: &ConformanceSchedule,
 ) -> anyhow::Result<(STracker, usize)> {
+    // Local, reassignable handle: `ConformanceStep::FreshClone` replaces it
+    // with a clone at a new path mid-loop
+    // (`docs/outcomes/20260816-state-residency/phases/08-plan.md` task 3).
+    // Every subsequent reference to `project` below therefore already reads
+    // this shadowed local, not the caller's original handle.
+    let mut project = project.clone();
     let mut tracker = STracker::new(&recipe.source);
     let mut last_k: Option<usize> = None;
     // The most recent `RewriteModel` step's edit (Phase 9), or `None` before
@@ -132,7 +152,7 @@ pub async fn drive_and_assert(
         match step {
             ConformanceStep::RunWindow { start, end, rows } => {
                 for row in rows {
-                    insert_row(project, recipe, row).await?;
+                    insert_row(&project, recipe, row).await?;
                 }
 
                 let snapshot = {
@@ -148,10 +168,10 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::AppendLateRow(row) => {
-                insert_row(project, recipe, row).await?;
+                insert_row(&project, recipe, row).await?;
             }
             ConformanceStep::RerunWindow { start, end } => {
                 // Redelivery: same window as an earlier `RunWindow`, no new
@@ -170,7 +190,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::FullRefreshRun => {
                 // Unwindowed run: `execute_project` takes the full-refresh
@@ -190,7 +210,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_full_refresh(snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
@@ -208,7 +228,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::RewriteModel { edit } => {
                 // Definition change (Phase 9): rewrite the model file on
@@ -224,6 +244,31 @@ pub async fn drive_and_assert(
                     render::render_model_file_with_edit(recipe, *edit),
                 )?;
                 current_edit = Some(*edit);
+            }
+            ConformanceStep::DropStateDir => {
+                // Residency leg (`docs/outcomes/20260816-state-residency/
+                // phases/08-plan.md` task 3): delete `.smelt/` in place. No
+                // accompanying run — the next window step's own equivalence
+                // assertion is the proof that nothing correctness-class rode
+                // on the deleted directory.
+                drop_state_dir(&project)?;
+            }
+            ConformanceStep::FreshClone => {
+                // Residency leg: replace the project handle with a fresh
+                // clone at a new path, carrying no `.smelt/` — catches
+                // anything keyed on the old absolute path that a same-path
+                // `DropStateDir` cannot.
+                let dest = project
+                    .project_dir
+                    .parent()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "project_dir {:?} has no parent to clone alongside",
+                            project.project_dir
+                        )
+                    })?
+                    .join(format!("fresh_clone_{i}"));
+                project = project.fresh_clone(&dest)?;
             }
         }
     }
@@ -1347,11 +1392,55 @@ pub async fn drive_keyed_and_assert(
     recipe: &KeyedRecipe,
     schedule: &KeyedSchedule,
 ) -> anyhow::Result<()> {
+    drive_keyed_and_assert_with_state_ops(
+        project,
+        recipe,
+        schedule,
+        &std::collections::BTreeMap::new(),
+    )
+    .await
+}
+
+/// [`drive_keyed_and_assert`], additionally applying a
+/// [`StateResidencyOp`] before window `i` whenever `ops` names one for that
+/// index (`docs/outcomes/20260816-state-residency/phases/08-plan.md` task
+/// 5) — the keyed pool's residency hook. `KeyedSchedule`/`KeyedRunWindow`
+/// themselves stay untouched: no new field, no churn to every existing
+/// construction site.
+pub async fn drive_keyed_and_assert_with_state_ops(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    schedule: &KeyedSchedule,
+    ops: &std::collections::BTreeMap<usize, StateResidencyOp>,
+) -> anyhow::Result<()> {
+    let mut project = project.clone();
     let mut tracker = STracker::new(&recipe.source);
 
     for (i, window) in schedule.0.iter().enumerate() {
+        if let Some(op) = ops.get(&i) {
+            project = match op {
+                StateResidencyOp::DropStateDir => {
+                    drop_state_dir(&project)?;
+                    project
+                }
+                StateResidencyOp::FreshClone => {
+                    let dest = project
+                        .project_dir
+                        .parent()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "project_dir {:?} has no parent to clone alongside",
+                                project.project_dir
+                            )
+                        })?
+                        .join(format!("fresh_clone_keyed_{i}"));
+                    project.fresh_clone(&dest)?
+                }
+            };
+        }
+
         for row in &window.rows {
-            insert_row_keyed(project, recipe, row)?;
+            insert_row_keyed(&project, recipe, row)?;
         }
 
         let snapshot = {
@@ -1367,7 +1456,7 @@ pub async fn drive_keyed_and_assert(
             .await?;
 
         let k = tracker.record_run(window.start, window.end, snapshot);
-        assert_keyed_equivalence(project, recipe, &tracker, k).await?;
+        assert_keyed_equivalence(&project, recipe, &tracker, k).await?;
     }
     Ok(())
 }

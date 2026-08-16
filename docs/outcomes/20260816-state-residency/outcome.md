@@ -72,12 +72,25 @@ this outcome runs first in the programme.
 | 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
-| 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | planned |
+| 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
 | 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
 | 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
 
+- **2026-08-16 (phase 8 implement).** Phase 8 landed: `ConformanceStep::DropStateDir`/
+  `FreshClone` (excluded from `is_permutable`) plus the shared `StateResidencyOp` enum;
+  `LinkCProject` derives `Clone` and gains `fresh_clone` (copies `models/` + `smelt.yml`, never
+  `.smelt/`, same `db_path`); `drive_and_assert` holds a reassignable local project handle;
+  `drive_keyed_and_assert_with_state_ops` (index-keyed `BTreeMap<usize, StateResidencyOp>`) with
+  `drive_keyed_and_assert` delegating an empty map; the Spark twin's match arm `bail!`s on both
+  new steps naming the ledger-less-backend downgrade. New `state_deletion.rs` (7 tests, the 6
+  planned plus one exercising the keyed hook directly) all pass with NO product-code changes —
+  every criterion-5 scenario (redelivery-still-refuses after a ledger-holding drop, generative
+  mid-schedule drop/clone, region-recompute frontier survival) held on the first try, confirming
+  phases 4/5/7's engine-residency work is actually load-bearing. Anti-vacuity confirmed per the
+  plan's Verification step. All gates green including the full `verify-phase.sh` sweep, the
+  Spark compile check, and `frontier_residency`/`state_posture`. See `phases/08-summary.md`.
 - **2026-08-16 (phase 8 plan).** No reshape (rows 9–10 stand). Phase 8 carries no spec delta: it
   is a test-only leg over already-shipped behaviour, and the Known Divergences sweep is row 9's
   job. The one carve-out is named in the plan — if a residency step exposes a real defect (some

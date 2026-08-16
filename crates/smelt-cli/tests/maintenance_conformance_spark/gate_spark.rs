@@ -321,6 +321,21 @@ pub async fn drive_and_assert_spark(
                 )?;
                 current_edit = Some(*edit);
             }
+            ConformanceStep::DropStateDir | ConformanceStep::FreshClone => {
+                // State-residency steps are DuckDB-only
+                // (`docs/outcomes/20260816-state-residency/phases/08-plan.md`
+                // task 4): the Spark twin has no ledger builder, so an
+                // additive-graded cell downgrades to the recompute family
+                // (phase 5's `MaintenanceStateDowngraded`) rather than
+                // carrying any engine-resident state a residency step could
+                // meaningfully delete or clone away from. Refuse rather than
+                // silently no-op.
+                anyhow::bail!(
+                    "residency steps are DuckDB-only — the Spark twin has no ledger builder \
+                     to survive a `.smelt/` deletion or clone (phase 5's ledger-less-backend \
+                     downgrade)"
+                );
+            }
         }
     }
 

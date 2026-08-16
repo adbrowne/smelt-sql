@@ -107,6 +107,38 @@ pub enum ConformanceStep {
     /// classification is unbuilt (no `derive_model_maintenance_plan` caller
     /// reads a prior definition to classify an added column against it).
     RewriteModel { edit: ModelEdit },
+    /// Delete `.smelt/` from the staged project directory in place
+    /// (`docs/outcomes/20260816-state-residency/phases/08-plan.md`;
+    /// `state.md`'s residency rule: nothing correctness-class may ride on
+    /// `.smelt/`). No accompanying run — the next `RunWindow`/`RerunWindow`/
+    /// `BackfillRegion` step proves equivalence still holds with the
+    /// directory gone.
+    DropStateDir,
+    /// Replace the driving [`LinkCProject`](crate::link_c_harness::LinkCProject)
+    /// handle with a fresh clone of `models/` + `smelt.yml` at a new path,
+    /// carrying NO `.smelt/` (`docs/outcomes/20260816-state-residency/
+    /// phases/08-plan.md`). Distinct from [`ConformanceStep::DropStateDir`]:
+    /// the project's absolute path itself changes, catching anything keyed
+    /// on the old path that a same-path deletion cannot.
+    FreshClone,
+}
+
+/// A residency-testing operation, independent of [`ConformanceStep`]'s own
+/// generated-schedule shape (`docs/outcomes/20260816-state-residency/
+/// phases/08-plan.md` task 5) — the keyed pool has no step enum of its own
+/// (`KeyedSchedule` is a plain `Vec<KeyedRunWindow>`), so its residency
+/// injection is an index-keyed `BTreeMap<usize, StateResidencyOp>` rather
+/// than a dedicated `KeyedStep` variant. Single-owned here and shared by
+/// both the partition/append-only pool's [`ConformanceStep::DropStateDir`]/
+/// [`ConformanceStep::FreshClone`] handling and the keyed pool's map-driven
+/// injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateResidencyOp {
+    /// Delete `.smelt/` from the project directory in place.
+    DropStateDir,
+    /// Replace the project handle with a fresh clone at a new path, carrying
+    /// no `.smelt/`.
+    FreshClone,
 }
 
 /// Whether every window in `schedule` is mutually independent under
@@ -116,12 +148,19 @@ pub enum ConformanceStep {
 /// order it was processed"). A schedule containing an [`ConformanceStep::AppendLateRow`]
 /// step is NOT eligible: a late row's catch-up rerun has a genuine ordering
 /// dependency on its own prior insert, so arbitrarily reordering steps could
-/// run the catch-up before the row even lands.
+/// run the catch-up before the row even lands. A [`ConformanceStep::DropStateDir`]/
+/// [`ConformanceStep::FreshClone`] step is likewise NOT eligible: a residency
+/// step is order-dependent by construction (it must land after the run whose
+/// survival it is proving).
 pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
-    !schedule
-        .0
-        .iter()
-        .any(|s| matches!(s, ConformanceStep::AppendLateRow(_)))
+    !schedule.0.iter().any(|s| {
+        matches!(
+            s,
+            ConformanceStep::AppendLateRow(_)
+                | ConformanceStep::DropStateDir
+                | ConformanceStep::FreshClone
+        )
+    })
 }
 
 /// Reorder a [`is_permutable`] schedule's steps according to `order` (a
@@ -614,7 +653,9 @@ mod tests {
                     ConformanceStep::RerunWindow { .. }
                     | ConformanceStep::FullRefreshRun
                     | ConformanceStep::BackfillRegion { .. }
-                    | ConformanceStep::RewriteModel { .. } => {}
+                    | ConformanceStep::RewriteModel { .. }
+                    | ConformanceStep::DropStateDir
+                    | ConformanceStep::FreshClone => {}
                 }
             }
             assert!(
