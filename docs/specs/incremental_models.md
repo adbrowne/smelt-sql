@@ -1259,9 +1259,13 @@ The record is engine-resident, graded by algebra into two backend tables: additi
 identities in `_smelt_ledger`, idempotent frontier watermarks in `_smelt_frontier`. A region
 recompute's reset (delete every intersecting `(region, group)` row, insert the input state the
 recompute read) commits in the same backend transaction as the recompute's own write, on a
-backend with a ledger builder (DuckDB today). Never `.smelt/`-resident — that residency belongs
-to run-state observability, not this correctness structure (`run_state.md` §"Relationship to
-the reconciliation ledger"; `state.md` §"The residency rule").
+backend with a ledger builder (DuckDB today). The record is written per **recomputed batch
+region** — a run's window is partitioned into batches, and each batch's reset writes its own
+region's row inside that batch's own write transaction, rather than one row for the run's whole
+window; the region-intersecting delete keeps these finer per-batch rows collapsible under a
+later coarser reset. Never `.smelt/`-resident — that residency belongs to run-state
+observability, not this correctness structure (`run_state.md` §"Relationship to the
+reconciliation ledger"; `state.md` §"The residency rule").
 
 ### The graph layer
 
@@ -1796,6 +1800,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `scan_bounds.on_violation: warn` parse but are not consumed (every refusal is an Error);
   the cost model between two admissible techniques is unbuilt; `AppendOnly` sources get no
   `UpstreamMutation` cell. Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **The frontier reset is not yet fused with every write path that recomputes a region.** The
+  ordinary DuckDB `DeleteInsert` batch, on an already-existing target, fuses its frontier reset
+  with its own write in one transaction. Three sibling write paths still write their frontier
+  record after the model write completes, in a separate (non-fused) transaction: the first-run
+  `CREATE TABLE AS` bootstrap materialization (no existing target to fuse against), the
+  delta-restricted recompute, and the column-scoped-merge / in-place-update techniques. Tracked:
+  `docs/outcomes/20260816-state-residency/outcome.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.

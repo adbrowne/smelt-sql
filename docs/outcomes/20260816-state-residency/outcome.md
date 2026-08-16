@@ -71,13 +71,30 @@ this outcome runs first in the programme.
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
 | 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
-| 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | planned |
+| 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
 | 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
 | 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
 
+- **2026-08-16 (phase 7 implement).** Phase 7 landed: `maintenance_driver::
+  execute_region_recompute_with_frontier_reset` fuses the ordinary DuckDB `DeleteInsert`
+  batch's write with its frontier reset in one transaction (`Backend::
+  execute_write_and_reset_frontier`), reusing the SAME `StatementGroup` `emit_delete_insert`
+  already built for the run's report; `execute.rs` dispatches through it whenever the target
+  already exists, falls back to `execute_model_incremental` for the bootstrap case, and a
+  `fused_batch_writes` counter skips the after-the-loop whole-range record only when every
+  batch in the run fused. Spec delta: `incremental_models.md` §"The frontier record
+  (reconciliation ledger)" now states per-recomputed-batch-region writing, and a new §Known
+  Divergences bullet names the three still-unfused paths (bootstrap, delta-restricted
+  recompute, column-scoped-merge/in-place-update). Three new tests in
+  `frontier_residency.rs` prove per-batch rows, atomic rollback of a failed fused batch, and
+  the retained unfused bootstrap path. All gates green, including the full `verify-phase.sh`
+  sweep; `.claude/hardening-baseline.txt`'s `smelt-runtime expect` count moved 10→11 (one more
+  infallible `.expect()`, same pattern as the existing `column_scoped_cell` one nearby). See
+  `phases/07-summary.md` "For the next planner" for row 8's now-available per-batch-fused
+  assertion opportunity.
 - **2026-08-16 (phase 7 plan).** No reshape (rows 8–10 stand). Planning established the precise
   shape of phase 4's flagged gap: the DuckDB `execute_write_and_reset_frontier` override is
   *already* a real single transaction and its rollback behaviour is already test-covered — the only

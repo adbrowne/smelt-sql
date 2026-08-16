@@ -3358,6 +3358,57 @@ pub async fn execute_delete_insert_with_delta_restriction(
     Ok(group)
 }
 
+/// Fuse an ordinary DuckDB `DeleteInsert` region recompute's own write with
+/// the frontier reset it must also record, in ONE backend transaction
+/// (state-residency phase 7, `docs/specs/incremental_models.md` §"The
+/// frontier record (reconciliation ledger)"). `group` is the SAME
+/// [`StatementGroup`] the caller already built via [`emit_delete_insert`]
+/// for its own run report — statement-emission single ownership means this
+/// function never authors DELETE/INSERT text of its own, only the
+/// frontier's ensure/reset/insert SQL from `smelt_state::ddl_duckdb`, which
+/// it hands to [`Backend::execute_write_and_reset_frontier`] alongside
+/// `group`.
+///
+/// One frontier row per call — one per recomputed batch region, watermarked
+/// to `region_end` — rather than the whole-run-range record the after-the-
+/// loop path writes; `generate_frontier_reset_delete_sql`'s region-
+/// intersecting `DELETE` keeps these finer per-batch rows collapsible under
+/// a later coarser reset. DuckDB-only: `Backend::execute_write_and_reset_
+/// frontier`'s default (non-atomic) fallback only exists for a dialect
+/// with no ledger builder, which this call site (`execute.rs`'s ordinary
+/// DuckDB `DeleteInsert` branch) never reaches.
+pub async fn execute_region_recompute_with_frontier_reset(
+    backend: &dyn Backend,
+    schema: &str,
+    group: &StatementGroup,
+    model_name: &str,
+    region_start: &str,
+    region_end: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> std::result::Result<(), BackendError> {
+    let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+    let reset_delete_sql = smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+        schema,
+        model_name,
+        "{*}",
+        region_start,
+        region_end,
+    );
+    let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+        schema,
+        model_name,
+        "{*}",
+        "self",
+        region_end,
+        region_start,
+        region_end,
+    );
+    crate::execute::retry_backend_call(retry, || {
+        backend.execute_write_and_reset_frontier(&ensure_sql, group, &reset_delete_sql, &insert_sql)
+    })
+    .await
+}
+
 /// The facts [`build_delete_insert_group_dispatched`]/
 /// [`execute_delete_insert_with_delta_restriction`] need to attempt T3 delta
 /// restriction for a model-edge-sourced creation cell, resolved by

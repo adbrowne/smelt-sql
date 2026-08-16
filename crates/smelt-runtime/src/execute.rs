@@ -2903,6 +2903,15 @@ pub async fn execute_project(
 
                 let mut used_column_scoped_merge = false;
 
+                // Count of batches this model's loop wrote via the fused
+                // region-recompute + frontier-reset path
+                // (`maintenance_driver::execute_region_recompute_with_
+                // frontier_reset`) — when every batch fused, the after-the-
+                // loop whole-range frontier record below is skipped rather
+                // than writing a redundant coarser row on top of the
+                // per-batch ones this loop already recorded.
+                let mut fused_batch_writes: usize = 0;
+
                 // Which physical corner (if any) THIS run's batches should
                 // dispatch through instead of the default
                 // `execute_model_incremental` (DELETE+INSERT) call — decided
@@ -3480,32 +3489,41 @@ pub async fn execute_project(
                             preview: None,
                         }
                     } else {
-                        // Observability: report the region DELETE+INSERT
-                        // group this batch is about to execute — the same
-                        // emitter call `Backend::delete_and_insert_transactional`
-                        // makes to build what it actually executes
+                        // Observability + fused-write eligibility: build the
+                        // region DELETE+INSERT group this batch is about to
+                        // execute — the same emitter call
+                        // `Backend::delete_and_insert_transactional` makes to
+                        // build what it actually executes
                         // (`docs/specs/incremental_models.md` §"Statement
                         // emission (single owner)"). Pure function, same
                         // inputs, so the reported text cannot drift from the
-                        // executed text.
+                        // executed text. On a DuckDB `DeleteInsert` target
+                        // that already exists, this SAME group is also what
+                        // gets executed below, fused with the frontier reset
+                        // in one transaction
+                        // (`maintenance_driver::execute_region_recompute_
+                        // with_frontier_reset`) — never rebuilt.
                         //
                         // `schema.table` is the correct fully-qualified name
                         // for every dialect this runtime path is exercised
                         // against today (DuckDB); a catalog-qualifying
                         // backend (Spark) would need its own qualified name
-                        // here, so the report is scoped to DuckDB until a
-                        // generic `Backend::qualified_table_name` exists —
-                        // Spark's *executed* text is still correct (its own
-                        // `delete_and_insert_transactional` override builds
-                        // it), only this runtime-side report is narrowed.
-                        if backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                        // here, so the report/fusion is scoped to DuckDB
+                        // until a generic `Backend::qualified_table_name`
+                        // exists — Spark's *executed* text is still correct
+                        // (its own `delete_and_insert_transactional`
+                        // override builds it), only this runtime-side path
+                        // is narrowed.
+                        let can_fuse_frontier_reset = backend.dialect()
+                            == smelt_backend::SqlDialect::DuckDB
                             && matches!(
                                 resolved_strategy,
                                 smelt_backend::IncrementalStrategy::DeleteInsert
-                            )
-                        {
-                            let table_name =
-                                format!("{schema}.{}", plan.model_file.db_name_owned());
+                            );
+
+                        let db_name = plan.model_file.db_name_owned();
+                        let ordinary_group = if can_fuse_frontier_reset {
+                            let table_name = format!("{schema}.{db_name}");
                             let region = smelt_logical::maintenance::emit::Region {
                                 start: format!("'{}'", partition.start.replace('\'', "''")),
                                 end: format!("'{}'", partition.end.replace('\'', "''")),
@@ -3529,27 +3547,69 @@ pub async fn execute_project(
                                 Some(&chunk),
                                 &group,
                             );
-                        }
-
-                        let strategy = MaterializationStrategy::Incremental {
-                            partition,
-                            strategy: resolved_strategy.clone(),
-                            unique_key: inc_plan.config.unique_key.clone(),
+                            Some(group)
+                        } else {
+                            None
                         };
 
-                        let db_name = plan.model_file.db_name_owned();
-                        retry_statement_group(request, run_id, &plan.name, reporter, || {
-                            backend.execute_model_incremental(
+                        // Fusion is licensed only when the target already
+                        // exists — an absent target is the bootstrap
+                        // `CREATE TABLE AS` case, which
+                        // `execute_model_incremental` still owns below and
+                        // whose frontier record stays the after-the-loop
+                        // whole-range write (`docs/specs/incremental_models.md`
+                        // §Known Divergences).
+                        let fuse_this_batch = can_fuse_frontier_reset
+                            && backend
+                                .table_exists(schema, &db_name)
+                                .await
+                                .unwrap_or(false);
+
+                        if fuse_this_batch {
+                            let group = ordinary_group
+                                .expect("built above whenever can_fuse_frontier_reset");
+                            crate::maintenance_driver::execute_region_recompute_with_frontier_reset(
+                                backend,
                                 schema,
-                                &db_name,
-                                &compiled.sql,
-                                Materialization::Table,
-                                strategy.clone(),
-                                false,
+                                &group,
+                                &plan.name,
+                                &partition.start,
+                                &partition.end,
+                                &retry_policy,
                             )
-                        })
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            fused_batch_writes += 1;
+                            let row_count = backend
+                                .get_row_count(schema, &db_name)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            smelt_backend::ExecutionResult {
+                                model_name: plan.name.clone(),
+                                duration: batch_start_time.elapsed(),
+                                row_count,
+                                preview: None,
+                            }
+                        } else {
+                            let strategy = MaterializationStrategy::Incremental {
+                                partition,
+                                strategy: resolved_strategy.clone(),
+                                unique_key: inc_plan.config.unique_key.clone(),
+                            };
+
+                            retry_statement_group(request, run_id, &plan.name, reporter, || {
+                                backend.execute_model_incremental(
+                                    schema,
+                                    &db_name,
+                                    &compiled.sql,
+                                    Materialization::Table,
+                                    strategy.clone(),
+                                    false,
+                                )
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
                     };
 
                     total_rows += exec_result.row_count;
@@ -3700,14 +3760,28 @@ pub async fn execute_project(
                     }
                 }
 
-                // Frontier record (reconciliation ledger, idempotent
-                // grading): this batch loop performed a region recompute of
-                // `[start_str, end_str)` (DELETE the write window, INSERT
-                // its recompute — write window = output window; or, for a
-                // column-scoped MERGE cell, MERGE that SAME window's
-                // freshly-recomputed rows in by `unique_key` — the row
-                // VALUES are still a from-scratch recompute of the window,
-                // only the physical write op differs).
+                // Whole-range frontier record (reconciliation ledger,
+                // idempotent grading) — the after-the-loop fallback for
+                // whichever batches did NOT already fuse their own frontier
+                // reset into their write transaction above
+                // (`maintenance_driver::execute_region_recompute_with_
+                // frontier_reset`, the ordinary DuckDB `DeleteInsert` branch
+                // on an already-existing target). `fused_batch_writes ==
+                // inc_plan.batches.len()` means every batch this loop ran
+                // already recorded its own per-batch-region row there, so
+                // this coarser whole-`[start_str, end_str)` write is skipped
+                // entirely rather than laying a redundant record on top.
+                // Still runs, unfused, for: the bootstrap `CREATE TABLE AS`
+                // first materialization (no existing target to fuse
+                // against), the delta-restricted recompute
+                // (`execute_delete_insert_with_delta_restriction`), and the
+                // column-scoped-merge / in-place-update techniques
+                // (`docs/specs/incremental_models.md` §Known Divergences) —
+                // each of those already committed its own write above via a
+                // separate call, so this reset's own delete+insert commits
+                // atomically with itself, just not fused with that earlier
+                // write.
+                //
                 // `docs/specs/incremental_models.md` §"The frontier record
                 // (reconciliation ledger)": a region recompute resets every
                 // intersecting entry to exactly the input it read. This
@@ -3723,13 +3797,11 @@ pub async fn execute_project(
                 //
                 // Engine-resident (`_smelt_frontier`), DuckDB-only — no
                 // frontier builder exists for another dialect yet (a Spark
-                // builder is out of scope for this outcome). `write_group`
-                // is empty: this batch's own model write already committed
-                // above via `execute_model_incremental`/the column-scoped
-                // MERGE dispatch, so the reset's own delete+insert commit
-                // atomically together, just not fused with that earlier
-                // write.
-                if !start_str.is_empty() && !end_str.is_empty() {
+                // builder is out of scope for this outcome).
+                if !start_str.is_empty()
+                    && !end_str.is_empty()
+                    && fused_batch_writes < inc_plan.batches.len()
+                {
                     if backend.dialect() == smelt_backend::SqlDialect::DuckDB {
                         let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
                         let reset_delete_sql =
