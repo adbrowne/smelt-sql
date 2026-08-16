@@ -70,6 +70,46 @@ gate *coverage*, not gate *tier*: Spark has a nightly CI job and BigQuery would 
 BigQuery regressions surface only when the suite is run by hand. This asymmetry belongs in
 `multi_backend.md` §Known Divergences so the supported-surface statement stays honest.
 
+## Decision: credentials are least-privilege, encrypted at rest, and short-lived
+
+Development happens on a single-user machine where AI coding sessions run as the developer's own
+UID. Any file the developer can read, such a session can read, so "hide the credential" is not
+an achievable goal. The design instead layers two real boundaries under two speed bumps.
+
+**Blast radius (real).** A dedicated GCP project, and a service account holding only
+`roles/bigquery.jobUser` at project scope plus dataset-scoped `WRITER` on the single test
+dataset. Full compromise then means writing to one test dataset and running queries billed to
+one capped project.
+
+*Rejected: user application-default credentials.* `gcloud auth application-default login` is the
+conventional path and the worst option available here — the resulting token carries the
+developer's entire Google Cloud identity across every project they can reach. A leak escalates
+from "one test dataset" to "everything".
+
+**Human-in-the-loop (real).** The service-account key is encrypted at rest with a passphrase
+(gpg symmetric AES256, openssl `-pbkdf2` fallback). `scripts/bigquery-auth.sh` decrypts to a
+temporary file that is shredded on exit, mints a one-hour OAuth access token, and writes it
+mode-`600` with an expiry stamp that `scripts/bigquery-env.sh` checks. Outside that window no
+usable credential exists, and minting one requires a human to type the passphrase — which an
+agent cannot do. The plaintext key never persists.
+
+**Non-default path (speed bump).** The gcloud configuration lives in
+`~/.config/gcloud-smelt-bq` via `CLOUDSDK_CONFIG`, never `~/.config/gcloud`. The path every
+Google client library probes stays empty, so nothing discovers these credentials ambiently.
+
+**Harness deny rules (speed bump).** `.claude/settings.json` denies `gcloud`, `bq`, the two
+BigQuery scripts, and reads of the credential directory.
+
+The adapter authenticates from `SMELT_BQ_ACCESS_TOKEN` explicitly and never falls back to
+application-default credentials. That is a security property rather than an implementation
+detail: it makes ambient credentials unusable by construction, so the exported short-lived
+token is the only route to GCP.
+
+Two accepted consequences. Within the one-hour window an agent session *can* run the BigQuery
+suite — chosen deliberately over shell-only export, which would isolate more strictly but
+prevent agents from running the tests at all. And a GCP budget **alerts rather than hard-stops**,
+so the budget cap bounds surprise, not spend.
+
 ## Decision: ordering is walking-skeleton-first
 
 The recommended order gets one trivial model materializing in a real BigQuery dataset before
