@@ -74,11 +74,26 @@ this outcome runs first in the programme.
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
 | 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | done |
-| 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
-| 11 | Close-out: full standing-gate sweep, outcome status flip | pending |
+| 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | planned |
+| 11 | Close-out: full standing-gate sweep (including one live-Spark execution of the `maintenance_conformance_spark` edits phase 9 could only compile-check, or a recorded reason it was not possible), criteria-vs-summaries judgment, outcome status flip | pending |
 
 ## Decision log
 
+- **2026-08-16 (phase 10 plan).** Minimal reshape: row 11 now explicitly carries the live-Spark
+  execution of phase 9's `maintenance_conformance_spark` edits (compile-checked only in that
+  phase's sandbox) or a recorded reason it could not run — leaving it implicit would let the
+  close-out sweep call criterion 6 green over an unexecuted suite. Row 10 stays a docs+spec
+  phase with no runtime behaviour change; its three doc-sync tests exist so the sweep is a
+  ratchet rather than one-shot prose. Also noted for row 11's judgment: **row 1 is marked
+  `blocked` but its content actually landed** — all five spec deltas are committed, and the
+  blocker (the pre-existing `contract_lattice_spec` heading-lookup regression) was fixed inside
+  phase 2 per option (b). Row 11 should judge criterion 4's spec half against phase 1's
+  summary, not against the row's `blocked` status.
+- **2026-08-16 (phase 10 plan).** The docs sweep narrows rather than deletes two bullets: the
+  DuckDB-only ledger-substrate bullet (`state.md`, `incremental_models.md`) survives as a
+  dialect-coverage gap even though its "fails loudly" half is closed, and per phase 9's summary
+  the two remaining `StateAvailability::all()` call sites are documented as intentional, not as
+  residue — recording them as a gap would misdescribe deliberate design.
 - **2026-08-16 (phase 9 plan).** Reshaped the tail into three rows: inserted a new row 9 for
   backend-aware downgrade visibility, pushing the docs/Known-Divergences sweep to 10 and
   close-out to 11. Criterion 3 requires `MaintenanceStateDowngraded` be "visible in `smelt
