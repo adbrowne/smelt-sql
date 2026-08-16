@@ -73,10 +73,30 @@ this outcome runs first in the programme.
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
-| 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
-| 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
+| 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | planned |
+| 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
+| 11 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
+
+- **2026-08-16 (phase 9 plan).** Reshaped the tail into three rows: inserted a new row 9 for
+  backend-aware downgrade visibility, pushing the docs/Known-Divergences sweep to 10 and
+  close-out to 11. Criterion 3 requires `MaintenanceStateDowngraded` be "visible in `smelt
+  explain` and diagnostics", and phase 5's summary flagged that it is not: `smelt explain`'s own
+  derivation (`crates/smelt-runtime/src/maintenance_driver.rs:3465`,
+  `:3484`) passes `StateAvailability::all()`, so a Spark-targeted project — the only project
+  that downgrades at all today — shows no downgrade line, and `build_maintenance_plan_json`
+  never carries `state_downgrades` at all. That is criterion-3 work, so it stays inside the
+  outcome as a row rather than being swept under row 10's Known Divergences. It runs *before*
+  the sweep because the sweep's wording for the availability bullet depends on whether this
+  gap is closed.
+- **2026-08-16 (phase 9 plan).** The `all()`-passing call sites split into two classes and only
+  one is in scope: the two report/graph resolvers `smelt explain` reaches have a target dialect
+  in the caller's hand already (`commands/explain.rs` resolves `dialect` from `config.targets`),
+  while `propagation.rs:812` and the four `maintenance_driver` resolvers at `:570`/`:796`/
+  `:1030`/`:1156` are reached from paths that may not know their target. Phase 9 threads real
+  availability wherever a target is genuinely reachable and leaves a narrowed Known Divergences
+  bullet naming any residue, rather than inventing a dialect at a call site that has none.
 
 - **2026-08-16 (phase 8 implement).** Phase 8 landed: `ConformanceStep::DropStateDir`/
   `FreshClone` (excluded from `is_permutable`) plus the shared `StateResidencyOp` enum;
