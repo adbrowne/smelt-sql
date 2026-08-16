@@ -68,7 +68,7 @@ structure's format and semantics; this table owns only its class.
 | Fingerprint sidecar | correctness | backend table (digest refresh in the maintenance run) | `sources.md` §"The fingerprint sidecar" |
 | Run manifests + run reports | observability | `.smelt/targets/<t>/runs/`, `reports/` | `run_state.md` |
 | Interval ledger | observability | `.smelt/targets/<t>/intervals.json` | `run_state.md` |
-| Landed-delta record | observability | `.smelt/targets/<t>/landed_deltas.json` | `run_state.md` |
+| Landed-delta record (includes the per-source watermark field) | observability | `.smelt/targets/<t>/landed_deltas.json` | `run_state.md` §"Per-source watermark" |
 | Deployed-schema snapshots | observability | `.smelt/targets/<t>/schemas/` | `run_state.md`, `schema_evolution.md` |
 | Snapshot / environment store | observability | `.smelt/targets/<t>/snapshots.json` | `run_state.md`, `virtual_environments.md` |
 | Source postures | observability | `.smelt/` (per target) | `sources.md` |

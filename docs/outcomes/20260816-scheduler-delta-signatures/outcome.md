@@ -62,7 +62,7 @@ run shape.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | planned |
+| 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | pending |
 | 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals | pending |
 | 4 | Live observed-delta consumption: `--since-upstream` reads the recorded delta table; settle-bound × observed-delta "delta empty" leg | pending |
@@ -83,6 +83,16 @@ run shape.
   watermark is a field on the existing observability-classified landed-delta family rather
   than a new correctness-classified state family (which would contradict `state.md`'s
   optionality rule).
+- 2026-08-16 (phase 1 implemented): spec deltas landed in `incremental_models.md` (new
+  §"Dispatch — from propagated components to run units", value-carrying "Keyed dirt-sets and
+  the narrowed refusal", three §Design paragraphs, CLI/run-flags wording, two reworded Known
+  Divergences bullets) and `run_state.md`/`state.md` (new §"Per-source watermark", inventory
+  row updated). One incidental edit to `incremental_shapes.md` to distinguish the new
+  propagation watermark from the rejected "watermark store" design paragraphs it would
+  otherwise appear to contradict. No production code touched, per plan. Andrew's review of
+  `phases/01-plan.md` is still pending/parallel to this implementation, per the outcome's
+  operator note — phases 2+ implement exactly what this phase pinned, so a requested change
+  here should land as a follow-up spec amendment before phase 2 proceeds far.
 
 ## Blocked
 

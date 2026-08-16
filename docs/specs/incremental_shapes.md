@@ -894,7 +894,11 @@ observable (§"Observing the per-source clamp") as the deliberate counterpart.
 (`docs/research/20260521-incremental-as-planner-rule.md`.)
 
 **smelt does not own state — scoped to the partition grain.** Owning a watermark store was
-rejected: it duplicates engine state and opens a sync-correctness window. The key grain's
+rejected: it duplicates engine state and opens a sync-correctness window. This is distinct
+from the per-source *propagation* watermark (`run_state.md` §"Per-source watermark") — an
+observability record of what forward propagation has already consumed, not a computational
+substitute for backend transaction state; it is opt-in, degrades to full recompute in its
+absence, and names no engine concept this paragraph's rejection covers. The key grain's
 transactional merge ledger is not a counterexample but the doctrine's model correctness
 structure (`state.md` §"The residency rule") — backend-resident, written in the same
 transaction as the merge it describes, so it cannot drift from the state it records. Consequence: a backend may only select a physical strategy that
