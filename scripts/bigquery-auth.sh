@@ -27,7 +27,10 @@ command -v gcloud >/dev/null 2>&1 || { echo "gcloud not found on PATH" >&2; exit
 _plain="$(mktemp)"
 trap 'command -v shred >/dev/null 2>&1 && shred -u "$_plain" 2>/dev/null || rm -f "$_plain"' EXIT
 
-gpg --quiet --decrypt --output "$_plain" "$KEY_ENC"
+# --yes is required: mktemp already created the file, and gpg otherwise stops to
+# ask about overwriting it. NOT --batch, which would suppress the passphrase
+# prompt this deliberately depends on.
+gpg --quiet --yes --decrypt --output "$_plain" "$KEY_ENC"
 
 gcloud auth activate-service-account --key-file="$_plain" --quiet >/dev/null 2>&1
 

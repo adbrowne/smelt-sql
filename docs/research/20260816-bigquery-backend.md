@@ -240,6 +240,14 @@ Scripts, in the order they run: `bigquery-login.sh` (browser OAuth, human),
 including a negative test that writing outside the granted dataset is refused.
 `bigquery-setup.sh` remains the single-command path for a fresh machine.
 
+**Measured round-trip cost** (2026-08-16, `US` multi-region, from Melbourne):
+`SELECT 1` **745 ms**; `CREATE OR REPLACE TABLE … AS SELECT` **1,945 ms**. So a
+statement costs roughly 0.7–2 s against BigQuery, versus sub-millisecond on in-process
+DuckDB — three orders of magnitude. A generative conformance case that drives, say, four
+run steps of three statements each lands near 20 s of wall-clock, putting a hundred-case
+suite at roughly half an hour. That is the number behind the reduced case count phase 7
+budgets for, and it argues for concurrency across cases rather than fewer cases.
+
 **The budget alert is not provisioned.** `gcloud billing budgets` authenticates
 through Application Default Credentials — the full-identity credential this design
 deliberately refuses to create — so automating it would have undone the credential

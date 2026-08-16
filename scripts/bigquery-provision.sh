@@ -42,6 +42,19 @@ else
      "${PROJECT}:${DATASET}"
 fi
 
+say "Control dataset ${DATASET}_notgranted (negative-test target)"
+# Exists so the least-privilege check has something real to be refused FROM.
+# Querying a non-existent dataset returns "not found" for every principal
+# including owners, which proves nothing about the grant.
+if "$BQ" --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}_notgranted" >/dev/null 2>&1; then
+  echo "already exists"
+else
+  "$BQ" --project_id="$PROJECT" mk --dataset \
+     --location="$LOCATION" \
+     --description="control dataset: the test service account must NOT have access" \
+     "${PROJECT}:${DATASET}_notgranted"
+fi
+
 say "Service account $SA"
 if "$GCLOUD" iam service-accounts describe "$SA" --project="$PROJECT" >/dev/null 2>&1; then
   echo "already exists"
