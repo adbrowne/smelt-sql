@@ -69,12 +69,43 @@ this outcome runs first in the programme.
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
-| 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
-| 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
-| 7 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` | pending |
-| 8 | Close-out: full standing-gate sweep, outcome status flip | pending |
+| 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | planned |
+| 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | pending |
+| 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | pending |
+| 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
+| 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
+| 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
+
+- **2026-08-16 (phase 5 plan).** Reshaped the tail into six rows. (a) Split the old row 5 in two:
+  the availability-resolution downgrade (advisory, plan-derivation, `MaintenanceStateDowngraded`)
+  and the declared-contract refusal (fail-loud, validation, `DeclaredContractRequiresState`) have
+  different oracles and different code paths — one rewrites a derived cell, the other rejects a
+  frontmatter declaration — so they get a row each. (b) Added a row for phase 4's flagged
+  not-achieved item: `run_state.md`/`incremental_models.md` already say the frontier reset
+  "commits in the same backend transaction as the recompute's own write", and today it is only
+  atomic with itself. That is spec-vs-code drift against criteria 2 and 6, so it stays inside the
+  outcome as row 7 rather than leaving as a fast-follow. (c) Widened the conformance leg (row 8)
+  to idempotent-graded region-recompute models per phase 4's summary, and folded the stale
+  "runtime ignores `state.mode`" bullet into row 9's sweep.
+- **2026-08-16 (phase 5 plan).** Availability is resolved **inside**
+  `smelt_db::queries::maintenance::derive_model_maintenance_plan(_with_edges)` rather than at each
+  of the ~8 `smelt-runtime` call sites: the resolved plan is then what every consumer already
+  reads (lowering included), while `MaintenancePlanResult` keeps the ideal plan as its own field —
+  which is exactly what `state.md` §"The degradation contract" demands ("the ideal plan must exist
+  as a derived object even when it will not run"; early pruning violates the spec). A caller that
+  does not know its target passes `StateAvailability::all()`, whose behaviour is byte-identical to
+  today's.
+- **2026-08-16 (phase 5 plan).** The keyed fold's downgrade target is chosen at derivation, not
+  guessed at resolution: the `Technique::KeyedFold` push site calls the existing
+  `repair::admit_per_group_recompute` with inputs already in scope and records the result as the
+  cell's `recompute_fallback`. No admissible fallback means a fail-loud
+  `Refusal::NoAdmissibleTechnique` naming the missing structure — the spec licenses a downgrade
+  only to a recompute-family member that preserves the equivalence invariant, never to "run the
+  fold anyway". The existing silent `ColumnScopedMerge` → region-recompute drop in
+  `choice.rs::resolve_cell_choice` is a *backend-capability* drop, not a state-structure one, and
+  is deliberately left as-is: `MaintenanceStateDowngraded` names a missing structure.
 
 - **2026-08-16 (phase 4 implement).** Phase 4 landed: `_smelt_frontier` (new table) plus
   `Backend::execute_write_and_reset_frontier` (DuckDB-transactional override) replace
