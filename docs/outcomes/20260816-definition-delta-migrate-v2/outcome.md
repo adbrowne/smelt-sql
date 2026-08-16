@@ -65,13 +65,14 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
-| 2 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
-| 3 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
-| 4 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
-| 5 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
-| 6 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
-| 7 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
-| 8 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
+| 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | planned |
+| 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | pending |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
+| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
+| 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
+| 7 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
+| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
+| 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -101,6 +102,17 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   alias walk — real for self-joins/multi-alias upstreams is deferred (see phase 1 summary "For
   the next planner"). `MigrateArgs` dropped the plan's `--database` field: this command never
   opens a backend connection, so the flag would be dead until `--apply` (phase 2) needs it.
+
+- **2026-08-16 (phase 2 planning). Reshape: old phase 2 split in two; old 3–8 renumbered 4–9.**
+  The single row bundled the *gate* (pure plan hash, approval persistence, `--json`, exit codes,
+  drift refusal) with *execution* (backend connection, per-technique statement execution,
+  deployed-snapshot re-record, resume). The gate is fully testable without a write path and the
+  execution half needs a real backend and its own equivalence argument, so they are now phase 2
+  and phase 3. Nothing left the outcome — success criterion 2 is met only when both land. Also
+  decided for phase 2: exit code `3` becomes a new normative CLI code ("a non-trivial migration
+  is pending and unapproved"), and `plan_hash` is a pure function in `smelt-logical` over the
+  plan data *plus* its `BackbuildInputs` facts (per the inherited plan-hash scope), which
+  requires `TechniqueCandidate` to carry its statement text rather than only a count.
 
 ## Blocked
 
