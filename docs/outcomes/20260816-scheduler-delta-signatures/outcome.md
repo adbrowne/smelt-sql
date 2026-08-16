@@ -66,7 +66,7 @@ run shape.
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
-| 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | pending |
+| 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | planned |
 | 6 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
 | 7 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 8 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
@@ -178,6 +178,21 @@ run shape.
   (both the new unit test and the new e2e fixture) required a COALESCE/composite-grain SQL
   shape rather than a plain equi-join — `derive_affected_keys`'s provenance walk traces literal
   SELECT-list lineage, not join-predicate equality. No reshape of the phase table.
+
+- 2026-08-16 (phase 5 planning): no reshape — phase 4's summary explicitly confirms row 5's scope
+  is unchanged by the coverage gate, and the `EventSink` gotcha it flagged is already recorded
+  against row 8. Two things pinned so the implementer does not have to rediscover them. (1) The
+  union rule the phase-4 planning entry pinned needs a *spec* home before it is wired: the
+  restriction-composition rule is user-visible correctness and is currently stated nowhere in
+  `incremental_models.md`, so the phase opens with a §"Dispatch — from propagated components to run
+  units" paragraph rather than encoding the rule only in code comments. (2) The union is computed
+  in `resolve_key_addressed_affected_keys` on the *inputs* to
+  `emit_key_addressed_affected_keys_select`, never by a second statement author — set arithmetic on
+  key values is not statement authoring, so maintenance-plan purity is upheld with the emitter
+  still the single owner of the affected-keys SELECT. Also noted: with no live keyed seeds until
+  row 6, the CLI's `--since-upstream` leg is a wired pass-through whose resolved-value set is
+  empty in practice today, so the conversion is tested directly against a seeded plan rather than
+  through the CLI.
 
 ## Blocked
 
