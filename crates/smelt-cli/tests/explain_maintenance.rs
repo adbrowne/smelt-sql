@@ -791,6 +791,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         state_columns: vec![],
         own_output_delta: vec![],
         run_shape: None,
+        column_determinism: Vec::new(),
     };
     let report = build_maintenance_plan_report(
         "non_repair_fixture",
@@ -909,6 +910,7 @@ fn explain_prints_a_downgraded_cell_with_both_techniques() {
         state_columns: vec![],
         own_output_delta: vec![],
         run_shape: None,
+        column_determinism: Vec::new(),
     };
 
     let report = build_maintenance_plan_report(
@@ -1087,6 +1089,8 @@ fn explain_json_carries_state_downgrades() {
             None,
             &result.state_downgrades,
             None,
+            vec![],
+            vec![],
         );
 
         if expect_downgrade {
@@ -1386,4 +1390,201 @@ fn explain_key_addressed_cell_prints_upstream_sidecar_discovery() {
         "expected the upstream-sidecar discovery mechanism, not a declared-source posture: \
          {report}"
     );
+}
+
+// =============================================================================
+// Per-column guarantee ledger + pre-execution refusal surfacing (phase 10 of
+// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
+// `docs/specs/incremental_models.md` §Surface "CLI").
+// =============================================================================
+
+/// `daily_events` (`grain: partition`, `examples/timeseries`) must print a
+/// `Guarantees:` block with one row per output column, each carrying the
+/// column's group, its effective contract, and a settle bound — never the
+/// bare `{:?}` of the underlying enums.
+#[test]
+fn explain_prints_per_column_guarantee_ledger() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+
+    assert!(
+        report.contains("Guarantees:"),
+        "expected a Guarantees: block: {report}"
+    );
+    let guarantees_start = report.find("Guarantees:").unwrap();
+    let guarantees_block = &report[guarantees_start..];
+    assert!(
+        guarantees_block.contains("(group ") && guarantees_block.contains("settle:"),
+        "expected per-column rows naming the owning group and a settle bound: {report}"
+    );
+}
+
+/// A refusing model's refusal block must print immediately after the
+/// delta-signature headline and before `Maintenance plan:` — an operator
+/// sees what will be refused before the plan body, not buried at the bottom.
+#[test]
+fn explain_surfaces_refusals_before_the_plan() {
+    use std::collections::BTreeSet;
+
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::analysis::output_delta::OutputDelta;
+    use smelt_logical::maintenance::{ColumnGroup, MaintenancePlan, Refusal};
+
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![],
+            refusals: vec![Refusal::ScanUnbounded {
+                source: "sources.raw.events".to_string(),
+                why: "no clocked column".to_string(),
+            }],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
+            cells: vec![],
+            refusals: vec![],
+            key_locality: None,
+        },
+        state_downgrades: vec![],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["amount".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+        state_columns: vec![],
+        own_output_delta: vec![(
+            "{amount}".to_string(),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()],
+            },
+        )],
+        run_shape: None,
+        column_determinism: Vec::new(),
+    };
+    let report = build_maintenance_plan_report(
+        "refusing_fixture",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    let headline_idx = report
+        .lines()
+        .position(|l| l.starts_with("emits:"))
+        .expect("headline present");
+    let refusals_idx = report
+        .lines()
+        .position(|l| l.starts_with("Refusals ("))
+        .expect("refusals block present");
+    let plan_idx = report
+        .lines()
+        .position(|l| l.starts_with("Maintenance plan:"))
+        .expect("Maintenance plan: line present");
+    assert!(
+        headline_idx < refusals_idx && refusals_idx < plan_idx,
+        "expected headline < refusals < Maintenance plan: {report}"
+    );
+    assert!(
+        report.contains(
+            "MaintenanceScanUnbounded: scan over 'sources.raw.events' cannot be \
+                          partition-bounded: no clocked column"
+        ),
+        "expected the rendered refusal, never `{{:?}}` of the enum: {report}"
+    );
+}
+
+/// `--json`'s `guarantees`/`refusals` arrays must carry the SAME field
+/// values the text report's `Guarantees:`/`Refusals:` blocks render — both
+/// read `smelt_logical::maintenance::ledger`'s single-owner derivation.
+#[test]
+fn explain_json_guarantees_match_text() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    let project_dir = find_project_root(&project_dir).expect("find project root");
+    let config = Config::load(&project_dir).expect("load smelt.yml");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, None);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), "daily_events")
+        .expect("resolve daily_events");
+    let model = models
+        .iter()
+        .find(|m| m.canonical_path() == canonical)
+        .expect("daily_events discovered");
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+    let dialect_name = dialect_name_for(&config, &canonical, model.metadata.as_deref());
+    let result =
+        smelt_db::maintenance_plan_report(&db, ws, file, dialect_name).expect("plan result");
+
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let graph = DependencyGraph::build(models.clone(), None).expect("build graph");
+    let upstream = graph.get_upstream(&canonical);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
+
+    let report = build_maintenance_plan_report(
+        &canonical,
+        &result,
+        &own_contract,
+        &edges,
+        &[],
+        None,
+        contract_cfg,
+        &source_infos,
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    let guarantees = smelt_cli::explain::explain_guarantees_json(&result, contract_cfg);
+    assert!(
+        !guarantees.is_empty(),
+        "expected at least one guarantee row"
+    );
+    for g in &guarantees {
+        let label = g
+            .contract
+            .clone()
+            .or_else(|| g.determinism_exemption.clone())
+            .expect("exactly one of contract/determinism_exemption is set");
+        let expected_line = format!(
+            "  - {} (group {}): {}, settle: {}",
+            g.column, g.group, label, g.settle
+        );
+        assert!(
+            report.contains(&expected_line),
+            "expected text line {expected_line:?} in report: {report}"
+        );
+    }
+
+    let refusals = smelt_cli::explain::explain_refusals_json(&result);
+    assert!(refusals.is_empty(), "daily_events is admitted, no refusals");
 }

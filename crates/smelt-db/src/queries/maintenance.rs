@@ -102,6 +102,16 @@ pub struct MaintenancePlanResult {
     /// cumulative classification failed). Populated only by
     /// `smelt_db::maintenance_plan_report`, mirroring `own_output_delta`.
     pub run_shape: Option<smelt_logical::maintenance::signature::KeyedRunShape>,
+    /// Per-column determinism, feeding `smelt explain`'s per-column
+    /// guarantee ledger (`smelt_logical::maintenance::ledger::
+    /// derive_guarantee_ledger`) — a `Run`/`Row` verdict prints the
+    /// determinism exemption in place of an equivalence contract
+    /// (`docs/specs/incremental_models.md` §"The determinism scope").
+    /// Populated only by `smelt_db::maintenance_plan_report`, from the
+    /// `model_property_vector` it computes there — every other
+    /// `MaintenancePlanResult` construction site leaves this empty
+    /// (phase 9's `own_output_delta` precedent).
+    pub column_determinism: Vec<smelt_logical::analysis::walk::ColumnDeterminism>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -672,6 +682,7 @@ fn finish_plan_result(
         state_columns: Vec::new(),
         own_output_delta: Vec::new(),
         run_shape: None,
+        column_determinism: Vec::new(),
     }
 }
 

@@ -1942,6 +1942,20 @@ pub fn maintenance_plan_report(
             .map(|(group, shape)| (group.name(), shape))
             .collect();
 
+    // Per-column determinism (`docs/specs/incremental_models.md` §"The
+    // determinism scope"), feeding the per-column guarantee ledger
+    // (`smelt_logical::maintenance::ledger::derive_guarantee_ledger`).
+    // `model_property_vector`'s own walk, offline (no join-shape context
+    // beyond the model's own SQL — the same `JoinContext::new()` baseline
+    // `derive_fold_spec` uses); an unclassifiable SQL body leaves this
+    // empty, never a fabricated `Clean` default.
+    result.column_determinism = smelt_logical::analysis::walk::model_property_vector(
+        sql_body,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.determinism)
+    .unwrap_or_default();
+
     Some(result)
 }
 

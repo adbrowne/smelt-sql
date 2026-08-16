@@ -982,6 +982,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         state_columns: vec![],
         own_output_delta: vec![],
         run_shape: None,
+        column_determinism: Vec::new(),
     };
     let report = build_maintenance_plan_report(
         "daily_events_enriched",
@@ -1111,6 +1112,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         state_columns: vec![],
         own_output_delta: vec![],
         run_shape: None,
+        column_determinism: Vec::new(),
     };
     let report = build_maintenance_plan_report(
         "events_enriched",
@@ -1304,6 +1306,7 @@ mod write_variant_explain_surface {
             state_columns: vec![],
             own_output_delta: vec![],
             run_shape: None,
+            column_determinism: Vec::new(),
         };
         build_maintenance_plan_report(
             "write_variant_fixture",

@@ -33,6 +33,7 @@ pub mod edge_type;
 pub mod emit;
 pub mod granularity;
 pub mod grouping;
+pub mod ledger;
 pub mod locality;
 pub mod probe_cadence;
 pub mod propagate;

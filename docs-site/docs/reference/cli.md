@@ -1136,10 +1136,16 @@ one-line **delta-signature headline**: what the model emits (`keyed upsert over 
 addressed (`key-addressed`, `window-addressed by <axis>`, or `whole-table-addressed`), the
 derived `grain` label, and the derived **run shape** — `window-forward` or `snapshot-reconcile`
 for `grain: key`, the window sweep over the partition axis for `grain: partition`. A model whose
-shape isn't derivable at all prints no headline line. After the headline: every cell (trigger,
-corner, technique), the `ledger_catch_up` flag (whether the cell routes through the
+shape isn't derivable at all prints no headline line. Immediately after the headline, before
+anything else, the report prints every admission **refusal** — `<DiagnosticCode>: <reason>`
+per refusal, or `Refusals: (none)` — so you see what will be refused before the plan body.
+Then: every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell
+routes through the
 [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived
-per-source scan clamps, each source's partition-locality verdict, any admission refusals, the
+per-source scan clamps, each source's partition-locality verdict, a model-level **Guarantees**
+ledger (one row per output column: its group, its effective equivalence contract or —
+for a volatile column — its determinism exemption, and its derived settle bound, `not derived`
+when no key-temporal-locality slice was established), the
 model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
@@ -1275,6 +1281,8 @@ smelt explain daily_events --show-sql --technique keyed_fold
 $ smelt explain daily_events
 emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
 
+Refusals: (none)
+
 Maintenance plan: daily_events
 
 Cells (2):
@@ -1291,7 +1299,8 @@ Cells (2):
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
 
-Refusals: (none)
+Guarantees:
+  - event_count (group {event_count}): default, settle: not derived
 
 Relation contract:
   clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day

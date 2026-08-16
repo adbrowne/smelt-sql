@@ -424,13 +424,21 @@ contract:
     never-fabricate rule). A model whose emitted shape degrades to `general` prints `emits:
     general change, whole-table-addressed`, naming the degrading construct — matching the
     widen-never-narrow default this section states for an underivable signature.
-  - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, the
-    effective contract point, and the **per-column guarantee ledger** — the printed summary
-    of what each output column is guaranteed (its equivalence contract and its **settle
+  - **Refusals**: every derived refusal, printed immediately after the headline, before the
+    plan body — an operator sees what will be refused before executing anything. Each refusal
+    names its diagnostic code and its rendered reason (`<DiagnosticCode>: <reason>`, never the
+    bare debug form of the underlying enum). A model with no refusals prints an explicit
+    empty marker rather than nothing.
+  - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, and the
+    effective contract point.
+  - **Guarantees** (model-level, not per-cell): the **per-column guarantee ledger** — one row
+    per output column naming its column group, what it is guaranteed (its effective
+    equivalence contract point, or, for a volatile column, its determinism exemption in place
+    of that contract, §"The equivalence invariant" determinism scope), and its **settle
     bound** — the derived interval after which a written slice provably receives no further
-    changes, so consumers may treat it as final; a volatile column prints its determinism
-    exemption in place of an equivalence contract, §"The equivalence invariant" determinism
-    scope).
+    changes, so consumers may treat it as final. A column whose settle bound is not derivable
+    (no established key-temporal-locality slice) prints an explicit "not derived" marker
+    rather than a fabricated or zero interval.
   - **Per inbound edge**: the derived **delta-signature shape** — `append-only within
     window`, `keyed upsert`, or `general` — the shape of change that edge's own upstream
     emits (§"Delta signatures"; a source edge is typed by its declared mutation profile, a
@@ -1946,12 +1954,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   emitter, or `ContractRetainDepartedInvalid` diagnostic. Today every keyed model behaves as
   if `retain_departed` were silently declared (decision record:
   `docs/research/20260816-open-questions-triage.md`).
-- **The determinism scope is unimplemented.** The runtime still compile-time-pins
-  `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed models, instead of
-  running them as-is; the conformance oracle's comparison and the recompute-equality
-  technique gates do not yet consult the per-column determinism verdict, and `smelt explain`
-  does not print the determinism exemption in the per-column guarantee ledger (decision
-  record: `docs/research/20260816-open-questions-triage.md`).
+- **The determinism scope's runtime half is unimplemented.** The runtime still
+  compile-time-pins `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed
+  models, instead of running them as-is; the conformance oracle's comparison and the
+  recompute-equality technique gates do not yet consult the per-column determinism verdict
+  (decision record: `docs/research/20260816-open-questions-triage.md`). `smelt explain`'s
+  per-column guarantee ledger does print the determinism exemption, per the derived verdict
+  the walk already produces.
 - **The scheduler does not yet consume delta signatures end to end**, per the design now
   pinned in §"Dispatch — from propagated components to run units". Signatures shape admission
   and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
@@ -1971,11 +1980,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
-- **`smelt explain` does not yet print the per-column guarantee summary or surface a
-  pre-execution refusal** (§Surface "CLI" — the headline and its derived run shape now print
-  first, ahead of the plan; the per-column equivalence-contract × settle-bound ledger and
-  refusal surfacing remain unbuilt). Tracked:
-  `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
 - **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
   but needs per-cell frontier addressing, which the frontier record tracks only per-region
   today (a state-shape change, not a lattice-point change). Tracked:

@@ -71,7 +71,7 @@ run shape.
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
-| 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | planned |
+| 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
@@ -347,6 +347,12 @@ run shape.
   surfacing is scoped as: one rendering, moved from the report's tail to immediately after the
   headline and given a diagnostic-code-named form, plus the `--json` array — `smelt build`'s
   own refusal gate is already the `smelt-db` diagnostic path and is not re-litigated here.
+- 2026-08-16 (phase 10 implementation): shipped as planned — `maintenance::ledger` landed with
+  the three pinned decisions intact. One implementation-level call not pinned by the plan: a
+  column group's effective contract is resolved against its own first (lexicographically least)
+  `mutation_sensitivity` source as the trigger address, since `derive_guarantee_ledger` has no
+  per-cell context to resolve against — documented as a known under-report for a multi-trigger
+  group with differing per-cell `deferral` overrides, never a fabricated merge.
 
 ## Blocked
 

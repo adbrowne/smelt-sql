@@ -328,6 +328,24 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out);
     }
 
+    // Pre-execution refusal surfacing (`docs/specs/incremental_models.md`
+    // §Surface "CLI" **Refusals**): printed immediately after the headline,
+    // before the plan body, so an operator sees what will be refused before
+    // executing anything — never re-rendered further down; this is the
+    // report's single refusal block. Each refusal reads
+    // `smelt_logical::maintenance::ledger::render_refusal`'s
+    // `<DiagnosticCode>: <reason>` summary, never `{:?}` of the enum.
+    if result.plan.refusals.is_empty() {
+        let _ = writeln!(out, "Refusals: (none)");
+    } else {
+        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
+        for refusal in &result.plan.refusals {
+            let summary = smelt_logical::maintenance::ledger::render_refusal(refusal);
+            let _ = writeln!(out, "  - {}", summary.render());
+        }
+    }
+    let _ = writeln!(out);
+
     let _ = writeln!(out, "Maintenance plan: {}", model_name);
     let _ = writeln!(out);
 
@@ -866,15 +884,34 @@ pub fn build_maintenance_plan_report(
         let _ = writeln!(out);
     }
 
-    if result.plan.refusals.is_empty() {
-        let _ = writeln!(out, "Refusals: (none)");
-    } else {
-        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
-        for refusal in &result.plan.refusals {
-            let _ = writeln!(out, "  - {:?}", refusal);
+    // Per-column guarantee ledger (`docs/specs/incremental_models.md`
+    // §Surface "CLI" — a model-level bullet, not per-cell): one row per
+    // output column carrying its column group, its effective equivalence
+    // contract (or, for a volatile column, its determinism exemption in
+    // place of that contract), and its derived settle bound. Built entirely
+    // by the single-owner `smelt_logical::maintenance::ledger` formatter —
+    // this function supplies only already-derived inputs, never formats a
+    // label itself.
+    let ledger_rows = smelt_logical::maintenance::ledger::derive_guarantee_ledger(
+        &result.column_groups,
+        contract_cfg,
+        result.plan.key_locality.as_ref(),
+        &result.column_determinism,
+    );
+    if !ledger_rows.is_empty() {
+        let _ = writeln!(out, "Guarantees:");
+        for row in &ledger_rows {
+            let _ = writeln!(
+                out,
+                "  - {} (group {}): {}, settle: {}",
+                row.column,
+                row.group,
+                row.guarantee.render(),
+                row.settle.render()
+            );
         }
+        let _ = writeln!(out);
     }
-    let _ = writeln!(out);
 
     // Relation Contract (`docs/specs/models.md` §"The Relation Contract"):
     // this model's own clock/identity/derived-grain rows, then one contract
@@ -1446,6 +1483,95 @@ pub struct ExplainMaintenanceJson {
     /// addition to this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state_downgrades: Vec<ExplainStateDowngradeJson>,
+    /// The per-column guarantee ledger (`docs/specs/cli.md` §"`smelt explain
+    /// --json` output schema"), the SAME `GuaranteeRow` values the text
+    /// report's `Guarantees:` block renders — byte-equal field-for-field
+    /// (`smelt_logical::maintenance::ledger::derive_guarantee_ledger`).
+    pub guarantees: Vec<ExplainGuaranteeJson>,
+    /// The pre-execution refusal summary (`docs/specs/cli.md` §"`smelt
+    /// explain --json` output schema"), the SAME `RefusalSummary` values the
+    /// text report's `Refusals:` block renders — empty for an admitted
+    /// model.
+    pub refusals: Vec<ExplainRefusalJson>,
+}
+
+/// One row of the per-column guarantee ledger's JSON shape
+/// (`docs/specs/cli.md` §"`smelt explain --json` output schema"):
+/// `{"column", "group", "contract" | "determinism_exemption", "settle"}` —
+/// exactly one of `contract`/`determinism_exemption` is present, mirroring
+/// `smelt_logical::maintenance::ledger::ColumnGuarantee`'s two variants.
+#[derive(Debug, Serialize)]
+pub struct ExplainGuaranteeJson {
+    pub column: String,
+    pub group: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub determinism_exemption: Option<String>,
+    pub settle: String,
+}
+
+/// One entry of the pre-execution refusal summary's JSON shape
+/// (`docs/specs/cli.md` §"`smelt explain --json` output schema"):
+/// `{"code", "message"}`, the SAME fields
+/// `smelt_logical::maintenance::ledger::RefusalSummary` carries.
+#[derive(Debug, Serialize)]
+pub struct ExplainRefusalJson {
+    pub code: String,
+    pub message: String,
+}
+
+/// Build the per-column guarantee ledger's JSON rows from the same inputs
+/// the text report's `Guarantees:` block reads — never a second derivation.
+pub fn explain_guarantees_json(
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+    contract_cfg: Option<&smelt_core::config::ContractConfig>,
+) -> Vec<ExplainGuaranteeJson> {
+    smelt_logical::maintenance::ledger::derive_guarantee_ledger(
+        &result.column_groups,
+        contract_cfg,
+        result.plan.key_locality.as_ref(),
+        &result.column_determinism,
+    )
+    .into_iter()
+    .map(|row| {
+        let (contract, determinism_exemption) = match row.guarantee {
+            smelt_logical::maintenance::ledger::ColumnGuarantee::Contract(label) => {
+                (Some(label), None)
+            }
+            smelt_logical::maintenance::ledger::ColumnGuarantee::DeterminismExemption(label) => {
+                (None, Some(label))
+            }
+        };
+        ExplainGuaranteeJson {
+            column: row.column,
+            group: row.group,
+            contract,
+            determinism_exemption,
+            settle: row.settle.render(),
+        }
+    })
+    .collect()
+}
+
+/// Build the pre-execution refusal summary's JSON entries from the same
+/// `smelt_logical::maintenance::ledger::render_refusal` the text report's
+/// `Refusals:` block reads.
+pub fn explain_refusals_json(
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+) -> Vec<ExplainRefusalJson> {
+    result
+        .plan
+        .refusals
+        .iter()
+        .map(|refusal| {
+            let summary = smelt_logical::maintenance::ledger::render_refusal(refusal);
+            ExplainRefusalJson {
+                code: summary.code,
+                message: summary.message,
+            }
+        })
+        .collect()
 }
 
 /// The delta-signature headline's JSON shape
@@ -1551,6 +1677,8 @@ pub fn build_maintenance_plan_json(
     contract_cfg: Option<&smelt_core::config::ContractConfig>,
     state_downgrades: &[smelt_logical::maintenance::availability::StateDowngrade],
     signature: Option<ExplainSignatureJson>,
+    guarantees: Vec<ExplainGuaranteeJson>,
+    refusals: Vec<ExplainRefusalJson>,
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1632,6 +1760,8 @@ pub fn build_maintenance_plan_json(
         state_columns,
         probes,
         state_downgrades,
+        guarantees,
+        refusals,
     }
 }
 

@@ -230,6 +230,28 @@ yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each
 `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
 cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
 
+**Refusals.** Every derived refusal prints immediately after the headline, before the plan
+body — the report's pre-execution surface, so an operator sees what will be refused before
+executing anything. Each refusal names its diagnostic code and its rendered reason:
+`<DiagnosticCode>: <reason>`, never the bare debug form of the underlying refusal enum. A model
+with no refusals prints an explicit `Refusals: (none)` marker. With `--json`, the report gains a
+top-level `refusals` array (§Constraints item 5): `{"code": "<DiagnosticCode>", "message":
+"<reason>"}`; empty for an admitted model.
+
+**Guarantees.** The report also prints a model-level per-column guarantee ledger, one row per
+output column: the column's owning group, what it is guaranteed (its effective equivalence
+contract point — the same label the per-cell `contract:` line renders — or, for a column whose
+determinism verdict is not `Clean`, its determinism exemption in its place,
+`incremental_models.md` §"The equivalence invariant" determinism scope), and its derived
+**settle bound** — the interval after which a written slice provably receives no further
+changes. A column with no established key-temporal-locality slice prints `settle: not derived`
+rather than a fabricated or zero interval; route 2 (key-determined) locality prints `settle:
+never` — a real, honest value, not a large sentinel duration. With `--json`, the report gains a
+top-level `guarantees` array (§Constraints item 5): `{"column": "<col>", "group": "<group
+display name>", "contract": "<label>", "settle": "<label>"}` for a contract-guaranteed column, or
+the same shape with `determinism_exemption` in place of `contract` for a volatile one — exactly
+one of the two is present per row.
+
 ### `smelt bakeoff <model>` flags
 
 | Flag | Default | Description |
