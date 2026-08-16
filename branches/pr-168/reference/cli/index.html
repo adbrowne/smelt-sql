@@ -2495,10 +2495,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#smelt-backbuild" class="md-nav__link">
+  <a href="#smelt-rebuild" class="md-nav__link">
     <span class="md-ellipsis">
       
-        smelt backbuild
+        smelt rebuild
       
     </span>
   </a>
@@ -3336,10 +3336,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#smelt-backbuild" class="md-nav__link">
+  <a href="#smelt-rebuild" class="md-nav__link">
     <span class="md-ellipsis">
       
-        smelt backbuild
+        smelt rebuild
       
     </span>
   </a>
@@ -3695,7 +3695,7 @@
 <p><code>1</code> means the command ran correctly and found a problem in the data or models — investigate the pipeline. <code>2</code> means the command could not run at all because its own inputs were invalid — fix the invocation. Retrying a <code>2</code> without changing the command is never useful.</p>
 <hr />
 <h2 id="state-lock-errors">State lock errors<a class="headerlink" href="#state-lock-errors" title="Permanent link">&para;</a></h2>
-<p>Any command that mutates run state (<code>smelt run</code>, <code>smelt build</code>, <code>smelt backbuild</code>) takes an exclusive lock on <code>.smelt/lock</code> for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:</p>
+<p>Any command that mutates run state (<code>smelt run</code>, <code>smelt build</code>, <code>smelt rebuild</code>) takes an exclusive lock on <code>.smelt/lock</code> for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>Error: state locked by PID &lt;n&gt;
 </code></pre></div>
 <p>rather than silently interleaving writes with the in-flight run. This is expected when two runs are launched concurrently against the same project (e.g. an overlapping cron schedule, or a manual run started while a CI job is still going) — it is not a corruption signal. Wait for the process named by <code>&lt;n&gt;</code> to finish, then re-run.</p>
@@ -3981,7 +3981,7 @@
 </tbody>
 </table>
 <h3 id="parallel-execution-with-jobs">Parallel execution with <code>--jobs</code><a class="headerlink" href="#parallel-execution-with-jobs" title="Permanent link">&para;</a></h3>
-<p>The run engine (shared by <code>smelt run</code>, <code>smelt build</code>, and <code>smelt backbuild</code>) dispatches models as a topological <strong>wavefront</strong>: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. <code>smelt run --jobs</code> bounds how many models are in flight at once:</p>
+<p>The run engine (shared by <code>smelt run</code>, <code>smelt build</code>, and <code>smelt rebuild</code>) dispatches models as a topological <strong>wavefront</strong>: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. <code>smelt run --jobs</code> bounds how many models are in flight at once:</p>
 <ul>
 <li>Omitted (the default) — resolves to the host's available parallelism (<code>std::thread::available_parallelism()</code>), typically the number of logical CPUs.</li>
 <li><code>--jobs 1</code> — strictly serial: one model at a time, in <code>execution_order</code>. This is the pre-<code>--jobs</code> behavior and remains available as an explicit opt-out.</li>
@@ -3990,12 +3990,12 @@
 <p>Progress output, the per-run manifest, and every other run-report artifact are identical regardless of <code>--jobs</code> — the run engine buffers each model's progress events internally and replays them in the same deterministic <code>execution_order</code> sequence a <code>--jobs 1</code> run would have produced, whichever models actually finished first. A failure stops the scheduler from starting further models; any already in flight are allowed to finish, and every model that completed (successfully or not) before the run stopped is still recorded in the manifest.</p>
 <p>Concurrency helps most when a project's DAG is wide (many independent models per layer) and when a meaningful share of a run's wall-clock time is spent on work other than the backend query itself (SQL compilation, schema-evolution checks, <code>smelt.check</code> execution) — a single-connection backend (e.g. DuckDB) still serializes concurrent query execution against that one connection, so <code>--jobs</code> primarily shortens a run by overlapping that surrounding work, and by overlapping models assigned to <em>different</em> targets.</p>
 <h3 id="retrying-transient-backend-failures">Retrying transient backend failures<a class="headerlink" href="#retrying-transient-backend-failures" title="Permanent link">&para;</a></h3>
-<p><code>smelt run</code>, <code>smelt build</code>, and <code>smelt backbuild</code> automatically retry a model's write step when it fails with a <strong>transient</strong> backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.</p>
+<p><code>smelt run</code>, <code>smelt build</code>, and <code>smelt rebuild</code> automatically retry a model's write step when it fails with a <strong>transient</strong> backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.</p>
 <p>A retry always re-runs the model's <em>entire</em> write step for the attempt that failed — the full drop-and-recreate for a table, one incremental batch's complete DELETE+INSERT, a column-scoped MERGE, or a keyed model's create-or-merge partition write — never a partial slice of it, so a retried model never leaves a half-applied write behind. Coverage is uniform across every write technique a model can dispatch to, including the delta-restricted recompute a model-edge creation trigger can take. Retries use exponential backoff between attempts; the delay is derived deterministically from the run and model identity rather than real-clock jitter, so repeated runs behave predictably.</p>
 <p>Only transient failures are retried. A deterministic failure — invalid SQL, a type mismatch, a constraint violation, a missing table, an unsupported dialect feature — fails the model on the first attempt, since retrying cannot change the outcome.</p>
 <p>By default, up to 3 attempts are made per write step before the model is reported as failed. To disable retry entirely (fail immediately on the first transient error, matching pre-retry behavior), set <code>retry_max: 0</code> on the run request. There is currently no dedicated CLI flag for this; it is available to programmatic consumers of the run engine (e.g. the UI) via the <code>retry_max</code>/<code>retry_backoff_ms</code> fields on the run request.</p>
 <h3 id="run-report-and-failure-summary">Run report and failure summary<a class="headerlink" href="#run-report-and-failure-summary" title="Permanent link">&para;</a></h3>
-<p>Every <code>smelt run</code>/<code>smelt build</code>/<code>smelt backbuild</code> invocation against a stateful project writes a <strong>run report</strong> alongside its run manifest, at <code>.smelt/targets/&lt;target&gt;/reports/&lt;run_id&gt;.json</code> (<code>docs/specs/run_state.md</code> §"Run report"). Where the manifest is the durable per-model record <code>--resume</code> reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.</p>
+<p>Every <code>smelt run</code>/<code>smelt build</code>/<code>smelt rebuild</code> invocation against a stateful project writes a <strong>run report</strong> alongside its run manifest, at <code>.smelt/targets/&lt;target&gt;/reports/&lt;run_id&gt;.json</code> (<code>docs/specs/run_state.md</code> §"Run report"). Where the manifest is the durable per-model record <code>--resume</code> reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.</p>
 <p>When independent models fail in the same run — even concurrently, in the same <code>--jobs</code>-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, <code>smelt</code> prints a failure summary naming every failed model with its first error line and a one-line hint toward the likely next action:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt: run 20260720-120001-a1b2c3 failed — 2 model(s) failed:
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>  - bad_a: Conversion Error: Could not convert string &#39;not_a_number&#39; to INT32
@@ -4053,8 +4053,8 @@
 <a id="__codelineno-9-20" name="__codelineno-9-20" href="#__codelineno-9-20"></a>smelt<span class="w"> </span>run<span class="w"> </span>--auto
 </code></pre></div>
 <h3 id="-dry-run-inspect-the-maintenance-statements-before-they-run"><code>--dry-run</code> — inspect the maintenance statements before they run<a class="headerlink" href="#-dry-run-inspect-the-maintenance-statements-before-they-run" title="Permanent link">&para;</a></h3>
-<p><code>smelt run --dry-run</code> and <code>smelt backbuild --dry-run</code> print, for every model the invocation would execute, the <strong>maintenance statements</strong> the run would execute — the region <code>DELETE</code>+<code>INSERT</code> pair (or keyed <code>MERGE</code>, etc.) a maintained model rebuilds its window with — not merely the compiled <code>SELECT</code> body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are <strong>real</strong>: they come from the invocation's own <code>--event-time-start</code>/<code>--event-time-end</code> window, never symbolic placeholders. A transactional group is bracketed by <code>BEGIN</code>/<code>COMMIT</code> lines to show its atomicity. Nothing is executed and no backend connection is opened.</p>
-<p><code>smelt backbuild --dry-run</code> additionally reflects the <strong>chunking</strong> a real backbuild performs: when a model's batch-safety classification (or an explicit <code>--batch-size</code>/<code>--per-partition</code>) splits the range, the statements print once per chunk, each introduced by a boundary line naming its <code>[start, end)</code> window and position — <code>-- chunk 2/4: [2026-03-08, 2026-03-15)</code> — in the order a real backbuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.</p>
+<p><code>smelt run --dry-run</code> and <code>smelt rebuild --dry-run</code> print, for every model the invocation would execute, the <strong>maintenance statements</strong> the run would execute — the region <code>DELETE</code>+<code>INSERT</code> pair (or keyed <code>MERGE</code>, etc.) a maintained model rebuilds its window with — not merely the compiled <code>SELECT</code> body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are <strong>real</strong>: they come from the invocation's own <code>--event-time-start</code>/<code>--event-time-end</code> window, never symbolic placeholders. A transactional group is bracketed by <code>BEGIN</code>/<code>COMMIT</code> lines to show its atomicity. Nothing is executed and no backend connection is opened.</p>
+<p><code>smelt rebuild --dry-run</code> additionally reflects the <strong>chunking</strong> a real rebuild performs: when a model's batch-safety classification (or an explicit <code>--batch-size</code>/<code>--per-partition</code>) splits the range, the statements print once per chunk, each introduced by a boundary line naming its <code>[start, end)</code> window and position — <code>-- chunk 2/4: [2026-03-08, 2026-03-15)</code> — in the order a real rebuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.</p>
 <p>Division of labour with <a href="#smelt-explain"><code>smelt explain &lt;model&gt; --show-sql</code></a>: <code>--show-sql</code> is the no-window, single-model plan-inspection surface (symbolic bounds unless <code>--period</code> is given); <code>--dry-run</code> is the "exactly what would <strong>this invocation</strong> do" surface — real window, real selection, real chunking.</p>
 <h3 id="forward-propagation-with-since-upstream">Forward propagation with <code>--since-upstream</code><a class="headerlink" href="#forward-propagation-with-since-upstream" title="Permanent link">&para;</a></h3>
 <p>Every <code>refresh: incremental</code> model with a declared <code>grain:</code> derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (<code>smelt explain &lt;model&gt;</code> prints it). <code>--since-upstream</code> composes those clamps into a propagation graph and walks it forward from each source's delta, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. A source's delta comes from a paired <code>--source &lt;address&gt; --landed &lt;start&gt;..&lt;end&gt;</code>, from a persisted per-source watermark when <code>--landed</code> is omitted, refined live wherever a recorded observed-delta exists — the CLI never requires an operator to restate what a prior run already covered. Keyed dirt additionally resolves the affected key <em>values</em> live, off the group-grain sidecar diff, rather than trusting only a caller-fed seed. The dirty set is printed before anything runs, then <code>smelt</code> runs exactly those <code>(model, region)</code> pairs — never a partition outside the propagated set.</p>
@@ -4075,11 +4075,11 @@
 <a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="w">  </span>--source<span class="w"> </span>sources.raw.users<span class="w"> </span>--landed<span class="w"> </span><span class="m">2026</span>-01-07..2026-01-08
 </code></pre></div>
 <hr />
-<h2 id="smelt-backbuild">smelt backbuild<a class="headerlink" href="#smelt-backbuild" title="Permanent link">&para;</a></h2>
+<h2 id="smelt-rebuild">smelt rebuild<a class="headerlink" href="#smelt-rebuild" title="Permanent link">&para;</a></h2>
 <p>Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.</p>
-<p><code>smelt backbuild</code> handles both <code>grain: partition</code> and <code>grain: key</code> incremental models uniformly. For <code>grain: partition</code> models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For <code>refresh: incremental</code> + <code>grain: key</code> table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.</p>
+<p><code>smelt rebuild</code> handles both <code>grain: partition</code> and <code>grain: key</code> incremental models uniformly. For <code>grain: partition</code> models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For <code>refresh: incremental</code> + <code>grain: key</code> table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>smelt backbuild [OPTIONS] &lt;SELECTOR&gt; --start &lt;DATE&gt; --end &lt;DATE&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>smelt rebuild [OPTIONS] &lt;SELECTOR&gt; --start &lt;DATE&gt; --end &lt;DATE&gt;
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -4190,18 +4190,18 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1"># Backbuild a model and all its upstreams for January (canonical path form)</span>
-<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1"># Rebuild a model and all its upstreams for January (canonical path form)</span>
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01
 <a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>
 <a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a><span class="c1"># Same using scope shorthand (equivalent when scope is marts)</span>
-<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>backbuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>rebuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01
 <a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>
 <a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a><span class="c1"># Preview the maintenance statements — one block per auto-derived chunk —</span>
 <a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a><span class="c1"># without executing anything</span>
-<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01<span class="w"> </span>--dry-run
+<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-02-01<span class="w"> </span>--dry-run
 <a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a>
-<a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="c1"># Backbuild with per-partition execution</span>
-<a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-01-08<span class="w"> </span>--per-partition
+<a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a><span class="c1"># Rebuild with per-partition execution</span>
+<a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-01-08<span class="w"> </span>--per-partition
 </code></pre></div>
 <hr />
 <h2 id="smelt-build">smelt build<a class="headerlink" href="#smelt-build" title="Permanent link">&para;</a></h2>

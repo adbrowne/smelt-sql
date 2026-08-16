@@ -1827,10 +1827,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#backbuilding" class="md-nav__link">
+  <a href="#rebuilding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Backbuilding
+        Rebuilding
       
     </span>
   </a>
@@ -3736,10 +3736,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#backbuilding" class="md-nav__link">
+  <a href="#rebuilding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Backbuilding
+        Rebuilding
       
     </span>
   </a>
@@ -4514,9 +4514,9 @@
 <li><strong>A derived, skewing <code>partition_column</code>.</strong> Some models compute their partition column from a rule that can place new data in a partition <em>other than</em> the one implied by the run window — a session model whose <code>partition_column</code> is the session's start date, for example, where a late-night event can extend a session rooted the <em>previous</em> day. When such a model declares the relationship (a <code>WHERE</code>/<code>JOIN</code> filter comparing the driving date column to <code>partition_column ± INTERVAL '…'</code>), smelt inverts it: a run over <code>[start, end)</code> derives an output window reaching as far as the declared interval allows on either side. A session model capped at one day, for instance, run for a single day <code>[D, D+1)</code>, derives the output window <code>[D-1, D+2)</code> — the run also rewrites the prior day's partition when new data reaches back into it.</li>
 </ul>
 <p>The output window is what the <code>DELETE</code> and the output clamp both key off; every written partition's <strong>scan</strong> is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.</p>
-<h2 id="backbuilding">Backbuilding<a class="headerlink" href="#backbuilding" title="Permanent link">&para;</a></h2>
-<p>Backbuilding rebuilds a model <strong>and all its upstream dependencies</strong> for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-02-01
+<h2 id="rebuilding">Rebuilding<a class="headerlink" href="#rebuilding" title="Permanent link">&para;</a></h2>
+<p><code>smelt rebuild</code> rebuilds a model <strong>and all its upstream dependencies</strong> for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-02-01
 </code></pre></div>
 <p>The <code>+</code> prefix means "include upstream dependencies." smelt will:</p>
 <ol>
@@ -4524,8 +4524,8 @@
 <li>Process each upstream model for the specified time range, in topological order.</li>
 <li>Process the target model last.</li>
 </ol>
-<p>Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are <code>FullyBatchSafe</code>), not per partition.</p>
-<p>Backbuilding reprocesses <em>data</em> under an unchanged definition. For the complementary problem — migrating a deployed table after the model's <em>definition</em> changes, without a full rebuild — see <a href="../backbuild-synthesis/">Backbuild Synthesis</a>.</p>
+<p>Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are <code>FullyBatchSafe</code>), not per partition.</p>
+<p>Rebuilding reprocesses <em>data</em> under an unchanged definition. For the complementary problem — migrating a deployed table after the model's <em>definition</em> changes, without a full rebuild — see <a href="../backbuild-synthesis/">Backbuild Synthesis</a>.</p>
 <h2 id="incremental-strategies">Incremental strategies<a class="headerlink" href="#incremental-strategies" title="Permanent link">&para;</a></h2>
 <p>smelt supports multiple strategies for how data is updated. The strategy is chosen based on your configuration and the backend's capabilities:</p>
 <table>
