@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786843573908,
+  "lastUpdate": 1786843604788,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -93,6 +93,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 10.146232,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f3de2cc5ab395a806beffd4f27b03a5166129655",
+          "message": "research: item 7 decision — equivalence scoped to deterministic outputs, NOW() runs as-is\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-08-16T11:24:02+10:00",
+          "tree_id": "1ce26670220d6f4dfe95bb92923bf675c2113927",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f3de2cc5ab395a806beffd4f27b03a5166129655"
+        },
+        "date": 1786843602933,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 57.618972,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 55.20107,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.143605,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.629998,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.33878,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1120.345256,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.863423,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.175836,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.182686,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.7223040000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 923.805507,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.998239999999999,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.66353,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.757972,
             "unit": "ms"
           }
         ]
