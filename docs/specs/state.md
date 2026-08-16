@@ -36,8 +36,9 @@ The central rule is a two-class split:
 - **Correctness state** is state whose loss or staleness could make a maintained table
   *wrong* (a double-counted fold, a replayed merge). It must live **in the data engine,
   in the same backend transaction as the write it describes**. Because it travels with the
-  data, it exists whenever the derived plan needs it — it is not part of any opt-in store and
-  no configuration can turn it off.
+  data, it exists whenever the derived plan needs it — it is not part of any opt-in store, and
+  the one configuration that touches it (`state.warehouse_tables: none`, below) removes the
+  techniques that need it rather than ever running a technique without its bookkeeping.
 - **Observability state** is everything else: run history, interval coverage, landed-delta
   records, schema snapshots, environment maps. It lives in the project-local `.smelt/` store,
   is opt-in via `state.mode`, and is always safe to delete — its absence degrades what smelt
@@ -91,14 +92,35 @@ the consequence table:
 | `environments` | everything in `intervals` plus the snapshot/environment store | all |
 
 Correctness structures are identical in every row: they are a property of the *plan*, not of
-the posture.
+the posture. The only surface that touches them is the warehouse-tables opt-out below — an
+orthogonal key, not a `state.mode` value.
+
+### Opting out of warehouse bookkeeping (`state.warehouse_tables`)
+
+Some organisations forbid tool-authored objects in the target schema. A project declares that
+constraint with a sibling of `state.mode` in `smelt.yml`:
+
+```yaml
+state:
+  warehouse_tables: allowed   # default — engine-resident correctness structures are created
+                              # as the derived plan needs them
+  # warehouse_tables: none    # smelt authors no tables of its own in the target backend
+```
+
+Under `warehouse_tables: none`, every engine-resident correctness structure is treated as
+**unavailable** during availability resolution (§"The degradation contract"): each cell whose
+technique requires one downgrades to its recompute-family equivalent, recorded and printed as
+`MaintenanceStateDowngraded` like any other availability downgrade, and a declaration whose
+semantics require such a structure refuses with `DeclaredContractRequiresState`. The knob is
+project-wide and binary — there is deliberately no per-table or per-model granularity — and it
+never changes what any maintained table equals, only what it costs to maintain.
 
 ### Diagnostics
 
 | Code | When it fires |
 |---|---|
 | `MaintenanceStateDowngraded` | Advisory, plan derivation: a cell's derived technique requires a state structure with no available realisation on the target backend, and the cell was downgraded to its recompute-family equivalent. Names the cell, the original technique, the missing structure, and the reason (§"The degradation contract"). Printed by `smelt explain`; surfaced as a warning-level diagnostic, never an error. |
-| `DeclaredContractRequiresState` | Validation, fail-loud: a declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture or backend cannot supply it. Names the declaration and the missing structure. |
+| `DeclaredContractRequiresState` | Validation, fail-loud: a declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture, backend, or `state.warehouse_tables: none` opt-out cannot supply it. Names the declaration and the missing structure. |
 | `ProbeBaselineUnavailable` | Advisory, run-time: a declared fact's probe had no recorded baseline to compare against — absent posture (`state.mode: stateless`) or the fact's first observation — and the run established a baseline instead of comparing. Names the source or model, the partition set, and why the baseline was absent. Shared by every absent-baseline probe (source postures, §"The optionality rule"; the frozen-horizon contract point, `incremental_models.md` §"The contract lattice"); never an error, because an absent baseline changes only what a probe can verify, never what a maintained table equals. |
 
 `smelt explain <model>` prints every downgraded cell with both the executed technique and the
@@ -147,8 +169,10 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    structure is available: cells get their best technique (an additive keyed fold, a
    ledger-enforced merge) exactly as `incremental_models.md` specifies.
 2. **Availability resolution.** Each cell's technique is checked against the structures
-   actually realisable for this project: the backend has a builder for the structure, and —
-   for observability structures only — the posture includes it. A cell whose technique
+   actually realisable for this project: the backend has a builder for the structure, the
+   project has not declared `state.warehouse_tables: none` (which makes every engine-resident
+   structure unavailable), and — for observability structures only — the posture includes it.
+   A cell whose technique
    requires an unavailable structure is **downgraded to the cheapest member of the recompute
    family that preserves the equivalence invariant** (typically per-region or per-key-group
    recompute), and the downgrade is recorded on the cell (`MaintenanceStateDowngraded`).
@@ -218,6 +242,15 @@ diagnostic and `smelt explain` answer "what would change if I configured state /
 backend with a ledger builder?" — turning the degradation contract into an adoption funnel
 instead of a cliff. Early pruning was rejected for exactly this reason.
 
+**The warehouse-tables opt-out is an availability input, not a third state class.** Modelling
+`state.warehouse_tables: none` as one more input to availability resolution keeps the doctrine
+intact: correctness structures remain transaction-coupled wherever they exist, and where the
+project forbids them the *techniques* go, never the coupling. Project-wide binary granularity
+was chosen over per-table or per-model knobs deliberately — the constraint it models is an
+organisational policy about the target schema, not a tuning decision, and per-table opt-outs
+would reintroduce exactly the silent, partially-stateful middle ground the two-class split
+rejects. The decision record is `docs/research/20260816-open-questions-triage.md` item 11.
+
 **`state.mode` stays where it is.** This spec deliberately does not take over the
 `state.mode` key from `virtual_environments.md`: the key's original job (gating environments)
 is unchanged, and moving surface ownership while the doctrine is young would churn references
@@ -264,10 +297,11 @@ lands.
   `smelt-runtime`'s source/contract probes and reporter — but the diagnostic is emitted as a
   run-time advisory string, not through the `DiagnosticCode` enum in §Surface "Diagnostics".
   Tracked by `docs/outcomes/20260816-state-residency/outcome.md`.
-- **Open question — opting out of warehouse bookkeeping tables.** The residency rule puts
-  smelt-owned tables (merge ledger, sidecar) in the user's warehouse. A user who refuses any
-  smelt-authored objects in the target schema has no knob today; the shape of that knob (and
-  whether it simply forces the downgrade path project-wide) is undecided.
+- **`state.warehouse_tables` is unimplemented.** The key (§"Opting out of warehouse
+  bookkeeping") is not parsed and does not yet feed availability resolution (which exists,
+  §"The degradation contract", but today consults only backend builder availability and
+  posture). Decision record:
+  `docs/research/20260816-open-questions-triage.md` item 11.
 
 ## Future Extensions
 
@@ -280,6 +314,17 @@ lands.
   store trait boundary in `smelt-state`, locking semantics across writers, and whether
   `state.mode` grows a `store:` sibling key. Not now: single-user file state has no felt pain
   yet, and the trait is cheap to extract later.
+- **Ledger builders for further backends (Spark first).** The engine-resident ledgers have a
+  transactional realisation on DuckDB only; on other backends availability resolution takes
+  the recorded downgrade path, which is the intended steady state, not a stopgap. A
+  Spark-dialect ledger builder is built when a real Spark-targeted incremental workload
+  demands the fold-family techniques the downgrade forgoes — not speculatively before.
+  Decision record: `docs/research/20260816-open-questions-triage.md` item 12.
+- **Conformance gate leg for state deletion.** A generative gate variant that interleaves
+  `.smelt/` deletion (and, later, downgrade-forcing) between run steps and asserts the
+  equivalence oracle still holds — the executable form of the "no correctness state outside
+  the engine" invariant. The reconciliation ledger's engine-residency move has landed, so
+  the gate is buildable when prioritised.
 
 ## References
 
