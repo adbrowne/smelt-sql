@@ -66,7 +66,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 |---|-------|--------|
 | 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
-| 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | pending |
+| 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | planned |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
@@ -121,6 +121,20 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   and reverted (not committed, unrelated to this phase): a `smelt-db`
   `prop_multi_model_type_inference` proptest regression (`PERCENTILE_DISC` over `SmallInt`
   infers `Double`) — see phase 2 summary "For the next planner".
+
+- **2026-08-16 (phase 3 planning).** No phase reshape — the phase-2 summary's "no rework expected"
+  held. Decided for phase 3: `--apply` executes each group's **first presented candidate** (the
+  plan is deterministic and the hash covers every candidate, so approving the plan approves that
+  selection — no per-candidate selection flag); one transactional `StatementGroup` per column
+  group realises §"The atomicity rule"; admission is checked over all groups *before* anything
+  executes, and a plan containing a skeleton-change group, a candidate-less group, or a
+  destructive (`ColumnDrop`) candidate executes nothing and exits `3` — destructive legs stay
+  refused until their verification probes are emitted. Resume is recorded **per column group** in
+  the approval store, not per region: the per-region frontier reset §"Frontier semantics"
+  describes is per-cell frontier addressing, which this outcome lists under "Out of scope". Both
+  narrowings land as Known Divergences bullets rather than silent gaps. Exit code `3`'s spec
+  wording widens from "unapproved" to "a non-trivial migration remains pending" so it covers the
+  refused-to-execute case too.
 
 ## Blocked
 
