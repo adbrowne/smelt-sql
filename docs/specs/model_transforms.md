@@ -1,7 +1,7 @@
 ---
 feature: model_transforms
 status: experimental
-last_reviewed: 2026-07-23
+last_reviewed: 2026-08-16
 owners: [andrew]
 ---
 
@@ -54,7 +54,6 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
-| Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | **built** |
 | Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonColumnAdded`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
 | Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonColumnAdded`) in a skeleton position for the same reason | unbuilt |
 | Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + a **derived** horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact. Licensed by a *derived* `H` only — a *declared*-on-source `H` no longer licenses this transform (an under-declared source lateness would silently truncate the recompute); where `H` is not derivable the transform is simply not licensed and the enrichment evaluates via the ordinary widened scan | **built** |
@@ -195,7 +194,7 @@ identity. Two obligations license either variant, both discharged fail-closed:
 - **Change comparability on every compared column** — each column in the predicate must be a pure
   function of the processed inputs, so re-evaluating it at a fixed processed-input set reproduces
   the same bits. A column that legitimately varies run to run (a declared `contract: plausible`,
-  or a run-pinned `NOW()`) is incomparable; a cell whose compared column-group contains even one
+  or a volatile `NOW()`) is incomparable; a cell whose compared column-group contains even one
   incomparable column refuses the conditional variant entirely and keeps the unconditional one —
   comparing only the mutation-sensitive group is sound because the other groups are proven
   insensitive to the trigger.
@@ -252,12 +251,12 @@ techniques for one cell holds only modulo this ledger: fold-then-recompute is
 safe (the recompute resets the region's ledger), but recompute-then-refold
 double-counts.
 
-**Compile-time pinning** resolves a run-deterministic function (`NOW()`,
-`CURRENT_DATE`) to one literal per run so every partition of that run sees the same
-value — the equivalence invariant would otherwise be violated by a value that
-drifts across a chunked backfill. A genuinely non-deterministic function
-(`RANDOM`, `UUID`) is *not* pinnable and is refused unless the column is declared
-exempt.
+**Volatile clocks run as-is.** `NOW()`/`CURRENT_DATE` execute at run time, never
+resolved to a compile-time literal: the columns they feed carry no equivalence
+promise (the determinism scoping of the invariant, `incremental_models.md` §"The
+equivalence invariant"), so drift across a chunked backfill is unpromised rather
+than a violation to engineer away. A genuinely per-row non-deterministic function
+(`RANDOM`, `UUID`) is still refused unless the column is declared exempt.
 
 **Delegate-to-native-IVM, full refresh, backend lowering.** Delegation emits the
 engine's own maintained view and hard-errors when `supports_native_ivm` is false —
@@ -371,6 +370,12 @@ the output window applies it exactly where it holds and nowhere else.
 The whole catalogue is being consolidated and largely unbuilt; status is tracked
 by `docs/plans/20260704-model-updates.md` (design:
 `docs/research/20260704-maintenance-fundamentals.md`).
+
+- **The implementation still compile-time-pins volatile clocks.** §"Volatile clocks
+  run as-is" has `NOW()`/`CURRENT_*` executing at run time with no equivalence
+  promise on the columns they feed; the shipped transformer still resolves them to
+  one literal per run. Decision record:
+  `docs/research/20260816-open-questions-triage.md` item 7.
 
 - **Built today:** keyed `merge_into` (the `Backend::merge_into` trait method,
   impls in `smelt-backend-duckdb`/`-spark`); source-filter pushdown
@@ -491,7 +496,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   synthesized delta (the fingerprint sidecar, M3) remains unbuilt. Tracked by `docs/plans/
   20260715-composed-axes-conditional-maintenance.md`.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
-  bounded-domain multiset, compile-time pinning; the reconciliation-ledger
+  bounded-domain multiset; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger
   storage exists yet — every technique today behaves as if it always folds
   cleanly); the keyed column-scoped-`MERGE` half of definition-change
