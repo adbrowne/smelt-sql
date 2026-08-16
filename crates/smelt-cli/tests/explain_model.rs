@@ -980,6 +980,8 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
     };
     let report = build_maintenance_plan_report(
         "daily_events_enriched",
@@ -1107,6 +1109,8 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         ],
         degenerate: vec![],
         state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
     };
     let report = build_maintenance_plan_report(
         "events_enriched",
@@ -1298,6 +1302,8 @@ mod write_variant_explain_surface {
             }],
             degenerate: vec![],
             state_columns: vec![],
+            own_output_delta: vec![],
+            run_shape: None,
         };
         build_maintenance_plan_report(
             "write_variant_fixture",
@@ -1528,5 +1534,74 @@ fn json_without_show_sql_emits_json() {
     assert!(
         cells[0]["statements"].is_array(),
         "expected statements per cell: {stdout}"
+    );
+}
+
+/// `smelt explain --json`'s `signature` object (`docs/specs/incremental_models.md`
+/// §Surface "CLI" **Headline**, phase 9 of
+/// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`) must carry
+/// the same `signature`/`addressing`/`grain`/`run_shape` fields the text
+/// report's headline line renders — byte-equal in content, since both read
+/// the SAME `SignatureHeadline` value and neither re-formats it.
+#[test]
+fn explain_json_carries_signature_headline() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let json_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("daily_events")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt explain daily_events --json");
+    assert!(
+        json_output.status.success(),
+        "smelt explain --json failed: stderr={}",
+        String::from_utf8_lossy(&json_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&json_output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("invalid JSON: {e}\n{stdout}"));
+    let signature = json["signature"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected a `signature` object: {stdout}"));
+    let emits = signature["signature"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected signature.signature: {stdout}"));
+    let addressing = signature["addressing"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected signature.addressing: {stdout}"));
+    let grain = signature["grain"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected signature.grain: {stdout}"));
+    assert_eq!(grain, "partition");
+    let run_shape = signature["run_shape"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected signature.run_shape: {stdout}"));
+    assert_eq!(run_shape, "window sweep over event_date");
+
+    let text_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("daily_events")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt explain daily_events");
+    assert!(text_output.status.success());
+    let text_stdout = String::from_utf8_lossy(&text_output.stdout);
+    let headline = text_stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("text report has a first non-empty line");
+
+    let expected_headline =
+        format!("emits: {emits}, {addressing}, grain: {grain}, run shape: {run_shape}");
+    assert_eq!(
+        headline, expected_headline,
+        "the JSON signature fields must reconstruct byte-for-byte the text report's headline"
     );
 }

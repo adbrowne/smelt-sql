@@ -222,6 +222,54 @@ fn explain_prints_cells_clamps_locality() {
     );
 }
 
+/// The delta-signature headline (`docs/specs/incremental_models.md` §Surface
+/// "CLI" **Headline**, phase 9 of
+/// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`) must be
+/// the report's first non-empty line, ahead of `Maintenance plan:` — and
+/// must name the grain label and derived run shape for `daily_events`
+/// (`grain: partition` with a declared `timeseries:` axis, so the run shape
+/// is the window sweep over `event_date`).
+#[test]
+fn explain_headline_is_the_first_line() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+
+    let first_line = report
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("report has a first non-empty line");
+    assert!(
+        first_line.starts_with("emits:"),
+        "expected the delta-signature headline as the first line: {first_line:?}"
+    );
+    assert!(
+        first_line.contains("grain: partition"),
+        "expected the grain label in the headline: {first_line:?}"
+    );
+    assert!(
+        first_line.contains("run shape: window sweep over event_date"),
+        "expected the derived run shape naming the partition axis: {first_line:?}"
+    );
+
+    let maintenance_plan_line_idx = report
+        .lines()
+        .position(|l| l.starts_with("Maintenance plan:"))
+        .expect("report still has the Maintenance plan: line");
+    let headline_idx = report
+        .lines()
+        .position(|l| l == first_line)
+        .expect("headline line found");
+    assert!(
+        headline_idx < maintenance_plan_line_idx,
+        "the headline must print before `Maintenance plan:`: {report}"
+    );
+}
+
 /// A model whose SQL has an unqualified column ambiguous between two joined
 /// sources cannot be resolved to a single provenance — the derivation falls
 /// back to one column group spanning the whole model
@@ -741,6 +789,8 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
     };
     let report = build_maintenance_plan_report(
         "non_repair_fixture",
@@ -857,6 +907,8 @@ fn explain_prints_a_downgraded_cell_with_both_techniques() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
     };
 
     let report = build_maintenance_plan_report(
@@ -1034,6 +1086,7 @@ fn explain_json_carries_state_downgrades() {
             &[],
             None,
             &result.state_downgrades,
+            None,
         );
 
         if expect_downgrade {

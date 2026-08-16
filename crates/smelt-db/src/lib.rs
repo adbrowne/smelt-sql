@@ -1517,6 +1517,47 @@ pub fn model_edges_for(
         .collect()
 }
 
+/// This model's own per-column-group output-delta verdicts
+/// (`docs/specs/incremental_models.md` §Surface "CLI" — the delta-signature
+/// headline needs the per-group verdicts themselves, not only the reduced
+/// scalar `ModelEdge::output_shape` folds via `OutputDelta::meet`). Extracted
+/// from `ref_model_edge`'s own `output_shape` derivation so both call sites
+/// — `ref_model_edge` (resolving an UPSTREAM edge's shape) and
+/// `maintenance_plan_report` (resolving the model being explained's OWN
+/// shape) — read the SAME fold rather than two independently-assembled
+/// copies. `project` is the caller's already-resolved project (`None` when
+/// `file` resolves outside any known project).
+fn own_output_delta_verdicts(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    sql: &str,
+    meta: &smelt_core::ModelMetadata,
+    model_verdicts: &std::collections::BTreeMap<
+        String,
+        smelt_logical::analysis::output_delta::OutputDeltaFacts,
+    >,
+) -> Vec<(
+    smelt_logical::maintenance::ColumnGroup,
+    smelt_logical::analysis::output_delta::OutputDelta,
+)> {
+    let sources = model_own_source_facts(db, workspace, project, sql);
+    let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
+    let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+        sql,
+        &declared_unique_key,
+        partition_col.as_deref(),
+    );
+    smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+        &sources,
+        &skeleton,
+        model_verdicts,
+    )
+}
+
 fn ref_model_edge(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -1566,25 +1607,11 @@ fn ref_model_edge(
     // contributes no groups at all (e.g. an unclassifiable `SELECT *`
     // projection) rather than an optimistic guess.
     let project = find_project(db, workspace, file.project_root(db));
-    let sources = model_own_source_facts(db, workspace, project, &sql);
-    let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
-    let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
-        &sql,
-        &declared_unique_key,
-        partition_col.as_deref(),
-    );
     let output_shape =
-        smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
-            &sql,
-            &smelt_logical::analysis::join_shape::JoinContext::new(),
-            &sources,
-            &skeleton,
-            model_verdicts,
-        )
-        .into_iter()
-        .map(|(_, shape)| shape)
-        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
+        own_output_delta_verdicts(db, workspace, project, &sql, &meta, model_verdicts)
+            .into_iter()
+            .map(|(_, shape)| shape)
+            .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
@@ -1874,8 +1901,46 @@ pub fn maintenance_plan_report(
             &metadata.functional_dependencies,
         ) {
             result.state_columns = smelt_logical::state_column_summary(&classification);
+            // `incremental_shapes.md` §"The two run shapes (derived, never
+            // declared)": an unclocked driving source reconciles the whole
+            // keyed end-state every run; a clocked one advances
+            // window-forward. Read straight off the SAME classification
+            // `CumulativeClassification::is_snapshot_reconcile` already
+            // decides, never re-derived here.
+            result.run_shape = Some(if classification.is_snapshot_reconcile() {
+                smelt_logical::maintenance::signature::KeyedRunShape::SnapshotReconcile
+            } else {
+                smelt_logical::maintenance::signature::KeyedRunShape::WindowForward
+            });
         }
+    } else if resolved_grain == Some(smelt_core::config::Grain::Partition) {
+        // `grain: partition`'s run shape is the window sweep over the
+        // declared partition axis (`incremental_shapes.md` §"The two run
+        // shapes") — `None` when the model declares no `timeseries:`, since
+        // there is then no axis to sweep and nothing to derive.
+        result.run_shape = metadata.timeseries.as_ref().map(|t| {
+            smelt_logical::maintenance::signature::KeyedRunShape::PartitionSweep {
+                axis: t.partition_column.clone(),
+            }
+        });
     }
+
+    // This model's own delta-signature headline verdicts
+    // (`docs/specs/incremental_models.md` §Surface "CLI" — the delta-signature
+    // headline): the SAME per-group fold `ref_model_edge`'s `output_shape`
+    // reduces to a single scalar, kept per-group here so a mixed meet can
+    // name the group that forced a `General` widen. Reads the SAME
+    // cross-model verdict map `model_edges_for` folds for this file's own
+    // upstream edges above — recomputed here since `model_edges_for` does
+    // not return it.
+    let model_verdicts = smelt_logical::analysis::output_delta::derive_workspace_output_deltas(
+        &model_delta_inputs(db, workspace, file),
+    );
+    result.own_output_delta =
+        own_output_delta_verdicts(db, workspace, project, sql_body, &metadata, &model_verdicts)
+            .into_iter()
+            .map(|(group, shape)| (group.name(), shape))
+            .collect();
 
     Some(result)
 }

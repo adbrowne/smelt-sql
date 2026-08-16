@@ -193,6 +193,30 @@ fn format_output_delta(delta: &smelt_logical::analysis::output_delta::OutputDelt
     }
 }
 
+/// The admitted key-temporal-locality route's short label — the same
+/// classification the "Key temporal locality:" stanza and the delta-signature
+/// headline's `locality:` clause both print, read from `locality.slice`'s own
+/// variant (never re-derived).
+fn locality_route_label(
+    slice: &smelt_logical::maintenance::locality::LocalitySlice,
+) -> &'static str {
+    use smelt_logical::maintenance::locality::LocalitySlice;
+    match slice {
+        LocalitySlice::Window {
+            recurrence_bounded: false,
+            ..
+        } => "route 1 (key-embedded)",
+        LocalitySlice::Window {
+            recurrence_bounded: true,
+            ..
+        } => "route 3 (recurrence-bounded, statically derived)",
+        LocalitySlice::DeltaValues { .. } => "route 2 (key-determined)",
+        LocalitySlice::RecurrenceBounded { .. } => {
+            "route 3 (recurrence-bounded, declared key_recurrence)"
+        }
+    }
+}
+
 /// A cell's own trigger, addressed the same way `maintenance.cells[]`/
 /// `contract.cells[]` address it (a source address, or the literal
 /// `backfill`) — `None` for `Trigger::ColumnAdded`, which has no `on:`
@@ -276,6 +300,34 @@ pub fn build_maintenance_plan_report(
     use std::fmt::Write as _;
 
     let mut out = String::new();
+
+    // Delta-signature headline (`docs/specs/incremental_models.md` §Surface
+    // "CLI" **Headline**): the report's first line, built entirely by the
+    // single-owner `smelt_logical::maintenance::signature` formatter — this
+    // function supplies only already-derived inputs (this model's own
+    // per-group verdicts, its resolved grain label, its derived run shape,
+    // its admitted locality route), never formats anything itself. `None`
+    // when the model derives no verdict at all (an unclassifiable
+    // projection) — no `emits:` line printed rather than a fabricated one.
+    let locality_bound = result
+        .plan
+        .key_locality
+        .as_ref()
+        .map(|kl| locality_route_label(&kl.slice).to_string());
+    let grain_label = own_contract
+        .derived_grain
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "(unclassified)".to_string());
+    if let Some(headline) = smelt_logical::maintenance::signature::derive_signature_headline(
+        &result.own_output_delta,
+        grain_label,
+        result.run_shape.clone(),
+        locality_bound,
+    ) {
+        let _ = writeln!(out, "{}", headline.render());
+        let _ = writeln!(out);
+    }
+
     let _ = writeln!(out, "Maintenance plan: {}", model_name);
     let _ = writeln!(out);
 
@@ -783,20 +835,7 @@ pub fn build_maintenance_plan_report(
     // Phase A5's review checklist).
     if let Some(locality) = &result.plan.key_locality {
         use smelt_logical::maintenance::locality::LocalitySlice;
-        let route = match &locality.slice {
-            LocalitySlice::Window {
-                recurrence_bounded: false,
-                ..
-            } => "route 1 (key-embedded)",
-            LocalitySlice::Window {
-                recurrence_bounded: true,
-                ..
-            } => "route 3 (recurrence-bounded, statically derived)",
-            LocalitySlice::DeltaValues { .. } => "route 2 (key-determined)",
-            LocalitySlice::RecurrenceBounded { .. } => {
-                "route 3 (recurrence-bounded, declared key_recurrence)"
-            }
-        };
+        let route = locality_route_label(&locality.slice);
         // Observed-delta key→partition projection form
         // (`incremental_shapes.md` §"What the composed shape uniquely
         // enables" — "Exact key→partition dirt projection"; §Known
@@ -1376,6 +1415,13 @@ impl From<smelt_logical::contract::EffectiveContract> for ExplainContractPointJs
 #[derive(Debug, Serialize)]
 pub struct ExplainMaintenanceJson {
     pub model: String,
+    /// The delta-signature headline (`docs/specs/incremental_models.md`
+    /// §Surface "CLI" **Headline**), the SAME `SignatureHeadline` value the
+    /// text report's first line renders — `None` when this model derives no
+    /// verdict at all (`build_maintenance_plan_report`'s own headline is
+    /// then also absent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<ExplainSignatureJson>,
     pub contract: RelationContractView,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbound_edges: Vec<InboundEdgeContract>,
@@ -1400,6 +1446,57 @@ pub struct ExplainMaintenanceJson {
     /// addition to this JSON shape (`docs/specs/cli.md` §Constraints item 5).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub state_downgrades: Vec<ExplainStateDowngradeJson>,
+}
+
+/// The delta-signature headline's JSON shape
+/// (`docs/specs/cli.md` §"`smelt explain --json` output schema"): the SAME
+/// fields the text report's headline line renders — `signature` +
+/// `addressing` are the `emits:`/addressing clauses, `grain` and `run_shape`/
+/// `locality` are the trailing clauses. No CLI-side re-formatting: every
+/// field is read straight off a `smelt_logical::maintenance::signature::
+/// SignatureHeadline` value built by `explain_signature_json`.
+#[derive(Debug, Serialize)]
+pub struct ExplainSignatureJson {
+    pub signature: String,
+    pub addressing: String,
+    pub grain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_shape: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locality: Option<String>,
+}
+
+/// Build the delta-signature headline's JSON shape from the same inputs
+/// `build_maintenance_plan_report`'s headline line uses — this model's own
+/// per-group verdicts, the resolved grain label, its derived run shape, and
+/// its admitted locality route. `None` when no verdict is derivable at all,
+/// mirroring the text report's absent headline line.
+pub fn explain_signature_json(
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+    own_contract: &RelationContractView,
+) -> Option<ExplainSignatureJson> {
+    let locality_bound = result
+        .plan
+        .key_locality
+        .as_ref()
+        .map(|kl| locality_route_label(&kl.slice).to_string());
+    let grain_label = own_contract
+        .derived_grain
+        .map(|g| g.to_string())
+        .unwrap_or_else(|| "(unclassified)".to_string());
+    let headline = smelt_logical::maintenance::signature::derive_signature_headline(
+        &result.own_output_delta,
+        grain_label,
+        result.run_shape.clone(),
+        locality_bound,
+    )?;
+    Some(ExplainSignatureJson {
+        signature: headline.emits_label(),
+        addressing: headline.addressing_label(),
+        grain: headline.grain_label.clone(),
+        run_shape: headline.run_shape_label(),
+        locality: headline.locality_bound.clone(),
+    })
 }
 
 /// One entry of `state_downgrades`
@@ -1453,6 +1550,7 @@ pub fn build_maintenance_plan_json(
     column_groups: &[smelt_logical::maintenance::ColumnGroup],
     contract_cfg: Option<&smelt_core::config::ContractConfig>,
     state_downgrades: &[smelt_logical::maintenance::availability::StateDowngrade],
+    signature: Option<ExplainSignatureJson>,
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1526,6 +1624,7 @@ pub fn build_maintenance_plan_json(
         .collect();
     ExplainMaintenanceJson {
         model: model_name.to_string(),
+        signature,
         contract: own_contract,
         inbound_edges,
         cells,

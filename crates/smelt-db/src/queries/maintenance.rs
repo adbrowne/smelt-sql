@@ -84,6 +84,24 @@ pub struct MaintenancePlanResult {
     /// internal derivation never re-decides which columns are
     /// state-bearing).
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// This model's own per-column-group output-delta verdicts, keyed by
+    /// group display name (`ColumnGroup::name`) — the SAME per-workspace
+    /// fold `ref_model_edge`'s `output_shape` reduces via `OutputDelta::meet`
+    /// into a single scalar, kept here per-group so `smelt explain`'s
+    /// delta-signature headline
+    /// (`docs/specs/incremental_models.md` §Surface "CLI") can name the
+    /// degrading group when a mixed meet widens to `General`. Empty when
+    /// this model derives no groups at all (an unclassifiable projection).
+    /// Populated only by `smelt_db::maintenance_plan_report`, the single
+    /// caller that has a `model_verdicts` map to fold against — every other
+    /// site constructing a [`MaintenancePlanResult`] leaves this empty.
+    pub own_output_delta: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)>,
+    /// The model's derived run shape (`incremental_shapes.md` §"The two run
+    /// shapes"), for the delta-signature headline's `run shape:` clause.
+    /// `None` when not derivable (no resolved grain, or a keyed model whose
+    /// cumulative classification failed). Populated only by
+    /// `smelt_db::maintenance_plan_report`, mirroring `own_output_delta`.
+    pub run_shape: Option<smelt_logical::maintenance::signature::KeyedRunShape>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -652,6 +670,8 @@ fn finish_plan_result(
         column_groups,
         degenerate,
         state_columns: Vec::new(),
+        own_output_delta: Vec::new(),
+        run_shape: None,
     }
 }
 

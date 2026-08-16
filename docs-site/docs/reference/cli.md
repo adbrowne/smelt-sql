@@ -1130,11 +1130,17 @@ smelt explain [MODEL_NAME] [OPTIONS]
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
-With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
-the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
+With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**, led by a
+one-line **delta-signature headline**: what the model emits (`keyed upsert over [...]`,
+`append-only within a window`, or `general change` naming what degraded it), how that shape is
+addressed (`key-addressed`, `window-addressed by <axis>`, or `whole-table-addressed`), the
+derived `grain` label, and the derived **run shape** — `window-forward` or `snapshot-reconcile`
+for `grain: key`, the window sweep over the partition axis for `grain: partition`. A model whose
+shape isn't derivable at all prints no headline line. After the headline: every cell (trigger,
+corner, technique), the `ledger_catch_up` flag (whether the cell routes through the
+[reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived
+per-source scan clamps, each source's partition-locality verdict, any admission refusals, the
+model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
 
@@ -1267,6 +1273,8 @@ smelt explain daily_events --show-sql --technique keyed_fold
 
 ```text
 $ smelt explain daily_events
+emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
+
 Maintenance plan: daily_events
 
 Cells (2):

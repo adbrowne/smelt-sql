@@ -37,6 +37,7 @@ pub mod locality;
 pub mod probe_cadence;
 pub mod propagate;
 pub mod repair;
+pub mod signature;
 pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};

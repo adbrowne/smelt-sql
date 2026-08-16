@@ -146,6 +146,8 @@ smelt explain silver.events_deduped
 
 <!-- smelt-generate: @cwd=tutorial_stages/06_composed_dedupe @render=text explain silver.events_deduped -->
 ```text
+emits: keyed upsert over [event_id], key-addressed, grain: key, run shape: window-forward, locality: route 3 (recurrence-bounded, declared key_recurrence)
+
 Maintenance plan: silver.events_deduped
 
 Cells (2):

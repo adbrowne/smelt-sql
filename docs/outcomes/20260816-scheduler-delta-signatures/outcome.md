@@ -70,7 +70,7 @@ run shape.
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
-| 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | planned |
+| 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | pending |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
@@ -315,6 +315,21 @@ run shape.
   clock" at the CLI. Also noted: phase 8's summary flagged a stale keyed-seed clause in the
   scheduler-currency Known Divergences bullet — that belongs to row 13's close-out sweep, not
   here.
+
+- 2026-08-16 (phase 9 implemented): `smelt_logical::maintenance::signature`
+  (new module) lands `KeyedRunShape` + `SignatureHeadline` +
+  `derive_signature_headline`, a pure formatter reusing `edge_type::
+  Addressing`'s three-way mapping. `smelt-db`'s `own_output_delta_verdicts`
+  is extracted from `ref_model_edge`'s inline fold and now also called by
+  `maintenance_plan_report`, which populates the new `MaintenancePlanResult`
+  fields `own_output_delta`/`run_shape` (the latter from
+  `CumulativeClassification::is_snapshot_reconcile` for `grain: key`, from
+  `metadata.timeseries` for `grain: partition`). `smelt-cli`'s
+  `build_maintenance_plan_report` prints the headline first; `--json` gets a
+  matching `signature` object built by the new `explain_signature_json`,
+  reading the identical `SignatureHeadline` value (byte-equal fields,
+  test-verified). Spec, docs-site `cli.md`, and the web-analytics tutorial
+  fixture updated. No reshape of the phase table.
 
 ## Blocked
 

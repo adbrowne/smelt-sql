@@ -1,3 +1,5 @@
+emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
+
 Maintenance plan: daily_events
 
 Cells (2):

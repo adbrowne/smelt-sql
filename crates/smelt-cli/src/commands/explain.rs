@@ -741,6 +741,7 @@ async fn explain_maintenance_plan(
     );
 
     if args.json {
+        let signature = smelt_cli::explain::explain_signature_json(&result, &own_contract);
         let json = smelt_cli::explain::build_maintenance_plan_json(
             &canonical,
             &result.plan.cells,
@@ -755,6 +756,7 @@ async fn explain_maintenance_plan(
             &result.column_groups,
             contract_cfg,
             &result.state_downgrades,
+            signature,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

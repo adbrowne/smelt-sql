@@ -416,7 +416,14 @@ contract:
     `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the same with
     its locality slice bound appended (the worked example below); for a partition-grain model,
     `emits: append-only within a window, window-addressed by order_date` — with the derived
-    `grain` label alongside as the friendly name.
+    `grain` label alongside as the friendly name, and the model's derived **run shape** named
+    alongside the grain label: for `grain: key`, window-forward or snapshot-reconcile
+    (`incremental_shapes.md` §"The two run shapes (derived, never declared)"); for `grain:
+    partition`, the window sweep over the partition axis. A model whose run shape is not
+    derivable prints no run-shape clause rather than a guessed one (the §"Delta signatures"
+    never-fabricate rule). A model whose emitted shape degrades to `general` prints `emits:
+    general change, whole-table-addressed`, naming the degrading construct — matching the
+    widen-never-narrow default this section states for an underivable signature.
   - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, the
     effective contract point, and the **per-column guarantee ledger** — the printed summary
     of what each output column is guaranteed (its equivalence contract and its **settle
@@ -1964,9 +1971,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
-- **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
-  the signature the first line; today's output leads with grain), nor the per-column guarantee
-  summary or derived run shape. Tracked:
+- **`smelt explain` does not yet print the per-column guarantee summary or surface a
+  pre-execution refusal** (§Surface "CLI" — the headline and its derived run shape now print
+  first, ahead of the plan; the per-column equivalence-contract × settle-bound ledger and
+  refusal surfacing remain unbuilt). Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
 - **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
   but needs per-cell frontier addressing, which the frontier record tracks only per-region
