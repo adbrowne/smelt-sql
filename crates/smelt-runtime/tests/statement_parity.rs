@@ -462,6 +462,7 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     }
 }
 
@@ -1654,6 +1655,7 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     }
 }
 
@@ -2405,6 +2407,7 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     // Run 1: creation — nothing to fold yet.

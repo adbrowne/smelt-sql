@@ -38,6 +38,8 @@ use smelt_logical::maintenance::{
     ColumnGroup, MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
 };
 
+use crate::types::KeyedRestriction;
+
 /// One caller-declared per-source delta: the partitions that landed on
 /// `source` (bare name, the `sources.` breadcrumb stripped — matches
 /// [`Edge::upstream`]'s naming convention) since the last propagation.
@@ -1302,6 +1304,43 @@ fn plan_since_upstream_full(
         dirty_set_report: report,
         keyed_dirty: prop.keyed_dirty,
     })
+}
+
+/// Convert a [`SinceUpstreamPlan::keyed_dirty`] channel into the
+/// [`ExecuteRequest::keyed_restrictions`](crate::types::ExecuteRequest::keyed_restrictions)
+/// wire shape the CLI's `run_since_upstream` populates each per-model
+/// request from (`docs/specs/incremental_models.md` §"Restrictions compose
+/// by union", phase 5,
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/05-plan.md`).
+/// Pure data conversion — only [`smelt_logical::maintenance::propagate::
+/// KeyValues::Resolved`] entries contribute a [`KeyedRestriction`]; an
+/// unresolved entry contributes **nothing** to the map (never narrows the
+/// union its consumer computes) rather than erroring or defaulting to an
+/// empty restriction. Values are sorted and deduplicated per entry, mirroring
+/// the union arithmetic performed downstream in `maintenance_driver.rs`.
+pub fn keyed_restrictions_from_plan(
+    plan: &SinceUpstreamPlan,
+) -> BTreeMap<String, Vec<KeyedRestriction>> {
+    let mut out: BTreeMap<String, Vec<KeyedRestriction>> = BTreeMap::new();
+    for (model, keyed) in &plan.keyed_dirty {
+        for kd in keyed {
+            let smelt_logical::maintenance::propagate::KeyValues::Resolved(values) = &kd.values
+            else {
+                continue;
+            };
+            let mut values = values.clone();
+            values.sort();
+            values.dedup();
+            out.entry(model.clone())
+                .or_default()
+                .push(KeyedRestriction {
+                    upstream: kd.from.clone(),
+                    keys: kd.keys.clone(),
+                    values,
+                });
+        }
+    }
+    out
 }
 
 /// The resolved backward-resolution plan for `smelt build --include-upstreams`:

@@ -733,6 +733,7 @@ pub async fn run_bakeoff(
                         on: cell.on.clone(),
                         technique,
                     }],
+                    keyed_restrictions: std::collections::BTreeMap::new(),
                 };
                 let run_id = format!("bakeoff-{schema}-{i}");
                 let backend_factory = CliBackendFactory {

@@ -181,6 +181,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let run_id = generate_run_id();
@@ -415,6 +416,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -217,6 +217,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         retry_backoff_ms: None,
         resume: args.resume,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let run_id = generate_run_id();
@@ -388,6 +389,14 @@ async fn run_since_upstream(
         database_override: args.database.clone(),
     };
 
+    // The propagated keyed-restriction channel (`docs/specs/incremental_models.md`
+    // §"Restrictions compose by union"): the WHOLE resolved map is computed
+    // once from `plan` and passed to every per-model request — `execute_project`
+    // selects each model's own entries by name (`ExecuteRequest::keyed_restrictions`
+    // is keyed by consumer model name), so a run's request never carries a
+    // narrower view of the plan than the plan itself resolved.
+    let keyed_restrictions = smelt_runtime::propagation::keyed_restrictions_from_plan(&plan);
+
     for run in &plan.runs {
         info!(
             "[--since-upstream] running {} over {}",
@@ -418,6 +427,7 @@ async fn run_since_upstream(
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: keyed_restrictions.clone(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

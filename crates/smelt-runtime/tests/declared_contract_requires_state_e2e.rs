@@ -152,6 +152,7 @@ async fn stateless_project_declaring_deferral_refuses_the_run() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let result = execute_project(

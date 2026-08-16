@@ -1533,6 +1533,15 @@ A model receiving several components in one tick dispatches each; per-edge dirt 
 (§Design "Per-edge dirt keys trigger cells") is unchanged — components refine it, they do not
 replace it.
 
+**Restrictions compose by union.** A key-addressed run unit's read restriction is the **union**
+of (a) the keyed component's propagated key values and (b) the values the cell's own affected-key
+discovery resolves (§"Upstream model edges" — the group-grain fingerprint sidecar diff over the
+upstream's own output table) — never an intersection. The sidecar refresh commits in the same
+backend transaction as the cell's write, so narrowing the repaired set to only the values both
+sides agree on would advance the comparandum past keys that were never actually consumed —
+wrong-and-quiet. A propagated component whose values are unresolved (§"Unresolved seeds")
+contributes no keys to the union and never narrows it; it widens at dispatch by the rule above.
+
 ### Shape profiles
 
 A maintained model composes properties (`model_properties.md`), transforms

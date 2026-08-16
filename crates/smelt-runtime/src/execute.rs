@@ -2103,6 +2103,7 @@ pub async fn execute_project(
                             digest_columns,
                             write,
                             &retry_policy,
+                            restriction_keys_for(request, &plan.name, edge_name),
                         )
                         .await?;
                         for (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) in
@@ -2136,6 +2137,7 @@ pub async fn execute_project(
                                 digest_columns,
                                 write,
                                 &retry_policy,
+                                restriction_keys_for(request, &plan.name, edge_name),
                             )
                             .await?;
                         }
@@ -2818,6 +2820,7 @@ pub async fn execute_project(
                             digest_columns,
                             write,
                             &retry_policy,
+                            restriction_keys_for(request, &plan.name, edge_name),
                         )
                         .await?,
                     );
@@ -4965,6 +4968,25 @@ fn maintenance_dialect_for_target(
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
 }
 
+/// Look up the propagated keyed-restriction values `request.keyed_restrictions`
+/// carries for `(model, edge_name)` (`ExecuteRequest::keyed_restrictions`,
+/// `docs/specs/incremental_models.md` §"Restrictions compose by union") — an
+/// empty slice when the request carries no such restriction, so a plain
+/// request (no `--since-upstream` restriction populated) resolves
+/// byte-identically to today's sidecar-only discovery.
+fn restriction_keys_for<'a>(
+    request: &'a ExecuteRequest,
+    model: &str,
+    edge_name: &str,
+) -> &'a [String] {
+    request
+        .keyed_restrictions
+        .get(model)
+        .and_then(|entries| entries.iter().find(|e| e.upstream == edge_name))
+        .map(|e| e.values.as_slice())
+        .unwrap_or(&[])
+}
+
 /// Execute an already-resolved live key-addressed model-edge cell
 /// (`docs/specs/incremental_models.md` §"Upstream model edges") — shared by
 /// the `grain: key` run branch and the non-keyed dispatch site
@@ -4995,6 +5017,7 @@ async fn dispatch_key_addressed_model_edge(
     digest_columns: &[String],
     write: &crate::maintenance_driver::RepairWrite,
     retry_policy: &RetryPolicy<'_>,
+    restriction_keys: &[String],
 ) -> Result<smelt_backend::ExecutionResult> {
     let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
         anyhow::anyhow!(
@@ -5026,6 +5049,7 @@ async fn dispatch_key_addressed_model_edge(
         &compiled.sql,
         write,
         retry_policy,
+        restriction_keys,
     )
     .await?
     {

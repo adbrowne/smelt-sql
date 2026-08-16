@@ -2296,8 +2296,19 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// already refused a non-DuckDB dialect before any backend call is reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
-/// changed upstream keys — the caller reports a no-op rather than executing
-/// an empty-but-real write.
+/// changed upstream keys AND `restriction_keys` is empty — the caller
+/// reports a no-op rather than executing an empty-but-real write.
+///
+/// `restriction_keys` is the propagated keyed-restriction channel's own
+/// resolved values for this edge (`ExecuteRequest::keyed_restrictions`,
+/// `docs/specs/incremental_models.md` §"Restrictions compose by union") —
+/// **unioned**, never intersected, with the sidecar's own `changed_keys`
+/// before the emitter is called: the sidecar refresh commits in the same
+/// transaction as the write, so narrowing the repaired set would advance
+/// the comparandum past keys that were never consumed. Set arithmetic on
+/// the emitter's inputs, not a second statement author — the emitter stays
+/// the single owner of the affected-keys SELECT
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/05-plan.md`).
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_key_addressed_affected_keys(
     backend: &dyn Backend,
@@ -2309,8 +2320,9 @@ pub async fn resolve_key_addressed_affected_keys(
     digest_columns: &[String],
     downstream_keys: &[String],
     model_sql: &str,
+    restriction_keys: &[String],
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
-    let changed_keys = diff_repair_group_sidecar_changed_keys(
+    let sidecar_changed_keys = diff_repair_group_sidecar_changed_keys(
         backend,
         schema,
         upstream_source_address,
@@ -2321,6 +2333,7 @@ pub async fn resolve_key_addressed_affected_keys(
         model_sql,
     )
     .await?;
+    let changed_keys = union_affected_keys(sidecar_changed_keys, restriction_keys);
     let dialect = maintenance_dialect(backend.dialect());
     let affected_keys_select =
         smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
@@ -2331,6 +2344,25 @@ pub async fn resolve_key_addressed_affected_keys(
             dialect,
         );
     Ok((changed_keys, affected_keys_select))
+}
+
+/// The union arithmetic §"Restrictions compose by union" pins: `sidecar_changed_keys`
+/// (the group-grain sidecar diff's own resolved set) unioned with `restriction_keys`
+/// (the propagated keyed-restriction channel), sorted and deduplicated. Never an
+/// intersection — an empty `restriction_keys` leaves `sidecar_changed_keys`
+/// unchanged (mod sort/dedup), which is already `resolve_key_addressed_affected_keys`'s
+/// pre-phase-5 behaviour (`diff_repair_group_sidecar_changed_keys` itself never
+/// returns keys out of order or duplicated, so this is a true no-op for the
+/// empty-restriction case). Pure so the union rule is unit-testable without a
+/// backend.
+fn union_affected_keys(
+    mut sidecar_changed_keys: Vec<String>,
+    restriction_keys: &[String],
+) -> Vec<String> {
+    sidecar_changed_keys.extend(restriction_keys.iter().cloned());
+    sidecar_changed_keys.sort();
+    sidecar_changed_keys.dedup();
+    sidecar_changed_keys
 }
 
 /// Execute a live key-addressed model-edge cell
@@ -2346,11 +2378,12 @@ pub async fn resolve_key_addressed_affected_keys(
 /// ([`RepairSidecarRefresh`]), so a failed write never leaves the sidecar
 /// advanced past a change it did not actually consume.
 ///
-/// An empty changed-key set is a legitimate no-op: this returns
-/// `Ok(None)` rather than executing an empty-but-real write, matching
-/// [`emit_key_addressed_affected_keys_select`]'s own well-typed-empty
-/// convention (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`
-/// task 5).
+/// An empty union of the sidecar's changed keys and `restriction_keys` is a
+/// legitimate no-op: this returns `Ok(None)` rather than executing an
+/// empty-but-real write, matching [`emit_key_addressed_affected_keys_select`]'s
+/// own well-typed-empty convention
+/// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md` task 5).
+/// `restriction_keys` — see [`resolve_key_addressed_affected_keys`].
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_key_addressed_model_edge_cell(
     backend: &dyn Backend,
@@ -2365,6 +2398,7 @@ pub async fn execute_key_addressed_model_edge_cell(
     compiled_model_sql: &str,
     write: &RepairWrite,
     retry: &crate::execute::RetryPolicy<'_>,
+    restriction_keys: &[String],
 ) -> Result<Option<ExecutionResult>> {
     let full_table = format!("{schema}.{table}");
     let (changed_keys, affected_keys_select) = resolve_key_addressed_affected_keys(
@@ -2377,6 +2411,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         digest_columns,
         downstream_keys,
         clean_model_sql,
+        restriction_keys,
     )
     .await
     .map_err(|e| {
@@ -3845,6 +3880,57 @@ mod tests {
     #[test]
     fn driving_steps_rejects_empty_window() {
         assert!(driving_steps("2024-01-05", "2024-01-01", &Granularity::Day).is_err());
+    }
+
+    // ── phase 5: restriction/sidecar union (`docs/outcomes/
+    // 20260816-scheduler-delta-signatures/phases/05-plan.md` tests 3-4) ──
+
+    /// Regression pin: an empty restriction leaves the sidecar's own
+    /// resolved key set unchanged (mod sort/dedup, which
+    /// `diff_repair_group_sidecar_changed_keys` already produces) —
+    /// byte-identical to `resolve_key_addressed_affected_keys`'s pre-phase-5
+    /// behaviour.
+    #[test]
+    fn empty_restriction_leaves_discovery_unchanged() {
+        let sidecar = vec!["k1".to_string(), "k3".to_string()];
+        assert_eq!(union_affected_keys(sidecar.clone(), &[]), sidecar);
+    }
+
+    /// §"Restrictions compose by union": a restriction key absent from the
+    /// sidecar's own diff still ends up in the resolved set (union, not
+    /// intersection), sorted and deduplicated.
+    #[test]
+    fn restriction_unions_with_sidecar_keys_never_intersects() {
+        let sidecar = vec!["k1".to_string()];
+        let restriction = vec!["k2".to_string()];
+        assert_eq!(
+            union_affected_keys(sidecar, &restriction),
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+    }
+
+    /// A restriction key that already appears in the sidecar's own diff is
+    /// deduplicated, not doubled.
+    #[test]
+    fn restriction_union_deduplicates_overlapping_keys() {
+        let sidecar = vec!["k1".to_string(), "k2".to_string()];
+        let restriction = vec!["k2".to_string(), "k1".to_string()];
+        assert_eq!(
+            union_affected_keys(sidecar, &restriction),
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+    }
+
+    /// The sidecar reporting zero changed keys is not itself a no-op signal
+    /// when a restriction is present — the union is non-empty, so
+    /// `resolve_key_addressed_affected_keys`'s caller must still dispatch
+    /// rather than short-circuit to `Ok(None)`.
+    #[test]
+    fn restriction_alone_yields_a_non_empty_union_when_sidecar_is_empty() {
+        assert_eq!(
+            union_affected_keys(Vec::new(), &["k2".to_string()]),
+            vec!["k2".to_string()]
+        );
     }
 
     /// The plain unconditional matched arm — the pre-Phase-C6 default for

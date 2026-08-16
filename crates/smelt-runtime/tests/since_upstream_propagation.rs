@@ -13,8 +13,9 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, plan_since_upstream_with_keyed_seeds,
-    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    build_forward_graph, keyed_restrictions_from_plan, plan_since_upstream,
+    plan_since_upstream_with_keyed_seeds, plan_since_upstream_with_observed_deltas,
+    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1464,5 +1465,121 @@ fn keyed_seed_values_flow_through_plan_since_upstream() {
             || plan.dirty_set_report.contains("Resolved"),
         "the dirty-set report must surface the resolved values: {}",
         plan.dirty_set_report
+    );
+}
+
+/// Shared fixture for the [`keyed_restrictions_from_plan`] tests below —
+/// same `agg` (grain: key) -> `downstream` chain as
+/// [`keyed_seed_values_flow_through_plan_since_upstream`].
+fn stage_agg_downstream_chain(root: &Path) {
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+}
+
+/// Phase 5 test 5 (`docs/outcomes/20260816-scheduler-delta-signatures/
+/// phases/05-plan.md`): a plan built via [`plan_since_upstream_with_keyed_seeds`]
+/// converts, through [`keyed_restrictions_from_plan`], into a `model ->
+/// [KeyedRestriction]` map carrying the resolved values.
+#[test]
+fn keyed_restrictions_from_plan_carries_resolved_values() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    stage_agg_downstream_chain(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+    let order = vec!["downstream".to_string()];
+
+    let mut keyed_seeds = std::collections::BTreeMap::new();
+    keyed_seeds.insert(
+        "agg".to_string(),
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "2".to_string(),
+            "1".to_string(),
+            "2".to_string(),
+        ]),
+    );
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &[], &keyed_seeds)
+            .expect("plan with keyed seeds");
+
+    let restrictions = keyed_restrictions_from_plan(&plan);
+    let downstream_restrictions = restrictions
+        .get("downstream")
+        .expect("downstream must carry a keyed restriction");
+    assert_eq!(downstream_restrictions.len(), 1);
+    let restriction = &downstream_restrictions[0];
+    assert_eq!(restriction.upstream, "agg");
+    assert_eq!(restriction.keys, vec!["user_id".to_string()]);
+    assert_eq!(
+        restriction.values,
+        vec!["1".to_string(), "2".to_string()],
+        "values must be sorted and deduplicated: {restriction:?}"
+    );
+}
+
+/// Phase 5 test 6: an unseeded admitted keyed edge propagates a symbolic
+/// `KeyValues::Unresolved` record (`docs/specs/incremental_models.md`
+/// §"Unresolved seeds") — [`keyed_restrictions_from_plan`] must contribute
+/// **no** map entry for it, never narrowing the union its consumer computes
+/// with a spurious empty restriction.
+#[test]
+fn keyed_restrictions_from_plan_drops_unresolved_values() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    stage_agg_downstream_chain(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+    let order = vec!["agg".to_string(), "downstream".to_string()];
+
+    // `agg` itself is the delta origin (a landed-model delta, mirroring
+    // `model_delta_origin_propagates_to_downstreams_without_rerunning_origin`)
+    // — this marks `agg` dirty so its outbound admitted keyed edge is
+    // actually visited, but no seed is provided for `agg`, so the edge still
+    // propagates a symbolic Unresolved record on the keyed channel.
+    let deltas = vec![SourceDelta {
+        source: "agg".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let keyed_seeds = std::collections::BTreeMap::new();
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &deltas, &keyed_seeds)
+            .expect("plan with no keyed seeds");
+    assert!(
+        plan.keyed_dirty.contains_key("downstream"),
+        "the unseeded edge must still propagate a symbolic Unresolved record: {:?}",
+        plan.keyed_dirty
+    );
+
+    let restrictions = keyed_restrictions_from_plan(&plan);
+    assert!(
+        !restrictions.contains_key("downstream"),
+        "an unresolved seed must contribute no restriction entry: {restrictions:?}"
     );
 }

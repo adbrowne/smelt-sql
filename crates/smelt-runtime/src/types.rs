@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use smelt_core::discovery::ModelFile;
 use smelt_state::ModelRunRecord;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// Unified run request consumed by `execute_project`. Both `smelt-cli`'s
 /// `commands/run.rs` and `smelt-ui`'s `run_manager.rs` convert their native
@@ -166,10 +166,38 @@ pub struct ExecuteRequest {
     /// overrides at all.
     #[serde(default)]
     pub technique_overrides: Vec<CellTechniqueOverride>,
+
+    /// Propagated keyed-restriction channel for `smelt run --since-upstream`
+    /// (`docs/specs/incremental_models.md` §"Restrictions compose by
+    /// union"): per consumer model name, the resolved key values a prior
+    /// `--since-upstream` plan propagated for one of its key-addressed
+    /// upstream edges. At dispatch, a key-addressed run unit's read
+    /// restriction is the **union** of these values with the cell's own
+    /// live affected-key discovery — never an intersection. Populated by
+    /// [`crate::propagation::keyed_restrictions_from_plan`]; empty (the
+    /// default) leaves resolution byte-identical to a request with no
+    /// restrictions at all.
+    #[serde(default)]
+    pub keyed_restrictions: BTreeMap<String, Vec<KeyedRestriction>>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// One propagated keyed restriction on a key-addressed model edge — see
+/// [`ExecuteRequest::keyed_restrictions`]. `upstream` names the edge (the
+/// upstream model's bare address) this restriction targets, matching
+/// [`smelt_logical::maintenance::KeyScope::from`]; `keys`/`values` are the
+/// downstream's own key columns and the resolved key values propagated for
+/// them. A plain serde wire type, not a re-export of
+/// `smelt_logical::maintenance::propagate::KeyedDirt` (mirrors
+/// [`CellTechniqueOverride`]'s own precedent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyedRestriction {
+    pub upstream: String,
+    pub keys: Vec<String>,
+    pub values: Vec<String>,
 }
 
 /// One request-scoped hard pin — see [`ExecuteRequest::technique_overrides`].

@@ -125,6 +125,7 @@ fn base_request(target: &str) -> ExecuteRequest {
         retry_backoff_ms: Some(1),
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     }
 }
 

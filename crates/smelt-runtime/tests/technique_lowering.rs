@@ -1709,6 +1709,7 @@ mod column_scoped_merge_e2e {
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2147,6 +2148,7 @@ mod keyed_membership_recompute_e2e {
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         }
     }
 

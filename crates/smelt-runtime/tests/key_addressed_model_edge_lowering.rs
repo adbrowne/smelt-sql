@@ -692,7 +692,31 @@ mod chain {
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// [`select_request`] plus a populated `keyed_restrictions` map — the
+    /// phase 5 tests' own request-scoped keyed-restriction channel
+    /// (`ExecuteRequest::keyed_restrictions`,
+    /// `docs/specs/incremental_models.md` §"Restrictions compose by union").
+    fn select_request_with_restriction(
+        models: &[&str],
+        consumer: &str,
+        upstream: &str,
+        keys: &[&str],
+        values: &[&str],
+    ) -> smelt_runtime::types::ExecuteRequest {
+        let mut request = select_request(models);
+        request.keyed_restrictions.insert(
+            consumer.to_string(),
+            vec![smelt_runtime::types::KeyedRestriction {
+                upstream: upstream.to_string(),
+                keys: keys.iter().map(|s| s.to_string()).collect(),
+                values: values.iter().map(|s| s.to_string()).collect(),
+            }],
+        );
+        request
     }
 
     struct DuckDbBackendFactory {
@@ -848,7 +872,181 @@ mod chain {
         assert_eq!(oracle_user_1, repaired);
     }
 
-    // ── 7 (dispatch outside `grain: key`) ──────────────────────────────
+    // ── 7 (phase 5: propagated key restrictions reach the cell) ─────────
+    /// Phase 5 (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
+    /// 05-plan.md` tests 1-2, `docs/specs/incremental_models.md`
+    /// §"Restrictions compose by union"): the sidecar diff alone cannot
+    /// detect every kind of staleness (here, a row directly corrupted
+    /// without any real upstream mutation) — a propagated keyed restriction
+    /// naming that key must still reach and repair the cell, even though
+    /// the sidecar itself reports zero changed keys (proving dispatch
+    /// actually runs rather than short-circuiting to the `Ok(None)` no-op).
+    #[tokio::test]
+    async fn propagated_restriction_key_is_repaired_when_sidecar_reports_no_change() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_chain_project(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments(&backend).await;
+        }
+
+        // Run 1: creation — nothing to repair yet.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "restrict-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        // Mutate user 1's contribution so run 2 dispatches a REAL repair —
+        // this establishes the group-grain sidecar's own baseline for BOTH
+        // keys (the refresh self-heals every currently-observed key, not
+        // just the changed subset).
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.sources_payments SET amount = 200.00 WHERE user_id = 1 AND amount = 100.00")
+                .await
+                .expect("mutate payments");
+        }
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "restrict-run-2".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run (establish sidecar baseline) must succeed");
+        }
+
+        // Directly corrupt user 2's downstream row WITHOUT touching
+        // payments/agg at all — the sidecar's own digest for user 2 is
+        // still accurate (nothing upstream changed), so a plain repair
+        // dispatch finds zero changed keys.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.downstream SET total = 999.00 WHERE user_id = 2")
+                .await
+                .expect("corrupt downstream row");
+        }
+
+        // Run 3 (no restriction): the sidecar alone cannot see the
+        // corruption — the corrupted value survives untouched.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "restrict-run-3".to_string(),
+                select_request(&["downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("third run (no restriction, sidecar-only) must succeed");
+        }
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            let still_corrupted = scalar_text(
+                &backend,
+                "SELECT total FROM main.downstream WHERE user_id = 2",
+            )
+            .await;
+            assert_eq!(
+                still_corrupted, "999.00",
+                "the sidecar diff alone must not detect the direct corruption — this is the \
+                 baseline the propagated restriction must fix"
+            );
+        }
+
+        // Run 4: a propagated keyed restriction naming user 2 on the `agg`
+        // edge — the sidecar's own diff is still empty, but the restriction
+        // alone must dispatch the cell and repair the row.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "restrict-run-4".to_string(),
+                select_request_with_restriction(
+                    &["downstream"],
+                    "downstream",
+                    "agg",
+                    &["user_id"],
+                    &["2"],
+                ),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("fourth run (propagated restriction) must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_eq!(record.strategy, "per_group_recompute");
+        }
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let repaired = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 2",
+        )
+        .await;
+        assert_eq!(
+            repaired, "70.00",
+            "the propagated restriction alone must dispatch the cell and repair user 2's group \
+             back to the true upstream value, even though the sidecar diff reported no change"
+        );
+    }
+
+    // ── 9 (dispatch outside `grain: key`) ──────────────────────────────
     /// Phase 2 (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
     /// 02-plan.md`): the derived key-addressed model-edge cell must
     /// actually run for a `grain: partition` downstream of the SAME
@@ -957,7 +1155,7 @@ mod chain {
         );
     }
 
-    // ── 8 (substitution gate: an uncovered second input) ───────────────
+    // ── 10 (substitution gate: an uncovered second input) ──────────────
     /// Phase 2 task 5's widen-never-narrow substitution gate: `downstream`
     /// reads BOTH the key-addressed `agg` model edge AND a declared source
     /// (`flags`) the key-addressed cell does not restrict. The non-keyed
@@ -1062,7 +1260,7 @@ mod chain {
         assert_eq!(untouched, "70.00", "user 2's group must be unchanged");
     }
 
-    // ── 9 (dispatch composition: two covered inbound edges) ────────────
+    // ── 11 (dispatch composition: two covered inbound edges) ───────────
     /// Phase 4 test 3
     /// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
     /// 04-plan.md`): a `grain: partition` downstream reading TWO clockless
@@ -1213,7 +1411,7 @@ mod chain {
         assert_eq!(oracle_b2, "300.00");
     }
 
-    // ── 10 (widen-never-narrow: the visible downgrade) ─────────────────
+    // ── 12 (widen-never-narrow: the visible downgrade) ─────────────────
     /// Phase 4 test 4: the SAME uncovered-input fixture test 8 exercises,
     /// now run with a [`RecordingReporter`] — the ordinary route is still
     /// taken and the result is still correct, but exactly one
@@ -1316,7 +1514,7 @@ mod chain {
         assert_eq!(repaired, "250.00");
     }
 
-    // ── 11 (widen-never-narrow: no downgrade when fully covered) ───────
+    // ── 13 (widen-never-narrow: no downgrade when fully covered) ───────
     /// Phase 4 test 5: the fully-covered two-upstream fixture (test 9)
     /// fires no `dispatch_widened` advisory — the downgrade report is only
     /// for the genuinely uncovered case.

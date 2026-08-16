@@ -66,7 +66,7 @@ run shape.
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
-| 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | planned |
+| 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
 | 6 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
 | 7 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 8 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
@@ -193,6 +193,18 @@ run shape.
   row 6, the CLI's `--since-upstream` leg is a wired pass-through whose resolved-value set is
   empty in practice today, so the conversion is tested directly against a seeded plan rather than
   through the CLI.
+
+- 2026-08-16 (phase 5 implemented): `ExecuteRequest::keyed_restrictions` +
+  `KeyedRestriction` land in `smelt-runtime::types`; `propagation::keyed_restrictions_from_plan`
+  converts `SinceUpstreamPlan::keyed_dirty` to the wire shape; `maintenance_driver::
+  union_affected_keys` (pure, unit-tested) unions the sidecar's own `changed_keys` with the
+  restriction before `emit_key_addressed_affected_keys_select` is called; all three
+  `dispatch_key_addressed_model_edge` call sites in `execute.rs` now look up and pass the
+  request's restriction for the dispatching `(model, edge)` pair; `run_since_upstream` populates
+  the map once per `--since-upstream` invocation. The load-bearing e2e test corrupts a downstream
+  row directly (bypassing the sidecar entirely) to prove the restriction alone — not the sidecar
+  diff — drives the repair; the union rule itself is proven as a pure unit test rather than
+  through a real backend. No reshape of the phase table.
 
 ## Blocked
 

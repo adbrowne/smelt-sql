@@ -236,6 +236,7 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let outcome = execute_project(
