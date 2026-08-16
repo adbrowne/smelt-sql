@@ -1961,23 +1961,25 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   (decision record: `docs/research/20260816-open-questions-triage.md`). `smelt explain`'s
   per-column guarantee ledger does print the determinism exemption, per the derived verdict
   the walk already produces.
-- **The scheduler does not yet consume delta signatures end to end**, per the design now
-  pinned in §"Dispatch — from propagated components to run units". Signatures shape admission
-  and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
-  day-intervals in most respects: the graph layer's keyed channel now carries resolved key
-  *values*, not just key columns and provenance (§"Keyed dirt-sets and the narrowed refusal"),
-  but only when a caller feeds them in as a seed; cross-model runs no longer require the operator
-  to state what landed upstream on the command line for a source a prior run already covered — the
-  per-source watermark (`run_state.md` §"Per-source watermark") is now written and read — but
-  `--landed` stays required for a source no completed run has yet covered (no watermark to resolve
-  from). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:
-  a clockless `keyed upsert` upstream feeding a `grain: partition` downstream runs the repair
-  family's `PerGroupRecompute` cell, not the ordinary route, and several key-addressed edges into
-  one downstream compose — each dispatches in the same tick rather than only the first. The
-  residue is an inbound input that is not itself key-addressed (a declared source, or a model
-  edge that resolved no cell), which widens to the ordinary route with a reported
-  `dispatch_widened` downgrade rather than risking a silently dropped component. Tracked:
-  `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
+- **Delta signatures are the dispatch currency for key-addressed model edges, not yet for
+  everything the scheduler runs.** Key-addressed model edges dispatch outside the `grain: key`
+  branch, composed: a clockless `keyed upsert` upstream feeding a `grain: partition` downstream
+  runs the repair family's `PerGroupRecompute` cell, not the ordinary route, and several
+  key-addressed edges into one downstream compose — each dispatches in the same tick rather than
+  only the first. The graph layer's keyed channel carries resolved key *values*, not just key
+  columns and provenance (§"Keyed dirt-sets and the narrowed refusal"), resolved live off the
+  group-grain sidecar at plan time — no caller-fed seed is required. Cross-model runs no longer
+  require the operator to state what landed upstream on the command line for a source a prior run
+  already covered — the per-source watermark (`run_state.md` §"Per-source watermark") is now
+  written and read — but `--landed` stays required for a source no completed run has yet covered
+  (no watermark to resolve from). Three residues remain: (a) an inbound input that is not itself
+  key-addressed (a declared source, or a model edge that resolved no cell) widens to the ordinary
+  route with a reported `dispatch_widened` downgrade rather than risking a silently dropped
+  component; (b) a non-keyed-grain downstream of an admitted keyed edge still widens to
+  whole-table currency in the graph layer's propagation once its own upstream is visited, so
+  interval currency survives below the dispatch seam; (c) `change_feed`/`UpstreamMutation` folds
+  and per-cell `deferral` scheduling are untouched by this dispatch path, each tracked by its own
+  bullet below. Tracked: `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
 - **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
@@ -2128,15 +2130,6 @@ none of it may be relied on or implemented against until it graduates into
   classifier grammar (expressions over `LEAD`, post-window delete filtering), the fail-loud
   diagnostics for near-misses, and the `model_properties.md` walk vocabulary for window
   functions. Full sketch: `docs/research/20260723-scd2-succession-pattern.md`.
-- **Automatic, watermark-diffed `--since-upstream`.** Today the caller supplies each source's
-  landed delta explicitly (§Surface "CLI"). A future extension persists a per-source "last
-  propagated through" watermark in `smelt-state` and diffs it against the source's current
-  `covered_intervals`, so a bare `--since-upstream` discovers its own delta. This still does
-  not solve a never-modeled raw source's freshness (no `covered_intervals` exists for data
-  smelt never landed) — live backend freshness querying stays out of scope. The explicit and
-  automatic forms are not exclusive: the automatic form computes the same `--landed`
-  intervals the explicit form takes directly, layering on top without changing the graph
-  layer or CLI.
 - **An observer / prefix-consistency contract for non-replayable combinations.** Per-column
   admission refuses folding state *observations* into fold-family columns because no
   executable full-refresh oracle exists (§"The equivalence invariant";

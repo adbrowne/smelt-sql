@@ -1,7 +1,7 @@
 # Outcome: The scheduler consumes delta signatures
 
 **Created:** 2026-08-16
-**Status:** active
+**Status:** done
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 2)
 **Spec anchors:** `docs/specs/incremental_models.md`, `docs/specs/incremental_shapes.md`,
 `docs/specs/run_state.md`
@@ -78,7 +78,7 @@ run shape.
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | done |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | done |
-| 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | planned |
+| 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | done |
 
 ## Decision log
 
@@ -441,6 +441,18 @@ run shape.
   since `20260809-repair-family` and is what a reader is misled by. (3) `smelt explain`'s
   refusal codes get a doc-sync test so the catalogue and `render_refusal` cannot drift again —
   the gap phase 10 found existed precisely because nothing pinned the two together.
+
+- 2026-08-16 (phase 13 implemented, outcome closed): narrowed the scheduler-currency Known
+  Divergences bullet to its three real residues (dispatch-widen downgrade, whole-table currency
+  below the dispatch seam, change_feed/deferral); removed the "Automatic, watermark-diffed
+  `--since-upstream`" Future Extensions bullet (phase 8 shipped exactly it); rewrote the stale
+  `MaintenanceRepairKeysNotDiscoverable`/`MaintenanceRepairSliceUnbounded` diagnostics.md
+  paragraph and fixed its dangling heading link; landed
+  `crates/smelt-logical/tests/refusal_catalogue_sync.rs` as the standing doc-sync gate; reworded
+  `docs-site/docs/reference/cli.md`'s `--since-upstream` opening (off "caller-declared") and
+  documented the `dispatch_widened` downgrade. Full standing-gate sweep green, including
+  `maintenance_conformance`'s scheduler-driven keyed→partition recipes from phase 12. All seven
+  success criteria met — outcome closed.
 
 ## Blocked
 
