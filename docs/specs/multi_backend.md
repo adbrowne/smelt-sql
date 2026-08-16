@@ -25,9 +25,10 @@ owners: [andrew]
 
 ## Surface
 
-- **Backends.** A target's `type:` selects a backend (`duckdb` | `spark`; see `smelt_yml.md`
-  §"Target shape"). Each backend declares a `SqlDialect` (`DuckDB` | `SparkSQL` | `PostgreSQL`)
-  and a `BackendCapabilities` value.
+- **Backends.** A target's `type:` selects a backend (`duckdb` | `spark` | `bigquery`; see
+  `smelt_yml.md` §"Target shape"). Each backend declares a `SqlDialect` (`DuckDB` | `SparkSQL` |
+  `PostgreSQL` | `BigQuery`) and a `BackendCapabilities` value. A `bigquery` target names a
+  `project`, `dataset`, and `location` in place of DuckDB's `database` or Spark's `connect_url`.
 - **Capability matrix.** `BackendCapabilities` is the single declared description of what a
   backend's SQL surface supports. Backends differ **only** in (a) their capability flags and
   (b) the dialect-specific physical SQL the printer emits; they do **not** differ in which
@@ -66,6 +67,16 @@ owners: [andrew]
 - **`SPARK_CONNECT_URL`.** Spark integration tests connect to a Spark Connect server at this
   URL. When it is unset, Spark-targeted tests **skip** (not fail). The runtime backend reads
   `connect_url` from the target config (see `smelt_yml.md`).
+- **`SMELT_BQ_PROJECT`.** BigQuery integration tests run against this GCP project. When it is
+  unset, BigQuery-targeted tests **skip** (not fail), exactly as Spark's do. `SMELT_BQ_DATASET`
+  and `SMELT_BQ_LOCATION` name the base dataset and its location; each test run creates and drops
+  a uniquely-suffixed dataset beneath them, and that dataset carries a default table expiration so
+  tables orphaned by an interrupted run are reclaimed without depending on teardown.
+- **BigQuery authenticates from an explicit token.** The backend reads a short-lived OAuth access
+  token from `SMELT_BQ_ACCESS_TOKEN` and **never** falls back to Google application-default
+  credentials. This is a security property, not a convenience: ambient credentials on a developer
+  machine carry that developer's whole cloud identity, so refusing the fallback makes the
+  explicitly-supplied token the only route to the warehouse.
 
 ## Semantics
 
@@ -292,6 +303,28 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
+- **BigQuery's capability column is not yet populated, and its parity is unverified.** The
+  matrix above carries DuckDB and both Spark profiles only. BigQuery's flag values are
+  established empirically against a live warehouse rather than asserted from documentation, so
+  until that runs there is no `BackendCapabilities::bigquery()` for the capability-conformance
+  test to check and no BigQuery leg in the dual-target parity suites. Two flags are expected to
+  move for the first time when it lands — `supports_pipe_syntax`, which no backend sets today,
+  and `supports_merge_not_matched_by_source`, which only Spark-over-Delta sets — so the printer
+  paths behind them get their first exercise. Tracked in
+  `docs/research/20260816-bigquery-backend.md`.
+- **BigQuery has no CI tier.** Spark parity runs per-PR on changed paths and nightly in full;
+  BigQuery runs **only when a developer runs it by hand** against their own GCP project, gated on
+  `SMELT_BQ_PROJECT`. A BigQuery regression therefore does not surface on `main` on any schedule.
+  This is a deliberate consequence of keeping cloud credentials off CI, not an oversight, and it
+  means a claim of Spark-equivalent BigQuery coverage is a claim about which gates exist, never
+  about when they run. Revisiting it requires a service account, a GitHub secret, and a billing
+  decision. Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **The generative conformance case count on BigQuery is undecided.** Every statement costs a
+  network round trip — measured at roughly 0.7 s for a trivial query and 2 s for a
+  `CREATE TABLE` — against sub-millisecond in-process DuckDB. Whether the suite absorbs that by
+  reducing cases (the precedent Spark set) or by running cases concurrently is open; the latter
+  preserves coverage and is preferred if per-table write-rate limits allow it. Tracked in
+  `docs/research/20260816-bigquery-backend.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated
   into the capability struct (`crates/smelt-dialect/src/dialect.rs`), matrixed above and asserted
