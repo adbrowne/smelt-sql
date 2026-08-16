@@ -135,6 +135,22 @@ run shape.
   keyed edge is implemented but untested (no fixture in this phase's list exercised it) —
   flagged for phase 4+ if a real fan-in scenario surfaces.
 
+- 2026-08-16 (operator review of phase 1, follow-up spec amendment): Andrew's review of
+  `phases/01-plan.md` upheld the three pinned design decisions and landed four amendments
+  before phase 4+ builds on them. (1) Absent-watermark behaviour contradiction resolved in
+  favour of the CLI's **refuse-loudly leg**: a source named with neither `--landed` nor a
+  watermark propagates nothing, naming the missing watermark — the run_state bullet's
+  "recompute the full dirty set" degradation is gone (unbounded, unasked-for cost), and
+  `state.md` §"The optionality rule" swaps its now-wrong forward-propagation example for
+  `--auto`. (2) Watermark granularity pinned: per source, advanced only by a run that
+  completed every consumer; selective runs stall it, never advance it; per-`(source,
+  consumer)` recorded as rejected-for-now in §Design. (3) `watermark → now` semantics for
+  external sources pinned: the span itself is the landed delta; observed-delta refinement
+  applies only where a record exists (model upstreams — only smelt's conditional-write path
+  writes one). (4) The stale "no key-level dirt representation exists" clause removed from
+  the Graph-layer-gaps divergence bullet (phase 3 landed the representation; the scheduler
+  bullet owns the remaining residue). Phases 5–6 implement the amended semantics.
+
 ## Blocked
 
 _(empty)_

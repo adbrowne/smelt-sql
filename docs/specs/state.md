@@ -131,9 +131,11 @@ maintained table equals. Concretely:
 - Correctness structures are exempt from the posture: a keyed model's merge ledger exists
   under every posture, because it lives in the backend alongside the table it protects.
 - A capability that consumes an observability structure the posture excludes must either
-  **degrade to a coarser, always-correct behaviour and say so** (forward propagation without
-  landed deltas recomputes the full dirty set and reports why) or **refuse loudly by name**
-  (`--resume` with no manifest refuses, `run_state.md` §"`--resume` semantics") — never
+  **degrade to a coarser, always-correct behaviour and say so** (`--auto` with no interval
+  ledger treats every interval as uncovered and reports why) or **refuse loudly by name**
+  (`--resume` with no manifest refuses, `run_state.md` §"`--resume` semantics"; a source named
+  in `--since-upstream` with neither `--landed` nor a persisted watermark propagates nothing,
+  naming the missing watermark, `run_state.md` §"Per-source watermark") — never
   silently pretend the state was empty. Which of the two applies is owned by the consuming
   feature's spec; this spec requires that one of them is specified.
 

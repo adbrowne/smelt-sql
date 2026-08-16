@@ -438,12 +438,14 @@ contract:
   repeatable, `--landed` repeatable and optional per source) — **forward propagation**: the
   caller declares what landed for each source since it last propagated, or omits `--landed`
   for a source with a persisted watermark (`run_state.md` §"Per-source watermark") to have
-  smelt read `watermark → now` from the recorded observed-delta table live; the graph reflects
+  smelt treat `watermark → now` as that source's landed delta, refined live by the recorded
+  observed-delta table where a record exists (model upstreams); the graph reflects
   those per-source deltas through the edges and runs exactly the propagated per-edge regions
   with their trigger cells (§"The graph layer"). `--source` accepts a declared source or an
   upstream maintained model (a model's landed delta is the output window a completed run
   wrote). A source named with neither a matching `--landed` nor a persisted watermark
-  propagates nothing — never a silent full-table fallback. Opt-in; the intended default
+  propagates nothing, and the refusal names the missing watermark — never a silent no-op and
+  never an implicit full-table fallback. Opt-in; the intended default
   posture once trusted. Prints the **dirty set** — the per-model regions propagation says must
   run (§"The graph layer") — before acting.
 - `smelt run --auto` — process only the intervals the run-state interval ledger
@@ -482,8 +484,9 @@ uses, and admission still binds.
 **Run flags.** Every run is told its window — directly via the event-time flags, via
 `--landed`, or via the interval ledger (`--auto`). `--landed` becomes optional per source once
 a persisted watermark exists for it (`run_state.md` §"Per-source watermark"): `smelt run
---since-upstream` with no `--landed` for a source reads its watermark forward from the
-recorded observed-delta table live; an explicit `--landed` always overrides. Automatic
+--since-upstream` with no `--landed` for a source propagates `watermark → now` as its landed
+delta, refined live by the recorded observed-delta table where a record exists; an explicit
+`--landed` always overrides. Automatic
 **snapshot diffing** of an external source with no watermark and no native delta feed remains
 §Future Extensions. Which flags a model takes follows from its derived run shape:
 
@@ -1672,7 +1675,16 @@ them would make forward propagation require state to run at all, contradicting t
 rule (`state.md` §"The optionality rule"): observability's absence must degrade, never block.
 Filing it as a field on the existing landed-delta record keeps it observability-classified,
 `state.mode: stateless`-optional, and subject to the same degrade-or-refuse contract every
-other absent observability structure already has (`run_state.md` §"Per-source watermark").
+other absent observability structure already has (`run_state.md` §"Per-source watermark") —
+with the **refuse leg** chosen for absence: the coarser behaviour would be recomputing
+everything downstream of the source, an unbounded cost the operator never asked for, so
+absence withdraws only the convenience of omitting `--landed`, never substitutes a full
+recompute. Granularity is **per source, not per `(source, consumer)`**: the watermark
+advances only on a run that completed every consumer of the source, so a selective run stalls
+it rather than silently dropping a span for the unselected consumers. Rejected for now: a
+per-`(source, consumer)` watermark, which would un-stall selective runs at the cost of a
+consumer-keyed record family and per-consumer read composition — deferred until
+selective-run stalling is a demonstrated pain, not a hypothetical one.
 (`docs/handoffs/2026-08-16-delta-signature-closure-programme.md`.)
 
 **Rejected alternatives, briefly.** A `strategy:` sub-knob (the invisible-contract footgun); a
@@ -1921,8 +1933,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   Spark-dialect ledger/frontier builder is worth building before a real Spark-targeted
   incremental workload demands it remains undecided.
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
-  key-level dirt representation exists (intervals are the graph's only currency); the
+  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; the
   `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
   self-referential model and a bare-keyed model with readers each refuse the whole-workspace
   graph); no `--select` scoping exists.
