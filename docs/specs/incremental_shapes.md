@@ -325,9 +325,11 @@ once-write column, and needs no proof.
 
 The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.once(value)` (→ the
 once-write canonical spelling), and `smelt.current(value)` (→ `ANY_VALUE`) are intent-naming
-sugar for the overwrite, once-write, and plain-overwrite families; they are ordinary transparent
-functions (`functions.md`) whose expansions are admitted on exactly the same terms as
-hand-written calls.
+sugar for the overwrite, once-write, and plain-overwrite families. They ship as a
+`smelt.define` template file a project imports — ordinary transparent functions
+(`functions.md`) with no parser or registry surface of their own — and their expansions are
+admitted on exactly the same terms as hand-written calls. Promotion to built-ins is a possible
+later step, not part of this surface (§Future Extensions).
 
 ### Diagnostics
 
@@ -344,6 +346,7 @@ chooser").
 | `TimeseriesRequiredForPartitionGrain` | `grain: partition` asserted with no `timeseries:` block (rule owned by `models.md` §"Constraint violations"). |
 | `PartitionGrainNotSafe` | The batch-safety classifier rejects the model's SQL (§"Safety checks (per-cell admission for recompute-a-region)"). |
 | `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation or subquery hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
+| `PartitionGrainForbidsMetrics` | A partition-grain model's body consumes `smelt.metric()` — the composition of metric expansion with time-filter injection is deliberately unspecified, so the combination refuses ahead of execution rather than composing unpredictably (§"Functions inside partition-grain bodies"). |
 
 **Key-grain codes.**
 
@@ -354,7 +357,7 @@ chooser").
 | `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
 | `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
-| `KeyedForbidsNondeterministic` | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions; cross-window merge requires deterministic per-window output. |
+| `KeyedForbidsNondeterministic` | The SQL uses `RANDOM()`, `UUID()`, or another per-row non-deterministic function. Time-dependent functions (`NOW()`/`CURRENT_*`) are admitted in payload positions and run as-is — the columns they feed carry no equivalence promise (`incremental_models.md` §"The equivalence invariant") — but stay refused in a `unique_key`/`GROUP BY` or other membership position, where they would make row identity itself time-of-run-dependent. |
 | `KeyedSqlNotParseable` | The model body cannot be parsed into the shape the classifier reads. |
 | `KeyedMultipleDrivingSources` | More than one timeseries-tagged source in the FROM clause; lists the candidates. |
 | `KeyedOnceWriteUnproven` | A once-write (`COALESCE`) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns; names the column, the unproven candidate(s), and the three fixes (key-derived form; declaring the dependency — `functional_dependencies: [{key: [...], determines: <col>}]`, `model_properties.md`; remodelling). |
@@ -386,7 +389,7 @@ declaration (`grain: partition`)".
 | **Output shape / grain** | `grain: partition` — a complete table with a monotone `partition_column`, addressed by partition, not by key | `models.md` §"Refresh axis" |
 | **Properties (required)** | event-time monotonicity trace; column nullability gate; unified bound/reach derivation; frame-reach taxonomy; injection-point/pushdown-depth; partition alignment (scoped); driving-fact/anchor resolution; determinism + nondeterminism predicate + taint; body-structure classifier; set-operation distribution; static-seed detection; window-independence/ordered-execution | `model_properties.md` |
 | **World-facts (consumed)** | timeseries clock; source mutation profile and lateness margin; column-scoped equivalence contract (`columns.<c>.contract`) | `timeseries.md`, `sources.md`, `models.md` |
-| **Default plan (recompute-a-region quadrant)** | source-filter pushdown; partition DELETE+INSERT; output-window derivation (skew inversion); outer output-clamp; two-layer widened-scan + exact output clamp; compile-time pinning | `model_transforms.md` |
+| **Default plan (recompute-a-region quadrant)** | source-filter pushdown; partition DELETE+INSERT; output-window derivation (skew inversion); outer output-clamp; two-layer widened-scan + exact output clamp | `model_transforms.md` |
 | **Admission** | every check below is one instance of `incremental_models.md` §"Per-cell admission" for the recompute-a-region quadrant over a partition-grain output (§"Safety checks (per-cell admission for recompute-a-region)") | this spec |
 | **Invariant upheld** | per-partition equivalence — the strengthening of the equivalence invariant and the plan's `S`-vector refinement | `incremental_models.md` §"The equivalence invariant"; §"Per-partition equivalence" |
 
@@ -436,8 +439,10 @@ implied by `partition_column`'s own truncation/grid transform (`g_part`), derive
 rather than trusted: a daily truncation implies `g_part = day`, rejecting an hourly
 `granularity` as a DELETE+INSERT misalignment. `g_run >= g_part` is checked under the closed
 coarseness ordering (hour < day < week < month < quarter < year); an opaque `g_part` skips the
-comparison (undecided, not disproved). A sub-`g_part` run window is rejected naming the minimum
-window, never silently widened.
+comparison (undecided, not disproved). A sub-`g_part` run window is rejected with a diagnostic
+naming the model's partition granularity and spelling out the coarsened run window that would
+be accepted — never silently widened (auto-coarsening was rejected: it recomputes more than
+the operator asked for; `docs/research/20260816-open-questions-triage.md`).
 
 #### Batch safety classification
 
@@ -510,8 +515,10 @@ a sibling's or the outer query's. A non-deterministic value is admitted only flo
 **exclusively** into a `plausible` column, never read back to place/filter/group/dedup a row;
 the taint check hard-excludes the `event_time_column`/`partition_column` expression, any
 `unique_key` column, and any row-set-membership/grouping position, regardless of opt-in.
-`NOW()`/`CURRENT_*` are admitted as a direct projection without `plausible` (compile-time
-pinning freezes them per run); `RANDOM()`/`UUID()` always require it; declaring an excluded
+`NOW()`/`CURRENT_*` are admitted as a direct projection without `plausible` — they execute
+as-is at run time, never compile-time-pinned, and the columns they feed carry no equivalence
+promise (the determinism scoping of the invariant, `incremental_models.md` §"The equivalence
+invariant"); `RANDOM()`/`UUID()` always require it; declaring an excluded
 column `plausible` is a configuration error, and `allow_nondeterministic` drops the guardrail
 wholesale (discouraged).
 
@@ -543,6 +550,10 @@ inside a `smelt.define` body and one inlined at the call site are indistinguisha
 clamp and pushdown both operate on the expanded CST. **Opaque calls remain black boxes**: bound
 derivation cannot read through `smelt.extern`/built-ins, so time-dependence hidden behind one
 is `NotDerivable` and refused unless a bound is provable from the surrounding SQL.
+`smelt.metric()` calls are refused outright (`PartitionGrainForbidsMetrics`): how metric
+expansion composes with time-filter injection is deliberately unspecified until the metrics
+surface settles, and an unspecified composition must refuse loudly rather than execute
+unpredictably.
 
 #### Window independence and self-referential models
 
@@ -608,11 +619,36 @@ pushdown injects the window, the delta SELECT executes, and `merge_into` folds i
 per-column combiner map; non-timeseries sources are read in full each step, and a missing
 target is created from the first step's delta (`CREATE TABLE AS SELECT`).
 **Snapshot-reconcile** — no clocked source: the run re-scans the source whole, aggregates per
-key, and `merge_into`s it — matched overwritten, unmatched inserted, a key **absent from the
-incoming scan retained** unchanged (deletion needs an explicit mechanism, out of scope, §Known
-Divergences). Out-of-order, parallel, or sliced-backfill application is admitted **iff** the
+key, and `merge_into`s it — matched overwritten, unmatched inserted, and a key **absent from
+the incoming scan deleted**: it has departed the upstream (§"Departed keys and deletion").
+Out-of-order, parallel, or sliced-backfill application is admitted **iff** the
 model is order-independent (§"Derived execution postures"); otherwise windows apply
 sequentially.
+
+#### Departed keys and deletion
+
+What happens to a key that disappears from the upstream is **derived from the source posture,
+never declared**, and the default always preserves full-refresh equivalence:
+
+- **Snapshot-reconcile:** a key present in the target but absent from the incoming scan has
+  departed. The reconcile write deletes it — an anti-join of stored keys against the scanned
+  snapshot, executed in the same transaction as the merge — so the stored table equals the
+  oracle exactly.
+- **Window-forward over an append-only source:** keys never depart — nothing upstream can
+  remove a row — so retaining every key ever seen is exactly what a full refresh produces.
+  There is nothing to delete.
+- **A windowed scan over a mutable source:** departure is not observable — the departed key
+  simply stops appearing in windows, and there is no tombstone to consume. Equivalence is
+  maintained by whole-region recompute, or the shape is refused; it is never maintained by
+  silently retaining the key.
+- **A change feed with delete events:** the delete is applied as a delete once change-feed
+  fold machinery consumes the feed's delta shape (`incremental_models.md` §Future Extensions);
+  until then the posture's full re-derivation already removes the key.
+
+Retaining departed keys as queryable history is an opt-in **declared relaxation** of the
+equivalence invariant, owned by the contract lattice (`incremental_models.md` §"The contract
+lattice") — never the silent default. Decision record:
+`docs/research/20260816-open-questions-triage.md`.
 
 #### Derived execution postures
 
@@ -637,8 +673,11 @@ one of the two named realisations of the frontier (`incremental_models.md` §"Th
 (`KeyedReprocessedWindow`) exactly; crash resume merges only unrecorded windows, so an
 interrupted run resumes correctly by re-running the same range. **Re-run-tolerant:** a recorded
 window may be re-merged (a no-op); the frontier serves reprocessing detection and `--auto`
-bookkeeping, not refusal. Snapshot-reconcile models keep no frontier — each run is
-self-contained. This realisation is backend-resident and transactional with the write it
+bookkeeping, not refusal. The two grades differ in classification, not existence: for an
+additive-fold model the frontier is a correctness structure and always exists; for a
+re-run-tolerant model it is bookkeeping, written automatically whenever the project's state
+mode supports it (`state.md`), so `--auto` staleness always has a record to consult.
+Snapshot-reconcile models keep no frontier — each run is self-contained. This realisation is backend-resident and transactional with the write it
 describes — a **correctness structure** in `state.md`'s classification (`state.md` §"The
 state-structure inventory"), distinct from the opt-in run-state observability surface
 (`run_state.md`), and the model realisation of `state.md` §"The residency rule".
@@ -662,8 +701,8 @@ retraction-free); overwrite families consume **observations** (current-snapshot 
 The additive-fold and decomposed-fold ✗ cells are a **catalogue boundary**, not an equivalence
 failure: the additive family's combiner is `+` by family design, while the snapshot posture's
 valid maintenance would be overwrite-with-recompute — each run re-aggregates the whole current
-snapshot per key, so overwriting the matched row's value would equal the full refresh,
-departed-keys carve-out included. The catalogue does not currently assign that combiner to
+snapshot per key, so overwriting the matched row's value would equal the full refresh
+exactly. The catalogue does not currently assign that combiner to
 aggregate spellings, so the cell refuses rather than silently switching a family's combiner.
 
 The three *observer semantics* ✗ cells are equivalence failures, not double-count hazards
@@ -683,10 +722,10 @@ Because the body is required to be the aggregation itself (§"Key-grain declarat
 (`grain: key`)"), the oracle is executable for every admitted model — its **own SQL**.
 **Window-forward:** for any set `S` of processed driving-source partitions and any admitted
 ordering, stored state equals the model SQL evaluated over `source.where(partition ∈ S)`
-(overwrite columns hold up to ordering-key ties). **Snapshot-reconcile:** the stored row for
-every key **present in the current snapshot** equals the model SQL over that snapshot; absent
-keys are retained — the stored table is the oracle's rows plus retained departed keys (a named
-carve-out of the equivalence invariant, `incremental_models.md` §"The equivalence invariant").
+(overwrite columns hold up to ordering-key ties). **Snapshot-reconcile:** the stored table
+equals the model SQL over the current snapshot exactly — matched keys overwritten, new keys
+inserted, departed keys deleted (§"Departed keys and deletion"); keeping departed keys is an
+opt-in declared relaxation, never part of the oracle.
 
 #### No write-eligibility clamp
 
@@ -968,6 +1007,16 @@ refresh can reproduce — a genuinely different contract that admitting silently
 one mode. The refused cells name the observer contract as the future opt-in path
 (`incremental_models.md` §Future Extensions).
 
+**Deletion is derived from the source posture, not declared.** A declared per-model retention
+policy as the primary deletion mechanism was rejected: what deletion *can* mean is fixed by
+what the source can signal (a snapshot reveals departure, a window cannot, a change feed says
+it outright), so a knob would either restate the derivable answer or promise one the posture
+cannot honour — and it would make the equivalence-preserving behaviour opt-in rather than the
+default. The derived rule (§"Departed keys and deletion") keeps the default equal to a full
+refresh with no knob; the one genuine preference — keeping departed keys as history — is a
+declared contract-lattice relaxation, where every other deliberate weakening of the invariant
+already lives. (`docs/research/20260816-open-questions-triage.md`.)
+
 **Ties: honest boundary, not fake proof.** Incumbent-wins plus mandatory sequential execution
 makes overwrite columns deterministic-given-history without claiming an order-independence no
 static analysis can prove. A last-processed combiner (no ordering column, order-dependent for
@@ -984,7 +1033,7 @@ to `refresh: materialized_view`.
 windowed-keyed-maintenance driver (`model_transforms.md`), parameterised by
 `(classifier, merge-SQL builder)`. Per-pattern copies of the loop were rejected as four-way
 drift risk; a consequence is that every consumer inherits the driver's granularity support
-(§Known Divergences).
+(day and week today — widening is driver work, §Future Extensions).
 
 ## Constraints & Invariants
 
@@ -1020,9 +1069,10 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
     `UNION ALL` branch traces `Traceable`; otherwise `EventTimeColumnNotVisibleAtOuterSelect`
     (§"Event-time outer-visibility").
 12. **Non-determinism stays in the payload.** Admitted only into `contract: plausible` columns
-    (plus run-nondeterministic direct projections under compile-time pinning); never in
-    `event_time_column`, `partition_column`, a `unique_key` column, or any membership/grouping
-    position. Declaring an excluded column `plausible` is a configuration error.
+    (plus `NOW()`/`CURRENT_*` direct projections, which run as-is and carry no equivalence
+    promise); never in `event_time_column`, `partition_column`, a `unique_key` column, or any
+    membership/grouping position. Declaring an excluded column `plausible` is a configuration
+    error.
 
 ### Key-grain constraints
 
@@ -1037,9 +1087,11 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
 4. **The catalogue is closed and the classifier fail-closed.** Unrecognised aggregators,
    composite expressions, unproven once-write columns, and retractable contributions are
    refused — never approximated.
-5. **End-state equivalence holds with the model's own SQL as the oracle**, with exactly two
-   named carve-outs: retained departed keys under snapshot-reconcile, and ordering-key ties on
-   overwrite columns.
+5. **End-state equivalence holds with the model's own SQL as the oracle**, with one named
+   carve-out: ordering-key ties on overwrite columns. Departed keys are handled by the
+   posture-derived deletion rule (§"Departed keys and deletion") — deleted under
+   snapshot-reconcile, structurally impossible under append-only window-forward — never by a
+   silent retention carve-out.
 6. **No write-eligibility clamp.** A run merges every delta row it scans; no scanned input is
    silently dropped. Slice pruning under locality is no-op elimination (or a
    transactionally-checked declared bound), never a write clamp. Any future clamp or
@@ -1100,16 +1152,25 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   Divergences); the residual open question here is a `partition_column` rename, a
   skeleton-position change whose refusal path has no fixture or diagnostic surfaced ahead of a
   run.
-- **The `smelt.metric()` interaction is unspecified (Open Question)** — metric expansion ×
-  time-filter injection for partition-grain models consuming metrics.
+- **The `PartitionGrainForbidsMetrics` refusal is unimplemented** — §"Functions inside
+  partition-grain bodies" refuses `smelt.metric()` in a partition-grain body, but no
+  classifier or diagnostic produces the code today, so the combination's behaviour is
+  effectively undefined at runtime. Decision record:
+  `docs/research/20260816-open-questions-triage.md`.
 - **Per-`ModelDef` overrides for generator-emitted models are not part of the closed field set
   in v1.** Tracked: `docs/plans/20260509-meta-language-overall.md`.
-- **`g_run >= g_part` auto-coarsening is not implemented (Open Question)** — sub-`g_part` run
-  windows hard-reject; whether to auto-coarsen or reject-with-suggestion instead is undecided.
+- **The sub-`g_part` rejection does not yet name the coarsened window** — §"Run window vs
+  partition granularity" requires the refusal to spell out the run window that would be
+  accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
+  auto-coarsening was decided 2026-08-16; `docs/research/20260816-open-questions-triage.md`.)
 - **Monotone-integer `partition_column` has no end-to-end run** — the trace and bound
   derivation admit it, but run windows, backfill chunking, scan-filter injection, and the
   explain clamp rendering are date-typed throughout. Tracked:
   `docs/plans/20260704-model-updates-l4-batched.md`.
+- **`NOW()`/`CURRENT_*` are still compile-time-pinned** — §"Safety checks" admits them running
+  as-is with no equivalence promise on the columns they feed; the implementation still freezes
+  them to one per-run timestamp. Decision record:
+  `docs/research/20260816-open-questions-triage.md`.
 
 ### The key grain
 
@@ -1128,13 +1189,11 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   `docs/research/20260705-keyed-collapse-application.md`; tracking:
   `docs/outcomes/20260809-rung2-state-shapes/outcome.md`,
   `docs/plans/20260705-keyed-collapse.md`, `docs/plans/20260809-keyed-frontier.md`.
-- **A re-run-tolerant keyed model keeps no ledger at all unless additive-graded (Open
-  Question)** — the runtime only creates the ledger table for `Grade::Additive`, so a fully
-  idempotent model has no record of which windows it merged; nothing is unsound (re-merging
-  converges), but `--auto` staleness can't consult a ledger that was never written.
-- **Snapshot-reconcile admits at most one unclocked source in the FROM clause (Open Question)**
-  — a join of two or more unclocked candidates refuses `KeyedSnapshotPostureUnsupported`
-  rather than picking one; widening to a proven multi-source scan is unbuilt.
+- **Re-run-tolerant keyed models do not yet write the frontier** — §"The transactional
+  frontier write (merge ledger)" has it written for every window-forward model whenever the
+  project's state mode supports it; the runtime only creates the ledger table for
+  additive-graded models, so a fully idempotent model has no merge record for `--auto` to
+  consult. Decision record: `docs/research/20260816-open-questions-triage.md`.
 - **`KeyedRetractableContribution` has no implementation (Open Question)** — the code is
   specified but no classifier, diagnostic variant, or test produces it.
 - **`safety_overrides:` on a key-addressed model is not a hard error** — §"Key-grain
@@ -1168,27 +1227,22 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   family's NULL direction (a key whose first window carries only a NULL payload) is covered by
   one targeted test case rather than by the generated pool that proves every other keyed
   family.
-- **Locality open questions (Open Question)**: whether a derived recurrence bound can license
-  slice pruning under snapshot-reconcile (v1: window-forward only); relaxing the
-  granularity-equality precondition (a daily driver with weekly output partitions);
-  slice-scoped deletion — interacts with the key-deletion question below.
-- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped** —
-  each family is reachable only through its hand-written SQL spelling; whether they ship as
-  built-ins or a shipped `smelt.define` template file is an open decision. Tracked:
+- **The pattern-function template file does not exist** — `smelt.latest`, `smelt.once`, and
+  `smelt.current` are specified as a shipped `smelt.define` template file (§"The column-family
+  catalogue"), but no such file ships; each family is reachable only through its hand-written
+  SQL spelling. Decision record: `docs/research/20260816-open-questions-triage.md`; tracked:
   `docs/plans/20260705-keyed-collapse.md`.
-- **Driver granularity is `day`/`week` only (Open Question)** — inherited by every consumer of
-  the shared driver; widening is driver work.
-- **`--auto` staleness fidelity for all-invertible models is conservative in v1 (Open
-  Question)**; "exactly the changed windows" needs the group rung's delta-history mechanism.
-- **Self-referential keyed models are rejected (Open Question)** (`state += delta − decay`);
-  admitting them needs an explicit input/state distinction design.
-- **Run-pinning alignment is deferred (Open Question)**: `NOW()`/`CURRENT_*` are rejected
-  outright in keyed models rather than compile-time-pinned as the partition grain does.
-- **Key deletion is unresolved beyond retention** — snapshot-reconcile retains a key present in
-  the target but absent from the incoming scan, unchanged and forever, and no explicit
-  mechanism deletes a departed key; window-forward has no delete signal short of a change feed
-  with delete events. Tombstones, opt-in hard delete, and the observer contract for the refused
-  matrix cells are deferred (`docs/research/20260705-keyed-collapse-application.md` §5).
+- **`NOW()`/`CURRENT_*` are still rejected in keyed models** — `KeyedForbidsNondeterministic`
+  fires for them today, where §Diagnostics admits them in payload positions running as-is
+  with no equivalence promise. Decision record:
+  `docs/research/20260816-open-questions-triage.md`.
+- **Departed keys are still retained under snapshot-reconcile** — §"Departed keys and
+  deletion" has the reconcile write deleting a key absent from the incoming scan; the
+  implementation retains it unchanged, forever. There are no production users, so the
+  behaviour change ships without a compatibility path. The opt-in retention relaxation (the
+  contract-lattice point for keeping departed keys as history) is likewise unbuilt. Decision
+  record: `docs/research/20260816-open-questions-triage.md`; earlier analysis:
+  `docs/research/20260705-keyed-collapse-application.md` §5.
 - **Ladder rungs 3–4 remain specified ahead of this profile's use of them** — group-rung
   retraction (rung 3) and the bounded-domain multiset (rung 4) are out of scope for the rung-2
   work above; rung 3 additionally depends on the change-feed consumption design. Deferred by
@@ -1198,6 +1252,39 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   and the derived label (clock + identity with `partition_column ∈ unique_key`) refuses again
   at plan derivation (`MaintenanceUnsupportedGrain`); trajectory support is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+
+## Future Extensions
+
+Ideas for widening the admission space that are **not decided**. Nothing here is surface;
+none of it may be relied on or implemented against until it graduates into §Surface/§Semantics
+via its own spec diff. Deferral decisions recorded 2026-08-16:
+`docs/research/20260816-open-questions-triage.md`.
+
+- **Multi-source snapshot-reconcile.** Admitting a join of two or more unclocked snapshot
+  sources needs a proven multi-source scan design; today the loud
+  `KeyedSnapshotPostureUnsupported` refusal is the intended behaviour, revisited when a real
+  workload hits it.
+- **Self-referential keyed models** (`state = state + delta − decay`, the model reading its
+  own previous output). Rejected by design: without an explicit input-vs-carried-state
+  distinction the full-refresh oracle does not exist. Revisit after the posture-derived
+  deletion doctrine (§"Departed keys and deletion") is implemented — deletion of carried
+  state interacts directly.
+- **Deletion-adjacent locality relaxations**, re-triaged together once posture-derived
+  deletion is implemented: a derived recurrence bound licensing slice pruning under
+  snapshot-reconcile; relaxing the granularity-equality precondition (a daily driver feeding
+  weekly output partitions); slice-scoped deletion.
+- **Wider driver granularities.** The shared windowed driver understands `day` and `week`;
+  widening (month first, hour later) is driver work every consumer inherits, taken up when a
+  workload demands it.
+- **Exact `--auto` staleness for all-invertible models.** The current over-approximation is
+  safe and accepted; "exactly the changed windows" needs the group rung's delta-history
+  mechanism.
+- **Promoting the pattern functions to built-ins.** `smelt.latest`/`smelt.once`/
+  `smelt.current` ship as a `smelt.define` template file; a registry surface is worth its
+  cost only if adoption proves the names.
+- **Metric expansion in partition-grain bodies.** The `PartitionGrainForbidsMetrics` refusal
+  stands until the composition of metric expansion with time-filter injection is specified,
+  when metrics work resumes.
 
 ## References
 

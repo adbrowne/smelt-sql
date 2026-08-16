@@ -51,8 +51,8 @@ something slower but safer (§"Validator, not chooser"). Two consequences worth 
 before reading on:
 
 - **Order doesn't matter.** The right-hand side depends only on the *set* `S`, so any two run
-  histories that process the same inputs converge to the same table — up to the two named
-  carve-outs (§"The equivalence invariant").
+  histories that process the same inputs converge to the same table — up to the named
+  carve-out and the determinism scope (§"The equivalence invariant").
 - **Freshness is the only degree of freedom.** Anything smelt chooses — which technique runs, in
   what order — may change *when* the table reflects an input, never *what* the table says once
   it has (§"Per-cell admission").
@@ -197,8 +197,10 @@ the remaining choice a pure cost question — and freshness is the only thing at
 The equivalence invariant is the **default contract**. A modeller may opt into a named,
 parameterised **relaxation** that trades a bounded amount of equivalence for a capability the
 default forbids — `frozen_horizon: H` (partitions older than `H` are never revisited; a late
-arrival that would land there raises a diagnostic instead of silently folding) and
-`deferral: D` (the table may lag its inputs by up to `D`, licensing run skipping). Each
+arrival that would land there raises a diagnostic instead of silently folding),
+`deferral: D` (the table may lag its inputs by up to `D`, licensing run skipping), and
+`retain_departed` (keys the source no longer carries are kept — or tombstoned — instead of
+deleted at reconcile). Each
 relaxation is a triple — a declaration, a precise restatement of what the oracle becomes, and a
 runtime probe that checks it — and `smelt explain` always prints what was relaxed (§"The
 contract lattice"). Alongside the contract sit **probes** generally: declared facts about the
@@ -364,7 +366,7 @@ maintenance:
 ### Contract relaxations (`contract:`)
 
 `contract:` is a sibling top-level frontmatter block to `maintenance:`, opting a model into one
-or both v1 lattice points (§"The contract lattice"). Where `maintenance:` steers *choice among
+or more lattice points (§"The contract lattice"). Where `maintenance:` steers *choice among
 proven-equivalent techniques* and never widens what admission allows, `contract:` does the
 opposite: it names a bounded, checked relaxation of the equivalence invariant itself.
 
@@ -372,6 +374,8 @@ opposite: it names a bounded, checked relaxation of the equivalence invariant it
 contract:
   frozen_horizon: '90 days'      # partition grain only
   deferral: '6 hours'
+  retain_departed: true          # keyed shape over a mutable snapshot only
+  # retain_departed: {tombstone: <col>}   # alternative form: mark departure instead
   cells:                          # optional per-cell refinement, addressed like maintenance.cells
     - columns: [<col>, ...]
       on: <source-address> | backfill
@@ -388,9 +392,16 @@ contract:
   clocked, interval-representable source. `on: backfill`, an unclocked source, and a
   `mutable_snapshot` source each have no frontier to measure lag against and each raise
   `ContractDeferralInvalid`.
+- `retain_departed: true` (or `retain_departed: {tombstone: <col>}` to mark departed keys in
+  a column instead of merely keeping them) is admitted **only on a keyed shape consuming a
+  mutable snapshot** — the one posture where departure is observable and deletion is the
+  default (§"The equivalence invariant", key departure). Declaring it on any other shape or
+  posture, or naming a tombstone column absent from the model's output, is a configuration
+  error, `ContractRetainDepartedInvalid`.
 - Model-level values are the default for every cell; a `cells[]` entry — addressed the same way
-  as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is
-  model-level only (it clamps the model's write eligibility, not a single cell's).
+  as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon`
+  and `retain_departed` are
+  model-level only (each governs the model's write behaviour as a whole, not a single cell's).
 - An unparseable or negative `deferral`, or a `deferral` on a model or cell with no clock to
   measure lag against, is `ContractDeferralInvalid`.
 - Absent `contract:` (the common case) is the default point: strict equivalence, no relaxation.
@@ -410,7 +421,9 @@ contract:
     effective contract point, and the **per-column guarantee ledger** — the printed summary
     of what each output column is guaranteed (its equivalence contract and its **settle
     bound** — the derived interval after which a written slice provably receives no further
-    changes, so consumers may treat it as final).
+    changes, so consumers may treat it as final; a volatile column prints its determinism
+    exemption in place of an equivalence contract, §"The equivalence invariant" determinism
+    scope).
   - **Per inbound edge**: the derived **delta-signature shape** — `append-only within
     window`, `keyed upsert`, or `general` — the shape of change that edge's own upstream
     emits (§"Delta signatures"; a source edge is typed by its declared mutation profile, a
@@ -536,6 +549,7 @@ position — is owned by `definition_deltas.md` §Surface.
 | `ContractLateArrivalOutsideHorizon` | Runtime probe, frozen-horizon point only: a frozen-band partition's baseline row count increased (or a new partition appeared in the frozen band); names the partition, the added row count, and `H` (§"The contract lattice"). |
 | `ContractDeferralInvalid` | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against (§"Contract relaxations (`contract:`)"). |
 | `ContractDeferralExceeded` | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag (§"The contract lattice"). |
+| `ContractRetainDepartedInvalid` | A `contract.retain_departed` is declared on anything other than a keyed shape consuming a mutable snapshot, or names a tombstone column absent from the model's output; names the failing condition (§"Contract relaxations (`contract:`)"). |
 
 ## Semantics
 
@@ -644,16 +658,41 @@ snapshot-consuming cells are admitted against the current-snapshot oracle instea
 the rest could one day get a weaker, never-smuggled-in **observer / prefix-consistency
 contract** (§Future Extensions).
 
-**Two named carve-outs**, both consequences of the executable-oracle requirement rather than
-gaps in it: **retained departed keys** under snapshot-reconcile (a key present in stored state
-but absent from the current snapshot is retained, not deleted — `incremental_shapes.md` §"The
-two run shapes (derived, never declared)"), and **ordering-key ties** on an order-monotone
-overwrite column (equivalence holds up to ties, since ordering-key uniqueness is not statically
-provable — `incremental_shapes.md` §"Ordering ties (order-monotone overwrite)"). Every
-`model_properties.md` property and `model_transforms.md` transform is proven/licensed in
-service of this invariant: the smelt-driven shapes discharge it via the generative equivalence
-oracle (§References); `refresh: materialized_view` discharges it via the **engine's** native
-IVM, with no smelt combiner (`materialized_view.md`).
+**Key departure follows the source posture.** Deletion is derived, never declared: the
+default behaviour is whatever preserves the full-refresh equation for the posture actually
+consumed. An append-only source never loses a key, so nothing departs and nothing is deleted.
+A mutable snapshot's oracle is the current snapshot, so a key present in stored state but
+absent from the incoming scan is **deleted** at reconcile — an anti-join over the scan the
+model already performs (`incremental_shapes.md` §"The two run shapes (derived, never
+declared)"). A windowed scan over a mutable source cannot observe departure at all — the
+window carries no tombstone — so the affected region is recomputed, or the shape refused;
+departure is never silently retained. A change feed's delete events are applied as
+retractions. Keeping departed keys is available only as the declared **retention** relaxation
+(§"The contract lattice"), never as a silent default.
+
+**The determinism scope.** The promise extends exactly as far as determinism does: where two
+full refreshes of the model would themselves disagree, no equivalence is promised. Volatile
+expressions — `NOW()`, `CURRENT_DATE`/`CURRENT_TIMESTAMP`, random — run **as-is**, never
+compile-time pinned and never rejected for volatility alone. The per-column determinism
+verdict (`model_properties.md`) marks every column such an expression reaches; the
+conformance oracle's comparison exempts those columns, and `smelt explain`'s per-column
+guarantee ledger prints the exemption in place of an equivalence contract. The same verdict
+gates every technique that relies on recompute-equality — change-suppression comparisons,
+diff-then-patch probes — which exclude volatile columns or refuse, fail-closed, rather than
+reading their inevitable drift as data change. Volatility in a **row-placement or identity
+position** (partition placement, key derivation, a membership predicate) is different in
+kind — writes could not address rows stably — so those positions still require deterministic
+expressions (the placement taint rule, `incremental_shapes.md` §"Safety checks (per-cell
+admission for recompute-a-region)").
+
+**One named carve-out**, a consequence of the executable-oracle requirement rather than a gap
+in it: **ordering-key ties** on an order-monotone overwrite column (equivalence holds up to
+ties, since ordering-key uniqueness is not statically provable — `incremental_shapes.md`
+§"Ordering ties (order-monotone overwrite)"). Every `model_properties.md` property and
+`model_transforms.md` transform is proven/licensed in service of this invariant: the
+smelt-driven shapes discharge it via the generative equivalence oracle (§References);
+`refresh: materialized_view` discharges it via the **engine's** native IVM, with no smelt
+combiner (`materialized_view.md`).
 
 ### The algebraic maintenance ladder
 
@@ -725,8 +764,9 @@ and a probe emitter. The conformance gate (`maintenance_conformance`, root `CLAU
 §"Architectural invariants") consumes the oracle transform directly rather than encoding its
 own comparator, and runtime probes emit from the same definition — mirroring the
 statement-emission single-owner rule (§"Statement emission (single owner)"). Users pick and
-parameterise a point; they never define one. v1 ships exactly two relaxations, chosen for
-having the clearest oracles and probes:
+parameterise a point; they never define one. The lattice defines three relaxations — frozen
+horizon and deferral (chosen first for having the clearest oracles and probes), and
+retention:
 
 **Frozen horizon (`H`), partition grain only.** Declaring `frozen_horizon: H` clamps writes
 **by contract** to output partitions within `H` of the current run — narrowing (never
@@ -790,9 +830,24 @@ current run's write range covers that cell's pending window
 (`(maintained_frontier, input_frontier]`); when both hold, the covering run's manifest records
 the subsumed window alongside its normal `success` outcome.
 
-Both points compose with `grain`, column families, and `maintenance:` overrides without a new
+**Retention (`retain_departed`), keyed shapes over a mutable snapshot.** At the default point
+a key absent from the current snapshot is deleted at reconcile (§"The equivalence invariant",
+key departure). Declaring `retain_departed` keeps such keys — history over currency, the
+SCD-flavoured trade — optionally naming a **tombstone column** in which departure is marked.
+The oracle is a **quotient that ignores departed keys**: for every key present in the current
+snapshot, the strict per-key equation holds unchanged; a stored key absent from the current
+snapshot is exempt from comparison (and, when a tombstone column is declared, must be marked
+in it). The probe is the reconcile scan's own anti-join — the very computation that would
+otherwise have deleted — recording the retained-departed key count on the run manifest, with
+the retained set's tombstone marking checked where declared. The point is meaningful only
+where departure is observable and deletion is the default, so it is admitted **only on a
+keyed shape consuming a mutable snapshot**; declaring it anywhere else is a configuration
+error (`ContractRetainDepartedInvalid`).
+
+The points compose with `grain`, column families, and `maintenance:` overrides without a new
 mode: a relaxed cell resolves technique via the same admission rule (§"Per-cell admission"),
-checked against its restated oracle. A definition delta interacts with both points through the
+checked against its restated oracle. A definition delta interacts with the frozen-horizon and
+deferral points through the
 plan-and-approve gate, never silently: a migration whose catch-up would enter a frozen band
 surfaces the conflict on the presented plan, and a deferral skip never defers definition-delta
 catch-up (`definition_deltas.md` §"Interaction with the contract lattice").
@@ -817,7 +872,11 @@ still produces membership sensitivity — absence from every value-sensitivity s
 admissibility for cheaper repair. The one admissible pruning is a proof: an enrichment join
 proven unable to add or remove output rows (its **skeleton-source closure** proven `Closed`
 over a provably outer join — `model_properties.md`) contributes none, since its deltas
-provably cannot change which rows exist.
+provably cannot change which rows exist. A group whose sensitivity set spans **two or more
+mutation-sensitive inputs** (a merged group — one output value drawing on multiple sources
+that can each mutate) is repaired by **region recompute**, never a column-scoped merge: no
+single input's delta determines the merged value, so the conservative, always-correct default
+applies, the same posture every other blended-provenance rule in this spec takes.
 
 **Triggers.** Four trigger classes index the plan:
 
@@ -1144,7 +1203,8 @@ only checked (fail-loud on violation); no unproven bound ever refuses a write.*
    never skips **evaluating** a scanned input — that is the separately-licensed
    delta-restricted enrichment compute (`model_transforms.md`, skeleton-source-closure proof).
    A compared column must be a pure function of the processed inputs; one varying run to run
-   (`contract: plausible`, run-pinned `NOW()`) is incomparable and refuses the technique,
+   (`contract: plausible`, a volatile `NOW()` — the determinism verdict, §"The equivalence
+   invariant" determinism scope) is incomparable and refuses the technique,
    fail-closed. At fixed `S` the suppressed and unconditional variants are interchangeable in
    the strongest sense of §"Per-cell admission" — a cost-model/`prefer`/`technique` choice.
    `model_transforms.md` owns the two realisations, both licensed by region row identity plus
@@ -1717,10 +1777,15 @@ Boundaries stated normatively elsewhere, collected here for discoverability:
   first-observed-value, and similar fold-the-observation-sequence columns have no executable
   full-refresh oracle and are rejected rather than approximated (§"The equivalence
   invariant"; a possible opt-in weaker contract is §Future Extensions).
-- **No delete signal under window-forward consumption.** An append-only feed without delete
-  events cannot express key deletion; departed keys persist (retention). Deletion semantics
-  beyond retention are an open question (§Future Extensions "Retention / key departure";
-  `incremental_shapes.md` §Known Divergences).
+- **No delete signal under window-forward consumption.** An append-only feed carries no
+  delete events, so a key never departs and there is nothing to delete — retention over such
+  a feed is simply correct, not a carve-out. Where the underlying source *is* mutable but
+  only a window of it is scanned, departure is unobservable and the affected region is
+  recomputed or the shape refused (§"The equivalence invariant", key departure).
+- **No out-of-band-edit detection.** An external mutation to a target table between runs is
+  not detected. A per-run digest tripwire was considered and rejected: it taxes every run to
+  catch a rare, self-inflicted failure mode, and a full refresh is always the repair. This is
+  a stated non-goal, not an open question.
 - **Skeleton-position definition changes are never migrated in place**
   (`definition_deltas.md` §"Skeleton changes are a new relation").
 
@@ -1732,6 +1797,19 @@ and §References → Plans. Shape-profile gaps are `incremental_shapes.md` §Kno
 definition-delta gaps (including the unwired synthesis layer and the verb renames) are
 `definition_deltas.md` §Known Divergences.
 
+- **Posture-derived key departure is unimplemented; the runtime retains departed keys
+  unconditionally.** A snapshot-reconcile run does not delete keys absent from the incoming
+  scan (no anti-join delete leg exists), and the `retain_departed` retention point — the
+  declared way to keep that behaviour — has no declaration parsing, oracle transform, probe
+  emitter, or `ContractRetainDepartedInvalid` diagnostic. Today every keyed model behaves as
+  if `retain_departed` were silently declared (decision record:
+  `docs/research/20260816-open-questions-triage.md`).
+- **The determinism scope is unimplemented.** The runtime still compile-time-pins
+  `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed models, instead of
+  running them as-is; the conformance oracle's comparison and the recompute-equality
+  technique gates do not yet consult the per-column determinism verdict, and `smelt explain`
+  does not print the determinism exemption in the per-column guarantee ledger (decision
+  record: `docs/research/20260816-open-questions-triage.md`).
 - **The scheduler does not yet consume delta signatures end to end.** Signatures shape
   admission and are printed, but the DAG scheduler's currency for "what needs re-running" is
   still whole day-intervals: a clockless `keyed upsert` upstream feeding a `grain: partition`
@@ -1796,8 +1874,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
-  recompute family, explain-visible), and whether a Spark-dialect ledger builder is worth
-  building before a real Spark-targeted incremental workload demands it remains undecided.
+  recompute family, explain-visible). A Spark-dialect ledger builder is deliberately deferred
+  until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
+  recorded downgrade is the intended behaviour, not a stopgap (decision record:
+  `docs/research/20260816-open-questions-triage.md`).
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
   (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
   key-level dirt representation exists (intervals are the graph's only currency); the
@@ -1810,10 +1890,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key
   footprint chaining across history;
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
-- **No out-of-band-edit tripwire (Open Question)** — an external mutation to a target table
-  between runs is not detected; whether a digest tripwire is worth its cost is open.
-- **A proposed `on_column_add: backfill | leave_null | recompute` policy knob (Open
-  Question)** is noted but not surfaced.
 - **The derived model-wide horizon is under construction**, as is the data-quality check for
   the model-author lateness-flag pattern. Tracked: `docs/plans/20260704-model-updates.md`.
 - **Override-ladder reach (Open Question)**: the keyed-fold suppression consumer honours
@@ -1822,14 +1898,18 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
   cost only, not the write-suppression dimension; whether a future cost model needs
   region-level change-ratio statistics from prior observed deltas is open.
-- **docs-site coverage of the plan's CLI surface is partial (Open Question)** — the residue
-  is not enumerated; audit and either document or drop this entry.
-- **A group merged across two mutable inputs has no group-merge-provenance policy (Open
-  Question)** — whether provenance spanning multiple mutation-sensitive inputs should force
-  region recompute is undecided.
-- **`change_feed` sources never get an `UpstreamMutation` cell (Open Question)**, and even
-  where the posture is threaded through, only full-input re-derivation is admitted — no live
-  fold machinery consumes a change feed's delta shape.
+- **docs-site coverage of the plan's CLI surface is partial** — a one-time close-out task:
+  enumerate the undocumented residue once, then document or explicitly drop each item.
+- **The merged-group region-recompute rule is unverified in the implementation** — a group
+  whose sensitivity spans two or more mutation-sensitive inputs must take region recompute
+  (§"The plan matrix"); whether today's derivation ever admits a column-scoped repair for
+  such a group has not been audited, and no check or fixture pins the rule (decision record:
+  `docs/research/20260816-open-questions-triage.md`).
+- **`change_feed` sources do not yet get an `UpstreamMutation` cell** — every other
+  mutation-sensitive posture receives one, and a change feed must too; today none is derived,
+  and even where the posture is threaded through, only full-input re-derivation is admitted
+  (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
+  retention point).
 - **`INTERSECT`/`EXCEPT` are unclassified set operations**: they collapse to whole-model
   mutation-sensitivity, so every admitted cell is region recompute; a future distribution
   proof needs per-arm-cardinality reasoning. Cross-ref `model_properties.md` §Known
@@ -1850,22 +1930,23 @@ none of it may be relied on or implemented against until it graduates into
 
 - **Further contract-lattice points.** Candidates, in the priority order the delta framing
   suggests (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §5):
-  - **Retention / key departure** — a declared retention policy giving deletion a contract
-    home (licensing tombstones or hard deletes with a stated policy), turning the "departed
-    keys are retained" carve-out into the default point's honest statement rather than a
-    footnote. In delta terms it is the missing **retraction** row of the delta-shape scale —
-    also the prerequisite for maintaining aggregates under deletes and for consuming change
-    feeds with delete events.
   - **Reconciliation points** — equivalence promised at declared moments (say, end of day)
     rather than after every run, licensing cheap approximate folds in between; the
     diff-then-patch write is simultaneously the probe (it measures drift) and the remedy (it
     repairs it).
   - **Declared indifference** — equivalence modulo stated tie-breaks or tolerances, making
-    the two carve-outs currently special-cased inside the invariant (departed keys, ordering
-    ties) ordinary declared points; costs the conformance comparator a quotient by the
+    the carve-out currently special-cased inside the invariant (ordering ties) an ordinary
+    declared point; costs the conformance comparator a quotient by the
     declared relation.
   - **Per-column-group freshness** — not a separate point: blocked on the same per-cell
     frontier bookkeeping gap as per-cell deferral, and rides that work.
+- **Live change-feed folds.** Consuming a change feed's insert/update/delete rows as an
+  incremental fold — the delta shape applied directly instead of full-input re-derivation
+  (the admitted route today, §Known Divergences). Delete events are retractions whose
+  contract home is the posture-derived departure rule (§"The equivalence invariant", key
+  departure), which must be implemented first; in delta terms this fills the **retraction**
+  row of the delta-shape scale and is the prerequisite for maintaining aggregates under
+  deletes.
 - **Proofs as product.** A `smelt prove` report card, `must_hold:` assertions that fail
   compilation, and a proof-diff surface for CI — making the derivation visible and
   assertable, printed over the full lattice. Deliberately after the scheduler and
