@@ -504,7 +504,7 @@ via a shared `model_properties.md` proof, individually disabled via
 | Check | Admitted when |
 |---|---|
 | **Window functions** | `PARTITION BY <keys> ⊇ partition_column`, or a bounded `RANGE BETWEEN INTERVAL '…' PRECEDING` frame with no `PARTITION BY`/`UNBOUNDED` hazard (`safety_overrides.allow_window_functions`). |
-| **`HAVING`** | enclosing `GROUP BY` key ⊇ `partition_column`. |
+| **`HAVING`** | enclosing `GROUP BY` key ⊇ `partition_column`; a grouping key resolves to `partition_column` by the item's own expression text, by its output alias, or by ordinal position, matching what the engines accept. |
 | **`DISTINCT`** | `partition_column` projected in the same scope. |
 | **`LIMIT`** | never — survival depends on which other rows are present, which differs run vs full refresh. |
 | **Subqueries** (FROM/JOIN) | rejected unless overridden; a `WITH` CTE is *not* gated — CTE bodies flow through bound derivation via the body-structure classifier. |

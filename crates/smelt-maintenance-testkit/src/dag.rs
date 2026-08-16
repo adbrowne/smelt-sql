@@ -78,21 +78,25 @@ pub enum DagBody {
     /// typing/phases/08-plan.md`'s `keyed_chain_dag`).
     KeyedFold,
     /// `SELECT DATE '2024-01-01' AS d, id, ANY_VALUE(total) AS total FROM
-    /// <upstream> GROUP BY d, id` — a `grain: partition` downstream reading
-    /// a clockless `KeyedUpsert` upstream directly by its key column
+    /// <upstream> GROUP BY id` — a `grain: partition` downstream reading a
+    /// clockless `KeyedUpsert` upstream directly by its key column
     /// (`keyed_partition_sink_dag`): the combination phase 7 flagged as
     /// deriving a key-addressed model-edge cell the run loop never
     /// dispatches (`docs/specs/incremental_models.md` §"Known
-    /// Divergences"). The partition column is a constant and the `GROUP
-    /// BY` is a structural no-op (the upstream is already one row per
-    /// `id`) — this body exists only to PROVE the downstream's own row
+    /// Divergences"). The partition column is a constant and left OUT of
+    /// `GROUP BY` — this body exists only to PROVE the downstream's own row
     /// identity includes `id` (via the walk, not a declared `unique_key`:
     /// a declared `unique_key: id` alongside `grain: partition` trips the
     /// `GrainAssertionMismatch` diagnostic, since a declared key alone
     /// reads as key-grain shape facts) so `admit_key_addressed_recompute`'s
     /// grain proof resolves through `id`, exercising plan derivation and
     /// the full-refresh fallback correctness rather than pinning a real
-    /// time axis.
+    /// time axis. Grouping by `d`'s own alias too would prove grain `[d,
+    /// id]`, but `derive_affected_keys` then names `d` in the cell's
+    /// `key_scope`, and `d` is absent from the upstream's own proven key
+    /// columns (`[id]`) — the cell would be refused
+    /// (`MaintenanceKeyScopeColumnMissing`) rather than admitted; see
+    /// [`DagBody::PartitionOverKeyedId`]'s own render comment.
     PartitionOverKeyedId,
 }
 
@@ -411,14 +415,20 @@ pub fn render_node_body(dag: &DagRecipe, idx: usize) -> String {
             // `{d}` is NOT in the `GROUP BY` list — a literal projection is
             // trivially single-valued per group (DuckDB/Postgres both
             // accept a constant select item outside `GROUP BY`), so the
-            // grain reduces to `{id}` alone rather than the pair. This
-            // also sidesteps a walk limitation
-            // (`analysis::walk::group_by_output_keys`): a grouping key is
-            // matched against a select item's own EXPRESSION text, not its
-            // output alias, so `GROUP BY {d}, {id}` (grouping by the
-            // alias) would fail the grain proof closed for the WHOLE
-            // scope — including `{id}` — rather than just the constant
-            // `{d}` column.
+            // grain reduces to `{id}` alone rather than the pair. This is
+            // NOT a walk limitation anymore — `analysis::walk::
+            // group_by_output_keys` now resolves `GROUP BY {d}, {id}`
+            // against both items' output aliases
+            // (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
+            // 11-plan.md`), proving grain `[{d}, {id}]`. But
+            // `derive_affected_keys` then names both grain columns in the
+            // key-addressed cell's `key_scope`, and `{d}` is absent from
+            // the upstream's own proven `KeyedUpsert` key columns (`[{id}]`
+            // only), so the cell is refused
+            // (`MaintenanceKeyScopeColumnMissing`) rather than admitted.
+            // Widening `derive_affected_keys` to key_scope-project only
+            // columns the upstream actually carries is out of this phase's
+            // scope.
             format!(
                 "SELECT DATE '2024-01-01' AS {d}, {id}, ANY_VALUE(total) AS total FROM {src} \
                  GROUP BY {id}"

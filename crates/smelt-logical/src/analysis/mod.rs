@@ -270,6 +270,37 @@ pub fn resolve_scope_group_by(
         .collect()
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): resolve one already-resolved `GROUP BY` key (from
+/// [`resolve_scope_group_by`], which already handles ordinal and `GROUP BY
+/// ALL` expansion) against this scope's own already-classified `items` to the
+/// name it carries on the output relation. Two routes, tried in order: the
+/// key matches a select item's own expression text exactly, or it matches a
+/// select item's output alias case-insensitively (SQL identifiers are
+/// case-insensitive). Returns the item's alias when it has one, else its
+/// expression text. `None` means the key names neither an expression nor an
+/// alias projected in this scope — it cannot be named on the output relation.
+pub fn resolve_group_by_key_to_output(items: &[SelectItemKind], key: &str) -> Option<String> {
+    if let Some(item) = items
+        .iter()
+        .find(|item| item_expr(item).text().trim() == key)
+    {
+        let alias = item_alias(item);
+        return Some(if alias.is_empty() {
+            key.to_string()
+        } else {
+            alias.to_string()
+        });
+    }
+    items
+        .iter()
+        .find(|item| {
+            let alias = item_alias(item);
+            !alias.is_empty() && alias.eq_ignore_ascii_case(key)
+        })
+        .map(|item| item_alias(item).to_string())
+}
+
 /// Partition-alignment verdict for a `HAVING` clause living in `select`:
 /// `Aligned` when this scope's own resolved `GROUP BY` keys are a superset
 /// containing the projected `partition_col` expression — found among
@@ -293,7 +324,12 @@ pub fn scope_group_by_alignment(
             reason: "this scope has no GROUP BY".to_string(),
         };
     }
-    if group_by_keys.iter().any(|k| k == &partition_expr) {
+    let aligned = group_by_keys.iter().any(|k| {
+        k == &partition_expr
+            || resolve_group_by_key_to_output(&items, k)
+                .is_some_and(|resolved| resolved == partition_col)
+    });
+    if aligned {
         PartitionAlignment::Aligned
     } else {
         PartitionAlignment::NotAligned {
@@ -867,6 +903,21 @@ mod tests {
     fn test_scope_group_by_alignment_no_group_by_fails_closed() {
         let select = parse_select("SELECT a, b FROM t");
         assert!(!scope_group_by_alignment(&select, "a").is_aligned());
+    }
+
+    #[test]
+    fn scope_group_by_alignment_accepts_alias_grouping() {
+        // Grouping by the projected alias `d`, not the underlying
+        // `date_trunc(...)` expression text, must still align with a
+        // partition_column declared as `d`.
+        let select = parse_select(
+            "SELECT date_trunc('day', ts) AS d, user_id, COUNT(*) as cnt FROM events \
+             GROUP BY d, user_id",
+        );
+        assert_eq!(
+            scope_group_by_alignment(&select, "d"),
+            PartitionAlignment::Aligned
+        );
     }
 
     #[test]

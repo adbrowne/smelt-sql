@@ -72,7 +72,7 @@ run shape.
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
-| 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | planned |
+| 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | done |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
@@ -374,6 +374,17 @@ run shape.
   `RepairKeysNotDiscoverable`, and `RepairSliceUnbounded` have no `DiagnosticCode` variant; that
   residue is folded into row 13's close-out sweep rather than getting its own row (it is a
   catalogue alignment, not outcome-criterion work).
+- 2026-08-16 (phase 11 implemented): `resolve_group_by_key_to_output` lands as the shared
+  resolver in `smelt-logical::analysis::mod`; both `group_by_output_keys` (walk) and
+  `scope_group_by_alignment` (partition-alignment) now use it. Spec deltas landed as planned. The
+  scoped-out edge did fire exactly as anticipated: restoring the honest `GROUP BY {d}, {id}`
+  shape in both phase-2 workaround sites now clears the walk's grain proof (`[d, id]`) but trips
+  `MaintenanceKeyScopeColumnMissing` from `derive_affected_keys`, which still projects every grain
+  column (not just the upstream's own proven key columns) into the cell's `key_scope`. Reverted
+  both sites to their original constant-projection shape and rewrote the comments to name that
+  real cause instead of the now-fixed walk explanation, per the phase's own instruction not to
+  chase `derive_affected_keys` here. That gap is now precisely characterized (two comments name
+  the exact diagnostic and the fix shape) for whoever picks it up. No reshape of the phase table.
 
 ## Blocked
 

@@ -415,12 +415,16 @@ mod chain {
     /// `user_id` — the same shape phase 7 flagged as deriving an admitted
     /// but undispatched key-addressed cell. `d` is deliberately left OUT of
     /// `GROUP BY` (a literal projection is trivially single-valued per
-    /// group): grouping by `d`'s own output ALIAS instead of leaving it out
-    /// would fail the walk's grain proof closed for the whole scope, since
-    /// `analysis::walk::group_by_output_keys` matches a grouping key
-    /// against a select item's own expression text, not its alias — see
-    /// `DagBody::PartitionOverKeyedId`'s own render comment for the same
-    /// note.
+    /// group) — NOT because the walk cannot resolve an alias-grouped `d`
+    /// anymore (`analysis::walk::group_by_output_keys` now does, phase 11 of
+    /// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`), but
+    /// because grouping by `d` widens the proven grain to `[d, user_id]`,
+    /// and `derive_affected_keys` then names both grain columns in the
+    /// key-addressed cell's `key_scope` — `d` is absent from the upstream
+    /// (`agg`)'s own proven `KeyedUpsert` key columns (`[user_id]` only), so
+    /// the cell is refused (`MaintenanceKeyScopeColumnMissing`) rather than
+    /// admitted. Widening `derive_affected_keys` to key_scope-project only
+    /// columns the upstream actually carries is out of this phase's scope.
     fn stage_chain_project_partition_downstream(project_dir: &std::path::Path) {
         write(
             project_dir,

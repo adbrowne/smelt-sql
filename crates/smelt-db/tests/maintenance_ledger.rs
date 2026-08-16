@@ -122,3 +122,46 @@ GROUP BY device_id, event_date
         .unwrap_or_else(|| panic!("no determinism verdict for daily_amount: {plan:?}"));
     assert_eq!(daily_amount.level, Determinism::Clean);
 }
+
+/// A `grain: key` model with no declared `unique_key`, grouping by a
+/// projected alias (`date_trunc('day', event_date) AS d`), must still prove
+/// `RowIdentity::Key(["d"])` through the full Salsa path — not fail closed to
+/// `WholeRow` because the grain factory couldn't resolve `GROUP BY d` against
+/// the alias (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`
+/// phase 11).
+#[test]
+fn alias_grouped_model_proves_row_identity() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT date_trunc('day', event_date) AS d, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY d
+"#;
+
+    let plan = plan_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/events.yml", EVENTS_SOURCE),
+            ("models/total_amount.sql", model),
+        ],
+        "total_amount",
+    );
+
+    let identity = plan
+        .plan
+        .cells
+        .iter()
+        .find_map(|cell| match &cell.row_identity.identity {
+            smelt_logical::maintenance::RowIdentity::Key(cols) => Some(cols.clone()),
+            smelt_logical::maintenance::RowIdentity::WholeRow => None,
+        })
+        .unwrap_or_else(|| panic!("expected a Key row identity, got WholeRow only: {plan:?}"));
+    assert_eq!(
+        identity,
+        vec!["d".to_string()],
+        "alias-grouped key must resolve to the output column 'd'"
+    );
+}
