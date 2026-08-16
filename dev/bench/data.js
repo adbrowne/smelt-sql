@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786843604788,
+  "lastUpdate": 1786843608011,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 33.97576558470179,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f3de2cc5ab395a806beffd4f27b03a5166129655",
+          "message": "research: item 7 decision — equivalence scoped to deterministic outputs, NOW() runs as-is\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-08-16T11:24:02+10:00",
+          "tree_id": "1ce26670220d6f4dfe95bb92923bf675c2113927",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f3de2cc5ab395a806beffd4f27b03a5166129655"
+        },
+        "date": 1786843607172,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.05645454141061,
             "unit": "MB/s"
           }
         ]
