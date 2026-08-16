@@ -10,12 +10,15 @@ use std::collections::BTreeMap;
 
 use anyhow::Result;
 use smelt_backend::Backend;
+use smelt_core::sources::SourceInfo;
+use smelt_core::ModelFile;
 use smelt_logical::maintenance::propagate::KeyValues;
 
 use crate::maintenance_driver::{diff_repair_group_sidecar_changed_keys, read_observed_delta};
 use crate::propagation::{
-    fold_keyed_seed_values, keyed_seed_diff_result_to_key_values, KeyedSeedDiff, ObservedDeltaKey,
-    ObservedDeltaLookup,
+    fold_keyed_seed_values, keyed_seed_diff_result_to_key_values, keyed_seed_diffs_to_read,
+    observed_delta_keys_to_read, plan_since_upstream_live, KeyedSeedDiff, ObservedDeltaKey,
+    ObservedDeltaLookup, SinceUpstreamPlan, SourceDelta,
 };
 
 /// Read every key in `keys` off `backend`, one `read_observed_delta` call
@@ -113,4 +116,36 @@ pub async fn resolve_keyed_seeds(
         .into_iter()
         .map(|(upstream, values)| (upstream, fold_keyed_seed_values(values)))
         .collect())
+}
+
+/// The single owner of `--since-upstream`'s live-plan sequence
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/12-plan.md`):
+/// derive which `(model, window)` observed-delta keys and which `(upstream,
+/// consumer)` keyed-seed descriptors matter (pure), read both live off
+/// `backend`, then fold everything into a [`SinceUpstreamPlan`] via
+/// [`plan_since_upstream_live`]. `run.rs::run_since_upstream` delegates here
+/// so the generative conformance suite can drive the SAME sequence instead
+/// of hand-rolling a copy that could silently drift from the real CLI path.
+pub async fn resolve_live_plan(
+    backend: &dyn Backend,
+    config: &smelt_core::config::Config,
+    target: &str,
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+) -> Result<SinceUpstreamPlan> {
+    let observed_keys = observed_delta_keys_to_read(models, source_infos, deltas)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let keyed_seed_diffs = keyed_seed_diffs_to_read(models, source_infos, deltas)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let schema = &config
+        .targets
+        .get(target)
+        .ok_or_else(|| anyhow::anyhow!("target '{target}' not found in smelt.yml"))?
+        .schema;
+    let observed = resolve_observed_delta_lookup(backend, schema, &observed_keys).await?;
+    let keyed_seeds = resolve_keyed_seeds(backend, config, target, &keyed_seed_diffs).await?;
+    plan_since_upstream_live(models, source_infos, order, deltas, &observed, &keyed_seeds)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }

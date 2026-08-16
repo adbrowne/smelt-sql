@@ -1935,3 +1935,145 @@ fn unsupported_dialect_diff_yields_an_unresolved_seed() {
         other => panic!("expected Unresolved, got {other:?}"),
     }
 }
+
+/// `resolve_live_plan_matches_hand_wired_sequence`
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/12-plan.md`
+/// test 1): `resolve_live_plan` must be the single owner of the live-plan
+/// sequence `run.rs::run_since_upstream` drives — this pins the extraction
+/// by proving it returns exactly what hand-calling the four underlying
+/// functions in order produces, over a real staged keyed→partition project
+/// (`dag_kpart_a` -> `dag_kpart_b`) with a landed delta on the source.
+#[tokio::test]
+async fn resolve_live_plan_matches_hand_wired_sequence() {
+    let dag = smelt_maintenance_testkit::dag::keyed_partition_sink_dag();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    let db_path = tmp.path().join("db.duckdb");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    let project = smelt_maintenance_testkit::dag::stage_dag(&dag, &project_dir, &db_path)
+        .expect("stage keyed partition sink dag");
+
+    let base_day = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let initial_rows = vec![(base_day, 0_i64, 10_i64), (base_day, 1_i64, 20_i64)];
+    {
+        let conn = project.connect().expect("connect");
+        smelt_maintenance_testkit::dag::insert_rows(&conn, &dag, &initial_rows)
+            .expect("insert initial rows");
+    }
+    project
+        .run_quiet(
+            "resolve-live-plan-init",
+            smelt_maintenance_testkit::link_c_harness::base_request("dev"),
+        )
+        .await
+        .expect("initial build succeeds (creation)");
+    // A second no-change run is `dag_kpart_b`'s own FIRST live key-addressed
+    // dispatch (`table_exists_before_run` now true) — this is what seeds its
+    // group-grain sidecar partition over `dag_kpart_a`
+    // (`resolve_keyed_seeds_reads_changed_keys_off_the_sidecar`'s own
+    // precedent in `key_addressed_model_edge_lowering.rs`), so a later live
+    // seed read has a prior snapshot to diff against.
+    project
+        .run_quiet(
+            "resolve-live-plan-seed",
+            smelt_maintenance_testkit::link_c_harness::base_request("dev"),
+        )
+        .await
+        .expect("second build succeeds (sidecar seed)");
+
+    let delta_rows = vec![(base_day, 0_i64, 99_i64)];
+    {
+        let conn = project.connect().expect("connect");
+        smelt_maintenance_testkit::dag::insert_rows(&conn, &dag, &delta_rows)
+            .expect("insert delta rows");
+    }
+
+    let config = smelt_core::config::Config::load(&project_dir).expect("load smelt.yml");
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &config.paths);
+    let order = dag.order();
+    // The delta names `dag_kpart_a` itself (an upstream MAINTAINED MODEL, not
+    // the raw declared source) — the only address shape that reaches
+    // `dag_kpart_b`'s keyed edge at all: `dag_kpart_a` (`grain: key`) never
+    // derives an inbound propagation edge from the raw source
+    // (`keyed_grain_model_never_derives_an_edge`), so a delta on the raw
+    // `events` source cannot inform anything here. `dag_kpart_a` has not
+    // been rebuilt yet at this point, so the live sidecar diff is
+    // legitimately empty — `dag_kpart_b` still gets scheduled (whole table)
+    // because a non-keyed-grain downstream of an admitted keyed edge always
+    // widens once its upstream is visited, regardless of the seed's value.
+    let deltas = vec![SourceDelta {
+        source: "dag_kpart_a".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(
+            smelt_logical::maintenance::propagate::day_ordinal(2024, 1, 1),
+            smelt_logical::maintenance::propagate::day_ordinal(2024, 1, 2),
+        ),
+    }];
+
+    let backend_for_extracted = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb for resolve_live_plan");
+    let extracted = smelt_runtime::propagation_live::resolve_live_plan(
+        &backend_for_extracted,
+        &config,
+        "dev",
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+    )
+    .await
+    .expect("resolve_live_plan succeeds");
+
+    let backend_for_hand = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb for hand-wired sequence");
+    let observed_keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let keyed_seed_diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+    let schema = &config.targets["dev"].schema;
+    let observed = smelt_runtime::propagation_live::resolve_observed_delta_lookup(
+        &backend_for_hand,
+        schema,
+        &observed_keys,
+    )
+    .await
+    .expect("resolve_observed_delta_lookup succeeds");
+    let keyed_seeds = smelt_runtime::propagation_live::resolve_keyed_seeds(
+        &backend_for_hand,
+        &config,
+        "dev",
+        &keyed_seed_diffs,
+    )
+    .await
+    .expect("resolve_keyed_seeds succeeds");
+    let hand_wired = smelt_runtime::propagation::plan_since_upstream_live(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+        &keyed_seeds,
+    )
+    .expect("plan_since_upstream_live succeeds");
+
+    assert_eq!(
+        extracted.runs, hand_wired.runs,
+        "resolve_live_plan must schedule the same runs as the hand-wired sequence"
+    );
+    assert_eq!(
+        extracted.dirty_set_report, hand_wired.dirty_set_report,
+        "resolve_live_plan must print the same dirty-set report as the hand-wired sequence"
+    );
+    assert_eq!(
+        extracted.keyed_dirty, hand_wired.keyed_dirty,
+        "resolve_live_plan must resolve the same keyed-dirty map as the hand-wired sequence"
+    );
+    assert!(
+        !extracted.runs.is_empty(),
+        "a delta on dag_kpart_a must schedule dag_kpart_b (whole table) via the keyed edge: {}",
+        extracted.dirty_set_report
+    );
+}

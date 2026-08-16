@@ -382,21 +382,7 @@ async fn run_since_upstream(
     // named error here, never a silent fallback to an empty lookup (which
     // would silently widen every eligible origin back to its declared
     // window).
-    let observed_keys =
-        smelt_runtime::propagation::observed_delta_keys_to_read(models, &source_infos, &deltas)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    // Live keyed-seed resolution (`docs/outcomes/
-    // 20260816-scheduler-delta-signatures/phases/07-plan.md`): the
-    // `(upstream, consumer)` descriptors to read off the group-grain
-    // sidecar, computed the same pure way `observed_keys` is above. Runs
-    // under `--dry-run` too, same rationale as the observed-delta read: a
-    // read plus the same idempotent `CREATE TABLE IF NOT EXISTS` every
-    // other state read performs, and a dry run must preview the live run's
-    // own dirty set.
-    let keyed_seed_diffs =
-        smelt_runtime::propagation::keyed_seed_diffs_to_read(models, &source_infos, &deltas)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let (observed, keyed_seeds) = {
+    let plan = {
         let target_config = config
             .targets
             .get(&args.target)
@@ -413,34 +399,19 @@ async fn run_since_upstream(
                     args.target
                 )
             })?;
-        let schema = &config.targets[&args.target].schema;
-        let observed = smelt_runtime::propagation_live::resolve_observed_delta_lookup(
-            backend.as_ref(),
-            schema,
-            &observed_keys,
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-        let keyed_seeds = smelt_runtime::propagation_live::resolve_keyed_seeds(
+
+        smelt_runtime::propagation_live::resolve_live_plan(
             backend.as_ref(),
             config,
             &args.target,
-            &keyed_seed_diffs,
+            models,
+            &source_infos,
+            &order,
+            &deltas,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
-        (observed, keyed_seeds)
+        .map_err(|e| anyhow::anyhow!("{}", e))?
     };
-
-    let plan = smelt_runtime::propagation::plan_since_upstream_live(
-        models,
-        &source_infos,
-        &order,
-        &deltas,
-        &observed,
-        &keyed_seeds,
-    )
-    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {

@@ -77,7 +77,7 @@ run shape.
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | done |
-| 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | planned |
+| 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | done |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
@@ -407,6 +407,23 @@ run shape.
   the live seed resolves `Unresolved` rather than to values, the test is not to be weakened
   into vacuity: the oracle + incrementality legs stand and the real reason is recorded for
   row 13.
+
+- 2026-08-16 (phase 12 implemented): `smelt_runtime::propagation_live::resolve_live_plan` lands
+  as the single owner of `--since-upstream`'s live-plan sequence; `run.rs::run_since_upstream`
+  delegates to it. Three new generative conformance tests drive the real scheduler path over
+  `keyed_partition_sink_dag`: a source-rooted sweep (plans `--source dag_kpart_a` before it
+  reruns — plan-time seed legitimately empty, the run-time sidecar diff at dispatch does the
+  repair), a model-rooted sweep (plans after `dag_kpart_a` reruns — the live seed resolves the
+  real touched ids, criterion 2's evidence), and an untouched-row bit-identical stability check.
+  Both scenarios turned out to name `dag_kpart_a` as the delta source (not the raw `events`
+  source, which never derives an edge into a `grain: key` node at all) — "source-rooted" vs
+  "model-rooted" is about plan-vs-rebuild ordering, not address choice; see
+  `phases/12-summary.md` for the full reasoning. Caught and fixed a real regression along the
+  way: the initial extraction kept the live-read backend alive through the later execute loop,
+  causing silent lock-contention data loss (`since_upstream.rs::
+  composed_model_address_landed_delta_propagates` failed with a missing table, not a lock
+  error) — fixed by re-scoping the backend to drop before the execute loop, matching the
+  original code's scoping. No reshape of the phase table.
 
 ## Blocked
 

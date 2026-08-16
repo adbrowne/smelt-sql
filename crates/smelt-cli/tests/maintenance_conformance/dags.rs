@@ -34,7 +34,8 @@ use smelt_maintenance_testkit::link_c_harness::base_request;
 use smelt_maintenance_testkit::recipe::arb_payload_value;
 use smelt_maintenance_testkit::verdict::Verdict;
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, resolve_build_plan, SourceDelta,
+    build_forward_graph, keyed_restrictions_from_plan, plan_since_upstream, resolve_build_plan,
+    SourceDelta,
 };
 
 /// Deterministic case count — DAG cases stage TWO independent projects and
@@ -768,6 +769,360 @@ fn keyed_upstream_partition_downstream_matches_oracle() {
             .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
         assert_every_node_equal(&dag, &inc, &full, i, "keyed partition sink").expect("compare");
+    }
+}
+
+/// Drive a `SinceUpstreamPlan`'s `runs` through `execute_project` exactly the
+/// way `run.rs::run_since_upstream` does (`docs/outcomes/
+/// 20260816-scheduler-delta-signatures/phases/12-plan.md` task 5): one
+/// request per run, the WHOLE resolved `keyed_restrictions` map on every
+/// request (`docs/specs/incremental_models.md` §"Restrictions compose by
+/// union"). Returns the last `RunOutcome` — this DAG shape only ever
+/// schedules one model (`dag_kpart_b`) via the plan.
+async fn run_plan(
+    project: &smelt_maintenance_testkit::link_c_harness::LinkCProject,
+    plan: &smelt_runtime::propagation::SinceUpstreamPlan,
+    run_id_prefix: &str,
+) -> smelt_runtime::RunOutcome {
+    let keyed_restrictions = keyed_restrictions_from_plan(plan);
+    let mut last = None;
+    for (idx, run) in plan.runs.iter().enumerate() {
+        let mut req = base_request("dev");
+        req.select = vec![run.model.clone()];
+        req.start = run.start.clone();
+        req.end = run.end.clone();
+        req.keyed_restrictions = keyed_restrictions.clone();
+        let outcome = project
+            .run_quiet(&format!("{run_id_prefix}-{idx}-{}", run.model), req)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{run_id_prefix}: propagated run for {} failed: {e}",
+                    run.model
+                )
+            });
+        last = Some(outcome);
+    }
+    last.unwrap_or_else(|| panic!("{run_id_prefix}: plan had no runs to execute"))
+}
+
+/// `keyed_partition_scheduler_sweep_matches_oracle` (phase 12 plan test 2+3;
+/// `incremental_models.md` §"Dispatch — from propagated components to run
+/// units", §"Keyed dirt-sets and the narrowed refusal"): a source-rooted
+/// `--source dag_kpart_a` live plan resolved BEFORE `dag_kpart_a` itself is
+/// rebuilt — the plan-time sidecar diff is legitimately empty (`dag_kpart_a`
+/// hasn't changed yet relative to the last snapshot), but `dag_kpart_b`
+/// still gets scheduled (whole table) because a non-keyed-grain downstream
+/// of an admitted keyed edge always widens once its upstream is visited.
+/// Correctness comes from `dag_kpart_b`'s OWN fresh sidecar diff at dispatch
+/// time (the run-time union), not from the plan-time seed — proving the
+/// REAL `--since-upstream` scheduler path (live observed-delta read, live
+/// keyed-seed resolution, propagated keyed restrictions), unlike
+/// `keyed_upstream_partition_downstream_matches_oracle` above, which drives
+/// a plain whole-project build.
+#[test]
+fn keyed_partition_scheduler_sweep_matches_oracle() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_partition_sink_dag();
+        let tmp = TempDir::new().expect("tempdir");
+        let (inc, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kpsweep-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        // Second no-change run: dag_kpart_b's own first live key-addressed
+        // dispatch, seeding its group-grain sidecar partition over
+        // dag_kpart_a — needed before a live seed read has a prior snapshot
+        // to diff against.
+        rt.block_on(inc.run_quiet(&format!("kpsweep-{i}-seed"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: sidecar-seeding run failed: {e}"));
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
+        }
+
+        let (models, source_infos) = discover(&inc.project_dir).expect("discover inc");
+        let order = dag.order();
+        let deltas = vec![SourceDelta {
+            source: "dag_kpart_a".to_string(),
+            landed: DayInterval::new(day_ordinal(2024, 1, 1), day_ordinal(2024, 1, 2)),
+        }];
+        let backend = rt.block_on(inc.backend()).expect("open backend for plan");
+        let plan = rt
+            .block_on(smelt_runtime::propagation_live::resolve_live_plan(
+                backend.as_ref(),
+                &inc.config,
+                "dev",
+                &models,
+                &source_infos,
+                &order,
+                &deltas,
+            ))
+            .unwrap_or_else(|e| panic!("case {i}: resolve_live_plan failed: {e}"));
+        assert!(
+            !plan.runs.is_empty(),
+            "case {i}: expected dag_kpart_b to be scheduled by the keyed edge: {}",
+            plan.dirty_set_report
+        );
+
+        // dag_kpart_a itself never appears in `plan.runs` (grain: key nodes
+        // never derive an inbound propagation edge) — it must be rebuilt
+        // separately, same as `keyed_upstream_partition_downstream_matches_oracle`.
+        let mut a_req = base_request("dev");
+        a_req.select = vec!["dag_kpart_a".to_string()];
+        rt.block_on(inc.run_quiet(&format!("kpsweep-{i}-a"), a_req))
+            .unwrap_or_else(|e| panic!("case {i}: dag_kpart_a repair run failed: {e}"));
+
+        let repair_outcome = rt.block_on(run_plan(&inc, &plan, &format!("kpsweep-{i}-b")));
+        let repair_record = repair_outcome.models.get("dag_kpart_b").unwrap_or_else(|| {
+            panic!("case {i}: scheduled repair run has no manifest entry for dag_kpart_b")
+        });
+        assert_eq!(
+            repair_record.strategy, "per_group_recompute",
+            "case {i}: the scheduler-driven dag_kpart_b repair must dispatch the key-addressed \
+             cell's repair family, not the ordinary route — got strategy '{}'",
+            repair_record.strategy
+        );
+
+        {
+            let conn = full.connect().expect("connect full");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
+        }
+        rt.block_on(full.run_quiet(&format!("kpsweep-{i}-full"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+
+        assert_every_node_equal(&dag, &inc, &full, i, "keyed partition scheduler sweep")
+            .expect("compare nodes");
+    }
+}
+
+/// `keyed_partition_scheduler_sweep_from_model_upstream_matches_oracle`
+/// (phase 12 plan test 4+5): model-rooted — `dag_kpart_a` is rebuilt FIRST,
+/// then a `--source dag_kpart_a` live plan is resolved; its sidecar diff now
+/// finds the real per-id changes, so the resolved keyed restriction
+/// (`keyed_restrictions_from_plan`) names exactly the touched ids —
+/// criterion 2's "value-level discovery feeds the scheduler" evidence.
+#[test]
+fn keyed_partition_scheduler_sweep_from_model_upstream_matches_oracle() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_partition_sink_dag();
+        let tmp = TempDir::new().expect("tempdir");
+        let (inc, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kpmodel-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        rt.block_on(inc.run_quiet(&format!("kpmodel-{i}-seed"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: sidecar-seeding run failed: {e}"));
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
+        }
+
+        let mut a_req = base_request("dev");
+        a_req.select = vec!["dag_kpart_a".to_string()];
+        rt.block_on(inc.run_quiet(&format!("kpmodel-{i}-a"), a_req))
+            .unwrap_or_else(|e| panic!("case {i}: dag_kpart_a repair run failed: {e}"));
+
+        let (models, source_infos) = discover(&inc.project_dir).expect("discover inc");
+        let order = dag.order();
+        let deltas = vec![SourceDelta {
+            source: "dag_kpart_a".to_string(),
+            landed: DayInterval::new(day_ordinal(2024, 1, 1), day_ordinal(2024, 1, 2)),
+        }];
+        let backend = rt.block_on(inc.backend()).expect("open backend for plan");
+        let plan = rt
+            .block_on(smelt_runtime::propagation_live::resolve_live_plan(
+                backend.as_ref(),
+                &inc.config,
+                "dev",
+                &models,
+                &source_infos,
+                &order,
+                &deltas,
+            ))
+            .unwrap_or_else(|e| panic!("case {i}: resolve_live_plan failed: {e}"));
+        assert!(
+            !plan.runs.is_empty(),
+            "case {i}: expected dag_kpart_b to be scheduled: {}",
+            plan.dirty_set_report
+        );
+
+        // Criterion 2's evidence: the resolved keyed restriction names the
+        // touched ids (value-level discovery feeding the scheduler) — or,
+        // per phase 12 plan pin 3, if the live seed resolved `Unresolved`
+        // instead, this is not to be weakened into vacuity.
+        let restrictions = keyed_restrictions_from_plan(&plan);
+        match restrictions.get("dag_kpart_b") {
+            Some(entries) => {
+                let touched: std::collections::BTreeSet<String> =
+                    kcase.touched_ids.iter().map(|id| id.to_string()).collect();
+                let seen: std::collections::BTreeSet<String> = entries
+                    .iter()
+                    .flat_map(|r| r.values.iter().cloned())
+                    .collect();
+                assert_eq!(
+                    seen, touched,
+                    "case {i}: the live keyed seed must name exactly the touched ids: {entries:?}"
+                );
+            }
+            None => panic!(
+                "case {i}: expected a resolved keyed restriction for dag_kpart_b from the live \
+                 seed read: keyed_dirty={:?}",
+                plan.keyed_dirty
+            ),
+        }
+
+        let repair_outcome = rt.block_on(run_plan(&inc, &plan, &format!("kpmodel-{i}-b")));
+        let repair_record = repair_outcome.models.get("dag_kpart_b").unwrap_or_else(|| {
+            panic!("case {i}: scheduled repair run has no manifest entry for dag_kpart_b")
+        });
+        assert_eq!(
+            repair_record.strategy, "per_group_recompute",
+            "case {i}: the scheduler-driven dag_kpart_b repair must dispatch the key-addressed \
+             cell's repair family, not the ordinary route — got strategy '{}'",
+            repair_record.strategy
+        );
+
+        {
+            let conn = full.connect().expect("connect full");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
+        }
+        rt.block_on(full.run_quiet(&format!("kpmodel-{i}-full"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+
+        assert_every_node_equal(
+            &dag,
+            &inc,
+            &full,
+            i,
+            "keyed partition scheduler sweep (model upstream)",
+        )
+        .expect("compare nodes");
+    }
+}
+
+/// `keyed_partition_scheduler_sweep_leaves_untouched_rows_bit_identical`
+/// (phase 12 plan test 6): the scheduler-driven repair (model-rooted sweep)
+/// only ever moves the rows the dirt names — reuses the
+/// `keyed_chain_maintains_only_the_changed_keys` before/after snapshot
+/// pattern over the real `--since-upstream` scheduler path instead of a
+/// whole-project rebuild.
+#[test]
+fn keyed_partition_scheduler_sweep_leaves_untouched_rows_bit_identical() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_partition_sink_dag();
+        let id_col = dag.source.key_column.clone();
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().join(format!("inc-{i}"));
+        let db = dir.join("db.duckdb");
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let inc = stage_dag(&dag, &dir, &db).expect("stage inc");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows");
+        }
+        rt.block_on(inc.run_quiet(&format!("kponly-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+        rt.block_on(inc.run_quiet(&format!("kponly-{i}-seed"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: sidecar-seeding run failed: {e}"));
+
+        let conn = inc.connect().expect("connect inc for before-snapshot");
+        let before: std::collections::BTreeMap<i64, Vec<Vec<String>>> = kcase
+            .touched_ids
+            .iter()
+            .chain(kcase.untouched_ids.iter())
+            .map(|&id| {
+                let rows = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+                (id, rows)
+            })
+            .collect();
+        drop(conn);
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows");
+        }
+
+        let mut a_req = base_request("dev");
+        a_req.select = vec!["dag_kpart_a".to_string()];
+        rt.block_on(inc.run_quiet(&format!("kponly-{i}-a"), a_req))
+            .unwrap_or_else(|e| panic!("case {i}: dag_kpart_a repair run failed: {e}"));
+
+        let (models, source_infos) = discover(&inc.project_dir).expect("discover inc");
+        let order = dag.order();
+        let deltas = vec![SourceDelta {
+            source: "dag_kpart_a".to_string(),
+            landed: DayInterval::new(day_ordinal(2024, 1, 1), day_ordinal(2024, 1, 2)),
+        }];
+        let backend = rt.block_on(inc.backend()).expect("open backend for plan");
+        let plan = rt
+            .block_on(smelt_runtime::propagation_live::resolve_live_plan(
+                backend.as_ref(),
+                &inc.config,
+                "dev",
+                &models,
+                &source_infos,
+                &order,
+                &deltas,
+            ))
+            .unwrap_or_else(|e| panic!("case {i}: resolve_live_plan failed: {e}"));
+
+        rt.block_on(run_plan(&inc, &plan, &format!("kponly-{i}-b")));
+
+        let conn = inc.connect().expect("connect inc for after-snapshot");
+        for &id in &kcase.untouched_ids {
+            let after = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+            assert_eq!(
+                before[&id], after,
+                "case {i}: untouched id {id}'s row on dag_kpart_b must be bit-identical \
+                 before/after the scheduler-driven repair run"
+            );
+        }
+        for &id in &kcase.touched_ids {
+            let after = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+            assert_ne!(
+                before[&id], after,
+                "case {i}: touched id {id}'s row on dag_kpart_b must have moved after the \
+                 scheduler-driven repair run — its delta rows landed but the fold left it \
+                 unchanged"
+            );
+        }
     }
 }
 
