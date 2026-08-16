@@ -2506,6 +2506,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#smelt-migrate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt migrate
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#smelt-build" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3340,6 +3351,17 @@
     <span class="md-ellipsis">
       
         smelt rebuild
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smelt-migrate" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt migrate
       
     </span>
   </a>
@@ -4204,6 +4226,112 @@
 <a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-01-08<span class="w"> </span>--per-partition
 </code></pre></div>
 <hr />
+<h2 id="smelt-migrate">smelt migrate<a class="headerlink" href="#smelt-migrate" title="Permanent link">&para;</a></h2>
+<p>Migrate a deployed table after its model's SQL definition changed. Disjoint from
+<a href="#smelt-rebuild"><code>smelt rebuild</code></a>: <code>rebuild</code> re-runs a model's <em>data</em> over a time range under its
+current, unchanged definition; <code>migrate</code> moves a deployed table from the <em>old</em> definition to the
+<em>new</em> one, in place where a targeted script can prove equivalence to a full rebuild (see
+<a href="../../guide/backbuild-synthesis/">Backbuild Synthesis</a> for how the plan is derived).</p>
+<p><strong>Usage:</strong></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>smelt migrate &lt;MODEL&gt; [--apply] [--json]
+</code></pre></div>
+<p><strong>Arguments:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Argument</th>
+<th>Required</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>&lt;MODEL&gt;</code></td>
+<td>yes</td>
+<td>Model to derive a migration plan for. Bare names are subject to scope resolution; see <a href="#argument-resolution-and-scope">Argument resolution and <code>--scope</code></a>.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Flags:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--apply</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Execute the plan most recently printed and recorded by a plan-mode call. Refuses (exit <code>3</code>) if the freshly re-derived plan's hash no longer matches the recorded one, or if the approved plan itself refuses to execute.</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Emit the plan as machine-readable JSON instead of the human-readable report (CI mode).</td>
+</tr>
+<tr>
+<td><code>--project-dir</code></td>
+<td>path</td>
+<td><code>.</code></td>
+<td>Path to smelt project root</td>
+</tr>
+<tr>
+<td><code>--target</code></td>
+<td>string</td>
+<td><code>dev</code></td>
+<td>Target environment from smelt.yml — the deployed-schema snapshot the diff's "before" side is read from is recorded per target</td>
+</tr>
+<tr>
+<td><code>--database</code></td>
+<td>path</td>
+<td><em>(from config)</em></td>
+<td>DuckDB database file path override — only opened by <code>--apply</code> on a matching hash</td>
+</tr>
+</tbody>
+</table>
+<p><strong>What a plan step does:</strong> derives the migration plan (diff the model's current SQL against its
+recorded deployed definition, classify each output column group into a verdict — eclipsed,
+backfill in place, re-derive, or skeleton change — and pick a technique per group), prints it, and
+records its <strong>plan hash</strong>. Nothing executes. A plan hash covers the plan's content — verdicts,
+techniques, and the input facts they were derived from — so approving a plan approves the exact
+statements <code>--apply</code> would run, never a stale description.</p>
+<p><strong>The approval contract:</strong> <code>--apply</code> executes only the plan whose hash matches what plan mode most
+recently recorded. If the model's SQL or any input fact the plan depends on has changed since, the
+freshly re-derived plan's hash no longer matches, and <code>--apply</code> refuses — printing the new plan
+instead of running anything. There is no separate "approve" step: printing a plan <em>is</em> recording
+it, and reviewing that printed output before re-running with <code>--apply</code> is the approval. The
+approval store lives at <code>.smelt/targets/&lt;target&gt;/migration-approvals.json</code>, one entry per model.</p>
+<p><strong>Execution, once approved:</strong> each column group's <strong>first presented candidate</strong> executes as one
+transactional statement group, in plan order. Admission is checked over every group before
+anything executes — a plan containing a skeleton-change group, a group with no admissible
+candidate, or a destructive (column-drop) candidate executes nothing and exits <code>3</code>, naming the
+refusing group; the honest route for that plan is <code>smelt build --full-refresh</code> or <code>smelt rebuild</code>.
+On success, <code>--apply</code> re-records the deployed definition, so the next plan step reports eclipsed.</p>
+<p><strong>Resume:</strong> an interrupted <code>--apply</code> resumes on re-invocation. Progress is recorded <strong>per column
+group</strong> in the approval store — a group already applied under the currently-approved hash is
+skipped, and the remaining groups in plan order execute. Re-invoking once every group has applied
+executes nothing and reports "already applied", exiting <code>0</code>.</p>
+<p><strong>Exit codes</strong> (see <a href="#exit-codes">Exit codes</a>): <code>0</code> when there is no definition delta, the delta is
+eclipsed-only, or <code>--apply</code> executed (or found already-applied) every group; <code>3</code> when a non-trivial
+plan is derived and unapproved, when <code>--apply</code> finds the recorded hash stale, or when an approved
+<code>--apply</code> refuses to execute; <code>2</code> for the usual usage/config errors.</p>
+<p><strong>Examples:</strong></p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="gp"># </span>Print<span class="w"> </span>the<span class="w"> </span>migration<span class="w"> </span>plan<span class="w"> </span><span class="k">for</span><span class="w"> </span>a<span class="w"> </span>changed<span class="w"> </span>model<span class="w"> </span>—<span class="w"> </span>derives,<span class="w"> </span>prints,<span class="w"> </span>records<span class="w"> </span>the<span class="w"> </span><span class="nb">hash</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="gp">$ </span>smelt<span class="w"> </span>migrate<span class="w"> </span>marts.daily_revenue
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="gp"># </span>Review<span class="w"> </span>the<span class="w"> </span>plan,<span class="w"> </span><span class="k">then</span><span class="w"> </span>approve<span class="w"> </span>and<span class="w"> </span>execute<span class="w"> </span>it
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a><span class="gp">$ </span>smelt<span class="w"> </span>migrate<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--apply
+<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>
+<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="gp"># </span>CI<span class="w"> </span>gate:<span class="w"> </span>fail<span class="w"> </span>the<span class="w"> </span>pipeline<span class="w"> </span><span class="k">while</span><span class="w"> </span>a<span class="w"> </span>migration<span class="w"> </span>is<span class="w"> </span>pending<span class="w"> </span>and<span class="w"> </span>unapproved
+<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a><span class="gp">$ </span>smelt<span class="w"> </span>migrate<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--json
+</code></pre></div>
+<hr />
 <h2 id="smelt-build">smelt build<a class="headerlink" href="#smelt-build" title="Permanent link">&para;</a></h2>
 <p>Seed the database with CSV files and then run all models. This is a convenience command that combines <code>smelt seed</code> followed by <code>smelt run</code>.</p>
 <p><strong>Lifecycle.</strong> A single <code>smelt build</code> performs these steps in order:</p>
@@ -4266,7 +4394,7 @@
 </tbody>
 </table>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>smelt build [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>smelt build [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4367,36 +4495,36 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="c1"># Seed and run everything</span>
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>smelt<span class="w"> </span>build
-<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>
-<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="c1"># Seed and run with incremental time range</span>
-<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>smelt<span class="w"> </span>build<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2026</span>-01-08
-<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>
-<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="c1"># Seed and run only selected models (canonical path form)</span>
-<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>smelt<span class="w"> </span>build<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--select<span class="w"> </span>marts.transactions
-<a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>
-<a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a><span class="c1"># Same with scope shorthand</span>
-<a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>build<span class="w"> </span>--select<span class="w"> </span>daily_revenue<span class="w"> </span>--select<span class="w"> </span>transactions
-<a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a>
-<a id="__codelineno-15-13" name="__codelineno-15-13" href="#__codelineno-15-13"></a><span class="c1"># Bounded test/validation build: resolve and build exactly what marts.daily_revenue</span>
-<a id="__codelineno-15-14" name="__codelineno-15-14" href="#__codelineno-15-14"></a><span class="c1"># needs for January</span>
-<a id="__codelineno-15-15" name="__codelineno-15-15" href="#__codelineno-15-15"></a>smelt<span class="w"> </span>build<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-02-01<span class="w"> </span>--include-upstreams
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="c1"># Seed and run everything</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>smelt<span class="w"> </span>build
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="c1"># Seed and run with incremental time range</span>
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>smelt<span class="w"> </span>build<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2026</span>-01-08
+<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>
+<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a><span class="c1"># Seed and run only selected models (canonical path form)</span>
+<a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a>smelt<span class="w"> </span>build<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--select<span class="w"> </span>marts.transactions
+<a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a>
+<a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a><span class="c1"># Same with scope shorthand</span>
+<a id="__codelineno-17-11" name="__codelineno-17-11" href="#__codelineno-17-11"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>build<span class="w"> </span>--select<span class="w"> </span>daily_revenue<span class="w"> </span>--select<span class="w"> </span>transactions
+<a id="__codelineno-17-12" name="__codelineno-17-12" href="#__codelineno-17-12"></a>
+<a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a><span class="c1"># Bounded test/validation build: resolve and build exactly what marts.daily_revenue</span>
+<a id="__codelineno-17-14" name="__codelineno-17-14" href="#__codelineno-17-14"></a><span class="c1"># needs for January</span>
+<a id="__codelineno-17-15" name="__codelineno-17-15" href="#__codelineno-17-15"></a>smelt<span class="w"> </span>build<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-02-01<span class="w"> </span>--include-upstreams
 </code></pre></div>
 <h3 id="backward-resolution-with-include-upstreams">Backward resolution with <code>--include-upstreams</code><a class="headerlink" href="#backward-resolution-with-include-upstreams" title="Permanent link">&para;</a></h3>
 <p><code>smelt build &lt;model&gt; --period &lt;start&gt;..&lt;end&gt; --include-upstreams</code> answers the dual question to <code>--since-upstream</code>: given a target model and a requested output period, which upstream slices must exist for that period to be correct? It walks the target's ancestor sub-DAG backward through the SAME propagation graph <code>--since-upstream</code> assembles, applying each edge's derived scan clamp directly (<code>[s, e)</code> downstream requires <code>[s − before, e + after)</code> upstream), and resolves, for every ancestor, the partition interval that must exist — a data prerequisite for a raw source, a build region for an intermediate model — plus the build order those models must run in (ancestor-first, target last).</p>
 <p>The resolved-slices report — one <code>STAGE &lt;source&gt;: &lt;interval&gt;</code> or <code>BUILD &lt;model&gt;: &lt;interval&gt;</code> line per ancestor, then a <code>Build order: ...</code> line — is printed before anything runs. <code>smelt</code> then builds exactly that set, ancestor models first, the target last, through the same execution path every other run/build command uses. Raw sources are reported (so you know what must already be staged) but never built by <code>smelt</code> — sources are external data.</p>
 <p>An ancestor whose partition axis can't be sliced (an unclocked lookup/dimension source, or a model with no declared <code>timeseries:</code>) resolves to the whole table — printed as <code>whole table</code> rather than an interval — since there is no interval structure to bound it against.</p>
 <p>This is the bounded test/validation build: staging exactly the resolved slices and building bottom-up produces the same result, over the requested period, as a full build over complete history.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="c1"># Resolve and build exactly what marts.daily_revenue needs for January,</span>
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="c1"># printing the required upstream slices and build order first.</span>
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a>smelt<span class="w"> </span>build<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-02-01<span class="w"> </span>--include-upstreams
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="c1"># Resolve and build exactly what marts.daily_revenue needs for January,</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="c1"># printing the required upstream slices and build order first.</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>smelt<span class="w"> </span>build<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-01-01..2026-02-01<span class="w"> </span>--include-upstreams
 </code></pre></div>
 <hr />
 <h2 id="smelt-seed">smelt seed<a class="headerlink" href="#smelt-seed" title="Permanent link">&para;</a></h2>
 <p>Load CSV seed files into the database. Seed files are CSV files placed in the directories listed under <code>paths:</code> in <code>smelt.yml</code> (default: <code>["models"]</code>).</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>smelt seed [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>smelt seed [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4448,21 +4576,21 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="c1"># Load all seed files</span>
-<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>smelt<span class="w"> </span>seed
-<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>
-<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="c1"># Load specific seeds</span>
-<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>smelt<span class="w"> </span>seed<span class="w"> </span>--select<span class="w"> </span>customers<span class="w"> </span>--select<span class="w"> </span>products
-<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>
-<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="c1"># Load and display the data</span>
-<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>smelt<span class="w"> </span>seed<span class="w"> </span>--show-results
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1"># Load all seed files</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>smelt<span class="w"> </span>seed
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="c1"># Load specific seeds</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>smelt<span class="w"> </span>seed<span class="w"> </span>--select<span class="w"> </span>customers<span class="w"> </span>--select<span class="w"> </span>products
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a>
+<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a><span class="c1"># Load and display the data</span>
+<a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a>smelt<span class="w"> </span>seed<span class="w"> </span>--show-results
 </code></pre></div>
 <hr />
 <h2 id="smelt-test">smelt test<a class="headerlink" href="#smelt-test" title="Permanent link">&para;</a></h2>
 <p>Run model tests and report results. Tests are <code>smelt.test</code> declarations in <code>.sql</code> files, placed in a directory listed in <code>paths:</code> (typically <code>tests/</code>).</p>
 <p>Each test defines mock input data and expected output for a model or CTE. smelt compiles the test into a standalone SQL query, executes it against an in-memory DuckDB instance, and compares the result.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>smelt test [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>smelt test [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4536,25 +4664,25 @@
 </table>
 <p><strong>Output:</strong></p>
 <p>Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails — except with <code>--json</code>, which always exits <code>0</code> so an editor or CI step can parse the JSON body regardless of pass/fail status.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>smelt test
-<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>
-<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>  PASS test_cohort_sizes (mart_cohort_retention::cohort_sizes)     0.02s
-<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a>  FAIL test_user_activity (user_activity)                          0.03s
-<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>
-<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a>  1 passed, 1 failed, 2 total (0.05s)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>smelt test
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a>  PASS test_cohort_sizes (mart_cohort_retention::cohort_sizes)     0.02s
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>  FAIL test_user_activity (user_activity)                          0.03s
+<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>
+<a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>  1 passed, 1 failed, 2 total (0.05s)
 </code></pre></div>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="c1"># Run all tests</span>
-<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a>smelt<span class="w"> </span><span class="nb">test</span>
-<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a>
-<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="c1"># Run tests matching &quot;cohort&quot;</span>
-<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--select<span class="w"> </span>cohort
-<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a>
-<a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a><span class="c1"># Run with compiled SQL output</span>
-<a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--verbose
-<a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a>
-<a id="__codelineno-21-10" name="__codelineno-21-10" href="#__codelineno-21-10"></a><span class="c1"># Show all results including passes</span>
-<a id="__codelineno-21-11" name="__codelineno-21-11" href="#__codelineno-21-11"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--show-all
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="c1"># Run all tests</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>smelt<span class="w"> </span><span class="nb">test</span>
+<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>
+<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="c1"># Run tests matching &quot;cohort&quot;</span>
+<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--select<span class="w"> </span>cohort
+<a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>
+<a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a><span class="c1"># Run with compiled SQL output</span>
+<a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--verbose
+<a id="__codelineno-23-9" name="__codelineno-23-9" href="#__codelineno-23-9"></a>
+<a id="__codelineno-23-10" name="__codelineno-23-10" href="#__codelineno-23-10"></a><span class="c1"># Show all results including passes</span>
+<a id="__codelineno-23-11" name="__codelineno-23-11" href="#__codelineno-23-11"></a>smelt<span class="w"> </span><span class="nb">test</span><span class="w"> </span>--show-all
 </code></pre></div>
 <p>See the <a href="../../guide/testing/">Testing guide</a> for how to write tests.</p>
 <hr />
@@ -4562,7 +4690,7 @@
 <p>Run data-quality checks against built pipeline data. Checks are <code>smelt.check</code> declarations in <code>.sql</code> files, placed in a directory listed in <code>paths:</code> (typically <code>checks/</code>).</p>
 <p>Each check is a <strong>failing-rows query</strong>: it returns the rows that violate an invariant. The check passes when the query returns zero rows and fails when it returns one or more. Unlike <code>smelt test</code> — which runs against mock data in an in-memory DuckDB — <code>smelt check</code> compiles each check's <code>smelt.&lt;path&gt;</code> references to the <strong>real materialized relations</strong> in the configured target and executes against the data the pipeline actually produced.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>smelt check [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a>smelt check [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4615,14 +4743,14 @@
 </table>
 <p><strong>Output:</strong></p>
 <p>Each check is reported as a <code>PASS</code>, <code>FAIL</code>, or <code>WARN</code> line. A violation includes the violating row count and a capped inline sample of the offending rows for debugging; violating rows are not persisted to the warehouse. A summary line shows total counts.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a>smelt check
-<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a>
-<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a>  PASS  daily_revenue_non_negative
-<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a>  FAIL  amount_must_exceed_500 — 3 violating row(s)
-<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>    {&quot;order_id&quot;: &quot;7&quot;, &quot;amount&quot;: &quot;120.00&quot;}
-<a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>  WARN  amount_above_threshold — 1 violating row(s)
-<a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a>
-<a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a>  1 passed, 1 failed, 1 warned, 3 total
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a>smelt check
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a>
+<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a>  PASS  daily_revenue_non_negative
+<a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a>  FAIL  amount_must_exceed_500 — 3 violating row(s)
+<a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a>    {&quot;order_id&quot;: &quot;7&quot;, &quot;amount&quot;: &quot;120.00&quot;}
+<a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a>  WARN  amount_above_threshold — 1 violating row(s)
+<a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a>
+<a id="__codelineno-25-8" name="__codelineno-25-8" href="#__codelineno-25-8"></a>  1 passed, 1 failed, 1 warned, 3 total
 </code></pre></div>
 <p><strong>Exit codes:</strong></p>
 <ul>
@@ -4632,24 +4760,24 @@
 <li>A check whose referenced model has not been built in the target fails with <code>CheckTargetNotBuilt</code> (exit <code>1</code>), never a silent pass on an absent relation.</li>
 </ul>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="c1"># Run all checks against the dev target</span>
-<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a>smelt<span class="w"> </span>check
-<a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a>
-<a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="c1"># Run checks matching &quot;revenue&quot;</span>
-<a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a>smelt<span class="w"> </span>check<span class="w"> </span>--select<span class="w"> </span>revenue
-<a id="__codelineno-24-6" name="__codelineno-24-6" href="#__codelineno-24-6"></a>
-<a id="__codelineno-24-7" name="__codelineno-24-7" href="#__codelineno-24-7"></a><span class="c1"># Run against a specific target</span>
-<a id="__codelineno-24-8" name="__codelineno-24-8" href="#__codelineno-24-8"></a>smelt<span class="w"> </span>check<span class="w"> </span>--target<span class="w"> </span>prod
-<a id="__codelineno-24-9" name="__codelineno-24-9" href="#__codelineno-24-9"></a>
-<a id="__codelineno-24-10" name="__codelineno-24-10" href="#__codelineno-24-10"></a><span class="c1"># Show the compiled SQL for each check</span>
-<a id="__codelineno-24-11" name="__codelineno-24-11" href="#__codelineno-24-11"></a>smelt<span class="w"> </span>check<span class="w"> </span>--verbose
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1"># Run all checks against the dev target</span>
+<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>smelt<span class="w"> </span>check
+<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a>
+<a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="c1"># Run checks matching &quot;revenue&quot;</span>
+<a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>smelt<span class="w"> </span>check<span class="w"> </span>--select<span class="w"> </span>revenue
+<a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a>
+<a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a><span class="c1"># Run against a specific target</span>
+<a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a>smelt<span class="w"> </span>check<span class="w"> </span>--target<span class="w"> </span>prod
+<a id="__codelineno-26-9" name="__codelineno-26-9" href="#__codelineno-26-9"></a>
+<a id="__codelineno-26-10" name="__codelineno-26-10" href="#__codelineno-26-10"></a><span class="c1"># Show the compiled SQL for each check</span>
+<a id="__codelineno-26-11" name="__codelineno-26-11" href="#__codelineno-26-11"></a>smelt<span class="w"> </span>check<span class="w"> </span>--verbose
 </code></pre></div>
 <p>See the <a href="../../guide/testing/">Testing guide</a> for how to write checks.</p>
 <hr />
 <h2 id="smelt-list">smelt list<a class="headerlink" href="#smelt-list" title="Permanent link">&para;</a></h2>
 <p>List every entity <code>smelt</code> discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical <code>smelt.&lt;path&gt;</code> form, alongside its kind and, for models, its materialization. Offline: discovery and parsing only, no database connection.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a>smelt list [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a>smelt list [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4689,21 +4817,21 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1"># List everything in the project</span>
-<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a>smelt<span class="w"> </span>list
-<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a>
-<a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="c1"># Narrow to models under a tag</span>
-<a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>smelt<span class="w"> </span>list<span class="w"> </span>--select<span class="w"> </span>tag:staging
-<a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a>
-<a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a><span class="c1"># Machine-readable output</span>
-<a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a>smelt<span class="w"> </span>list<span class="w"> </span>--format<span class="w"> </span>json
+<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="c1"># List everything in the project</span>
+<a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a>smelt<span class="w"> </span>list
+<a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>
+<a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="c1"># Narrow to models under a tag</span>
+<a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a>smelt<span class="w"> </span>list<span class="w"> </span>--select<span class="w"> </span>tag:staging
+<a id="__codelineno-28-6" name="__codelineno-28-6" href="#__codelineno-28-6"></a>
+<a id="__codelineno-28-7" name="__codelineno-28-7" href="#__codelineno-28-7"></a><span class="c1"># Machine-readable output</span>
+<a id="__codelineno-28-8" name="__codelineno-28-8" href="#__codelineno-28-8"></a>smelt<span class="w"> </span>list<span class="w"> </span>--format<span class="w"> </span>json
 </code></pre></div>
 <p>Exits <code>0</code> on success, including an empty (selector-narrowed) result set. Exits <code>2</code> on a parse error or an unresolvable/ambiguous selector.</p>
 <hr />
 <h2 id="smelt-clean">smelt clean<a class="headerlink" href="#smelt-clean" title="Permanent link">&para;</a></h2>
 <p>Remove <code>target/</code> — the directory <code>smelt docs generate</code> and other artifact-producing commands write to. Never touches <code>.smelt/</code> state (run manifests, deployed-schema snapshots) or the configured target database.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a>smelt clean [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>smelt clean [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4725,7 +4853,7 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a>smelt<span class="w"> </span>clean
+<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a>smelt<span class="w"> </span>clean
 </code></pre></div>
 <p>Exits <code>0</code> whether or not <code>target/</code> existed to remove. Exits <code>1</code> if <code>target/</code> exists but cannot be removed.</p>
 <hr />
@@ -4733,7 +4861,7 @@
 <p>Show pending schema changes between model definitions and deployed state. Compares the inferred schema (from SQL parsing and type inference) against the last deployed schema (stored in <code>.smelt/schemas/</code>).</p>
 <p>This command does <strong>not</strong> require a database connection — it works entirely offline, making it fast and suitable for CI pipelines.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>smelt diff [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a>smelt diff [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4791,22 +4919,22 @@
 </ul>
 <p><strong>Output:</strong></p>
 <p>For each model with changes, smelt shows the specific column-level changes and a risk assessment:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a>smelt diff
-<a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a>
-<a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a>Model: daily_revenue
-<a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a>  ADD COLUMN email VARCHAR NULL
-<a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a>  ALTER COLUMN amount TYPE INTEGER -&gt; BIGINT
-<a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a>  -&gt; Safe: ALTER TABLE (no data loss)
-<a id="__codelineno-30-7" name="__codelineno-30-7" href="#__codelineno-30-7"></a>
-<a id="__codelineno-30-8" name="__codelineno-30-8" href="#__codelineno-30-8"></a>Model: user_sessions
-<a id="__codelineno-30-9" name="__codelineno-30-9" href="#__codelineno-30-9"></a>  DROP COLUMN legacy_id
-<a id="__codelineno-30-10" name="__codelineno-30-10" href="#__codelineno-30-10"></a>  ADD COLUMN session_type VARCHAR NOT NULL
-<a id="__codelineno-30-11" name="__codelineno-30-11" href="#__codelineno-30-11"></a>  -&gt; Requires: --full-refresh (NOT NULL column added)
-<a id="__codelineno-30-12" name="__codelineno-30-12" href="#__codelineno-30-12"></a>
-<a id="__codelineno-30-13" name="__codelineno-30-13" href="#__codelineno-30-13"></a>Model: new_model
-<a id="__codelineno-30-14" name="__codelineno-30-14" href="#__codelineno-30-14"></a>  + New model (not yet deployed)
-<a id="__codelineno-30-15" name="__codelineno-30-15" href="#__codelineno-30-15"></a>
-<a id="__codelineno-30-16" name="__codelineno-30-16" href="#__codelineno-30-16"></a>Summary: 2 changed, 1 new, 0 removed, 5 unchanged
+<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>smelt diff
+<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a>
+<a id="__codelineno-32-3" name="__codelineno-32-3" href="#__codelineno-32-3"></a>Model: daily_revenue
+<a id="__codelineno-32-4" name="__codelineno-32-4" href="#__codelineno-32-4"></a>  ADD COLUMN email VARCHAR NULL
+<a id="__codelineno-32-5" name="__codelineno-32-5" href="#__codelineno-32-5"></a>  ALTER COLUMN amount TYPE INTEGER -&gt; BIGINT
+<a id="__codelineno-32-6" name="__codelineno-32-6" href="#__codelineno-32-6"></a>  -&gt; Safe: ALTER TABLE (no data loss)
+<a id="__codelineno-32-7" name="__codelineno-32-7" href="#__codelineno-32-7"></a>
+<a id="__codelineno-32-8" name="__codelineno-32-8" href="#__codelineno-32-8"></a>Model: user_sessions
+<a id="__codelineno-32-9" name="__codelineno-32-9" href="#__codelineno-32-9"></a>  DROP COLUMN legacy_id
+<a id="__codelineno-32-10" name="__codelineno-32-10" href="#__codelineno-32-10"></a>  ADD COLUMN session_type VARCHAR NOT NULL
+<a id="__codelineno-32-11" name="__codelineno-32-11" href="#__codelineno-32-11"></a>  -&gt; Requires: --full-refresh (NOT NULL column added)
+<a id="__codelineno-32-12" name="__codelineno-32-12" href="#__codelineno-32-12"></a>
+<a id="__codelineno-32-13" name="__codelineno-32-13" href="#__codelineno-32-13"></a>Model: new_model
+<a id="__codelineno-32-14" name="__codelineno-32-14" href="#__codelineno-32-14"></a>  + New model (not yet deployed)
+<a id="__codelineno-32-15" name="__codelineno-32-15" href="#__codelineno-32-15"></a>
+<a id="__codelineno-32-16" name="__codelineno-32-16" href="#__codelineno-32-16"></a>Summary: 2 changed, 1 new, 0 removed, 5 unchanged
 </code></pre></div>
 <p>Change types detected:</p>
 <ul>
@@ -4822,50 +4950,50 @@
 <li><strong>Requires: --allow-column-removal</strong> — column removals detected (blocked by default for safety)</li>
 </ul>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="c1"># Show all schema changes</span>
-<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a>smelt<span class="w"> </span>diff
-<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a>
-<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a><span class="c1"># Show changes for a specific model (canonical path form)</span>
-<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
-<a id="__codelineno-31-6" name="__codelineno-31-6" href="#__codelineno-31-6"></a>
-<a id="__codelineno-31-7" name="__codelineno-31-7" href="#__codelineno-31-7"></a><span class="c1"># Show changes using scope shorthand</span>
-<a id="__codelineno-31-8" name="__codelineno-31-8" href="#__codelineno-31-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>daily_revenue
-<a id="__codelineno-31-9" name="__codelineno-31-9" href="#__codelineno-31-9"></a>
-<a id="__codelineno-31-10" name="__codelineno-31-10" href="#__codelineno-31-10"></a><span class="c1"># Show changes for all models with a tag</span>
-<a id="__codelineno-31-11" name="__codelineno-31-11" href="#__codelineno-31-11"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>tag:staging
-<a id="__codelineno-31-12" name="__codelineno-31-12" href="#__codelineno-31-12"></a>
-<a id="__codelineno-31-13" name="__codelineno-31-13" href="#__codelineno-31-13"></a><span class="c1"># JSON output for CI</span>
-<a id="__codelineno-31-14" name="__codelineno-31-14" href="#__codelineno-31-14"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--json
-<a id="__codelineno-31-15" name="__codelineno-31-15" href="#__codelineno-31-15"></a>
-<a id="__codelineno-31-16" name="__codelineno-31-16" href="#__codelineno-31-16"></a><span class="c1"># Use in CI: fail if any schema changes pending</span>
-<a id="__codelineno-31-17" name="__codelineno-31-17" href="#__codelineno-31-17"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--json<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Schema changes detected!&quot;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="c1"># Show all schema changes</span>
+<a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a>smelt<span class="w"> </span>diff
+<a id="__codelineno-33-3" name="__codelineno-33-3" href="#__codelineno-33-3"></a>
+<a id="__codelineno-33-4" name="__codelineno-33-4" href="#__codelineno-33-4"></a><span class="c1"># Show changes for a specific model (canonical path form)</span>
+<a id="__codelineno-33-5" name="__codelineno-33-5" href="#__codelineno-33-5"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
+<a id="__codelineno-33-6" name="__codelineno-33-6" href="#__codelineno-33-6"></a>
+<a id="__codelineno-33-7" name="__codelineno-33-7" href="#__codelineno-33-7"></a><span class="c1"># Show changes using scope shorthand</span>
+<a id="__codelineno-33-8" name="__codelineno-33-8" href="#__codelineno-33-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>daily_revenue
+<a id="__codelineno-33-9" name="__codelineno-33-9" href="#__codelineno-33-9"></a>
+<a id="__codelineno-33-10" name="__codelineno-33-10" href="#__codelineno-33-10"></a><span class="c1"># Show changes for all models with a tag</span>
+<a id="__codelineno-33-11" name="__codelineno-33-11" href="#__codelineno-33-11"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--select<span class="w"> </span>tag:staging
+<a id="__codelineno-33-12" name="__codelineno-33-12" href="#__codelineno-33-12"></a>
+<a id="__codelineno-33-13" name="__codelineno-33-13" href="#__codelineno-33-13"></a><span class="c1"># JSON output for CI</span>
+<a id="__codelineno-33-14" name="__codelineno-33-14" href="#__codelineno-33-14"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--json
+<a id="__codelineno-33-15" name="__codelineno-33-15" href="#__codelineno-33-15"></a>
+<a id="__codelineno-33-16" name="__codelineno-33-16" href="#__codelineno-33-16"></a><span class="c1"># Use in CI: fail if any schema changes pending</span>
+<a id="__codelineno-33-17" name="__codelineno-33-17" href="#__codelineno-33-17"></a>smelt<span class="w"> </span>diff<span class="w"> </span>--json<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">echo</span><span class="w"> </span><span class="s2">&quot;Schema changes detected!&quot;</span>
 </code></pre></div>
 <p><strong>JSON output format:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="p">{</span>
-<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-32-3" name="__codelineno-32-3" href="#__codelineno-32-3"></a><span class="w">    </span><span class="p">{</span>
-<a id="__codelineno-32-4" name="__codelineno-32-4" href="#__codelineno-32-4"></a><span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;daily_revenue&quot;</span><span class="p">,</span>
-<a id="__codelineno-32-5" name="__codelineno-32-5" href="#__codelineno-32-5"></a><span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;changed&quot;</span><span class="p">,</span>
-<a id="__codelineno-32-6" name="__codelineno-32-6" href="#__codelineno-32-6"></a><span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
-<a id="__codelineno-32-7" name="__codelineno-32-7" href="#__codelineno-32-7"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;add_column&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;data_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;VARCHAR&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;nullable&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-32-8" name="__codelineno-32-8" href="#__codelineno-32-8"></a><span class="w">      </span><span class="p">],</span>
-<a id="__codelineno-32-9" name="__codelineno-32-9" href="#__codelineno-32-9"></a><span class="w">      </span><span class="nt">&quot;risk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-32-10" name="__codelineno-32-10" href="#__codelineno-32-10"></a><span class="w">        </span><span class="nt">&quot;requires_full_refresh&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
-<a id="__codelineno-32-11" name="__codelineno-32-11" href="#__codelineno-32-11"></a><span class="w">        </span><span class="nt">&quot;has_column_removals&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
-<a id="__codelineno-32-12" name="__codelineno-32-12" href="#__codelineno-32-12"></a><span class="w">        </span><span class="nt">&quot;migration_action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;alter_table&quot;</span><span class="p">,</span>
-<a id="__codelineno-32-13" name="__codelineno-32-13" href="#__codelineno-32-13"></a><span class="w">        </span><span class="nt">&quot;statements&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;ALTER TABLE main.daily_revenue ADD COLUMN email VARCHAR&quot;</span><span class="p">]</span>
-<a id="__codelineno-32-14" name="__codelineno-32-14" href="#__codelineno-32-14"></a><span class="w">      </span><span class="p">}</span>
-<a id="__codelineno-32-15" name="__codelineno-32-15" href="#__codelineno-32-15"></a><span class="w">    </span><span class="p">},</span>
-<a id="__codelineno-32-16" name="__codelineno-32-16" href="#__codelineno-32-16"></a><span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;new_model&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;new&quot;</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-32-17" name="__codelineno-32-17" href="#__codelineno-32-17"></a><span class="w">  </span><span class="p">],</span>
-<a id="__codelineno-32-18" name="__codelineno-32-18" href="#__codelineno-32-18"></a><span class="w">  </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;changed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;new&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;removed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unchanged&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-32-19" name="__codelineno-32-19" href="#__codelineno-32-19"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="p">{</span>
+<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a><span class="w">  </span><span class="nt">&quot;models&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-34-3" name="__codelineno-34-3" href="#__codelineno-34-3"></a><span class="w">    </span><span class="p">{</span>
+<a id="__codelineno-34-4" name="__codelineno-34-4" href="#__codelineno-34-4"></a><span class="w">      </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;daily_revenue&quot;</span><span class="p">,</span>
+<a id="__codelineno-34-5" name="__codelineno-34-5" href="#__codelineno-34-5"></a><span class="w">      </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;changed&quot;</span><span class="p">,</span>
+<a id="__codelineno-34-6" name="__codelineno-34-6" href="#__codelineno-34-6"></a><span class="w">      </span><span class="nt">&quot;changes&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<a id="__codelineno-34-7" name="__codelineno-34-7" href="#__codelineno-34-7"></a><span class="w">        </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;add_column&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;column&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;email&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;data_type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;VARCHAR&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;nullable&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-34-8" name="__codelineno-34-8" href="#__codelineno-34-8"></a><span class="w">      </span><span class="p">],</span>
+<a id="__codelineno-34-9" name="__codelineno-34-9" href="#__codelineno-34-9"></a><span class="w">      </span><span class="nt">&quot;risk&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-34-10" name="__codelineno-34-10" href="#__codelineno-34-10"></a><span class="w">        </span><span class="nt">&quot;requires_full_refresh&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<a id="__codelineno-34-11" name="__codelineno-34-11" href="#__codelineno-34-11"></a><span class="w">        </span><span class="nt">&quot;has_column_removals&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<a id="__codelineno-34-12" name="__codelineno-34-12" href="#__codelineno-34-12"></a><span class="w">        </span><span class="nt">&quot;migration_action&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;alter_table&quot;</span><span class="p">,</span>
+<a id="__codelineno-34-13" name="__codelineno-34-13" href="#__codelineno-34-13"></a><span class="w">        </span><span class="nt">&quot;statements&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;ALTER TABLE main.daily_revenue ADD COLUMN email VARCHAR&quot;</span><span class="p">]</span>
+<a id="__codelineno-34-14" name="__codelineno-34-14" href="#__codelineno-34-14"></a><span class="w">      </span><span class="p">}</span>
+<a id="__codelineno-34-15" name="__codelineno-34-15" href="#__codelineno-34-15"></a><span class="w">    </span><span class="p">},</span>
+<a id="__codelineno-34-16" name="__codelineno-34-16" href="#__codelineno-34-16"></a><span class="w">    </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;name&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;new_model&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;status&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;new&quot;</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-34-17" name="__codelineno-34-17" href="#__codelineno-34-17"></a><span class="w">  </span><span class="p">],</span>
+<a id="__codelineno-34-18" name="__codelineno-34-18" href="#__codelineno-34-18"></a><span class="w">  </span><span class="nt">&quot;summary&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">&quot;changed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;new&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;removed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;unchanged&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">5</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-34-19" name="__codelineno-34-19" href="#__codelineno-34-19"></a><span class="p">}</span>
 </code></pre></div>
 <hr />
 <h2 id="smelt-docs-generate">smelt docs generate<a class="headerlink" href="#smelt-docs-generate" title="Permanent link">&para;</a></h2>
 <p>Generate a static data catalog from your project's model metadata. Exports model schemas, column lineage, descriptions, tags, and dependency information as browsable documentation.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a>smelt docs generate [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a>smelt docs generate [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -4925,58 +5053,58 @@
 <li>Incremental configuration (if applicable)</li>
 </ul>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="c1"># Generate markdown docs</span>
-<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate
-<a id="__codelineno-34-3" name="__codelineno-34-3" href="#__codelineno-34-3"></a>
-<a id="__codelineno-34-4" name="__codelineno-34-4" href="#__codelineno-34-4"></a><span class="c1"># Generate JSON catalog</span>
-<a id="__codelineno-34-5" name="__codelineno-34-5" href="#__codelineno-34-5"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--format<span class="w"> </span>json
-<a id="__codelineno-34-6" name="__codelineno-34-6" href="#__codelineno-34-6"></a>
-<a id="__codelineno-34-7" name="__codelineno-34-7" href="#__codelineno-34-7"></a><span class="c1"># Generate docs for specific models</span>
-<a id="__codelineno-34-8" name="__codelineno-34-8" href="#__codelineno-34-8"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:marts
-<a id="__codelineno-34-9" name="__codelineno-34-9" href="#__codelineno-34-9"></a>
-<a id="__codelineno-34-10" name="__codelineno-34-10" href="#__codelineno-34-10"></a><span class="c1"># Custom output directory</span>
-<a id="__codelineno-34-11" name="__codelineno-34-11" href="#__codelineno-34-11"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--output<span class="w"> </span>docs/catalog
+<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="c1"># Generate markdown docs</span>
+<a id="__codelineno-36-2" name="__codelineno-36-2" href="#__codelineno-36-2"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate
+<a id="__codelineno-36-3" name="__codelineno-36-3" href="#__codelineno-36-3"></a>
+<a id="__codelineno-36-4" name="__codelineno-36-4" href="#__codelineno-36-4"></a><span class="c1"># Generate JSON catalog</span>
+<a id="__codelineno-36-5" name="__codelineno-36-5" href="#__codelineno-36-5"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--format<span class="w"> </span>json
+<a id="__codelineno-36-6" name="__codelineno-36-6" href="#__codelineno-36-6"></a>
+<a id="__codelineno-36-7" name="__codelineno-36-7" href="#__codelineno-36-7"></a><span class="c1"># Generate docs for specific models</span>
+<a id="__codelineno-36-8" name="__codelineno-36-8" href="#__codelineno-36-8"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--select<span class="w"> </span>tag:marts
+<a id="__codelineno-36-9" name="__codelineno-36-9" href="#__codelineno-36-9"></a>
+<a id="__codelineno-36-10" name="__codelineno-36-10" href="#__codelineno-36-10"></a><span class="c1"># Custom output directory</span>
+<a id="__codelineno-36-11" name="__codelineno-36-11" href="#__codelineno-36-11"></a>smelt<span class="w"> </span>docs<span class="w"> </span>generate<span class="w"> </span>--output<span class="w"> </span>docs/catalog
 </code></pre></div>
 <hr />
 <h2 id="smelt-docs-list">smelt docs list<a class="headerlink" href="#smelt-docs-list" title="Permanent link">&para;</a></h2>
 <p>List the user-facing documentation topics shipped with this binary. Documentation is embedded at build time, so it works offline and is pinned to the installed version of smelt.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a>smelt docs list
+<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>smelt docs list
 </code></pre></div>
 <p>Each line is a topic path you can pass to <code>smelt docs show</code>.</p>
 <p><strong>Example:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a>smelt<span class="w"> </span>docs<span class="w"> </span>list
-<a id="__codelineno-36-2" name="__codelineno-36-2" href="#__codelineno-36-2"></a><span class="c1"># concepts/how-it-works</span>
-<a id="__codelineno-36-3" name="__codelineno-36-3" href="#__codelineno-36-3"></a><span class="c1"># concepts/project-structure</span>
-<a id="__codelineno-36-4" name="__codelineno-36-4" href="#__codelineno-36-4"></a><span class="c1"># getting-started/installation</span>
-<a id="__codelineno-36-5" name="__codelineno-36-5" href="#__codelineno-36-5"></a><span class="c1"># getting-started/quickstart</span>
-<a id="__codelineno-36-6" name="__codelineno-36-6" href="#__codelineno-36-6"></a><span class="c1"># guide/incremental-models</span>
-<a id="__codelineno-36-7" name="__codelineno-36-7" href="#__codelineno-36-7"></a><span class="c1"># ...</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>smelt<span class="w"> </span>docs<span class="w"> </span>list
+<a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a><span class="c1"># concepts/how-it-works</span>
+<a id="__codelineno-38-3" name="__codelineno-38-3" href="#__codelineno-38-3"></a><span class="c1"># concepts/project-structure</span>
+<a id="__codelineno-38-4" name="__codelineno-38-4" href="#__codelineno-38-4"></a><span class="c1"># getting-started/installation</span>
+<a id="__codelineno-38-5" name="__codelineno-38-5" href="#__codelineno-38-5"></a><span class="c1"># getting-started/quickstart</span>
+<a id="__codelineno-38-6" name="__codelineno-38-6" href="#__codelineno-38-6"></a><span class="c1"># guide/incremental-models</span>
+<a id="__codelineno-38-7" name="__codelineno-38-7" href="#__codelineno-38-7"></a><span class="c1"># ...</span>
 </code></pre></div>
 <hr />
 <h2 id="smelt-docs-show">smelt docs show<a class="headerlink" href="#smelt-docs-show" title="Permanent link">&para;</a></h2>
 <p>Print the markdown contents of a documentation topic to stdout.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>smelt docs show &lt;topic&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>smelt docs show &lt;topic&gt;
 </code></pre></div>
 <p>The <code>&lt;topic&gt;</code> argument is a path from <code>smelt docs list</code>, with or without the <code>.md</code> suffix.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>getting-started/quickstart
-<a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>guide/incremental-models
-<a id="__codelineno-38-3" name="__codelineno-38-3" href="#__codelineno-38-3"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>reference/smelt-yml<span class="w"> </span><span class="p">|</span><span class="w"> </span>less
+<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>getting-started/quickstart
+<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>guide/incremental-models
+<a id="__codelineno-40-3" name="__codelineno-40-3" href="#__codelineno-40-3"></a>smelt<span class="w"> </span>docs<span class="w"> </span>show<span class="w"> </span>reference/smelt-yml<span class="w"> </span><span class="p">|</span><span class="w"> </span>less
 </code></pre></div>
 <p>If the topic isn't found, the error message lists near matches.</p>
 <hr />
 <h2 id="smelt-docs-path">smelt docs path<a class="headerlink" href="#smelt-docs-path" title="Permanent link">&para;</a></h2>
 <p>Explain where the embedded docs live (they are inside the binary itself, not on disk). Useful when you're scripting around the docs and want to know whether to grep through <code>smelt docs show</code> output or look for files on the filesystem.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>smelt docs path
+<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>smelt docs path
 </code></pre></div>
 <hr />
 <h2 id="smelt-table">smelt table<a class="headerlink" href="#smelt-table" title="Permanent link">&para;</a></h2>
 <p>Show column names and types for a model. The schema is inferred by the smelt type checker without executing the model.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a>smelt table [OPTIONS] &lt;MODEL_NAME&gt;
+<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a>smelt table [OPTIONS] &lt;MODEL_NAME&gt;
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5021,27 +5149,27 @@
 </tbody>
 </table>
 <p><strong>Type caveat:</strong> The types shown by <code>smelt table</code> are smelt's <strong>compile-time inferred types</strong> — they are derived from the SQL source without executing the model. They may differ from the physical column types that DuckDB stores after a <code>smelt build</code>. To see the physical DuckDB column types after building, use:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a>duckdb<span class="w"> </span>my-project.duckdb<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;DESCRIBE &lt;model&gt;&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a>duckdb<span class="w"> </span>my-project.duckdb<span class="w"> </span>-c<span class="w"> </span><span class="s1">&#39;DESCRIBE &lt;model&gt;&#39;</span>
 </code></pre></div>
 <p><strong>Typed functions:</strong> For columns whose values come from typed <code>smelt.define</code> calls — functions annotated with a <code>-&gt; Expr&lt;T&gt;</code> return type — <code>smelt table</code> correctly reflects the declared return type. For example, a column fed by a <code>-&gt; Expr&lt;Double&gt;</code> function shows as <code>DOUBLE</code> in <code>smelt table</code> output, and downstream aggregates (such as <code>SUM</code>) also use that declared type for their inferred result.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a><span class="c1"># Show column types for a model (canonical path form)</span>
-<a id="__codelineno-42-2" name="__codelineno-42-2" href="#__codelineno-42-2"></a>smelt<span class="w"> </span>table<span class="w"> </span>marts.daily_revenue
-<a id="__codelineno-42-3" name="__codelineno-42-3" href="#__codelineno-42-3"></a>
-<a id="__codelineno-42-4" name="__codelineno-42-4" href="#__codelineno-42-4"></a><span class="c1"># Using scope shorthand</span>
-<a id="__codelineno-42-5" name="__codelineno-42-5" href="#__codelineno-42-5"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>table<span class="w"> </span>daily_revenue
-<a id="__codelineno-42-6" name="__codelineno-42-6" href="#__codelineno-42-6"></a>
-<a id="__codelineno-42-7" name="__codelineno-42-7" href="#__codelineno-42-7"></a><span class="c1"># Output as JSON</span>
-<a id="__codelineno-42-8" name="__codelineno-42-8" href="#__codelineno-42-8"></a>smelt<span class="w"> </span>table<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--format<span class="w"> </span>json
-<a id="__codelineno-42-9" name="__codelineno-42-9" href="#__codelineno-42-9"></a>
-<a id="__codelineno-42-10" name="__codelineno-42-10" href="#__codelineno-42-10"></a><span class="c1"># Inspect a model in a different project</span>
-<a id="__codelineno-42-11" name="__codelineno-42-11" href="#__codelineno-42-11"></a>smelt<span class="w"> </span>table<span class="w"> </span>silver.users<span class="w"> </span>--project-dir<span class="w"> </span>./my-project
+<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a><span class="c1"># Show column types for a model (canonical path form)</span>
+<a id="__codelineno-44-2" name="__codelineno-44-2" href="#__codelineno-44-2"></a>smelt<span class="w"> </span>table<span class="w"> </span>marts.daily_revenue
+<a id="__codelineno-44-3" name="__codelineno-44-3" href="#__codelineno-44-3"></a>
+<a id="__codelineno-44-4" name="__codelineno-44-4" href="#__codelineno-44-4"></a><span class="c1"># Using scope shorthand</span>
+<a id="__codelineno-44-5" name="__codelineno-44-5" href="#__codelineno-44-5"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>table<span class="w"> </span>daily_revenue
+<a id="__codelineno-44-6" name="__codelineno-44-6" href="#__codelineno-44-6"></a>
+<a id="__codelineno-44-7" name="__codelineno-44-7" href="#__codelineno-44-7"></a><span class="c1"># Output as JSON</span>
+<a id="__codelineno-44-8" name="__codelineno-44-8" href="#__codelineno-44-8"></a>smelt<span class="w"> </span>table<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--format<span class="w"> </span>json
+<a id="__codelineno-44-9" name="__codelineno-44-9" href="#__codelineno-44-9"></a>
+<a id="__codelineno-44-10" name="__codelineno-44-10" href="#__codelineno-44-10"></a><span class="c1"># Inspect a model in a different project</span>
+<a id="__codelineno-44-11" name="__codelineno-44-11" href="#__codelineno-44-11"></a>smelt<span class="w"> </span>table<span class="w"> </span>silver.users<span class="w"> </span>--project-dir<span class="w"> </span>./my-project
 </code></pre></div>
 <hr />
 <h2 id="smelt-type">smelt type<a class="headerlink" href="#smelt-type" title="Permanent link">&para;</a></h2>
 <p>Show the function type signature of models, displaying their input references and output columns. When called without a model name, shows signatures for all models in the project.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-43-1" name="__codelineno-43-1" href="#__codelineno-43-1"></a>smelt type [OPTIONS] [MODEL_NAME]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a>smelt type [OPTIONS] [MODEL_NAME]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5080,25 +5208,25 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-44-1" name="__codelineno-44-1" href="#__codelineno-44-1"></a><span class="c1"># Show type signatures of all models</span>
-<a id="__codelineno-44-2" name="__codelineno-44-2" href="#__codelineno-44-2"></a>smelt<span class="w"> </span><span class="nb">type</span>
-<a id="__codelineno-44-3" name="__codelineno-44-3" href="#__codelineno-44-3"></a>
-<a id="__codelineno-44-4" name="__codelineno-44-4" href="#__codelineno-44-4"></a><span class="c1"># Show type signature of a specific model (canonical path form)</span>
-<a id="__codelineno-44-5" name="__codelineno-44-5" href="#__codelineno-44-5"></a>smelt<span class="w"> </span><span class="nb">type</span><span class="w"> </span>silver.events_parsed
-<a id="__codelineno-44-6" name="__codelineno-44-6" href="#__codelineno-44-6"></a>
-<a id="__codelineno-44-7" name="__codelineno-44-7" href="#__codelineno-44-7"></a><span class="c1"># Using scope shorthand</span>
-<a id="__codelineno-44-8" name="__codelineno-44-8" href="#__codelineno-44-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span><span class="nb">type</span><span class="w"> </span>events_parsed
-<a id="__codelineno-44-9" name="__codelineno-44-9" href="#__codelineno-44-9"></a>
-<a id="__codelineno-44-10" name="__codelineno-44-10" href="#__codelineno-44-10"></a><span class="c1"># All output uses canonical paths regardless of how you typed the name:</span>
-<a id="__codelineno-44-11" name="__codelineno-44-11" href="#__codelineno-44-11"></a><span class="c1"># silver.events_parsed:</span>
-<a id="__codelineno-44-12" name="__codelineno-44-12" href="#__codelineno-44-12"></a><span class="c1">#   (raw_events: {...})</span>
-<a id="__codelineno-44-13" name="__codelineno-44-13" href="#__codelineno-44-13"></a><span class="c1">#   -&gt; {event_id: BIGINT, device_id: INTEGER, ...}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a><span class="c1"># Show type signatures of all models</span>
+<a id="__codelineno-46-2" name="__codelineno-46-2" href="#__codelineno-46-2"></a>smelt<span class="w"> </span><span class="nb">type</span>
+<a id="__codelineno-46-3" name="__codelineno-46-3" href="#__codelineno-46-3"></a>
+<a id="__codelineno-46-4" name="__codelineno-46-4" href="#__codelineno-46-4"></a><span class="c1"># Show type signature of a specific model (canonical path form)</span>
+<a id="__codelineno-46-5" name="__codelineno-46-5" href="#__codelineno-46-5"></a>smelt<span class="w"> </span><span class="nb">type</span><span class="w"> </span>silver.events_parsed
+<a id="__codelineno-46-6" name="__codelineno-46-6" href="#__codelineno-46-6"></a>
+<a id="__codelineno-46-7" name="__codelineno-46-7" href="#__codelineno-46-7"></a><span class="c1"># Using scope shorthand</span>
+<a id="__codelineno-46-8" name="__codelineno-46-8" href="#__codelineno-46-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span><span class="nb">type</span><span class="w"> </span>events_parsed
+<a id="__codelineno-46-9" name="__codelineno-46-9" href="#__codelineno-46-9"></a>
+<a id="__codelineno-46-10" name="__codelineno-46-10" href="#__codelineno-46-10"></a><span class="c1"># All output uses canonical paths regardless of how you typed the name:</span>
+<a id="__codelineno-46-11" name="__codelineno-46-11" href="#__codelineno-46-11"></a><span class="c1"># silver.events_parsed:</span>
+<a id="__codelineno-46-12" name="__codelineno-46-12" href="#__codelineno-46-12"></a><span class="c1">#   (raw_events: {...})</span>
+<a id="__codelineno-46-13" name="__codelineno-46-13" href="#__codelineno-46-13"></a><span class="c1">#   -&gt; {event_id: BIGINT, device_id: INTEGER, ...}</span>
 </code></pre></div>
 <hr />
 <h2 id="smelt-status">smelt status<a class="headerlink" href="#smelt-status" title="Permanent link">&para;</a></h2>
 <p>Show interval coverage and gaps for incremental models. Reports which time intervals have been materialized and identifies any gaps in coverage.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-45-1" name="__codelineno-45-1" href="#__codelineno-45-1"></a>smelt status [OPTIONS] [MODEL_NAME]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a>smelt status [OPTIONS] [MODEL_NAME]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5155,23 +5283,23 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-46-1" name="__codelineno-46-1" href="#__codelineno-46-1"></a><span class="c1"># Show status of all incremental models</span>
-<a id="__codelineno-46-2" name="__codelineno-46-2" href="#__codelineno-46-2"></a>smelt<span class="w"> </span>status
-<a id="__codelineno-46-3" name="__codelineno-46-3" href="#__codelineno-46-3"></a>
-<a id="__codelineno-46-4" name="__codelineno-46-4" href="#__codelineno-46-4"></a><span class="c1"># Show status for a specific model (canonical path form)</span>
-<a id="__codelineno-46-5" name="__codelineno-46-5" href="#__codelineno-46-5"></a>smelt<span class="w"> </span>status<span class="w"> </span>silver.sessions
-<a id="__codelineno-46-6" name="__codelineno-46-6" href="#__codelineno-46-6"></a>
-<a id="__codelineno-46-7" name="__codelineno-46-7" href="#__codelineno-46-7"></a><span class="c1"># Using scope shorthand</span>
-<a id="__codelineno-46-8" name="__codelineno-46-8" href="#__codelineno-46-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span>status<span class="w"> </span>sessions
-<a id="__codelineno-46-9" name="__codelineno-46-9" href="#__codelineno-46-9"></a>
-<a id="__codelineno-46-10" name="__codelineno-46-10" href="#__codelineno-46-10"></a><span class="c1"># Check for gaps in a specific time range</span>
-<a id="__codelineno-46-11" name="__codelineno-46-11" href="#__codelineno-46-11"></a>smelt<span class="w"> </span>status<span class="w"> </span>silver.sessions<span class="w"> </span>--since<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--until<span class="w"> </span><span class="m">2026</span>-03-01
+<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a><span class="c1"># Show status of all incremental models</span>
+<a id="__codelineno-48-2" name="__codelineno-48-2" href="#__codelineno-48-2"></a>smelt<span class="w"> </span>status
+<a id="__codelineno-48-3" name="__codelineno-48-3" href="#__codelineno-48-3"></a>
+<a id="__codelineno-48-4" name="__codelineno-48-4" href="#__codelineno-48-4"></a><span class="c1"># Show status for a specific model (canonical path form)</span>
+<a id="__codelineno-48-5" name="__codelineno-48-5" href="#__codelineno-48-5"></a>smelt<span class="w"> </span>status<span class="w"> </span>silver.sessions
+<a id="__codelineno-48-6" name="__codelineno-48-6" href="#__codelineno-48-6"></a>
+<a id="__codelineno-48-7" name="__codelineno-48-7" href="#__codelineno-48-7"></a><span class="c1"># Using scope shorthand</span>
+<a id="__codelineno-48-8" name="__codelineno-48-8" href="#__codelineno-48-8"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span>status<span class="w"> </span>sessions
+<a id="__codelineno-48-9" name="__codelineno-48-9" href="#__codelineno-48-9"></a>
+<a id="__codelineno-48-10" name="__codelineno-48-10" href="#__codelineno-48-10"></a><span class="c1"># Check for gaps in a specific time range</span>
+<a id="__codelineno-48-11" name="__codelineno-48-11" href="#__codelineno-48-11"></a>smelt<span class="w"> </span>status<span class="w"> </span>silver.sessions<span class="w"> </span>--since<span class="w"> </span><span class="m">2026</span>-01-01<span class="w"> </span>--until<span class="w"> </span><span class="m">2026</span>-03-01
 </code></pre></div>
 <hr />
 <h2 id="smelt-history">smelt history<a class="headerlink" href="#smelt-history" title="Permanent link">&para;</a></h2>
 <p>Show run history for the project. Displays past execution records including timestamps, durations, and which models were run.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-47-1" name="__codelineno-47-1" href="#__codelineno-47-1"></a>smelt history [OPTIONS] [MODEL_NAME]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-49-1" name="__codelineno-49-1" href="#__codelineno-49-1"></a>smelt history [OPTIONS] [MODEL_NAME]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5226,20 +5354,20 @@
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-48-1" name="__codelineno-48-1" href="#__codelineno-48-1"></a><span class="c1"># Show recent run history</span>
-<a id="__codelineno-48-2" name="__codelineno-48-2" href="#__codelineno-48-2"></a>smelt<span class="w"> </span><span class="nb">history</span>
-<a id="__codelineno-48-3" name="__codelineno-48-3" href="#__codelineno-48-3"></a>
-<a id="__codelineno-48-4" name="__codelineno-48-4" href="#__codelineno-48-4"></a><span class="c1"># Show last 20 runs</span>
-<a id="__codelineno-48-5" name="__codelineno-48-5" href="#__codelineno-48-5"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
-<a id="__codelineno-48-6" name="__codelineno-48-6" href="#__codelineno-48-6"></a>
-<a id="__codelineno-48-7" name="__codelineno-48-7" href="#__codelineno-48-7"></a><span class="c1"># Show history for a specific model (canonical path form)</span>
-<a id="__codelineno-48-8" name="__codelineno-48-8" href="#__codelineno-48-8"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>silver.sessions
+<div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a><span class="c1"># Show recent run history</span>
+<a id="__codelineno-50-2" name="__codelineno-50-2" href="#__codelineno-50-2"></a>smelt<span class="w"> </span><span class="nb">history</span>
+<a id="__codelineno-50-3" name="__codelineno-50-3" href="#__codelineno-50-3"></a>
+<a id="__codelineno-50-4" name="__codelineno-50-4" href="#__codelineno-50-4"></a><span class="c1"># Show last 20 runs</span>
+<a id="__codelineno-50-5" name="__codelineno-50-5" href="#__codelineno-50-5"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">20</span>
+<a id="__codelineno-50-6" name="__codelineno-50-6" href="#__codelineno-50-6"></a>
+<a id="__codelineno-50-7" name="__codelineno-50-7" href="#__codelineno-50-7"></a><span class="c1"># Show history for a specific model (canonical path form)</span>
+<a id="__codelineno-50-8" name="__codelineno-50-8" href="#__codelineno-50-8"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>silver.sessions
 </code></pre></div>
 <hr />
 <h2 id="smelt-explain">smelt explain<a class="headerlink" href="#smelt-explain" title="Permanent link">&para;</a></h2>
 <p>Output model graph and configuration as JSON for orchestrator integration. Produces a machine-readable representation of the project's dependency graph, model configurations, and physical execution plan.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-49-1" name="__codelineno-49-1" href="#__codelineno-49-1"></a>smelt explain [MODEL_NAME] [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-51-1" name="__codelineno-51-1" href="#__codelineno-51-1"></a>smelt explain [MODEL_NAME] [OPTIONS]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5421,69 +5549,69 @@ not a <code>--period</code>-bound dry run. <code>--json</code> (with or without 
 a top-level <code>properties</code> object with the model's derived property set (columns, grain, functional
 dependencies, per-column determinism/comparability/discriminants, row identity, source bounds).</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a><span class="c1"># Show the explain output</span>
-<a id="__codelineno-50-2" name="__codelineno-50-2" href="#__codelineno-50-2"></a>smelt<span class="w"> </span>explain
-<a id="__codelineno-50-3" name="__codelineno-50-3" href="#__codelineno-50-3"></a>
-<a id="__codelineno-50-4" name="__codelineno-50-4" href="#__codelineno-50-4"></a><span class="c1"># Output as JSON for scripting</span>
-<a id="__codelineno-50-5" name="__codelineno-50-5" href="#__codelineno-50-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json
-<a id="__codelineno-50-6" name="__codelineno-50-6" href="#__codelineno-50-6"></a>
-<a id="__codelineno-50-7" name="__codelineno-50-7" href="#__codelineno-50-7"></a><span class="c1"># Explain only selected models and their dependencies (canonical path form)</span>
-<a id="__codelineno-50-8" name="__codelineno-50-8" href="#__codelineno-50-8"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--json
-<a id="__codelineno-50-9" name="__codelineno-50-9" href="#__codelineno-50-9"></a>
-<a id="__codelineno-50-10" name="__codelineno-50-10" href="#__codelineno-50-10"></a><span class="c1"># Using scope shorthand</span>
-<a id="__codelineno-50-11" name="__codelineno-50-11" href="#__codelineno-50-11"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+daily_revenue<span class="w"> </span>--json
-<a id="__codelineno-50-12" name="__codelineno-50-12" href="#__codelineno-50-12"></a>
-<a id="__codelineno-50-13" name="__codelineno-50-13" href="#__codelineno-50-13"></a><span class="c1"># Print one incremental model&#39;s maintenance plan</span>
-<a id="__codelineno-50-14" name="__codelineno-50-14" href="#__codelineno-50-14"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events
-<a id="__codelineno-50-15" name="__codelineno-50-15" href="#__codelineno-50-15"></a>
-<a id="__codelineno-50-16" name="__codelineno-50-16" href="#__codelineno-50-16"></a><span class="c1"># Also print the maintenance statements each cell executes</span>
-<a id="__codelineno-50-17" name="__codelineno-50-17" href="#__codelineno-50-17"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql
-<a id="__codelineno-50-18" name="__codelineno-50-18" href="#__codelineno-50-18"></a>
-<a id="__codelineno-50-19" name="__codelineno-50-19" href="#__codelineno-50-19"></a><span class="c1"># ...with a real window instead of the {{window_start}}/{{window_end}} placeholders</span>
-<a id="__codelineno-50-20" name="__codelineno-50-20" href="#__codelineno-50-20"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--period<span class="w"> </span><span class="m">2024</span>-01-01..2024-01-08
-<a id="__codelineno-50-21" name="__codelineno-50-21" href="#__codelineno-50-21"></a>
-<a id="__codelineno-50-22" name="__codelineno-50-22" href="#__codelineno-50-22"></a><span class="c1"># Machine-readable statements array per cell</span>
-<a id="__codelineno-50-23" name="__codelineno-50-23" href="#__codelineno-50-23"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--json
-<a id="__codelineno-50-24" name="__codelineno-50-24" href="#__codelineno-50-24"></a>
-<a id="__codelineno-50-25" name="__codelineno-50-25" href="#__codelineno-50-25"></a><span class="c1"># See what the keyed-fold technique would look like on a model that doesn&#39;t admit it,</span>
-<a id="__codelineno-50-26" name="__codelineno-50-26" href="#__codelineno-50-26"></a><span class="c1"># and why it&#39;s not applicable there</span>
-<a id="__codelineno-50-27" name="__codelineno-50-27" href="#__codelineno-50-27"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--technique<span class="w"> </span>keyed_fold
+<div class="highlight"><pre><span></span><code><a id="__codelineno-52-1" name="__codelineno-52-1" href="#__codelineno-52-1"></a><span class="c1"># Show the explain output</span>
+<a id="__codelineno-52-2" name="__codelineno-52-2" href="#__codelineno-52-2"></a>smelt<span class="w"> </span>explain
+<a id="__codelineno-52-3" name="__codelineno-52-3" href="#__codelineno-52-3"></a>
+<a id="__codelineno-52-4" name="__codelineno-52-4" href="#__codelineno-52-4"></a><span class="c1"># Output as JSON for scripting</span>
+<a id="__codelineno-52-5" name="__codelineno-52-5" href="#__codelineno-52-5"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json
+<a id="__codelineno-52-6" name="__codelineno-52-6" href="#__codelineno-52-6"></a>
+<a id="__codelineno-52-7" name="__codelineno-52-7" href="#__codelineno-52-7"></a><span class="c1"># Explain only selected models and their dependencies (canonical path form)</span>
+<a id="__codelineno-52-8" name="__codelineno-52-8" href="#__codelineno-52-8"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--json
+<a id="__codelineno-52-9" name="__codelineno-52-9" href="#__codelineno-52-9"></a>
+<a id="__codelineno-52-10" name="__codelineno-52-10" href="#__codelineno-52-10"></a><span class="c1"># Using scope shorthand</span>
+<a id="__codelineno-52-11" name="__codelineno-52-11" href="#__codelineno-52-11"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+daily_revenue<span class="w"> </span>--json
+<a id="__codelineno-52-12" name="__codelineno-52-12" href="#__codelineno-52-12"></a>
+<a id="__codelineno-52-13" name="__codelineno-52-13" href="#__codelineno-52-13"></a><span class="c1"># Print one incremental model&#39;s maintenance plan</span>
+<a id="__codelineno-52-14" name="__codelineno-52-14" href="#__codelineno-52-14"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events
+<a id="__codelineno-52-15" name="__codelineno-52-15" href="#__codelineno-52-15"></a>
+<a id="__codelineno-52-16" name="__codelineno-52-16" href="#__codelineno-52-16"></a><span class="c1"># Also print the maintenance statements each cell executes</span>
+<a id="__codelineno-52-17" name="__codelineno-52-17" href="#__codelineno-52-17"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql
+<a id="__codelineno-52-18" name="__codelineno-52-18" href="#__codelineno-52-18"></a>
+<a id="__codelineno-52-19" name="__codelineno-52-19" href="#__codelineno-52-19"></a><span class="c1"># ...with a real window instead of the {{window_start}}/{{window_end}} placeholders</span>
+<a id="__codelineno-52-20" name="__codelineno-52-20" href="#__codelineno-52-20"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--period<span class="w"> </span><span class="m">2024</span>-01-01..2024-01-08
+<a id="__codelineno-52-21" name="__codelineno-52-21" href="#__codelineno-52-21"></a>
+<a id="__codelineno-52-22" name="__codelineno-52-22" href="#__codelineno-52-22"></a><span class="c1"># Machine-readable statements array per cell</span>
+<a id="__codelineno-52-23" name="__codelineno-52-23" href="#__codelineno-52-23"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--json
+<a id="__codelineno-52-24" name="__codelineno-52-24" href="#__codelineno-52-24"></a>
+<a id="__codelineno-52-25" name="__codelineno-52-25" href="#__codelineno-52-25"></a><span class="c1"># See what the keyed-fold technique would look like on a model that doesn&#39;t admit it,</span>
+<a id="__codelineno-52-26" name="__codelineno-52-26" href="#__codelineno-52-26"></a><span class="c1"># and why it&#39;s not applicable there</span>
+<a id="__codelineno-52-27" name="__codelineno-52-27" href="#__codelineno-52-27"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--technique<span class="w"> </span>keyed_fold
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-51-1" name="__codelineno-51-1" href="#__codelineno-51-1"></a>$ smelt explain daily_events
-<a id="__codelineno-51-2" name="__codelineno-51-2" href="#__codelineno-51-2"></a>emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
-<a id="__codelineno-51-3" name="__codelineno-51-3" href="#__codelineno-51-3"></a>
-<a id="__codelineno-51-4" name="__codelineno-51-4" href="#__codelineno-51-4"></a>Refusals: (none)
-<a id="__codelineno-51-5" name="__codelineno-51-5" href="#__codelineno-51-5"></a>
-<a id="__codelineno-51-6" name="__codelineno-51-6" href="#__codelineno-51-6"></a>Maintenance plan: daily_events
-<a id="__codelineno-51-7" name="__codelineno-51-7" href="#__codelineno-51-7"></a>
-<a id="__codelineno-51-8" name="__codelineno-51-8" href="#__codelineno-51-8"></a>Cells (2):
-<a id="__codelineno-51-9" name="__codelineno-51-9" href="#__codelineno-51-9"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-51-10" name="__codelineno-51-10" href="#__codelineno-51-10"></a>      corner:    RecomputeRegion
-<a id="__codelineno-51-11" name="__codelineno-51-11" href="#__codelineno-51-11"></a>      technique: DeleteInsert
-<a id="__codelineno-51-12" name="__codelineno-51-12" href="#__codelineno-51-12"></a>      ledger_catch_up: false
-<a id="__codelineno-51-13" name="__codelineno-51-13" href="#__codelineno-51-13"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-51-14" name="__codelineno-51-14" href="#__codelineno-51-14"></a>      scan clamps: (none)
-<a id="__codelineno-51-15" name="__codelineno-51-15" href="#__codelineno-51-15"></a>  - group {*} on trigger Backfill
-<a id="__codelineno-51-16" name="__codelineno-51-16" href="#__codelineno-51-16"></a>      corner:    RecomputeRegion
-<a id="__codelineno-51-17" name="__codelineno-51-17" href="#__codelineno-51-17"></a>      technique: DeleteInsert
-<a id="__codelineno-51-18" name="__codelineno-51-18" href="#__codelineno-51-18"></a>      ledger_catch_up: false
-<a id="__codelineno-51-19" name="__codelineno-51-19" href="#__codelineno-51-19"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
-<a id="__codelineno-51-20" name="__codelineno-51-20" href="#__codelineno-51-20"></a>      scan clamps: (none)
-<a id="__codelineno-51-21" name="__codelineno-51-21" href="#__codelineno-51-21"></a>
-<a id="__codelineno-51-22" name="__codelineno-51-22" href="#__codelineno-51-22"></a>Guarantees:
-<a id="__codelineno-51-23" name="__codelineno-51-23" href="#__codelineno-51-23"></a>  - event_count (group {event_count}): default, settle: not derived
-<a id="__codelineno-51-24" name="__codelineno-51-24" href="#__codelineno-51-24"></a>
-<a id="__codelineno-51-25" name="__codelineno-51-25" href="#__codelineno-51-25"></a>Relation contract:
-<a id="__codelineno-51-26" name="__codelineno-51-26" href="#__codelineno-51-26"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
-<a id="__codelineno-51-27" name="__codelineno-51-27" href="#__codelineno-51-27"></a>  identity: (none)
-<a id="__codelineno-51-28" name="__codelineno-51-28" href="#__codelineno-51-28"></a>  derived grain: partition
-<a id="__codelineno-51-29" name="__codelineno-51-29" href="#__codelineno-51-29"></a>
-<a id="__codelineno-51-30" name="__codelineno-51-30" href="#__codelineno-51-30"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-51-31" name="__codelineno-51-31" href="#__codelineno-51-31"></a>  - sources.raw.events (source)
-<a id="__codelineno-51-32" name="__codelineno-51-32" href="#__codelineno-51-32"></a>      clock:    (none)
-<a id="__codelineno-51-33" name="__codelineno-51-33" href="#__codelineno-51-33"></a>      identity: event_id
-<a id="__codelineno-51-34" name="__codelineno-51-34" href="#__codelineno-51-34"></a>      derived grain: key
-<a id="__codelineno-51-35" name="__codelineno-51-35" href="#__codelineno-51-35"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
+<div class="highlight"><pre><span></span><code><a id="__codelineno-53-1" name="__codelineno-53-1" href="#__codelineno-53-1"></a>$ smelt explain daily_events
+<a id="__codelineno-53-2" name="__codelineno-53-2" href="#__codelineno-53-2"></a>emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
+<a id="__codelineno-53-3" name="__codelineno-53-3" href="#__codelineno-53-3"></a>
+<a id="__codelineno-53-4" name="__codelineno-53-4" href="#__codelineno-53-4"></a>Refusals: (none)
+<a id="__codelineno-53-5" name="__codelineno-53-5" href="#__codelineno-53-5"></a>
+<a id="__codelineno-53-6" name="__codelineno-53-6" href="#__codelineno-53-6"></a>Maintenance plan: daily_events
+<a id="__codelineno-53-7" name="__codelineno-53-7" href="#__codelineno-53-7"></a>
+<a id="__codelineno-53-8" name="__codelineno-53-8" href="#__codelineno-53-8"></a>Cells (2):
+<a id="__codelineno-53-9" name="__codelineno-53-9" href="#__codelineno-53-9"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-53-10" name="__codelineno-53-10" href="#__codelineno-53-10"></a>      corner:    RecomputeRegion
+<a id="__codelineno-53-11" name="__codelineno-53-11" href="#__codelineno-53-11"></a>      technique: DeleteInsert
+<a id="__codelineno-53-12" name="__codelineno-53-12" href="#__codelineno-53-12"></a>      ledger_catch_up: false
+<a id="__codelineno-53-13" name="__codelineno-53-13" href="#__codelineno-53-13"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-53-14" name="__codelineno-53-14" href="#__codelineno-53-14"></a>      scan clamps: (none)
+<a id="__codelineno-53-15" name="__codelineno-53-15" href="#__codelineno-53-15"></a>  - group {*} on trigger Backfill
+<a id="__codelineno-53-16" name="__codelineno-53-16" href="#__codelineno-53-16"></a>      corner:    RecomputeRegion
+<a id="__codelineno-53-17" name="__codelineno-53-17" href="#__codelineno-53-17"></a>      technique: DeleteInsert
+<a id="__codelineno-53-18" name="__codelineno-53-18" href="#__codelineno-53-18"></a>      ledger_catch_up: false
+<a id="__codelineno-53-19" name="__codelineno-53-19" href="#__codelineno-53-19"></a>      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+<a id="__codelineno-53-20" name="__codelineno-53-20" href="#__codelineno-53-20"></a>      scan clamps: (none)
+<a id="__codelineno-53-21" name="__codelineno-53-21" href="#__codelineno-53-21"></a>
+<a id="__codelineno-53-22" name="__codelineno-53-22" href="#__codelineno-53-22"></a>Guarantees:
+<a id="__codelineno-53-23" name="__codelineno-53-23" href="#__codelineno-53-23"></a>  - event_count (group {event_count}): default, settle: not derived
+<a id="__codelineno-53-24" name="__codelineno-53-24" href="#__codelineno-53-24"></a>
+<a id="__codelineno-53-25" name="__codelineno-53-25" href="#__codelineno-53-25"></a>Relation contract:
+<a id="__codelineno-53-26" name="__codelineno-53-26" href="#__codelineno-53-26"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+<a id="__codelineno-53-27" name="__codelineno-53-27" href="#__codelineno-53-27"></a>  identity: (none)
+<a id="__codelineno-53-28" name="__codelineno-53-28" href="#__codelineno-53-28"></a>  derived grain: partition
+<a id="__codelineno-53-29" name="__codelineno-53-29" href="#__codelineno-53-29"></a>
+<a id="__codelineno-53-30" name="__codelineno-53-30" href="#__codelineno-53-30"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-53-31" name="__codelineno-53-31" href="#__codelineno-53-31"></a>  - sources.raw.events (source)
+<a id="__codelineno-53-32" name="__codelineno-53-32" href="#__codelineno-53-32"></a>      clock:    (none)
+<a id="__codelineno-53-33" name="__codelineno-53-33" href="#__codelineno-53-33"></a>      identity: event_id
+<a id="__codelineno-53-34" name="__codelineno-53-34" href="#__codelineno-53-34"></a>      derived grain: key
+<a id="__codelineno-53-35" name="__codelineno-53-35" href="#__codelineno-53-35"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
 </code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>
@@ -5494,7 +5622,7 @@ ladder</a> a live run consults — <code>smelt bakeoff</code> measures
 what that ladder would cost under each candidate, it doesn't change what a run does until you
 paste the emitted pin yourself.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-52-1" name="__codelineno-52-1" href="#__codelineno-52-1"></a>smelt bakeoff &lt;MODEL_NAME&gt; [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a>smelt bakeoff &lt;MODEL_NAME&gt; [OPTIONS]
 </code></pre></div>
 <p><strong>Arguments:</strong></p>
 <table>
@@ -5572,29 +5700,29 @@ fails the whole run loudly rather than reporting a cost for a technique whose ou
 <p>A model with no cell that has 2+ admissible techniques prints a "nothing to measure" report and
 exits <code>0</code> — there is nothing to bake off.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-53-1" name="__codelineno-53-1" href="#__codelineno-53-1"></a><span class="c1"># Measure every multi-technique cell of daily_events_enriched over 3 replayed windows</span>
-<a id="__codelineno-53-2" name="__codelineno-53-2" href="#__codelineno-53-2"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched
-<a id="__codelineno-53-3" name="__codelineno-53-3" href="#__codelineno-53-3"></a>
-<a id="__codelineno-53-4" name="__codelineno-53-4" href="#__codelineno-53-4"></a><span class="c1"># Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection</span>
-<a id="__codelineno-53-5" name="__codelineno-53-5" href="#__codelineno-53-5"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--cells<span class="w"> </span>user_name@users<span class="w"> </span>--runs<span class="w"> </span><span class="m">5</span><span class="w"> </span>--keep
-<a id="__codelineno-53-6" name="__codelineno-53-6" href="#__codelineno-53-6"></a>
-<a id="__codelineno-53-7" name="__codelineno-53-7" href="#__codelineno-53-7"></a><span class="c1"># Measure and print the winning technique as a ready-to-paste frontmatter pin</span>
-<a id="__codelineno-53-8" name="__codelineno-53-8" href="#__codelineno-53-8"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--pin
+<div class="highlight"><pre><span></span><code><a id="__codelineno-55-1" name="__codelineno-55-1" href="#__codelineno-55-1"></a><span class="c1"># Measure every multi-technique cell of daily_events_enriched over 3 replayed windows</span>
+<a id="__codelineno-55-2" name="__codelineno-55-2" href="#__codelineno-55-2"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched
+<a id="__codelineno-55-3" name="__codelineno-55-3" href="#__codelineno-55-3"></a>
+<a id="__codelineno-55-4" name="__codelineno-55-4" href="#__codelineno-55-4"></a><span class="c1"># Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection</span>
+<a id="__codelineno-55-5" name="__codelineno-55-5" href="#__codelineno-55-5"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--cells<span class="w"> </span>user_name@users<span class="w"> </span>--runs<span class="w"> </span><span class="m">5</span><span class="w"> </span>--keep
+<a id="__codelineno-55-6" name="__codelineno-55-6" href="#__codelineno-55-6"></a>
+<a id="__codelineno-55-7" name="__codelineno-55-7" href="#__codelineno-55-7"></a><span class="c1"># Measure and print the winning technique as a ready-to-paste frontmatter pin</span>
+<a id="__codelineno-55-8" name="__codelineno-55-8" href="#__codelineno-55-8"></a>smelt<span class="w"> </span>bakeoff<span class="w"> </span>daily_events_enriched<span class="w"> </span>--pin
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-54-1" name="__codelineno-54-1" href="#__codelineno-54-1"></a>$ smelt bakeoff daily_events_enriched --runs 2 --pin
-<a id="__codelineno-54-2" name="__codelineno-54-2" href="#__codelineno-54-2"></a>smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
-<a id="__codelineno-54-3" name="__codelineno-54-3" href="#__codelineno-54-3"></a>
-<a id="__codelineno-54-4" name="__codelineno-54-4" href="#__codelineno-54-4"></a>cell: columns=[&quot;user_name&quot;] on=users trigger=UpstreamMutation
-<a id="__codelineno-54-5" name="__codelineno-54-5" href="#__codelineno-54-5"></a>  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
-<a id="__codelineno-54-6" name="__codelineno-54-6" href="#__codelineno-54-6"></a>  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
-<a id="__codelineno-54-7" name="__codelineno-54-7" href="#__codelineno-54-7"></a>  equivalence: OK (EXCEPT ALL empty both directions)
-<a id="__codelineno-54-8" name="__codelineno-54-8" href="#__codelineno-54-8"></a>
-<a id="__codelineno-54-9" name="__codelineno-54-9" href="#__codelineno-54-9"></a>to pin this choice, add to `daily_events_enriched.sql` frontmatter:
-<a id="__codelineno-54-10" name="__codelineno-54-10" href="#__codelineno-54-10"></a>maintenance:
-<a id="__codelineno-54-11" name="__codelineno-54-11" href="#__codelineno-54-11"></a>  cells:
-<a id="__codelineno-54-12" name="__codelineno-54-12" href="#__codelineno-54-12"></a>    - columns: [user_name]
-<a id="__codelineno-54-13" name="__codelineno-54-13" href="#__codelineno-54-13"></a>      on: users
-<a id="__codelineno-54-14" name="__codelineno-54-14" href="#__codelineno-54-14"></a>      technique: fold
+<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a>$ smelt bakeoff daily_events_enriched --runs 2 --pin
+<a id="__codelineno-56-2" name="__codelineno-56-2" href="#__codelineno-56-2"></a>smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
+<a id="__codelineno-56-3" name="__codelineno-56-3" href="#__codelineno-56-3"></a>
+<a id="__codelineno-56-4" name="__codelineno-56-4" href="#__codelineno-56-4"></a>cell: columns=[&quot;user_name&quot;] on=users trigger=UpstreamMutation
+<a id="__codelineno-56-5" name="__codelineno-56-5" href="#__codelineno-56-5"></a>  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
+<a id="__codelineno-56-6" name="__codelineno-56-6" href="#__codelineno-56-6"></a>  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
+<a id="__codelineno-56-7" name="__codelineno-56-7" href="#__codelineno-56-7"></a>  equivalence: OK (EXCEPT ALL empty both directions)
+<a id="__codelineno-56-8" name="__codelineno-56-8" href="#__codelineno-56-8"></a>
+<a id="__codelineno-56-9" name="__codelineno-56-9" href="#__codelineno-56-9"></a>to pin this choice, add to `daily_events_enriched.sql` frontmatter:
+<a id="__codelineno-56-10" name="__codelineno-56-10" href="#__codelineno-56-10"></a>maintenance:
+<a id="__codelineno-56-11" name="__codelineno-56-11" href="#__codelineno-56-11"></a>  cells:
+<a id="__codelineno-56-12" name="__codelineno-56-12" href="#__codelineno-56-12"></a>    - columns: [user_name]
+<a id="__codelineno-56-13" name="__codelineno-56-13" href="#__codelineno-56-13"></a>      on: users
+<a id="__codelineno-56-14" name="__codelineno-56-14" href="#__codelineno-56-14"></a>      technique: fold
 </code></pre></div>
 <p>The report lists, per measured cell, every admissible technique's total and per-window
 wall-clock cost, the resulting row count, and the scratch schema it ran in; the <code>equivalence:</code>
@@ -5608,7 +5736,7 @@ arbitrarily.</p>
 <h2 id="smelt-ui">smelt ui<a class="headerlink" href="#smelt-ui" title="Permanent link">&para;</a></h2>
 <p>Start a local web UI for visualizing the model graph and project structure.</p>
 <p><strong>Usage:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-55-1" name="__codelineno-55-1" href="#__codelineno-55-1"></a>smelt ui [OPTIONS]
+<div class="highlight"><pre><span></span><code><a id="__codelineno-57-1" name="__codelineno-57-1" href="#__codelineno-57-1"></a>smelt ui [OPTIONS]
 </code></pre></div>
 <p><strong>Flags:</strong></p>
 <table>
@@ -5649,14 +5777,14 @@ arbitrarily.</p>
 </table>
 <p><strong>Network exposure:</strong> <code>smelt ui</code> has no authentication or HTTPS. It is meant to be reached at <code>http://127.0.0.1:&lt;port&gt;</code> from the machine running it. Binding to a non-loopback host without <code>--allow-remote</code> fails loudly rather than silently binding to loopback instead; with the flag, the server starts and logs a startup warning that it is reachable from other hosts. CORS is restricted to the server's own origin.</p>
 <p><strong>Examples:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-56-1" name="__codelineno-56-1" href="#__codelineno-56-1"></a><span class="c1"># Start the web UI on default port</span>
-<a id="__codelineno-56-2" name="__codelineno-56-2" href="#__codelineno-56-2"></a>smelt<span class="w"> </span>ui
-<a id="__codelineno-56-3" name="__codelineno-56-3" href="#__codelineno-56-3"></a>
-<a id="__codelineno-56-4" name="__codelineno-56-4" href="#__codelineno-56-4"></a><span class="c1"># Start on a custom port</span>
-<a id="__codelineno-56-5" name="__codelineno-56-5" href="#__codelineno-56-5"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
-<a id="__codelineno-56-6" name="__codelineno-56-6" href="#__codelineno-56-6"></a>
-<a id="__codelineno-56-7" name="__codelineno-56-7" href="#__codelineno-56-7"></a><span class="c1"># Bind to all interfaces (for remote access) — requires the opt-in</span>
-<a id="__codelineno-56-8" name="__codelineno-56-8" href="#__codelineno-56-8"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w"> </span>--allow-remote
+<div class="highlight"><pre><span></span><code><a id="__codelineno-58-1" name="__codelineno-58-1" href="#__codelineno-58-1"></a><span class="c1"># Start the web UI on default port</span>
+<a id="__codelineno-58-2" name="__codelineno-58-2" href="#__codelineno-58-2"></a>smelt<span class="w"> </span>ui
+<a id="__codelineno-58-3" name="__codelineno-58-3" href="#__codelineno-58-3"></a>
+<a id="__codelineno-58-4" name="__codelineno-58-4" href="#__codelineno-58-4"></a><span class="c1"># Start on a custom port</span>
+<a id="__codelineno-58-5" name="__codelineno-58-5" href="#__codelineno-58-5"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
+<a id="__codelineno-58-6" name="__codelineno-58-6" href="#__codelineno-58-6"></a>
+<a id="__codelineno-58-7" name="__codelineno-58-7" href="#__codelineno-58-7"></a><span class="c1"># Bind to all interfaces (for remote access) — requires the opt-in</span>
+<a id="__codelineno-58-8" name="__codelineno-58-8" href="#__codelineno-58-8"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w"> </span>--port<span class="w"> </span><span class="m">3000</span><span class="w"> </span>--allow-remote
 </code></pre></div>
 
 
