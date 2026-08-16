@@ -60,6 +60,12 @@ addressing, write-pin equivalence, observed-delta consumption, plan-consumer/gra
 residues, conditional-maintenance gaps, key-grain validation gaps (keyed/partition residue
 outcomes), and every `(Open Question)` product decision (decision track). See the handoff.
 
+- **The pending-delta run refusal** (`definition_deltas.md` §Detection: `smelt run` refuses to
+  fold data deltas while a non-eclipsed definition delta is pending). None of this outcome's
+  success criteria name it, it changes the semantics of every ordinary run rather than the
+  migrate verb, and closing it needs its own equivalence argument. Recorded as a spec Known
+  Divergence in phase 6 instead.
+
 ## Phases
 
 | # | Phase | Status |
@@ -69,7 +75,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
-| 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | pending |
+| 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | planned |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
 | 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
@@ -186,6 +192,25 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   diagnosis or generator narrowing was needed. Spec delta applied: the "no definition-edit step
   kind" divergence bullet removed; the diagnostic-rename bullet's stale phase pointer fixed
   (6 → 8).
+
+- **2026-08-17 (phase 6 planning). No phase reshape; one item added to "## Out of scope".**
+  Read the code the phase-5 summary pointed at: the gap is narrower and more precise than "only
+  the full-refresh arm records". `execute.rs` already saves a first-deployment baseline for
+  `plan.incremental.is_some()` at the bottom of the per-model unit — but the cumulative arm and
+  the key-addressed arm both `return Ok(ModelOutcome::Completed(..))` before reaching it, so
+  models taking those routes never record a definition. Decided: the fix hoists that one save
+  into a helper called from all three sites, and the `!already_stored` guard **stays** — a
+  windowed run under changed SQL must never overwrite the recorded definition, or the pending
+  delta would vanish before `smelt migrate` could see it. That rule becomes normative spec text
+  (§Detection). Decided for the harness leg: `ConformanceStep::MigrateApply` drives the real
+  `smelt` binary (`CARGO_BIN_EXE_smelt`) as a subprocess rather than calling
+  `smelt_runtime::migrate::apply_migration_plan` directly, so the approval store and the exit-code
+  contract are exercised end to end; the step is **pinned, not generated** this phase (whether
+  `--apply` can execute depends on the edit's verdict — the pure-backfill leg applies, the
+  skeleton leg is refused by design — and the generator cannot cheaply predict which). Criterion 4
+  is met by phase 5's generative definition-edit pool plus phase 6's two pinned migrate legs.
+  Also noted: closing this gap makes the conformance registry's
+  `known_bug_incremental_path_skips_schema_snapshot` entry stale, so phase 6 prunes it.
 
 ## Blocked
 
