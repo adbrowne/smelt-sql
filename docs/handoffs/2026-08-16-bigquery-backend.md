@@ -1,6 +1,7 @@
 # Handoff — BigQuery as a first-class backend
 
 **Date:** 2026-08-16
+**Updated:** 2026-08-17 — type oracle and divergence registry landed
 **Worktree:** `/home/andrew/smelt-sql/.claude/worktrees/bigquery`
 **Branch:** `bigquery-backend-research` (clean descendant of `main`; no PR yet)
 
@@ -9,6 +10,11 @@
 BigQuery has a leg in every fixed-recipe parity suite, and **all eight pass against the live
 warehouse**: `dual_target_harness`, `source_seed`, `seed_parity`, `materialization_parity`,
 `lowering_parity`, `merge_parity`, `incremental_parity`, `schema_evolution_parity`.
+
+The type oracle now has a BigQuery leg too, backed by dry-run schema queries against the live
+warehouse, with a divergence registry in place. A 512-case sweep against 285 live-compared
+columns found exactly one unregistered divergence class — the surface is far smaller than
+DuckDB's or Spark's. See "The type oracle and BigQuery divergences" below.
 
 ```
 bash scripts/bigquery-auth.sh       # per session: prompts for the passphrase, 1h token
@@ -95,6 +101,41 @@ neither. Probed (`scripts/bigquery-probe-merge.sh`): `SET *` → `Expected "(" b
   resolvable cannot use `Technique::ColumnScopedMerge` on BigQuery. DuckDB and Spark are
   unaffected.
 
+## The type oracle and BigQuery divergences
+
+The oracle asks BigQuery for a query's output schema via a dry-run job — free, reads no table,
+still rejects invalid SQL — over a persistent Python subprocess, gated on
+`SMELT_BQ_ACCESS_TOKEN`; absent, the leg is not present and the suite is green. Full findings
+and the registered-divergence detail are in `docs/research/20260816-bigquery-backend.md`
+§"Measured against the live warehouse"; the summary:
+
+- A 512-case proptest sweep compared 285 columns against the live warehouse (the default
+  256-case sweep compares ~139) and produced exactly one unregistered divergence class, at 18
+  occurrences: smelt infers `Integer` where BigQuery reports `BigInt`.
+- Three divergences are registered in `divergences.rs`, all `BackendSpecific`:
+  `bigquery_single_integer_width` (BigQuery has one integer type, so width is unobservable on
+  this leg), `bigquery_decimal_width_unreported` (BigQuery's dry-run schema omits
+  precision/scale for `NUMERIC`/`BIGNUMERIC` entirely, surfaced as the sentinel `Decimal{0,0}`),
+  and `bigquery_timestamp_keyword_is_zone_aware` — **the one genuine smelt gap found**: BigQuery
+  spells its zone-aware type `TIMESTAMP` and its naive type `DATETIME`, the inverse of
+  SQL-standard/DuckDB/PostgreSQL, and type inference has no notion of target dialect so `CAST(x
+  AS TIMESTAMP)` reads the standard meaning regardless of target. Registered rather than fixed —
+  fixing it means threading a target dialect into type inference's inputs.
+- The registry's "matches any Decimal" wildcard is now a distinct `ANY_DECIMAL` constant, not
+  `Decimal{0,0}` — that value is BigQuery's unreported-width sentinel and the two meanings
+  collided before the split.
+- `check_types_against_oracle` previously skipped on any oracle error; it now only skips on an
+  allow-listed query-refusal shape, and fails on everything else, including an unrecognised 4xx.
+  This matters because an invalid/expired BigQuery token does **not** surface as 401/403 — it's a
+  client-side google-auth message with no HTTP status at all. A coverage floor
+  (`BIGQUERY_COLUMN_COVERAGE_FLOOR = 50`) additionally fails the leg if too few columns were
+  compared. Both guards were verified live: a deliberately invalid token fails in 8 seconds
+  rather than passing green.
+- Token window math: a full default sweep takes ~85s, a 512-case sweep ~162s — both fit inside
+  the one-hour token. Proptest shrinking dominates wall-clock on a failing run (150s+ on a
+  512-case failure), so surveying a new backend's type surface in one wide pass is cheaper than
+  iterating fail-fast.
+
 ## Two findings that change downstream sizing
 
 - **The per-table modification quota binds.** Eight rapid `CREATE OR REPLACE TABLE` statements
@@ -134,18 +175,15 @@ bash scripts/bigquery-test.sh     # defaults to the smoke suite; takes cargo arg
 
 ## Next steps, in order
 
-1. **Type oracle and divergences** — a BigQuery oracle beside `duckdb_oracle.rs` plus a
-   divergence column. The surface is smaller than anticipated: the divergence is concentrated
-   in type *spelling*, not semantics.
-2. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
+1. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
    `true` and no parity fixture writes a pipe query, so the printer's emit-pipes-natively path
    is the one BigQuery-relevant path still unexercised. A fixture with a `|>` query closes it.
-3. **Generative conformance** — needs the fresh-table-per-case allocation above. BigQuery has no
+2. **Generative conformance** — needs the fresh-table-per-case allocation above. BigQuery has no
    `maintenance_conformance` leg, so its incremental coverage is fixed-recipe only.
-4. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
+3. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
    between two live engines rather than looping over `targets_to_run`, so extending them means a
    new engine *pair*, not a third leg. Sized separately from the work above.
-5. **`/smelt:plan`** if the remaining work is taken as one programme rather than piecemeal.
+4. **`/smelt:plan`** if the remaining work is taken as one programme rather than piecemeal.
 
 ## Loose ends
 

@@ -7,6 +7,22 @@
 
 use smelt_types::DataType;
 
+/// Explicit wildcard sentinel: matches any `Decimal` regardless of precision/scale,
+/// wherever it appears as a divergence's type pattern (smelt/duckdb/spark/bigquery
+/// side alike). Deliberately spelled with out-of-range field values
+/// (`u8::MAX`/`u8::MAX`) so it can never collide with a real reported decimal
+/// width. `Decimal { precision: 0, scale: 0 }` used to serve as this wildcard, but
+/// that spelling collides with a real BigQuery value: a BigQuery query output
+/// schema reports NUMERIC/BIGNUMERIC precision/scale as absent, and the BigQuery
+/// oracle (`bigquery_oracle.rs`, `bigquery_type_to_smelt`) maps that absence to
+/// `Decimal { precision: 0, scale: 0 }` as a "width not reported" sentinel — an
+/// exact value that must compare normally, not wildcard-match. `Decimal { 0, 0 }`
+/// is therefore an ordinary type from here on; only `ANY_DECIMAL` wildcards.
+pub const ANY_DECIMAL: DataType = DataType::Decimal {
+    precision: u8::MAX,
+    scale: u8::MAX,
+};
+
 /// Why this divergence exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DivergenceStatus {
@@ -22,7 +38,9 @@ pub enum DivergenceStatus {
 ///
 /// Each record shows what smelt infers and what each backend actually returns.
 /// `None` means no divergence for that backend (smelt matches, or untested).
-/// `Decimal { precision: 0, scale: 0 }` acts as a wildcard matching any Decimal.
+/// `ANY_DECIMAL` acts as a wildcard matching any Decimal; `Decimal { precision: 0,
+/// scale: 0 }` is an ordinary exact value (see its doc comment for why it is no
+/// longer the wildcard).
 #[derive(Debug)]
 pub struct TypeDivergence {
     pub id: &'static str,
@@ -30,6 +48,10 @@ pub struct TypeDivergence {
     pub smelt_type: DataType,
     pub duckdb_type: Option<DataType>,
     pub spark_type: Option<DataType>,
+    /// What BigQuery's query output schema reports for this pattern. `None`
+    /// means no divergence recorded for BigQuery (smelt matches, or untested —
+    /// entries are filled in only from a verified live probe, never guessed).
+    pub bigquery_type: Option<DataType>,
     pub status: DivergenceStatus,
 }
 
@@ -50,6 +72,8 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Text,
             duckdb_type: Some(DataType::Varchar { max_length: None }),
             spark_type: Some(DataType::Varchar { max_length: None }),
+            // BigQuery's STRING is the same unbounded-length family member.
+            bigquery_type: Some(DataType::Varchar { max_length: None }),
             status: DivergenceStatus::ByDesign,
         },
         // Names the struct-field-naming blanket leniency in `type_comparison.rs`
@@ -68,6 +92,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Struct(vec![("v1".to_string(), DataType::Integer)]),
             duckdb_type: Some(DataType::Struct(vec![(String::new(), DataType::Integer)])),
             spark_type: None,
+            bigquery_type: None, // untested against BigQuery
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT SUM(x) FROM (SELECT CAST(1 AS INT) x)` and
@@ -82,6 +107,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 scale: 0,
             }),
             spark_type: None, // Spark also returns BigInt, matches smelt
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT CAST('a' AS STRING) || CAST('b' AS STRING)`
@@ -92,6 +118,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Text,
             duckdb_type: Some(DataType::Varchar { max_length: None }),
             spark_type: Some(DataType::Varchar { max_length: None }),
+            bigquery_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT UPPER('a')` — Spark's DESCRIBE QUERY
@@ -102,6 +129,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Text,
             duckdb_type: Some(DataType::Varchar { max_length: None }),
             spark_type: Some(DataType::Varchar { max_length: None }),
+            bigquery_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT CEIL(CAST(1.5 AS DOUBLE))` and the FLOOR
@@ -112,6 +140,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: None,
             spark_type: Some(DataType::BigInt),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT AVG(x) FROM (SELECT CAST(1.5 AS
@@ -123,11 +152,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 "AVG(DECIMAL) — smelt infers Double (matches DuckDB), Spark returns Decimal (varying precision)",
             smelt_type: DataType::Double,
             duckdb_type: None,
-            // Wildcard: Decimal(0,0) matches any Decimal precision/scale
-            spark_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
+            // Wildcard: matches any Decimal precision/scale.
+            spark_type: Some(ANY_DECIMAL),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT MEDIAN(x) FROM (SELECT CAST(1.5 AS
@@ -138,12 +165,12 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 "MEDIAN(DECIMAL) — smelt infers Decimal, unchanged (matches DuckDB, which \
                 preserves the input Decimal type). Spark's MEDIAN is implemented via \
                 percentile_cont, which always returns DOUBLE regardless of input type.",
-            smelt_type: DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            },
+            // Wildcard: matches any smelt Decimal (any precision/scale MEDIAN was
+            // called on).
+            smelt_type: ANY_DECIMAL,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // PERCENTILE_CONT/PERCENTILE_DISC ordered-set aggregates: smelt's
@@ -175,11 +202,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 DuckDB preserves the input Decimal type for both functions.",
             smelt_type: DataType::Double,
             // Wildcard: matches any DuckDB Decimal.
-            duckdb_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
+            duckdb_type: Some(ANY_DECIMAL),
             spark_type: None,
+            bigquery_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
@@ -194,6 +219,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::Integer),
             spark_type: None,
+            bigquery_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
@@ -208,6 +234,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::BigInt),
             spark_type: None,
+            bigquery_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DOUBLE))` — Spark's
@@ -221,6 +248,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS INT))` — Spark's DESCRIBE
@@ -235,6 +263,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS BIGINT))` — Spark's
@@ -248,6 +277,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DECIMAL(10,2)))` —
@@ -262,6 +292,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT CAST(1.5 AS FLOAT)` — Spark's DESCRIBE
@@ -273,6 +304,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::Float),
             spark_type: Some(DataType::Float),
+            bigquery_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT CAST('2024-01-02' AS DATE) -
@@ -286,6 +318,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Interval,
             duckdb_type: Some(DataType::BigInt),
             spark_type: None, // Spark returns Interval, matches smelt
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // Decimal arithmetic model: smelt applies the portable, Spark-aligned
@@ -300,7 +333,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         // and/or scale across an open-ended family of expressions, so this is a
         // single named class divergence rather than one entry per (p,s) pair.
         //
-        // Both operands are wildcards (`Decimal { precision: 0, scale: 0 }`): the
+        // Both operands are wildcards (`ANY_DECIMAL`): the
         // entry matches any Decimal-vs-Decimal pair. This is admissible — and not
         // a return to the removed blanket `is_decimal_compat` rule — because the
         // *exact* decimal correctness of smelt's inference is verified separately
@@ -335,22 +368,14 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 (type_conformance_tests.rs); this entry tolerates the raw-SQL Decimal-vs-Decimal \
                 difference only, against either backend.",
             // Wildcard: matches any smelt Decimal.
-            smelt_type: DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            },
+            smelt_type: ANY_DECIMAL,
             // Wildcard: matches any DuckDB Decimal.
-            duckdb_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
+            duckdb_type: Some(ANY_DECIMAL),
             // Wildcard: matches any Spark Decimal. Previously `None` on the
             // (disproven) assumption that Spark's decimal growth always matches
             // smelt's; ROUND and IFNULL both diverge on raw SQL against Spark too.
-            spark_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
+            spark_type: Some(ANY_DECIMAL),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT ROUND(CAST(1 AS INT))` — Spark's
@@ -370,6 +395,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::Integer),
             spark_type: Some(DataType::Integer),
+            bigquery_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT CAST('2024-01-01' AS DATE) + INTERVAL
@@ -386,6 +412,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             },
             duckdb_type: None,
             spark_type: Some(DataType::Date),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT COALESCE(CAST(1 AS FLOAT), CAST(2 AS
@@ -400,6 +427,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::Float,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
+            bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT ROW_NUMBER() OVER (ORDER BY x) FROM
@@ -412,6 +440,106 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             smelt_type: DataType::BigInt,
             duckdb_type: None,
             spark_type: Some(DataType::Integer),
+            bigquery_type: None,
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // BigQuery's query output schema (the only surface the BigQuery oracle
+        // can probe — see `bigquery_oracle.rs`) reports precision/scale as
+        // absent for both NUMERIC and BIGNUMERIC columns; there is no field to
+        // read a width from. `bigquery_type_to_smelt` surfaces that absence as
+        // the sentinel `Decimal { precision: 0, scale: 0 }` — "a Decimal was
+        // reported, but BigQuery didn't say how wide". smelt legitimately
+        // infers many different Decimal widths depending on the expression, so
+        // the smelt side is the `ANY_DECIMAL` wildcard; the BigQuery side is
+        // the exact sentinel, not a wildcard, so a leg that reports a real
+        // width (see the next paragraph) is NOT absorbed here. What this entry
+        // does still check strictly: smelt infers a Decimal at all — Double or
+        // BigInt vs Decimal remain real mismatches on the BigQuery leg. If
+        // BigQuery ever begins reporting precision/scale on query output
+        // schemas, this entry stops matching (the actual type would carry a
+        // real width, not the `0,0` sentinel) and the leg fails loudly, which
+        // is the intended outcome — the oracle mapping and this entry would
+        // both need to be revisited.
+        TypeDivergence {
+            id: "bigquery_decimal_width_unreported",
+            description: "Decimal width — smelt infers a specific precision/scale, but \
+                BigQuery's query output schema reports NUMERIC/BIGNUMERIC precision/scale as \
+                absent, which the oracle surfaces as the sentinel Decimal{0,0} (\"width not \
+                reported\"), not a real value to compare against.",
+            smelt_type: ANY_DECIMAL,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: Some(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // verified: 2026-08-17 `SELECT [CAST('2024-01-01 12:00:00' AS TIMESTAMP)]`
+        // — BigQuery's dry-run schema reports TIMESTAMP, which is its *absolute
+        // instant* type, while smelt infers a naive timestamp.
+        //
+        // This is a dialect collision over one keyword, not an arithmetic bug.
+        // In SQL-standard/DuckDB/PostgreSQL spelling, bare `TIMESTAMP` is the
+        // naive wall-clock type and the zone-aware one is `TIMESTAMPTZ`.
+        // BigQuery inverts the pair: its zone-aware type is spelled `TIMESTAMP`
+        // and its naive one is spelled `DATETIME`. smelt's `CAST(x AS
+        // TIMESTAMP)` inference reads the keyword with the standard meaning,
+        // because type inference has no notion of which dialect the model will
+        // be lowered to, so on BigQuery it lands on the wrong side of the pair.
+        //
+        // Registered rather than fixed: making CAST target-type resolution
+        // dialect-aware is a real change to type inference's inputs (it would
+        // have to be threaded a target dialect), not a local correction. Until
+        // then this entry keeps the leg honest about a difference that is
+        // genuinely there. Note it is *not* symmetric — smelt inferring
+        // zone-aware where BigQuery reports naive is NOT registered and still
+        // fails, because that direction has no dialect explanation.
+        TypeDivergence {
+            id: "bigquery_timestamp_keyword_is_zone_aware",
+            description: "CAST(x AS TIMESTAMP) — smelt reads TIMESTAMP with its \
+                SQL-standard/DuckDB meaning (naive wall clock); BigQuery spells its \
+                zone-aware absolute-instant type TIMESTAMP and its naive type DATETIME, \
+                so the same keyword denotes the other member of the pair.",
+            smelt_type: DataType::Timestamp {
+                with_timezone: false,
+            },
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: Some(DataType::Timestamp {
+                with_timezone: true,
+            }),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // verified: 2026-08-17 — the single divergence class a 512-case sweep
+        // against the live warehouse produced (18 occurrences out of 285
+        // columns compared; nothing else was unregistered).
+        //
+        // BigQuery has exactly one integer type, INT64, which the query output
+        // schema reports under its legacy name INTEGER and the oracle maps to
+        // `BigInt` (see `bigquery_oracle.rs` — reporting it as `Integer` would
+        // assert a 32-bit width the warehouse does not have). So every smelt
+        // integer inference, whatever its width, meets `BigInt` on this leg:
+        // integer *width* is simply not observable against BigQuery, in the
+        // same way decimal width is not (see
+        // `bigquery_decimal_width_unreported`). Width conformance for integers
+        // is carried by the DuckDB and Spark legs, which do distinguish.
+        //
+        // Deliberately narrow: only `Integer` is registered, because only
+        // `Integer` was observed. `SmallInt` or `TinyInt` meeting `BigInt` would
+        // still fail the leg — that would mean the generators had started
+        // producing a shape this sweep never covered, which is worth being told
+        // about rather than absorbing in advance.
+        TypeDivergence {
+            id: "bigquery_single_integer_width",
+            description: "Integer width — BigQuery has exactly one integer type (INT64, \
+                reported under the legacy name INTEGER), so a smelt Integer inference meets \
+                BigInt on every BigQuery column. Integer width is unobservable on this leg; \
+                the DuckDB and Spark legs carry that conformance.",
+            smelt_type: DataType::Integer,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: Some(DataType::BigInt),
             status: DivergenceStatus::BackendSpecific,
         },
     ]
@@ -436,6 +564,7 @@ pub fn find_divergence<'a>(
             let expected = match backend {
                 "duckdb" => d.duckdb_type.as_ref(),
                 "spark" => d.spark_type.as_ref(),
+                "bigquery" => d.bigquery_type.as_ref(),
                 _ => None,
             };
             expected.is_some_and(|t| types_match(t, actual))
@@ -444,21 +573,13 @@ pub fn find_divergence<'a>(
 }
 
 /// Check if a divergence's type pattern matches an actual type.
-/// `Decimal { precision: 0, scale: 0 }` acts as a wildcard for any Decimal.
+/// `ANY_DECIMAL` acts as a wildcard for any Decimal; every other pattern
+/// (including `Decimal { precision: 0, scale: 0 }`) compares exactly.
 fn types_match(pattern: &DataType, actual: &DataType) -> bool {
     if pattern == actual {
         return true;
     }
-    matches!(
-        (pattern, actual),
-        (
-            DataType::Decimal {
-                precision: 0,
-                scale: 0
-            },
-            DataType::Decimal { .. }
-        )
-    )
+    *pattern == ANY_DECIMAL && matches!(actual, DataType::Decimal { .. })
 }
 
 #[cfg(test)]
@@ -728,5 +849,130 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "avg_decimal");
+    }
+
+    #[test]
+    fn any_decimal_matches_any_precision_and_scale() {
+        assert!(types_match(
+            &ANY_DECIMAL,
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            }
+        ));
+        assert!(types_match(
+            &ANY_DECIMAL,
+            &DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }
+        ));
+    }
+
+    #[test]
+    fn decimal_zero_zero_no_longer_wildcards_as_a_pattern() {
+        // Decimal{0,0} used to be the wildcard sentinel; now it's an ordinary
+        // exact value (BigQuery's real "width not reported" signal), so it
+        // must not absorb a differently-shaped Decimal.
+        assert!(!types_match(
+            &DataType::Decimal {
+                precision: 0,
+                scale: 0
+            },
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn finds_bigquery_decimal_width_unreported_divergence() {
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            &DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            },
+            "bigquery",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "bigquery_decimal_width_unreported");
+    }
+
+    #[test]
+    fn bigquery_reported_width_is_not_absorbed() {
+        // A BigQuery leg that ever reports an actual width must NOT be
+        // swallowed by the "width unreported" entry — that entry's
+        // bigquery_type is the exact sentinel Decimal{0,0}, not a wildcard.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            &DataType::Decimal {
+                precision: 38,
+                scale: 2,
+            },
+            "bigquery",
+            &divs,
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn bigquery_double_vs_decimal_sentinel_is_still_a_mismatch() {
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Double,
+            &DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            },
+            "bigquery",
+            &divs,
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn bigquery_arm_is_reachable_and_none_when_unset() {
+        let divs = known_divergences();
+        // sum_integer has bigquery_type: None — should not match bigquery.
+        let found = find_divergence(
+            &DataType::BigInt,
+            &DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+            "bigquery",
+            &divs,
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn finds_bigquery_decimal_width_unreported_under_array_wrapping() {
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            })),
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            })),
+            "bigquery",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "bigquery_decimal_width_unreported");
     }
 }

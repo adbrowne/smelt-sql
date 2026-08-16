@@ -291,12 +291,74 @@ the negative control — writing to a pre-existing un-granted dataset must be re
 meaningful under it. The suites keep the table-level fallback for anyone running under a
 narrower grant.
 
+**Type inference conformance, measured against a live dry-run oracle.** The type oracle asks
+BigQuery for a query's output schema via a dry-run job — free, reads no table, still rejects
+invalid SQL — over a persistent Python subprocess, gated on `SMELT_BQ_ACCESS_TOKEN`; absent, the
+leg is not present and the suite is green. A 512-case proptest sweep compared 285 columns
+against the live warehouse (a default 256-case sweep compares roughly 139) and produced exactly
+one unregistered divergence class, at 18 occurrences: smelt infers `Integer` where BigQuery
+reports `BigInt`. Nothing else was unregistered. The divergence surface against BigQuery is far
+smaller than the DuckDB/Spark surface — a single systematic class plus two structural ones, not
+a long tail.
+
+The three registered BigQuery divergences (`crates/smelt-db/tests/prop_helpers/divergences.rs`,
+all `BackendSpecific`):
+
+- `bigquery_single_integer_width` — BigQuery has exactly one integer type, INT64 (reported under
+  its legacy name INTEGER), so every smelt integer inference meets `BigInt` and width is
+  unobservable on this leg; DuckDB and Spark carry that conformance instead. Registered for
+  `Integer` only, since only `Integer` was observed — `SmallInt`/`TinyInt` vs `BigInt` still
+  fails loudly.
+- `bigquery_decimal_width_unreported` — a dry-run schema for
+  `SELECT CAST(1 AS NUMERIC) AS n, CAST(1.5 AS BIGNUMERIC) AS bn` returns precision/scale keys
+  that are *absent*, not null, so there is no width to compare. The oracle surfaces that absence
+  as the sentinel `Decimal{0,0}`. The registry entry is a wildcard on the smelt side and the
+  exact sentinel on the BigQuery side, so if BigQuery ever starts reporting a real width the
+  entry stops matching and the leg fails loudly. Double-vs-Decimal and BigInt-vs-Decimal remain
+  real mismatches under it.
+- `bigquery_timestamp_keyword_is_zone_aware` — a dialect collision, and the one finding that is a
+  genuine smelt gap rather than an unobservable-width artifact. SQL-standard/DuckDB/PostgreSQL
+  spell the naive wall-clock type `TIMESTAMP` and the zone-aware type `TIMESTAMPTZ`; BigQuery
+  inverts the pair, so its zone-aware absolute-instant type is spelled `TIMESTAMP` and its naive
+  type `DATETIME`. `CAST(x AS TIMESTAMP)` reads the keyword with the standard meaning because
+  type inference has no notion of the target dialect, so on BigQuery it lands on the wrong side.
+  Registered rather than fixed, because making CAST target-type resolution dialect-aware means
+  threading a target dialect into type inference — a change to its inputs, not a local
+  correction. Registered asymmetrically: smelt inferring zone-aware where BigQuery reports naive
+  is *not* registered and still fails, because that direction has no dialect explanation.
+
+A design note: the registry previously used `Decimal{precision:0, scale:0}` as its "matches any
+Decimal" wildcard — the same value BigQuery's unreported width maps to, so the two meanings
+would have collided in one value and made the decimal entry unfalsifiable. The wildcard is now a
+distinct explicit `ANY_DECIMAL` constant; `Decimal{0,0}` is an ordinary exact value meaning only
+"BigQuery reported no width".
+
+**The oracle-error guard matters as much as the divergence count.** `check_types_against_oracle`
+previously swallowed every oracle error as a skip, so the leg could pass green while testing
+nothing. Oracle errors are now classified by an allow-list — only explicitly recognised
+query-refusal shapes skip (BigQuery's `400`/`404` job-submission errors against
+`bigquery.googleapis.com`, DuckDB `Catalog`/`Parser`/`Binder`/`Conversion Error`, Spark
+`AnalysisException`/`ParseException`); everything else, including an unrecognised 4xx, is fatal.
+The allow-list shape is load-bearing and was chosen against observed behaviour: an invalid or
+expired token does not surface as 401 or 403. It surfaces as a client-side google-auth message
+with no HTTP status in it at all — verbatim: `The credentials do not contain the necessary
+fields need to refresh the access token. You must specify refresh_token, token_uri, client_id,
+and client_secret.` A classifier built on "401/403 means auth failure" would have missed exactly
+the case the guard exists for. A coverage floor (`BIGQUERY_COLUMN_COVERAGE_FLOOR = 50`) fails
+the leg if it compared too few columns, calibrated against the measured ~139 on a default sweep.
+Both were verified live: running the suite with a deliberately invalid token fails in 8 seconds
+rather than passing green.
+
+**Operational notes.** The access token lasts one hour and only a human can mint it
+(`bash scripts/bigquery-auth.sh`, then `source scripts/bigquery-env.sh`); a full default sweep
+takes ~85s, a 512-case sweep ~162s, so a sweep fits comfortably inside one token window. Proptest
+*shrinking* dominates wall-clock on failure — a failing 512-case run took 150s+, mostly
+shrinking, each shrink step costing a dry-run round trip — so when first surveying a new
+backend's type surface it is far cheaper to enumerate the whole surface in one pass than to
+iterate fail-fast, one finding per run.
+
 ## Open questions
 
-- **Phase 3's true size** — mechanical versus semantic split of the type-divergence surface.
-  Answered by phase 2.
-- **Whether the emulator earns a place as a fast inner loop** — see below; the dataset-creation
-  question is settled (`roles/bigquery.user`).
 - **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the
   manual console step permanently, or find a budgets path that does not require
   application-default credentials.
