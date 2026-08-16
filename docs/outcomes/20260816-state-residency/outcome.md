@@ -1,7 +1,7 @@
 # Outcome: State residency — implement the state-ownership doctrine
 
 **Created:** 2026-08-16
-**Status:** queued
+**Status:** active
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 1)
 **Spec anchors:** `docs/specs/state.md`, `docs/specs/run_state.md`,
 `docs/specs/incremental_models.md`
@@ -65,8 +65,8 @@ this outcome runs first in the programme.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | pending |
-| 2 | Thread `StateMode` through `execute_project`: each mode gates exactly the state families `state.md` assigns it; red-green per mode | pending |
+| 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | planned |
+| 2 | Thread `StateMode` through `execute_project`: each mode gates exactly the state families `state.md` assigns it; red-green per mode. Includes implementing phase 1's absent-state behaviours (`ProbeBaselineUnavailable`, absent-snapshot degradation) so criterion 4's "implementation matches" half is met | pending |
 | 3 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
 | 4 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
 | 5 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
@@ -75,7 +75,21 @@ this outcome runs first in the programme.
 
 ## Decision log
 
-_(empty)_
+- **2026-08-16 (phase 1 plan).** Criterion 4 has two halves — spec sentence and matching
+  implementation. Phase 1 is spec-only, so the implementation half is folded into phase 2's row
+  (where posture gating already touches every baseline write site) rather than deferred out. No
+  new phase row needed; phase 2's description widened.
+- **2026-08-16 (phase 1 plan).** Resolved the frozen-horizon/deferral asymmetry that phase 1's
+  spec delta 3 would otherwise leave ambiguous: `contract.frozen_horizon` **degrades** when its
+  baseline is absent (the baseline is observability-class, and the spec already tolerates a
+  baseline-establishing first run), while `contract.deferral` stays
+  `DeclaredContractRequiresState` because its lag is measured from the correctness-class
+  frontier, which no posture can withhold. Consistent with `state.md` §"Declarations stay
+  fail-loud" naming deferral as the *one* exception.
+- **2026-08-16 (phase 1 plan).** Added one advisory diagnostic, `ProbeBaselineUnavailable`, as
+  the shared "say so" vehicle for absent probe baselines (source postures + frozen band). The
+  optionality rule requires degradation be reported; without a code, delta 2 and delta 3 would
+  specify silent degradation, which the rule forbids.
 
 ## Blocked
 
