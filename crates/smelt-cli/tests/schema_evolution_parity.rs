@@ -11,14 +11,21 @@
 //!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
+//! With `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` set AND `--features
+//! bigquery`: also covers BigQuery. This exercises the warehouse's own
+//! `ADD COLUMN`, which is a separate question from smelt emitting evolution
+//! DDL for BigQuery — that path resolves to a full refresh instead.
 
 mod common;
 #[cfg(feature = "spark")]
 use common::spark_connect_url;
-use common::{fetch_rows, targets_to_run, TargetKind};
+use common::{drop_bq_dataset, fetch_rows, targets_to_run, TargetKind};
 use tempfile::TempDir;
 
 const SPARK_SCHEMA: &str = "smelt_evo_p5";
+
+/// Scopes this suite's BigQuery dataset, as `SPARK_SCHEMA` does for Spark.
+const BQ_LABEL: &str = "evo_p5";
 
 /// Create a small source table (3 rows, 2 days).
 fn create_source_sql(schema: &str) -> String {
@@ -42,8 +49,11 @@ fn v1_model_sql(schema: &str) -> String {
 
 /// Dialect-specific `ALTER TABLE … ADD COLUMN` DDL.
 ///
-/// DuckDB: `ALTER TABLE schema.table ADD COLUMN col TYPE`
-/// Spark:  `ALTER TABLE catalog.schema.table ADD COLUMNS (col TYPE)`
+/// DuckDB:   `ALTER TABLE schema.table ADD COLUMN col TYPE`
+/// Spark:    `ALTER TABLE catalog.schema.table ADD COLUMNS (col TYPE)`
+/// BigQuery: `ALTER TABLE dataset.table ADD COLUMN col INT64` — GoogleSQL
+///           spells the 64-bit integer `INT64`, and takes one column per
+///           `ADD COLUMN` rather than Spark's parenthesised list.
 fn add_column_ddl(kind: &TargetKind, schema: &str) -> String {
     match kind {
         TargetKind::DuckDb => {
@@ -53,6 +63,9 @@ fn add_column_ddl(kind: &TargetKind, schema: &str) -> String {
             format!(
                 "ALTER TABLE spark_catalog.{schema}.event_totals ADD COLUMNS (event_count BIGINT)"
             )
+        }
+        TargetKind::BigQuery { dataset } => {
+            format!("ALTER TABLE {dataset}.event_totals ADD COLUMN event_count INT64")
         }
     }
 }
@@ -92,10 +105,11 @@ fn add_column_migration_matches_across_backends() {
     // Reference rows collected from DuckDB; Spark result is compared against them.
     let mut reference_rows: Vec<Vec<String>> = Vec::new();
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let schema = match &kind {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
+            TargetKind::BigQuery { dataset } => dataset.as_str(),
         };
 
         match &kind {
@@ -198,11 +212,55 @@ fn add_column_migration_matches_across_backends() {
                     });
                 }
             }
+            TargetKind::BigQuery { dataset } => {
+                let _ = dataset;
+                #[cfg(not(feature = "bigquery"))]
+                panic!("BigQuery path should only be reached when --features bigquery is enabled");
+                #[cfg(feature = "bigquery")]
+                rt.block_on(async {
+                    use smelt_backend::Backend;
+
+                    let backend = common::bq_backend(dataset).await;
+
+                    // Seed source table.
+                    backend
+                        .drop_table_if_exists(schema, "evt_source")
+                        .await
+                        .unwrap();
+                    backend
+                        .execute_sql(&create_source_sql(schema))
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery create source failed: {e}"));
+
+                    // Create v1 event_totals.
+                    backend
+                        .drop_table_if_exists(schema, "event_totals")
+                        .await
+                        .unwrap();
+                    backend
+                        .create_table_as(schema, "event_totals", &v1_model_sql(schema))
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery create_table_as failed: {e}"));
+
+                    // Evolve schema: ADD COLUMN (GoogleSQL spelling).
+                    backend
+                        .execute_sql(&add_column_ddl(&kind, schema))
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery ADD COLUMN failed: {e}"));
+
+                    // Incremental insert: day-2 rows WITH event_count.
+                    backend
+                        .insert_into_from_query(schema, "event_totals", &v2_insert_sql(schema))
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery insert v2 rows failed: {e}"));
+                });
+            }
         }
 
         // Fetch final rows and compare.  DuckDB establishes the reference;
-        // each subsequent target (Spark) must match it.
+        // each subsequent target (Spark, BigQuery) must match it.
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "event_totals");
+        drop_bq_dataset(&kind);
         if reference_rows.is_empty() {
             // First target sets the reference.
             assert_eq!(actual.len(), 3, "{kind:?}: expected 3 rows after migration");

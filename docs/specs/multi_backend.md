@@ -90,11 +90,13 @@ reject the model — the dialect printer **lowers** the logical construct to an 
 physical form the backend accepts. A capability flag set to `false` is an instruction to the
 printer to lower, never a reason to emit invalid SQL or to surface a user-facing error.
 
-**Supported-surface statement.** Dual-target parity covers: full-refresh table and view
+**Supported-surface statement.** Multi-target parity covers: full-refresh table and view
 materializations, ephemeral (CTE-inlined) models, and the `batched`/`keyed`/`versioned`
 incremental maintenance legs — each exercised on both DuckDB and Spark by the same parametrized
 CLI integration tests, plus the DuckDB-anchored `maintenance_conformance` suite (`smelt-cli`
-crate) for the maintenance legs specifically. `refresh: materialized_view` is excluded: no
+crate) for the maintenance legs specifically. BigQuery joins the fixed-recipe suites
+(materialization, seed, lowering, merge, incremental DELETE+INSERT, schema evolution) but not
+`maintenance_conformance`, so its incremental coverage is fixed-recipe rather than generative. `refresh: materialized_view` is excluded: no
 backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
 mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
@@ -269,12 +271,21 @@ resolves nested widening to a table rewrite.
   should not need to know their target lacks it. Rejected: surfacing a "Spark does not support
   QUALIFY" diagnostic — it would push backend physics into the user's logical model, violating
   the logical/physical separation that is smelt's reason to exist.
-- **Verification-first parity.** Parity is asserted by a **dual-target test matrix** (the same
-  CLI integration tests parametrized over `{DuckDb, Spark}`) plus a capability-conformance
-  suite, run against a real Spark Connect server. A capability the code claims but no test
-  exercises against a live backend is treated as unverified. Rejected: trusting the capability
-  constructors without live execution — the whole motivation here is that unverified Spark code
-  had drifted from reality.
+- **Verification-first parity.** Parity is asserted by a **multi-target test matrix** (the same
+  CLI integration tests parametrized over `{DuckDb, Spark, BigQuery}`) plus a
+  capability-conformance suite, run against a real Spark Connect server and a real BigQuery
+  project. A capability the code claims but no test exercises against a live backend is treated
+  as unverified. Rejected: trusting the capability constructors without live execution — the
+  whole motivation here is that unverified Spark code had drifted from reality.
+- **One target list, not per-suite target lists.** A suite enumerates its targets through the
+  shared `targets_to_run(label)` harness rather than hard-coding a pair, so adding a backend
+  reaches every suite in one edit and the compiler names each suite that has not yet handled it.
+  The label scopes BigQuery's dataset, which is *derived* from `(base, label, pid)` rather than
+  minted and threaded through the test: staging and assertion compute the same name
+  independently. Rejected: minting a unique dataset per run and passing it around — it forces
+  every suite that hand-writes its `smelt.yml` to also plumb state into its assertion loop.
+  Rejected too: one shared dataset for all suites — BigQuery's per-table modification quota
+  binds on repeated writes to a single table name, so suites must not share target tables.
 - **Delta as the parity baseline.** Delta is the Spark default because MERGE, column mapping,
   and rich schema evolution — the features that bring Spark to DuckDB parity — require it.
   Parquet format is a documented, reduced-capability profile, not the parity target.
@@ -305,15 +316,18 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **BigQuery has no leg in the dual-target parity suites.** Its capability column is populated
-  and asserted, and a single model materializes end to end, but `materialization_parity`,
-  `cross_engine_parity`, `seed_parity`, `lowering_parity`, `merge_parity`,
-  `incremental_parity` and `schema_evolution_parity` still run over `{DuckDb, Spark}` only. The
-  BigQuery gate is `bigquery_smoke` alone, so the capability flags are verified as *warehouse
-  facts* without yet being verified as *parity outcomes*. Two flags reach `true` for the first
-  time on any backend — `supports_pipe_syntax` and, outside Spark-over-Delta,
-  `supports_merge_not_matched_by_source` — so the printer paths behind them remain unexercised
-  by a parity test. Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **`supports_pipe_syntax` is unexercised by any parity test.** BigQuery is the only backend
+  reporting `true`, and no parity fixture writes a pipe query, so the printer's
+  emit-pipes-natively path has no live coverage on the one backend that would take it. Every
+  other BigQuery-relevant printer path does: `materialization_parity`, `seed_parity`,
+  `lowering_parity`, `merge_parity`, `incremental_parity` and `schema_evolution_parity` each
+  carry a BigQuery leg. `NOT MATCHED BY SOURCE` is likewise uncovered, but for a different
+  reason — no emitter produces the clause on any backend yet, so there is nothing to run.
+  Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **`cross_engine_parity` and `cross_engine_types_parity` are DuckDB↔Spark only.** They assert
+  handoff between two live engines rather than looping over `targets_to_run`, so extending them
+  to BigQuery means a new engine *pair*, not a third leg of an existing loop. The type-level
+  half of that gap is what a BigQuery type oracle would close.
 - **BigQuery advertises `supports_native_ivm: false` despite supporting materialized views.**
   The warehouse accepts `CREATE MATERIALIZED VIEW` with incremental refresh, so unlike DuckDB
   and Spark this backend's `false` describes smelt, not the engine: `true` obliges smelt to emit

@@ -25,6 +25,11 @@ else
   echo "no BigQuery client venv — create it with: bash scripts/bigquery-venv.sh" >&2
 fi
 
+# Every dataset the tests create inherits this default table expiration, so an
+# interrupted run sheds its tables even if teardown never ran. Both the test
+# process and the `smelt run` children it spawns read it from the environment.
+export SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS="${SMELT_BQ_DEFAULT_TABLE_EXPIRATION_MS:-7200000}"
+
 _bq_config_dir="${SMELT_BQ_CONFIG_DIR:-$HOME/.config/gcloud-smelt-bq}"
 _bq_env_file="${_bq_config_dir}/config.env"
 

@@ -6,15 +6,21 @@
 //!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
+//! With `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` set AND `--features
+//! bigquery`: also covers BigQuery, where `insert_overwrite` is unavailable and
+//! the scoped DELETE+INSERT emulation is the only path.
 
 mod common;
 #[cfg(feature = "spark")]
 use common::spark_connect_url;
-use common::{assert_table_parity, fetch_rows, targets_to_run, TargetKind};
+use common::{assert_table_parity, drop_bq_dataset, fetch_rows, targets_to_run, TargetKind};
 use smelt_backend::PartitionRange;
 use tempfile::TempDir;
 
 const SPARK_SCHEMA: &str = "smelt_incr_p3";
+
+/// Scopes this suite's BigQuery dataset, as `SPARK_SCHEMA` does for Spark.
+const BQ_LABEL: &str = "incr_p3";
 
 /// SQL to create the transaction source table (4 rows, 2 days × 2 users per day).
 ///
@@ -67,10 +73,11 @@ fn incremental_delete_insert_is_idempotent_on_both() {
     let window_start = "2024-01-01";
     let window_end = "2024-01-02";
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let schema = match &kind {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
+            TargetKind::BigQuery { dataset } => dataset.as_str(),
         };
 
         let partition = PartitionRange {
@@ -196,9 +203,61 @@ fn incremental_delete_insert_is_idempotent_on_both() {
                     });
                 }
             }
+            TargetKind::BigQuery { dataset } => {
+                let _ = dataset;
+                #[cfg(not(feature = "bigquery"))]
+                panic!("BigQuery path should only be reached when --features bigquery is enabled");
+                #[cfg(feature = "bigquery")]
+                rt.block_on(async {
+                    use smelt_backend::Backend;
+
+                    let backend = common::bq_backend(dataset).await;
+
+                    // Seed source table (DROP first for inter-run idempotency).
+                    backend
+                        .drop_table_if_exists(schema, "txn_source")
+                        .await
+                        .unwrap();
+                    backend
+                        .execute_sql(&create_source_sql(schema))
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery create txn_source failed: {e}"));
+
+                    // First run: CREATE TABLE AS for the day-1 window.
+                    backend
+                        .drop_table_if_exists(schema, "daily_totals")
+                        .await
+                        .unwrap();
+                    backend
+                        .create_table_as(
+                            schema,
+                            "daily_totals",
+                            &window_sql(schema, window_start, window_end),
+                        )
+                        .await
+                        .unwrap_or_else(|e| {
+                            panic!("BigQuery create_table_as (first run) failed: {e}")
+                        });
+
+                    // Second run (same window) — DELETE+INSERT.
+                    backend
+                        .delete_partitions(schema, "daily_totals", &partition)
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery delete_partitions failed: {e}"));
+                    backend
+                        .insert_into_from_query(
+                            schema,
+                            "daily_totals",
+                            &window_sql(schema, window_start, window_end),
+                        )
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery insert_into_from_query failed: {e}"));
+                });
+            }
         }
 
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "daily_totals");
+        drop_bq_dataset(&kind);
         assert_table_parity(&actual, &expected_rows(), &format!("{kind:?}"));
     }
 }

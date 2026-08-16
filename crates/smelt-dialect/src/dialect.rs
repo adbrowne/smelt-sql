@@ -100,9 +100,8 @@ pub struct BackendCapabilities {
     /// Supports pipe SQL (`|>`) syntax natively.
     ///
     /// When `false`, the dialect printer rewrites pipe queries to standard SQL
-    /// before emitting. Every current backend reports `false`; this field exists
-    /// so future backends (e.g. BigQuery, which has native pipe support) can opt
-    /// in without code changes.
+    /// before emitting. BigQuery is the only backend reporting `true`, on the
+    /// strength of GoogleSQL's native pipe support.
     pub supports_pipe_syntax: bool,
 
     /// Backend requires explicit schema creation during session init.

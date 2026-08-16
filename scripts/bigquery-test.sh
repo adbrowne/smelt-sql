@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # bigquery-test.sh — run the BigQuery-gated test suites against the live warehouse.
 #
-#     bash scripts/bigquery-auth.sh          # mint a token (prompts for passphrase)
-#     bash scripts/bigquery-test.sh [args…]  # defaults to the smoke suite
+#     bash scripts/bigquery-auth.sh           # mint a token (prompts for passphrase)
+#     bash scripts/bigquery-test.sh [args…]   # defaults to the smoke suite
+#     bash scripts/bigquery-parity.sh         # the whole parity sweep
 #
 # Sources the BigQuery environment (token, project, PYTHONPATH for the PyO3
 # adapter) and runs cargo with the `bigquery` feature. With no token minted the

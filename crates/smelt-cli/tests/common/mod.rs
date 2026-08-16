@@ -1,8 +1,10 @@
-//! Shared dual-target test utilities for W1+ harness tests.
+//! Shared multi-target test utilities for W1+ harness tests.
 //!
-//! DuckDB always runs; Spark runs only when `SPARK_CONNECT_URL` is set.
-//! Tests that call `targets_to_run()` are automatically skipped on the Spark
-//! path when no server is provisioned — they still pass by covering DuckDB only.
+//! DuckDB always runs; Spark runs only when `SPARK_CONNECT_URL` is set, and
+//! BigQuery only when `SMELT_BQ_PROJECT` and `SMELT_BQ_ACCESS_TOKEN` are both
+//! set. Tests that call `targets_to_run()` are automatically skipped on the
+//! remote paths when no warehouse is provisioned — they still pass by covering
+//! DuckDB only.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -19,11 +21,71 @@ use arrow::record_batch::RecordBatch;
 pub enum TargetKind {
     DuckDb,
     Spark,
+    /// BigQuery, carrying the suite-scoped dataset this run isolates in.
+    ///
+    /// The dataset doubles as the schema name, so a suite's match arm reads
+    /// `TargetKind::BigQuery { dataset } => ("bq", dataset.as_str())`.
+    BigQuery {
+        dataset: String,
+    },
 }
 
 /// Returns `SPARK_CONNECT_URL` from the environment, or `None` when absent.
 pub fn spark_connect_url() -> Option<String> {
     std::env::var("SPARK_CONNECT_URL").ok()
+}
+
+/// The live BigQuery environment a suite runs against.
+pub struct BqEnv {
+    pub project: String,
+    pub token: String,
+    pub dataset_base: String,
+    pub location: Option<String>,
+}
+
+/// The BigQuery environment, or `None` when the BigQuery leg should be skipped.
+///
+/// Both the project and a live token are required. `SMELT_BQ_PROJECT` alone
+/// would let a suite *fail* with an auth error rather than skip, which is
+/// exactly the failure mode the skip gate exists to prevent.
+pub fn bq_env() -> Option<BqEnv> {
+    Some(BqEnv {
+        project: std::env::var("SMELT_BQ_PROJECT").ok()?,
+        token: std::env::var("SMELT_BQ_ACCESS_TOKEN").ok()?,
+        dataset_base: std::env::var("SMELT_BQ_DATASET")
+            .unwrap_or_else(|_| "smelt_test".to_string()),
+        location: std::env::var("SMELT_BQ_LOCATION").ok(),
+    })
+}
+
+/// The dataset a suite labelled `label` isolates in.
+///
+/// Derived rather than minted, so staging (which writes the `bq:` target block)
+/// and the assertion loop (which reads back through `TargetKind::BigQuery`)
+/// agree without threading state between them. The pid keeps two concurrent
+/// runs — two worktrees, or a developer beside an autonomy loop — apart; the
+/// label keeps two suites in the same binary apart.
+pub fn bq_dataset(label: &str) -> String {
+    let base = bq_env()
+        .map(|e| e.dataset_base)
+        .unwrap_or_else(|| "smelt_test".to_string());
+    let label: String = label
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("{base}_{label}_{}", std::process::id())
+}
+
+/// True when this binary can actually drive BigQuery: compiled with the feature
+/// AND pointed at a live project with a live token.
+pub fn bigquery_enabled() -> bool {
+    cfg!(feature = "bigquery") && bq_env().is_some()
 }
 
 /// Returns the targets to run this iteration.
@@ -33,14 +95,96 @@ pub fn spark_connect_url() -> Option<String> {
 /// - the test binary was compiled with `--features spark` (so the `smelt`
 ///   binary also has Spark support).
 ///
-/// This ensures `cargo test --quiet` (the default, no spark feature) is always
-/// green even when `SPARK_CONNECT_URL` is present in the environment.
-pub fn targets_to_run() -> Vec<TargetKind> {
+/// Appends `BigQuery` under the same rule: `--features bigquery` plus a live
+/// `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` pair.
+///
+/// This ensures `cargo test --quiet` (the default, no remote features) is always
+/// green even when those variables are present in the environment.
+///
+/// `label` names the suite; it scopes the BigQuery dataset so two suites in one
+/// binary never write the same table. Pass the same label to
+/// [`bq_target_block`] when staging the workspace.
+pub fn targets_to_run(label: &str) -> Vec<TargetKind> {
     let mut targets = vec![TargetKind::DuckDb];
     if cfg!(feature = "spark") && spark_connect_url().is_some() {
         targets.push(TargetKind::Spark);
     }
+    if bigquery_enabled() {
+        targets.push(TargetKind::BigQuery {
+            dataset: bq_dataset(label),
+        });
+    }
     targets
+}
+
+/// The body of a `bigquery` target block (4-space indented, no leading key).
+fn bq_target_body(dataset: &str) -> String {
+    let env = bq_env().expect("bq_target_body called without a BigQuery environment");
+    let location = env
+        .location
+        .map(|l| format!("\n    location: {l}"))
+        .unwrap_or_default();
+    format!(
+        "type: bigquery\n    project: {}\n    dataset: {dataset}\n    schema: {dataset}{location}",
+        env.project
+    )
+}
+
+/// The whole `bq:` target entry for `label`, ready to concatenate under
+/// `targets:` in a hand-written `smelt.yml`.
+///
+/// Empty when BigQuery is not enabled, so a suite can append it unconditionally
+/// — an empty string leaves the default DuckDB-only workspace untouched, and a
+/// target the CLI could not parse is never written.
+pub fn bq_target_block(label: &str) -> String {
+    if !bigquery_enabled() {
+        return String::new();
+    }
+    format!("  bq:\n    {}\n", bq_target_body(&bq_dataset(label)))
+}
+
+/// Drops the suite's BigQuery dataset, if this kind is the BigQuery one.
+///
+/// A no-op for every other target. Datasets also carry the default table
+/// expiration `scripts/bigquery-env.sh` exports, so an interrupted run still
+/// sheds its tables — this makes the clean path immediate rather than delayed.
+pub fn drop_bq_dataset(target: &TargetKind) {
+    let TargetKind::BigQuery { dataset } = target else {
+        return;
+    };
+    let _ = dataset;
+    #[cfg(feature = "bigquery")]
+    {
+        use smelt_backend::Backend;
+        let env = bq_env().expect("BigQuery env must be set to drop a dataset");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime for drop_bq_dataset");
+        rt.block_on(async {
+            let backend = bq_backend(dataset).await;
+            let _ = backend
+                .execute_sql(&format!(
+                    "DROP SCHEMA IF EXISTS `{}.{dataset}` CASCADE",
+                    env.project
+                ))
+                .await;
+        });
+    }
+}
+
+/// Connects a `BigQueryBackend` to `dataset` from the ambient test environment.
+///
+/// Public so a suite that drives the `Backend` trait directly — rather than
+/// going through `smelt run` — can reach the same connection the harness uses.
+#[cfg(feature = "bigquery")]
+pub async fn bq_backend(dataset: &str) -> smelt_backend_bigquery::BigQueryBackend {
+    let env = bq_env().expect("BigQuery env must be set to connect");
+    smelt_backend_bigquery::BigQueryBackend::new(
+        &env.project,
+        dataset,
+        env.location.as_deref(),
+        &env.token,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("BigQuery connect failed: {e}"))
 }
 
 /// Returns `(target_name, yaml_block)` for a single target kind.
@@ -67,14 +211,17 @@ pub fn targets_yaml(kind: &TargetKind, warehouse_dir: &Path) -> (String, String)
                 ),
             )
         }
+        TargetKind::BigQuery { dataset } => ("bq".to_string(), bq_target_body(dataset)),
     }
 }
 
-/// Stages a smelt workspace with both a `dev` (DuckDB) and `spark` target.
+/// Stages a smelt workspace with a `dev` (DuckDB), a `spark`, and — when the
+/// BigQuery environment is live — a `bq` target.
 ///
-/// The `smelt.yml` always includes both target blocks so a test can run
-/// `--target spark` when Spark is up. `targets_to_run()` controls which
-/// targets are actually exercised in the loop.
+/// The `smelt.yml` always includes the DuckDB and Spark blocks so a test can run
+/// `--target spark` when Spark is up. `targets_to_run(name)` controls which
+/// targets are actually exercised in the loop; pass the same `name` there, since
+/// it scopes the BigQuery dataset.
 pub fn stage_dual_workspace(
     tmp: &TempDir,
     name: &str,
@@ -88,12 +235,13 @@ pub fn stage_dual_workspace(
 
     let (dev_name, dev_yaml) = targets_yaml(&TargetKind::DuckDb, warehouse_dir);
     let (spark_name, spark_yaml) = targets_yaml(&TargetKind::Spark, warehouse_dir);
+    let bq_block = bq_target_block(name);
 
     let yml = format!(
         "name: {name}\n\
          version: 1\n\
          paths:\n  - models\n\
-         targets:\n  {dev_name}:\n    {dev_yaml}\n  {spark_name}:\n    {spark_yaml}\n\
+         targets:\n  {dev_name}:\n    {dev_yaml}\n  {spark_name}:\n    {spark_yaml}\n{bq_block}\
          default_materialization: view\n"
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
@@ -238,6 +386,22 @@ pub fn seed_source_table(
                 });
             }
         }
+        TargetKind::BigQuery { dataset } => {
+            let _ = dataset;
+            #[cfg(not(feature = "bigquery"))]
+            panic!("BigQuery seeding requires --features bigquery");
+            #[cfg(feature = "bigquery")]
+            {
+                use smelt_backend::Backend;
+                rt.block_on(async {
+                    let backend = bq_backend(dataset).await;
+                    backend
+                        .load_table(schema, table, arrow_schema, vec![batch])
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery load_table failed: {e}"));
+                });
+            }
+        }
     }
 }
 
@@ -295,6 +459,22 @@ pub fn count_table_rows(
                 })
             }
         }
+        TargetKind::BigQuery { dataset } => {
+            let _ = dataset;
+            #[cfg(not(feature = "bigquery"))]
+            panic!("BigQuery count requires --features bigquery");
+            #[cfg(feature = "bigquery")]
+            {
+                use smelt_backend::Backend;
+                rt.block_on(async {
+                    let backend = bq_backend(dataset).await;
+                    backend
+                        .get_row_count(schema, table)
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery get_row_count failed: {e}"))
+                })
+            }
+        }
     }
 }
 
@@ -347,6 +527,22 @@ fn execute_sql_on(
                         .execute_sql(sql)
                         .await
                         .unwrap_or_else(|e| panic!("Spark execute_sql failed: {e}"))
+                })
+            }
+        }
+        TargetKind::BigQuery { dataset } => {
+            let _ = dataset;
+            #[cfg(not(feature = "bigquery"))]
+            panic!("BigQuery SQL requires --features bigquery");
+            #[cfg(feature = "bigquery")]
+            {
+                use smelt_backend::Backend;
+                rt.block_on(async {
+                    let backend = bq_backend(dataset).await;
+                    backend
+                        .execute_sql(sql)
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery execute_sql failed: {e}"))
                 })
             }
         }
