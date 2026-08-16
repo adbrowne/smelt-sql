@@ -75,9 +75,18 @@ this outcome runs first in the programme.
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
 | 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | done |
 | 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | done |
-| 11 | Close-out: full standing-gate sweep (including one live-Spark execution of the `maintenance_conformance_spark` edits phase 9 could only compile-check, or a recorded reason it was not possible), criteria-vs-summaries judgment, outcome status flip | pending |
+| 11 | Close-out: full standing-gate sweep (including one live-Spark execution of the `maintenance_conformance_spark` edits phase 9 could only compile-check, or a recorded reason it was not possible), criteria-vs-summaries judgment, outcome status flip | planned |
 
 ## Decision log
+
+- **2026-08-16 (phase 11 plan).** No reshape — row 11 is the last row and nothing in phase 10's
+  summary surfaced criteria-serving work that needs its own phase. The one discovery phase 10
+  flagged (`smelt-parser-compat`'s seed-dependent `top`-as-identifier proptest failure) is a
+  pre-existing dialect divergence in an unrelated crate, untouched by this outcome; phase 11
+  records it under "## Out of scope" rather than adopting it. Also recorded in the plan: docker
+  is available in this environment, so the live Spark leg is expected to actually run, and
+  `spark-up.sh` must be invoked **from this worktree** because the container is a singleton bound
+  to the last worktree that started it.
 
 - **2026-08-16 (phase 10 plan).** Minimal reshape: row 11 now explicitly carries the live-Spark
   execution of phase 9's `maintenance_conformance_spark` edits (compile-checked only in that
