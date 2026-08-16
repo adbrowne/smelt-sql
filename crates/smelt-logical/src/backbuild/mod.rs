@@ -14,11 +14,13 @@
 pub mod classify;
 pub mod diff;
 pub mod emit;
+pub mod hash;
 pub mod plan;
 pub mod requalify;
 
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
+pub use hash::plan_hash;
 pub use plan::{
     derive_migration_plan, ColumnGroupPlan, CostClass, MigrationPlan, TechniqueCandidate, Verdict,
 };

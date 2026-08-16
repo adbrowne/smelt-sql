@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_argument},
-    find_project_root, init_db, Config, ModelDiscovery, SourcesConfig,
+    find_project_root, init_db, CliError, Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_logical::backbuild::{
-    ColumnGroupPlan, CostClass, SourceRef, TechniqueCandidate, Verdict,
+    plan_hash, ColumnGroupPlan, CostClass, MigrationPlan, SourceRef, TechniqueCandidate, Verdict,
 };
 use smelt_runtime::migrate::{derive_migration_plan_for_model, MigrateError, ModelMigrationFacts};
 use smelt_runtime::schema_evolution::infer_deployed_columns;
@@ -122,8 +123,8 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
         sources: source_facts,
     };
 
-    let plan = match derive_migration_plan_for_model(&canonical, &facts) {
-        Ok(plan) => plan,
+    let (inputs, plan) = match derive_migration_plan_for_model(&canonical, &facts) {
+        Ok(pair) => pair,
         Err(MigrateError::NoRecordedDefinition { model }) => {
             return Err(anyhow::anyhow!(
                 "smelt migrate: model '{}' has no recorded definition — deploy it at least once \
@@ -134,8 +135,72 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
         Err(e) => return Err(anyhow::anyhow!("smelt migrate: {}", e)),
     };
 
-    print_plan(&canonical, &plan);
-    Ok(())
+    let hash = plan_hash(&inputs, &plan);
+    let mut approvals = file_store
+        .load_migration_approvals()
+        .with_context(|| "Failed to load migration approval store")?;
+    let previously_approved =
+        approvals.get(&canonical).map(|a| a.plan_hash.as_str()) == Some(hash.as_str());
+
+    // Eclipsed: nothing to approve or apply either way (§Surface "Plan-and-
+    // approve": "An eclipsed-only delta is the one case with nothing to
+    // approve; it completes on the next plan step.").
+    if plan.eclipsed {
+        render(&canonical, &plan, &hash, previously_approved, args.json);
+        return Ok(());
+    }
+
+    if args.apply {
+        if previously_approved {
+            render(&canonical, &plan, &hash, previously_approved, args.json);
+            if !args.json {
+                println!(
+                    "\napproved — nothing to execute yet (execution lands with the apply path)"
+                );
+            }
+            return Ok(());
+        }
+
+        // Absent or stale: re-record the freshly derived plan and refuse to
+        // execute, printing the plan the operator must re-approve
+        // (`docs/specs/definition_deltas.md` §Surface "Approve and apply").
+        approvals.record(&canonical, hash.clone(), Utc::now());
+        file_store
+            .save_migration_approvals(&approvals)
+            .with_context(|| "Failed to save migration approval store")?;
+        render(&canonical, &plan, &hash, previously_approved, args.json);
+        return Err(CliError::PendingMigration(format!(
+            "smelt migrate: '{}' has no approved plan matching its current definition — review \
+             the plan above and run `smelt migrate {} --apply` again to approve it",
+            canonical, canonical
+        ))
+        .into());
+    }
+
+    // Plan mode: derive, print, and record — the record is what a
+    // subsequent `--apply` checks freshness against, not itself an
+    // approval; exit 3 flags the pending, unreviewed migration to CI
+    // (`docs/specs/cli.md` §"Exit codes").
+    approvals.record(&canonical, hash.clone(), Utc::now());
+    file_store
+        .save_migration_approvals(&approvals)
+        .with_context(|| "Failed to save migration approval store")?;
+    render(&canonical, &plan, &hash, previously_approved, args.json);
+    Err(CliError::PendingMigration(format!(
+        "smelt migrate: '{}' has a non-trivial migration plan pending — review the plan above \
+         and run `smelt migrate {} --apply` to approve and (once execution lands) apply it",
+        canonical, canonical
+    ))
+    .into())
+}
+
+fn render(model_name: &str, plan: &MigrationPlan, hash: &str, approved: bool, json: bool) {
+    if json {
+        print_plan_json(model_name, plan, hash, approved);
+    } else {
+        print_plan(model_name, plan);
+        println!("\nplan hash: {hash}");
+    }
 }
 
 fn print_plan(model_name: &str, plan: &smelt_logical::backbuild::MigrationPlan) {
@@ -185,7 +250,7 @@ fn print_candidate(candidate: &TechniqueCandidate) {
         "  technique: {:?} (cost: {}, {} statement(s), rerun-safe: {})",
         candidate.technique,
         cost_class_label(candidate.cost_class),
-        candidate.statement_count,
+        candidate.statement_count(),
         candidate.rerun_safe
     );
 }
@@ -208,5 +273,59 @@ fn cost_class_label(cost_class: CostClass) -> &'static str {
         CostClass::UpstreamRowSubset => "upstream row subset",
         CostClass::Destructive => "destructive",
         CostClass::FullTable => "full table",
+    }
+}
+
+/// `--json` rendering (CI mode, `docs/specs/definition_deltas.md` §Surface
+/// "`smelt migrate`"). The plan types stay serde-free
+/// (`smelt-logical`/`smelt-runtime` purity) — this builds a
+/// [`serde_json::Value`] directly in the CLI, the one layer allowed to know
+/// about JSON shape.
+fn print_plan_json(model_name: &str, plan: &MigrationPlan, hash: &str, approved: bool) {
+    let value = serde_json::json!({
+        "model": model_name,
+        "eclipsed": plan.eclipsed,
+        "plan_hash": hash,
+        "approved": approved,
+        "groups": plan.groups.iter().map(group_json).collect::<Vec<_>>(),
+        "full_refresh": {
+            "technique": format!("{:?}", plan.full_refresh.technique),
+            "statement_count": plan.full_refresh.statement_count(),
+        },
+    });
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&value).unwrap_or_else(|e| format!("{{\"error\": \"{e}\"}}"))
+    );
+}
+
+fn group_json(group: &ColumnGroupPlan) -> serde_json::Value {
+    serde_json::json!({
+        "label": group.label,
+        "verdict": verdict_code(group.verdict),
+        "candidates": group.candidates.iter().map(candidate_json).collect::<Vec<_>>(),
+        "refusals": group.refusals.iter().map(|r| serde_json::json!({
+            "atom": r.atom,
+            "reason": r.reason,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn candidate_json(candidate: &TechniqueCandidate) -> serde_json::Value {
+    serde_json::json!({
+        "technique": format!("{:?}", candidate.technique),
+        "cost_class": cost_class_label(candidate.cost_class),
+        "statement_count": candidate.statement_count(),
+        "reads_upstream": candidate.reads_upstream,
+        "rerun_safe": candidate.rerun_safe,
+    })
+}
+
+fn verdict_code(verdict: Verdict) -> &'static str {
+    match verdict {
+        Verdict::Eclipsed => "eclipsed",
+        Verdict::BackfillInPlace => "backfill_in_place",
+        Verdict::ReDerive => "re_derive",
+        Verdict::SkeletonChange => "skeleton_change",
     }
 }

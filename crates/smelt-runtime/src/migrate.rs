@@ -92,11 +92,16 @@ fn not_null_columns(columns: &[DeployedColumn]) -> BTreeSet<String> {
 }
 
 /// Derive the [`MigrationPlan`] for one model from its gathered facts —
-/// pure aside from the two SQL parses. Executes nothing.
+/// pure aside from the two SQL parses. Executes nothing. Returns the
+/// [`BackbuildInputs`] alongside the plan so a caller (`commands/migrate.rs`)
+/// can hash exactly the facts the plan was derived from
+/// (`smelt_logical::backbuild::plan_hash` — `docs/specs/definition_deltas.md`
+/// §Design "The plan hash covers the plan data structure, not only rendered
+/// SQL") without reconstructing them.
 pub fn derive_migration_plan_for_model(
     model_name: &str,
     facts: &ModelMigrationFacts,
-) -> Result<MigrationPlan, MigrateError> {
+) -> Result<(BackbuildInputs, MigrationPlan), MigrateError> {
     let deployed = facts
         .deployed
         .as_ref()
@@ -130,7 +135,8 @@ pub fn derive_migration_plan_for_model(
     };
 
     let options = derive_backbuild_options(&diff, &inputs);
-    Ok(derive_migration_plan(&options))
+    let plan = derive_migration_plan(&options);
+    Ok((inputs, plan))
 }
 
 #[cfg(test)]
@@ -178,7 +184,7 @@ mod tests {
             sources: BTreeMap::new(),
         };
 
-        let plan =
+        let (_inputs, plan) =
             derive_migration_plan_for_model("orders_summary", &facts).expect("plan should derive");
 
         assert!(!plan.eclipsed);

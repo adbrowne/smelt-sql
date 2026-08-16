@@ -30,6 +30,7 @@ All run state lives under a single project-local `.smelt/` root (gitignored in e
     snapshots.json            # expanded-logical-SQL / fingerprint snapshots (virtual environments)
     schemas/<model>.json      # deployed schema snapshot per model, including the definition SQL
                               # the table was last maintained under (see schema_evolution.md)
+    migration-approvals.json  # per-model approved migration plan hash (see definition_deltas.md)
     reports/<run_id>.json     # run-report artifact (see "Run report" below)
 ```
 
@@ -49,7 +50,7 @@ A run acquires an exclusive advisory lock on `.smelt/lock` for its duration, rel
 
 ### Atomic writes
 
-Every write under `.smelt/` (a run manifest, the interval ledger, landed deltas, a schema snapshot, a run report, `meta.json` itself) is atomic: the new content is written to a temporary file in the same directory and renamed into place, so a process killed mid-write leaves either the old file intact or the new one — never a truncated or partially-written file.
+Every write under `.smelt/` (a run manifest, the interval ledger, landed deltas, a schema snapshot, a migration approval, a run report, `meta.json` itself) is atomic: the new content is written to a temporary file in the same directory and renamed into place, so a process killed mid-write leaves either the old file intact or the new one — never a truncated or partially-written file.
 
 ### Run manifest (`runs/<run_id>.json`)
 
@@ -168,7 +169,7 @@ The per-source landed-delta record (`landed_deltas.json`, §"`.smelt/` directory
 ## Constraints & Invariants
 
 - **Stateless requires no `.smelt/`.** Enabling no state posture must leave a project's on-disk footprint and behaviour exactly as today.
-- **Fixed layout.** State is confined to `.smelt/meta.json`, `.smelt/lock`, and, per target, `.smelt/targets/<target>/runs/`, `.smelt/targets/<target>/intervals.json`, `.smelt/targets/<target>/landed_deltas.json`, `.smelt/targets/<target>/snapshots.json`, `.smelt/targets/<target>/schemas/`, and `.smelt/targets/<target>/reports/`. New artifact kinds extend this layout under `.smelt/`, never outside it. (`reconciliation.json` is no longer part of the live layout — see §"Relationship to the reconciliation ledger" — but a legacy file left by a pre-residency binary is still recognised by the legacy-layout migration below and by the runtime's one-time import.)
+- **Fixed layout.** State is confined to `.smelt/meta.json`, `.smelt/lock`, and, per target, `.smelt/targets/<target>/runs/`, `.smelt/targets/<target>/intervals.json`, `.smelt/targets/<target>/landed_deltas.json`, `.smelt/targets/<target>/snapshots.json`, `.smelt/targets/<target>/schemas/`, `.smelt/targets/<target>/migration-approvals.json`, and `.smelt/targets/<target>/reports/`. New artifact kinds extend this layout under `.smelt/`, never outside it. (`reconciliation.json` is no longer part of the live layout — see §"Relationship to the reconciliation ledger" — but a legacy file left by a pre-residency binary is still recognised by the legacy-layout migration below and by the runtime's one-time import.)
 - **Layout version gates every read and write.** A `state_version` this binary does not recognise is a hard error, never a best-effort read. A missing `meta.json` triggers exactly one migration path (legacy root-level layout → per-target layout), never a silent no-op.
 - **Locking is mandatory around every state-mutating run.** `execute_project` acquires `.smelt/lock` before writing any state artifact and releases it on every exit path, including error. No code path writes under `.smelt/targets/` without holding the lock.
 - **Writes are atomic or they don't happen.** Every `.smelt/` write (manifest, ledger, snapshot, schema, report, `meta.json`) goes through a temp-file-then-rename path; a direct in-place `write` to a tracked state file is a bug.

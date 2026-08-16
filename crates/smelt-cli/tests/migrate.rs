@@ -55,14 +55,27 @@ fn run_build(project_dir: &Path) -> std::process::Output {
 }
 
 fn run_migrate(project_dir: &Path, model: &str) -> std::process::Output {
+    run_migrate_args(project_dir, model, &[])
+}
+
+fn run_migrate_args(project_dir: &Path, model: &str, extra_args: &[&str]) -> std::process::Output {
     Command::new(smelt_bin())
         .arg("migrate")
         .arg(model)
         .args(["--project-dir", project_dir.to_str().unwrap()])
+        .args(extra_args)
         .env_remove("RUST_LOG")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt migrate`: {e}"))
 }
+
+fn set_orders_definition(project_dir: &Path, sql: &str) {
+    std::fs::write(project_dir.join("models/orders.sql"), sql).unwrap();
+}
+
+const ORDERS_SQL_V2_ADDED_COLUMN: &str = "\
+SELECT id, amount, amount * 0.9 AS net_amount FROM (VALUES (1, 100.0), (2, 200.0)) AS t(id, amount)
+";
 
 fn table_row_snapshot(project_dir: &Path, table_name: &str) -> Vec<(i64, String)> {
     let db_path = project_dir.join("target/dev.duckdb");
@@ -110,9 +123,10 @@ fn migrate_prints_backfill_in_place_plan_for_added_derived_column() {
     .unwrap();
 
     let output = run_migrate(&project_dir, "orders");
-    assert!(
-        output.status.success(),
-        "migrate failed: stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a non-eclipsed derived plan is pending and unapproved, exit 3: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -164,9 +178,10 @@ fn migrate_presents_rebuild_for_skeleton_change() {
     .unwrap();
 
     let output = run_migrate(&project_dir, "orders");
-    assert!(
-        output.status.success(),
-        "migrate failed: stderr={}",
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "a non-eclipsed derived plan is pending and unapproved, exit 3: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -209,5 +224,172 @@ fn migrate_on_unchanged_model_reports_eclipsed() {
     assert!(
         stdout.contains("eclipsed: nothing to do"),
         "expected the eclipsed short-circuit in output:\n{stdout}"
+    );
+}
+
+#[test]
+fn eclipsed_delta_exits_zero() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    let output = run_migrate(&project_dir, "orders");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn plan_step_records_hash_and_exits_three() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+
+    let output = run_migrate(&project_dir, "orders");
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("plan hash:"),
+        "expected the printed plan hash in output:\n{stdout}"
+    );
+
+    let approvals_path = project_dir.join(".smelt/targets/dev/migration-approvals.json");
+    assert!(
+        approvals_path.exists(),
+        "expected the plan step to record an approval-store file"
+    );
+    let content = std::fs::read_to_string(&approvals_path).unwrap();
+    assert!(
+        content.contains("orders"),
+        "expected the recorded approval to be keyed by the model: {content}"
+    );
+}
+
+#[test]
+fn json_flag_emits_plan_hash_and_verdicts() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+
+    let output = run_migrate_args(&project_dir, "orders", &["--json"]);
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not valid JSON: {e}\n{stdout}"));
+
+    assert_eq!(json["model"], "orders");
+    assert_eq!(json["eclipsed"], false);
+    assert!(json["plan_hash"].as_str().unwrap().starts_with("sha256:"));
+    assert!(json["approved"].is_boolean());
+    let groups = json["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["verdict"], "backfill_in_place");
+    assert_eq!(
+        groups[0]["candidates"][0]["technique"],
+        "SelfDerivedColumnAdd"
+    );
+}
+
+#[test]
+fn apply_without_recorded_plan_refuses() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let before_snapshot = table_row_snapshot(&project_dir, "orders");
+
+    let output = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("plan hash:"),
+        "expected --apply to print the fresh plan on refusal:\n{stdout}"
+    );
+
+    let approvals_path = project_dir.join(".smelt/targets/dev/migration-approvals.json");
+    assert!(
+        approvals_path.exists(),
+        "--apply should still record the freshly derived plan it refused"
+    );
+
+    let after_snapshot = table_row_snapshot(&project_dir, "orders");
+    assert_eq!(
+        before_snapshot, after_snapshot,
+        "a refused --apply must not execute anything"
+    );
+}
+
+#[test]
+fn apply_refuses_when_definition_changed_since_plan() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+
+    // Edit again after the plan step recorded its hash.
+    set_orders_definition(
+        &project_dir,
+        "SELECT id, amount, amount * 0.5 AS net_amount FROM (VALUES (1, 100.0), (2, 200.0)) AS \
+         t(id, amount)\n",
+    );
+
+    let apply_output = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        apply_output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&apply_output.stderr);
+    assert!(
+        stderr.contains("no approved plan matching"),
+        "expected the hash-mismatch refusal message:\n{stderr}"
+    );
+}
+
+#[test]
+fn apply_with_matching_hash_is_accepted() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+    let before_snapshot = table_row_snapshot(&project_dir, "orders");
+
+    let apply_output = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        apply_output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&apply_output.stdout);
+    assert!(
+        stdout.contains("approved"),
+        "expected the approved-and-not-yet-executed message:\n{stdout}"
+    );
+
+    let after_snapshot = table_row_snapshot(&project_dir, "orders");
+    assert_eq!(
+        before_snapshot, after_snapshot,
+        "execution has not landed yet — --apply must not mutate the table this phase"
     );
 }

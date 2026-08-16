@@ -81,17 +81,27 @@ impl CostClass {
 pub struct TechniqueCandidate {
     pub technique: Technique,
     pub cost_class: CostClass,
-    pub statement_count: usize,
+    /// The ordered statement strings this candidate executes — carried here
+    /// (not only on the source [`BackbuildOption`]) so the plan is
+    /// self-sufficient for [`super::hash::plan_hash`] and for the eventual
+    /// `--apply` executor, neither of which re-derives options from a diff.
+    pub statements: Vec<String>,
     pub reads_upstream: bool,
     pub rerun_safe: bool,
 }
 
 impl TechniqueCandidate {
+    /// Statement count (research §2 metadata), derived from `statements`
+    /// rather than stored separately so it can never drift.
+    pub fn statement_count(&self) -> usize {
+        self.statements.len()
+    }
+
     fn from_option(option: &BackbuildOption) -> Self {
         TechniqueCandidate {
             technique: option.technique,
             cost_class: CostClass::from_option(option),
-            statement_count: option.statement_count(),
+            statements: option.statements.clone(),
             reads_upstream: option.reads_upstream,
             rerun_safe: option.rerun_safe,
         }

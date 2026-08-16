@@ -600,6 +600,17 @@ struct MigrateArgs {
     /// diff's "before" side is read from is recorded per target.
     #[arg(long, default_value = "dev")]
     target: String,
+
+    /// Execute the most recently approved plan — refuses (exit 3) if the
+    /// freshly re-derived plan hash doesn't match the recorded one.
+    #[arg(long)]
+    apply: bool,
+
+    /// Emit the plan as machine-readable JSON instead of the human-readable
+    /// report (CI mode; `docs/specs/definition_deltas.md` §Surface "`smelt
+    /// migrate`").
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser)]

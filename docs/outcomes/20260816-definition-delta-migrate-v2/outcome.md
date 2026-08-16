@@ -65,7 +65,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
-| 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | planned |
+| 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | pending |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
@@ -113,6 +113,14 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   is pending and unapproved"), and `plan_hash` is a pure function in `smelt-logical` over the
   plan data *plus* its `BackbuildInputs` facts (per the inherited plan-hash scope), which
   requires `TechniqueCandidate` to carry its statement text rather than only a count.
+
+- **2026-08-16 (phase 2 implementation).** Plan mode always records the freshly derived hash
+  (even for a non-eclipsed plan it still exits `3` for) — recording and approval are distinct
+  acts; a human reviewing the printed plan is the approval, `--apply`'s hash match is the check
+  that nothing drifted since. Eclipsed plans never touch the approval store at all. Discovered
+  and reverted (not committed, unrelated to this phase): a `smelt-db`
+  `prop_multi_model_type_inference` proptest regression (`PERCENTILE_DISC` over `SmallInt`
+  infers `Double`) — see phase 2 summary "For the next planner".
 
 ## Blocked
 

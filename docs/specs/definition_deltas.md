@@ -107,9 +107,13 @@ smelt migrate <model> --json     # machine-readable plan + exit-code contract (C
   regions each affected column group has caught up (§"Frontier semantics"), and re-applying the
   same approved plan continues from there.
 - **CI mode.** `--json` plus the exit-code contract makes the pending-migration state visible to
-  CI: exit 0 when there is no definition delta or the delta is eclipsed-only; a distinct non-zero
-  exit when a non-trivial migration is derived but unapproved. "The deploy changes what this
-  table means" becomes a checkable pipeline state; formatting-only changes pass silently.
+  CI: exit `0` when there is no definition delta or the delta is eclipsed-only; exit `3` when a
+  non-trivial migration is derived but unapproved (`cli.md` §"Exit codes"). "The deploy changes
+  what this table means" becomes a checkable pipeline state; formatting-only changes pass
+  silently.
+- **Where approval lives.** The plan step writes the recorded plan hash to
+  `.smelt/targets/<target>/migration-approvals.json`, one entry per model (`run_state.md`
+  §"`.smelt/` directory layout").
 
 ### `smelt rebuild`
 
@@ -430,13 +434,13 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
 - **The definition-delta synthesis layer's execution half is unwired.** The classification and
   emission machinery (`crates/smelt-logical/src/backbuild/` — diff factoring, per-group
   verdicts, the technique catalogue, script assembly) is now consumed by `smelt migrate`'s plan
-  derivation (`crates/smelt-runtime/src/migrate.rs`, `crates/smelt-cli/src/commands/migrate.rs`);
-  what remains unwired is execution — `--apply` does not exist yet, so no plan this layer derives
-  is ever run. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 2.
-- **`smelt migrate <model>` exists and derives/prints the plan-only migration plan**; `--apply`,
-  `--json`, and the approval store do not exist yet (phase 2), the ranged-rebuild verb still
-  ships under the name `smelt backbuild` rather than `smelt rebuild` (phase 3), and the live
+  derivation and approval gate (`crates/smelt-runtime/src/migrate.rs`,
+  `crates/smelt-cli/src/commands/migrate.rs`); what remains unwired is execution — `--apply` never
+  runs a plan's statements yet, even on a matching hash. Tracked:
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 3.
+- **`smelt migrate <model>` exists and derives/prints the plan-only migration plan, with `--apply`,
+  `--json`, and the approval store all wired as a gate** (phase 2); the ranged-rebuild verb still
+  ships under the name `smelt backbuild` rather than `smelt rebuild` (phase 4), and the live
   handling of a definition change outside `smelt migrate` is still the narrower third mechanism
   covering **column additions only** (the definition-change trigger in the maintenance driver);
   a changed column's redefinition still falls to a full recompute there. Tracked:
@@ -451,10 +455,10 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `schema_evolution.md`" names; the unification should subsume it, not inherit it.
 - **The conformance harness has no definition-edit step kind yet** — the oracle extension in
   §"The oracle" is specified ahead of the harness work.
-- **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
-  data structure per §Design "The plan hash covers the plan data structure, not only rendered
-  SQL", is unbuilt. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 2.
+- **`--apply` does not execute statements yet.** The plan hash, the approval store
+  (`.smelt/targets/<target>/migration-approvals.json`), and the hash-mismatch/staleness refusal
+  gate §Surface describes all exist; `--apply` on a matching hash reports the approved plan but
+  runs nothing. Tracked: `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 3.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's

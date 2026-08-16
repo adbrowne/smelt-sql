@@ -1,6 +1,7 @@
 use crate::frozen_band_baselines::FrozenBandBaselineStore;
 use crate::intervals::IntervalStore;
 use crate::landed_deltas::LandedDeltaStore;
+use crate::migration_approvals::MigrationApprovalStore;
 use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
@@ -32,6 +33,8 @@ enum StateFamily {
     Intervals,
     /// `.smelt/targets/<target>/landed_deltas.json`.
     LandedDeltas,
+    /// `.smelt/targets/<target>/migration-approvals.json`.
+    MigrationApproval,
     /// `.smelt/targets/<target>/schemas/{model}.json`.
     SchemaSnapshot,
     /// `.smelt/targets/<target>/source_postures.json`.
@@ -232,6 +235,10 @@ impl FileStore {
 
     fn landed_deltas_path(&self) -> PathBuf {
         self.target_dir.join("landed_deltas.json")
+    }
+
+    fn migration_approvals_path(&self) -> PathBuf {
+        self.target_dir.join("migration-approvals.json")
     }
 
     fn source_postures_path(&self) -> PathBuf {
@@ -622,6 +629,39 @@ impl FileStore {
             .with_context(|| format!("Failed to write landed-delta store: {:?}", path))
     }
 
+    // --- Migration approval store ---
+
+    /// Load the per-model migration approval store from disk
+    /// (`docs/specs/definition_deltas.md` §Surface "`smelt migrate`").
+    /// Returns default if the file doesn't exist — a model with no entry has
+    /// never had a migration plan approved.
+    pub fn load_migration_approvals(&self) -> Result<MigrationApprovalStore> {
+        if !self.writes(StateFamily::MigrationApproval) {
+            return Ok(MigrationApprovalStore::default());
+        }
+        self.check_version()?;
+        let path = self.migration_approvals_path();
+        if !path.exists() {
+            return Ok(MigrationApprovalStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read migration-approval store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse migration-approval store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-model migration approval store to disk.
+    pub fn save_migration_approvals(&self, store: &MigrationApprovalStore) -> Result<()> {
+        if !self.writes(StateFamily::MigrationApproval) {
+            return Ok(());
+        }
+        self.init()?;
+        let path = self.migration_approvals_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write migration-approval store: {:?}", path))
+    }
+
     // --- Source posture store ---
 
     /// Load the per-source append-only posture baseline store from disk
@@ -929,6 +969,36 @@ mod tests {
         let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
         let loaded = store.load_landed_deltas().unwrap();
         assert!(loaded.sources.is_empty());
+    }
+
+    #[test]
+    fn approval_store_round_trips() {
+        use chrono::Utc;
+
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
+
+        let mut approvals = MigrationApprovalStore::default();
+        approvals.record(
+            "orders_summary",
+            "sha256:aaaaaaaaaaaa".to_string(),
+            Utc::now(),
+        );
+        store.save_migration_approvals(&approvals).unwrap();
+
+        let loaded = store.load_migration_approvals().unwrap();
+        assert_eq!(
+            loaded.get("orders_summary").unwrap().plan_hash,
+            "sha256:aaaaaaaaaaaa"
+        );
+    }
+
+    #[test]
+    fn missing_approval_file_reads_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
+        let loaded = store.load_migration_approvals().unwrap();
+        assert!(loaded.approvals.is_empty());
     }
 
     /// A pre-existing `landed_deltas.json` written before the watermark

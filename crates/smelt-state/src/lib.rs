@@ -5,6 +5,7 @@ pub mod frozen_band_baselines;
 pub mod history;
 pub mod intervals;
 pub mod landed_deltas;
+pub mod migration_approvals;
 pub mod reconciliation;
 pub mod schema_tracking;
 pub mod snapshot_store;
