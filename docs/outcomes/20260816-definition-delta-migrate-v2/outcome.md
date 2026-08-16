@@ -87,7 +87,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
 | 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | done |
 | 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | done |
-| 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | planned |
+| 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | done |
 
 ## Decision log
 
@@ -359,6 +359,21 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   "## Out of scope" entry that owns it — a bullet that outlives this outcome must not cite this
   outcome as its tracker. Also scoped in: a standing `spec_references_are_live_paths` check in
   `backbuild_docs.rs`, so the §References path list cannot rot again silently.
+
+- **2026-08-17 (phase 11 implementation).** Landed the `spec_references_are_live_paths` standing
+  gate, refreshed §References, and re-verified all four §Known Divergences bullets against the
+  code. All four are still live (none were stale): bullet 1's wording was inaccurate ("falls to a
+  full recompute") — `diff_schemas` never detects a same-type redefinition at all, so nothing
+  recomputes, it silently folds under the new SQL — reconciled with the pending-delta-run-refusal
+  bullet (same gap, not two) and repointed at "Out of scope". Bullet 3 (destructive legs refused)
+  reworded to name it a deliberate phase-3 narrowing rather than an implied open commitment.
+  Checked and confirmed no contradiction between §Detection's "never overwrites the recorded
+  definition" claim and the schema-evolution `AtomicGroup` route re-recording it on an ordinary
+  run — §"Boundary with `schema_evolution.md`" already establishes that route as part of the
+  definition-delta migration mechanism itself for additive changes, so no spec edit was needed
+  there. Full standing-gate sweep green (`verify-phase.sh`, `maintenance_conformance`,
+  `statement_parity`, `execute_parity`, `walk_coverage`, `backbuild_docs`, `rebuild_dry_run`,
+  `mkdocs build --strict`).
 
 ## Blocked
 

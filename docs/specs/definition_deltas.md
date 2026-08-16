@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-17
 owners: [andrew]
 ---
 
@@ -473,10 +473,13 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **The live handling of a definition change outside `smelt migrate` is still the narrower third
-  mechanism covering column additions only** (the definition-change trigger in the maintenance
-  driver); a changed column's redefinition still falls to a full recompute there. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
+- **Outside `smelt migrate`, only column additions get a dedicated live mechanism** (the
+  maintenance driver's `Trigger::ColumnAdded` path). A redefined or removed column has no
+  narrower live handling at all — it is the same gap as the pending-delta run refusal below, not
+  a separate one: a windowed or incrementally-maintained run under such a change folds data
+  deltas under the new SQL while the old definition stays recorded, invisibly. Tracked as out of
+  scope in `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope" (the
+  pending-delta run refusal entry).
 - **Migration resume is recorded per column group, not per region.** §"Frontier semantics"
   describes per-region catch-up as the general frontier mechanism; `--apply`'s resume (§Surface
   "`smelt migrate`" "Resume") only distinguishes "this group's statements ran" from "they
@@ -484,12 +487,14 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   statement group on resume rather than resuming mid-region. Per-cell frontier addressing for
   migration groups is out of scope for this outcome; see
   `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope".
-- **Destructive legs are refused, not executed.** §"The migration plan" promises verification
-  probes (row-count and fingerprint checks) surface as part of the presented plan for a
-  column-drop or table-swap leg; `--apply` does not emit those probes yet, so a plan containing a
-  destructive candidate as a group's first candidate refuses to execute that group (and, by the
-  all-groups-admitted-first rule, the whole plan) rather than running it unverified. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
+- **Destructive legs are refused, not executed — by deliberate design, not a residual gap.**
+  §"The migration plan" promises verification probes (row-count and fingerprint checks) surface
+  as part of the presented plan for a column-drop or table-swap leg; `--apply` does not emit those
+  probes yet, so a plan containing a destructive candidate as a group's first candidate refuses to
+  execute that group (and, by the all-groups-admitted-first rule, the whole plan) rather than
+  running it unverified. This narrowing is permanent for this outcome, recorded in its phase 3
+  decision log (`docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`, 2026-08-16);
+  closing it needs the verification-probe emitters, which have no current tracker.
 - **The pending-delta run refusal is not implemented.** §Detection's "`smelt run` refuses to fold
   data deltas while a non-eclipsed definition delta is pending" is not yet enforced: today a
   windowed or incrementally-maintained run under changed SQL folds data deltas under the new SQL
@@ -509,19 +514,34 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/backbuild/{mod,diff,classify,emit,requalify}.rs` (the
-  synthesis layer: diff factoring, verdicts, technique catalogue, script emission);
-  `crates/smelt-logical/src/analysis/definition_change.rs` and
+- **Code**: `crates/smelt-logical/src/backbuild/{mod,diff,classify,emit,requalify,plan}.rs` (the
+  synthesis layer: diff factoring, verdicts, technique catalogue, script emission, the pure plan
+  and its hash); `crates/smelt-logical/src/analysis/definition_change.rs` and
   `crates/smelt-logical/src/maintenance/skeleton.rs` (the live column-add classification and
   skeleton refusal); `crates/smelt-runtime/src/maintenance_driver.rs` (the live
-  definition-change trigger path).
+  definition-change trigger path); `crates/smelt-runtime/src/migrate.rs` (`smelt migrate`'s plan
+  assembly and `--apply` execution); `crates/smelt-runtime/src/schema_evolution.rs`
+  (`resolve_definition_change_route`, the atomicity-route decision); `crates/smelt-state/src/migration_approvals.rs`
+  (the approval store); `crates/smelt-cli/src/commands/migrate.rs` and
+  `crates/smelt-cli/src/commands/rebuild.rs` (the CLI verbs); `crates/smelt-db/src/workspace_ingest.rs`
+  (`read_deployed_columns`, populating `ProjectInput::deployed_columns`).
 - **Tests**: `crates/smelt-logical/src/backbuild/` module tests;
   `crates/smelt-logical/tests/maintenance_skeleton.rs`;
   `crates/smelt-logical/tests/maintenance_tracer_evolution.rs`;
+  `crates/smelt-logical/tests/backbuild_docs.rs` (the doc-sync gate);
   `crates/smelt-runtime/tests/tracer_evolution.rs`;
-  `crates/smelt-cli/tests/targeted_column_backfill.rs`.
-- **User docs**: none yet — the docs-site page for migration lands with the wiring plan.
-- **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking).
+  `crates/smelt-cli/tests/targeted_column_backfill.rs`;
+  `crates/smelt-cli/tests/migrate.rs` and `crates/smelt-cli/tests/exit_codes.rs` (plan/apply CLI
+  coverage); `crates/smelt-cli/tests/rebuild_dry_run.rs` (the `smelt rebuild` rename ratchets);
+  `crates/smelt-cli/tests/maintenance_conformance/` (the generative definition-edit pool and the
+  pinned `MigrateApply` conformance legs).
+- **User docs**: `docs-site/docs/guide/backbuild-synthesis.md` (the migration guide, built around
+  `smelt migrate`/`--apply`); `docs-site/docs/reference/cli.md` §`smelt migrate`.
+- **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking);
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` (wiring `smelt migrate` end to
+  end: the approval gate, `--apply` execution, the `smelt rebuild` rename, the generative
+  definition-edit pool, the atomicity unification, the diagnostic rename, and the pre-run
+  surfacing this References list now names).
 - **Research**: `docs/research/20260802-backbuild-synthesis.md` (the technique catalogue and its
   correctness oracle); `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the
   unification and the plan-and-approve workflow).
