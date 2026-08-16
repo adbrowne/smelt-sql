@@ -1582,6 +1582,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../backbuild-synthesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backbuild Synthesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../seeds/" class="md-nav__link">
         
   
@@ -1842,6 +1870,34 @@
     
   
     Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../model-diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Diagnostics
   
 
     
@@ -3057,8 +3113,8 @@
 </tr>
 <tr>
 <td><code>grain</code></td>
-<td><code>partition</code> | <code>key</code> | <code>key_per_partition</code></td>
-<td>Required with <code>refresh: incremental</code> — what a stored row <em>is</em> and how it is addressed. See <a href="../materializations/#refresh-axis">Materializations</a>.</td>
+<td><code>partition</code> | <code>key</code></td>
+<td>Optional check-only assertion with <code>refresh: incremental</code> — what a stored row <em>is</em> and how it is addressed. <code>key_per_partition</code> is a third derived label with no writable spelling. See <a href="../materializations/#refresh-axis">Materializations</a>.</td>
 </tr>
 <tr>
 <td><code>timeseries.event_time_column</code></td>
@@ -3076,9 +3132,9 @@
 <td>Time granularity for partitioning</td>
 </tr>
 <tr>
-<td><code>batched.unique_key</code></td>
+<td><code>merge_key</code></td>
 <td>string[]</td>
-<td>Columns for row-level merge (optional, <code>grain: partition</code> only)</td>
+<td>The write/dedup key a column-scoped MERGE technique writes on — never identity-conferring (optional). See <a href="../../reference/smelt-yml/#incremental-fields">smelt.yml reference — Incremental Fields</a>.</td>
 </tr>
 <tr>
 <td><code>safety_overrides</code></td>

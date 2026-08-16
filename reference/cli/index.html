@@ -1383,6 +1383,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/backbuild-synthesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backbuild Synthesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/seeds/" class="md-nav__link">
         
   
@@ -1643,6 +1671,34 @@
     
   
     Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../guide/model-diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Diagnostics
   
 
     
@@ -5225,7 +5281,7 @@
 <td></td>
 <td>bool</td>
 <td><code>false</code></td>
-<td>Output as JSON (required for machine consumption). Ignored when <code>MODEL_NAME</code> is given, except in combination with <code>--show-sql</code> (below).</td>
+<td>Output as JSON (required for machine consumption). With <code>MODEL_NAME</code>, emits the per-model maintenance-plan report as JSON — with or without <code>--show-sql</code>, same schema either way.</td>
 </tr>
 <tr>
 <td><code>--select</code></td>
@@ -5248,6 +5304,13 @@
 <td></td>
 <td>With <code>--show-sql</code>, use these real literal date bounds (<code>YYYY-MM-DD..YYYY-MM-DD</code>, end exclusive) for the printed statements' region. Without it, the symbolic placeholders <code>{{window_start}}</code>/<code>{{window_end}}</code> stand in.</td>
 </tr>
+<tr>
+<td><code>--technique</code></td>
+<td></td>
+<td>string</td>
+<td></td>
+<td>Requires <code>--show-sql</code>. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts <code>delete_insert</code>, <code>keyed_fold</code>, <code>column_scoped_merge</code>, <code>in_place_update</code>, <code>per_group_recompute</code>, <code>recompute</code> (<code>recompute</code> and <code>delete_insert</code> both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect <code>--json</code>, whose <code>technique_previews</code> array always carries every technique regardless of this flag.</td>
+</tr>
 </tbody>
 </table>
 <p>Without a <code>MODEL_NAME</code>, the output includes both the <strong>logical graph</strong> (models as written) and the <strong>physical graph</strong> (execution plan with ephemeral models inlined, strategies resolved). See <a href="../../developing/architecture/#two-graph-architecture">Two-Graph Architecture</a> for details.</p>
@@ -5258,6 +5321,9 @@ derived per-source scan clamps, each source's partition-locality verdict, any ad
 the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label), and one
 contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
 incremental</code> with a <code>grain:</code> declared) — other models print a one-line notice instead.</p>
+<p>Each cell also prints a <code>contract:</code> row — its effective <a href="../../guide/incremental-models/#contract-relaxations">contract relaxation</a>
+(<code>default</code>, or <code>frozen_horizon</code>/<code>deferral</code> with their declared intervals); <code>--json</code> carries the
+same information per cell as a <code>contract_point</code> object.</p>
 <p>A <code>ColumnScopedMerge</code> cell's block additionally prints an <code>observed-delta recording:</code> line —
 the only technique family recording is wired for today (<code>KeyedFold</code> and the staged-candidate
 write family do not record yet, so their cells print no such line at all). The line still says
@@ -5289,6 +5355,19 @@ both render through the identical <code>clock:</code> / <code>identity:</code> /
 <code>(source)</code> or <code>(model)</code> so it's clear which provider filled them. A row prints <code>(none)</code> when
 that provider declares neither fact — a source with no <code>timeseries:</code> and no <code>unique_key:</code> is
 legal and simply has nothing to summarize, never an error.</p>
+<p>Each edge additionally prints a <code>delta type:</code> row — the shape of change that edge's own upstream
+emits: <code>append-only within window</code> (every change lands as new rows within a bounded window,
+never revising an already-emitted row), <code>keyed upsert</code> (a change instead revises the row
+identified by a key set), or <code>general</code> (neither addressing holds, naming the construct or
+world-fact that degraded it — an unregistered operator such as a window function, a
+row-multiplying join, or a source declaring no <code>mutation_profile</code>). A source edge is typed by its
+own declared mutation profile; a model edge is typed by the upstream model's own derived verdict.
+An edge with no derivable verdict (e.g. the upstream isn't itself <code>refresh: incremental</code>) prints
+no <code>delta type:</code> row at all, rather than a fabricated one. A per-group recompute cell reading a
+<code>keyed upsert</code> upstream model edge (key-addressed, no partition clamp of its own) prints the
+group-grain fingerprint-sidecar diff <strong>over the upstream's own output table</strong> as its
+affected-key discovery mechanism, alongside the clamped current-source scan and the
+<code>mutable_snapshot</code> source sidecar diff.</p>
 <p>Add <code>--show-sql</code> to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
 compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
@@ -5315,6 +5394,19 @@ the <code>IS DISTINCT FROM</code>-guarded suppressed form the live run actually 
 wired to the same suppression check yet. The cell's <code>region key:</code> row (<code>WholeRow</code> vs. a named key) is
 still a reliable signal for one half of the admission rule: a <code>WholeRow</code> region key means that cell
 never suppresses, regardless of what <code>--show-sql</code> prints.</p>
+<p>Add <code>--technique &lt;name&gt;</code> (alongside <code>--show-sql</code>) to inspect a technique smelt <em>didn't</em> pick — every
+technique smelt knows an emitter for, previewed against each cell's own contract/identity/column data,
+labelled with whether that technique is actually sound here. This renders the requested technique's
+own statements in place of the admitted one's, per cell, together with the cell's admissibility verdict
+for it: <code>Admitted</code> (this is the technique the plan actually resolved), <code>InterchangeableAlternative</code>
+(proven sound for this cell, but not the one the plan resolved — region recompute is always this when
+it isn't itself admitted), or <code>NotApplicable</code> with a reason (the technique's structural preconditions
+aren't met for this cell — printed, never silently skipped). <code>--technique</code> always uses the symbolic
+<code>{{window_start}}</code>/<code>{{window_end}}</code> placeholders — it's a display-only illustration of a cell's shape,
+not a <code>--period</code>-bound dry run. <code>--json</code> (with or without <code>--technique</code>) always carries the full
+<code>technique_previews</code> array per cell — one entry per known technique, not just the admitted one — plus
+a top-level <code>properties</code> object with the model's derived property set (columns, grain, functional
+dependencies, per-column determinism/comparability/discriminants, row identity, source bounds).</p>
 <p><strong>Examples:</strong></p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-50-1" name="__codelineno-50-1" href="#__codelineno-50-1"></a><span class="c1"># Show the explain output</span>
 <a id="__codelineno-50-2" name="__codelineno-50-2" href="#__codelineno-50-2"></a>smelt<span class="w"> </span>explain
@@ -5339,6 +5431,10 @@ never suppresses, regardless of what <code>--show-sql</code> prints.</p>
 <a id="__codelineno-50-21" name="__codelineno-50-21" href="#__codelineno-50-21"></a>
 <a id="__codelineno-50-22" name="__codelineno-50-22" href="#__codelineno-50-22"></a><span class="c1"># Machine-readable statements array per cell</span>
 <a id="__codelineno-50-23" name="__codelineno-50-23" href="#__codelineno-50-23"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--json
+<a id="__codelineno-50-24" name="__codelineno-50-24" href="#__codelineno-50-24"></a>
+<a id="__codelineno-50-25" name="__codelineno-50-25" href="#__codelineno-50-25"></a><span class="c1"># See what the keyed-fold technique would look like on a model that doesn&#39;t admit it,</span>
+<a id="__codelineno-50-26" name="__codelineno-50-26" href="#__codelineno-50-26"></a><span class="c1"># and why it&#39;s not applicable there</span>
+<a id="__codelineno-50-27" name="__codelineno-50-27" href="#__codelineno-50-27"></a>smelt<span class="w"> </span>explain<span class="w"> </span>daily_events<span class="w"> </span>--show-sql<span class="w"> </span>--technique<span class="w"> </span>keyed_fold
 </code></pre></div>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-51-1" name="__codelineno-51-1" href="#__codelineno-51-1"></a>$ smelt explain daily_events
 <a id="__codelineno-51-2" name="__codelineno-51-2" href="#__codelineno-51-2"></a>Maintenance plan: daily_events
@@ -5369,6 +5465,7 @@ never suppresses, regardless of what <code>--show-sql</code> prints.</p>
 <a id="__codelineno-51-27" name="__codelineno-51-27" href="#__codelineno-51-27"></a>      clock:    (none)
 <a id="__codelineno-51-28" name="__codelineno-51-28" href="#__codelineno-51-28"></a>      identity: event_id
 <a id="__codelineno-51-29" name="__codelineno-51-29" href="#__codelineno-51-29"></a>      derived grain: key
+<a id="__codelineno-51-30" name="__codelineno-51-30" href="#__codelineno-51-30"></a>      delta type: general (degraded by: source &#39;raw.events&#39; is append_only but declares no clock/axis column)
 </code></pre></div>
 <hr />
 <h2 id="smelt-bakeoff">smelt bakeoff<a class="headerlink" href="#smelt-bakeoff" title="Permanent link">&para;</a></h2>

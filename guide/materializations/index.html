@@ -1638,6 +1638,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../backbuild-synthesis/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backbuild Synthesis
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../seeds/" class="md-nav__link">
         
   
@@ -1898,6 +1926,34 @@
     
   
     Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../model-diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Diagnostics
   
 
     
@@ -3136,11 +3192,11 @@
 </tr>
 </tbody>
 </table>
-<p>When <code>refresh:</code> is omitted, <code>full</code> is assumed — the model always rebuilds completely. <code>refresh: incremental</code> additionally requires a sibling <code>grain:</code> declaration — what a stored row <em>is</em> and how it is addressed:</p>
+<p>When <code>refresh:</code> is omitted, <code>full</code> is assumed — the model always rebuilds completely. <code>refresh: incremental</code> is admitted on its two shape-defining facts (<code>timeseries:</code> and/or <code>unique_key:</code>), which determine a derived <code>grain</code> label — what a stored row <em>is</em> and how it is addressed. <code>grain: partition</code> and <code>grain: key</code> may also be written as a check-only assertion; <code>key_per_partition</code> has no writable spelling:</p>
 <table>
 <thead>
 <tr>
-<th><code>grain:</code></th>
+<th><code>grain</code> (derived label)</th>
 <th>A stored row is…</th>
 <th>Identity</th>
 <th><code>timeseries:</code></th>
@@ -3160,7 +3216,7 @@
 <td><strong>forbidden</strong> — the output has no partition column; partition shape is read from the source</td>
 </tr>
 <tr>
-<td><code>key_per_partition</code></td>
+<td><code>key_per_partition</code> (derived-only)</td>
 <td>the trajectory: one row per <code>(key, partition)</code></td>
 <td><code>unique_key</code> <strong>required</strong></td>
 <td><strong>required</strong> — the partition axis is half the grain</td>
