@@ -220,12 +220,42 @@ All entries are local-gated, skipping green when `SMELT_BQ_PROJECT` is unset.
 | `maintenance_conformance_spark` | `maintenance_conformance_bigquery`, reduced cases | 7 |
 | `statement_parity`, `execute_parity` | backend-parametrized | 7 |
 
+## Provisioned environment
+
+Phase 0 is complete. The following exists in GCP and does not need re-deriving:
+
+| Resource | Value |
+|---|---|
+| Project | `smelt-bq-test-20260816` (dedicated; billing linked) |
+| APIs | `bigquery.googleapis.com`, `iam.googleapis.com` |
+| Dataset | `smelt_test`, location `US`, 24h default table expiration |
+| Service account | `smelt-bq-test@smelt-bq-test-20260816.iam.gserviceaccount.com` |
+| Grants | `roles/bigquery.jobUser` (project scope); `WRITER` on `smelt_test` only |
+| Credential store | `~/.config/gcloud-smelt-bq` (isolated `CLOUDSDK_CONFIG`) |
+
+Scripts, in the order they run: `bigquery-login.sh` (browser OAuth, human),
+`bigquery-provision.sh` (APIs/dataset/service account/IAM, scriptable),
+`bigquery-key.sh` (mint + passphrase-encrypt, human), then per session
+`bigquery-auth.sh` + `bigquery-env.sh`. `bigquery-verify.sh` proves the chain
+including a negative test that writing outside the granted dataset is refused.
+`bigquery-setup.sh` remains the single-command path for a fresh machine.
+
+**The budget alert is not provisioned.** `gcloud billing budgets` authenticates
+through Application Default Credentials — the full-identity credential this design
+deliberately refuses to create — so automating it would have undone the credential
+posture to save a minute of clicking. It stays a manual console step, tracked in
+Open Questions below.
+
 ## Open questions
 
 - **Phase 3's true size** — mechanical versus semantic split of the type-divergence surface.
   Answered by phase 2.
-- **Per-table DML rate limit** and per-query latency. Answered by phase 1; sets phase 7's
-  case count and possibly its table-allocation strategy.
+- **Per-table DML rate limit.** Answered by phase 1; sets phase 7's case count and possibly
+  its table-allocation strategy. Per-query latency is now measurable via
+  `scripts/bigquery-verify.sh`, which times a probe query and a DDL round-trip.
+- **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the
+  manual console step permanently, or find a budgets path that does not require
+  application-default credentials.
 - **Whether the emulator earns a place as a fast inner loop** for parse and type work only,
   once the real round-trip cost is measured. Deliberately deferred, not dismissed.
 - **Whether the CI-tier gap should stay permanent.** Recorded as a Known Divergence; a nightly
