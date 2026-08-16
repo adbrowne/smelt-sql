@@ -71,7 +71,7 @@ run shape.
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
-| 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | pending |
+| 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | planned |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
@@ -330,6 +330,23 @@ run shape.
   reading the identical `SignatureHeadline` value (byte-equal fields,
   test-verified). Spec, docs-site `cli.md`, and the web-analytics tutorial
   fixture updated. No reshape of the phase table.
+
+- 2026-08-16 (phase 10 planning): no reshape — phase 9's summary confirms row 10 is fully
+  unblocked and its own types are reusable only as inputs, exactly as the row assumes. Three
+  things pinned so the implementer does not rediscover them. (1) The ledger is a **model-level**
+  block, not a per-cell one: the contract point varies per column *group*, the settle bound is
+  model-level (`KeyLocality::settle_bound`), and printing a copy of the ledger under every cell
+  would multiply one fact by the cell count; the spec's §Surface "Per cell" bullet is edited to
+  move it out. (2) Settle bound is never fabricated — a model with no established key-temporal
+  locality prints `not derived` rather than a zero interval or an assumed `never`; only routes
+  1–3 have a derivation today. (3) The determinism exemption print lands **here**, not with the
+  determinism-scope divergence: the per-column verdict already exists
+  (`analysis::walk`'s `PropertyVector::determinism`, computed in the same `smelt-db` function
+  that builds the report), so the exemption is a plumb-and-print, while that divergence's real
+  residue (runtime pinning, oracle exemption, technique gates) is untouched and stays. Refusal
+  surfacing is scoped as: one rendering, moved from the report's tail to immediately after the
+  headline and given a diagnostic-code-named form, plus the `--json` array — `smelt build`'s
+  own refusal gate is already the `smelt-db` diagnostic path and is not re-litigated here.
 
 ## Blocked
 
