@@ -65,13 +65,14 @@ run shape.
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
-| 4 | Dispatch composition in the run loop: a model receiving several components in one tick dispatches each (lifts phase 2's single-edge substitution gate); propagated key restrictions reach the key-addressed cell | pending |
-| 5 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
-| 6 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
-| 7 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
-| 8 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
-| 9 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
-| 10 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
+| 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | planned |
+| 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | pending |
+| 6 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
+| 7 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
+| 8 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
+| 9 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
+| 10 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
+| 11 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -150,6 +151,21 @@ run shape.
   writes one). (4) The stale "no key-level dirt representation exists" clause removed from
   the Graph-layer-gaps divergence bullet (phase 3 landed the representation; the scheduler
   bullet owns the remaining residue). Phases 5–6 implement the amended semantics.
+
+- 2026-08-16 (phase 4 planning): reshape — old row 4 split into two (4: dispatch composition,
+  i.e. resolving and dispatching every key-addressed cell a model's inbound edges yield, plus the
+  visible widen-never-narrow downgrade when an input is uncovered; 5: the propagated key
+  restriction actually reaching the cell). The two halves are independent seams — composition is
+  entirely inside `execute.rs`/`maintenance_driver.rs`, while the restriction needs a new
+  request-level channel (`ExecuteRequest`, ~70 struct literals) plus an emitter parameter —
+  and phase 3's precedent ("one phase cannot honestly carry both") applies. Nothing left the
+  outcome; old rows 5–10 renumbered 6–11. Also pinned for row 5, so the implementer does not have
+  to rediscover it: the restriction must be **unioned** with the sidecar-discovered key set, never
+  intersected — the sidecar refresh runs in the same transaction as the write, so narrowing the
+  repaired set would advance the comparandum past keys that were never consumed (the wrong-and-quiet
+  outcome §"Upstream model edges" forbids). Phase 4 also lands the reporter-visible downgrade the
+  spec's §"Widen-never-narrow at dispatch" already requires and phase 2 left silent; the
+  `smelt explain` half of that visibility stays with row 8.
 
 ## Blocked
 
