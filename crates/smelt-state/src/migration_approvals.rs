@@ -19,6 +19,17 @@ use serde::{Deserialize, Serialize};
 pub struct MigrationApproval {
     pub plan_hash: String,
     pub recorded_at: DateTime<Utc>,
+    /// Labels of the column groups of this approved plan that have already
+    /// executed — `--apply`'s resume record (`docs/specs/definition_deltas.md`
+    /// §Surface "`smelt migrate`" "Resume"). `#[serde(default)]` so an
+    /// approval recorded before this field existed reads back as "nothing
+    /// applied yet" — fail-closed, never assumed applied.
+    #[serde(default)]
+    pub applied_groups: Vec<String>,
+    /// When the most recent group in `applied_groups` committed. `None`
+    /// until the first group of this approved plan applies.
+    #[serde(default)]
+    pub applied_at: Option<DateTime<Utc>>,
 }
 
 /// The full migration-approval store: model name -> its most recently
@@ -31,13 +42,17 @@ pub struct MigrationApprovalStore {
 
 impl MigrationApprovalStore {
     /// Record `plan_hash` as the live approval for `model`, replacing
-    /// whatever was previously recorded for it.
+    /// whatever was previously recorded for it — a different plan resumes
+    /// nothing, so any prior `applied_groups`/`applied_at` for `model` is
+    /// discarded along with the old hash.
     pub fn record(&mut self, model: &str, plan_hash: String, recorded_at: DateTime<Utc>) {
         self.approvals.insert(
             model.to_string(),
             MigrationApproval {
                 plan_hash,
                 recorded_at,
+                applied_groups: Vec::new(),
+                applied_at: None,
             },
         );
     }
@@ -45,6 +60,19 @@ impl MigrationApprovalStore {
     /// The live approval recorded for `model`, if any.
     pub fn get(&self, model: &str) -> Option<&MigrationApproval> {
         self.approvals.get(model)
+    }
+
+    /// Record that `label` (one column group of `model`'s live approved
+    /// plan) has applied — `--apply`'s resume record. A no-op if `model` has
+    /// no live approval (should not happen: a caller only applies a plan it
+    /// just confirmed is approved) or `label` is already recorded.
+    pub fn record_applied_group(&mut self, model: &str, label: &str, at: DateTime<Utc>) {
+        if let Some(approval) = self.approvals.get_mut(model) {
+            if !approval.applied_groups.iter().any(|g| g == label) {
+                approval.applied_groups.push(label.to_string());
+            }
+            approval.applied_at = Some(at);
+        }
     }
 }
 

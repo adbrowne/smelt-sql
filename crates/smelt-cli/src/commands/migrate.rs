@@ -4,14 +4,19 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_argument},
+    backend_factory::CliBackendFactory,
     find_project_root, init_db, CliError, Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_logical::backbuild::{
     plan_hash, ColumnGroupPlan, CostClass, MigrationPlan, SourceRef, TechniqueCandidate, Verdict,
 };
-use smelt_runtime::migrate::{derive_migration_plan_for_model, MigrateError, ModelMigrationFacts};
-use smelt_runtime::schema_evolution::infer_deployed_columns;
+use smelt_runtime::execute::BackendFactory;
+use smelt_runtime::migrate::{
+    apply_migration_plan, derive_migration_plan_for_model, MigrateError, MigrationApplyError,
+    ModelMigrationFacts,
+};
+use smelt_runtime::schema_evolution::{infer_deployed_columns, save_deployed_schema};
 use smelt_state::file_store::FileStore;
 
 use crate::MigrateArgs;
@@ -21,7 +26,7 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
-    if !config.targets.contains_key(&args.target) {
+    let Some(target_config) = config.targets.get(&args.target) else {
         return Err(anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
             args.target,
@@ -32,7 +37,8 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-    }
+    };
+    let target_config = target_config.clone();
 
     let sources = SourcesConfig::load(&project_dir).ok();
     let seeds = smelt_core::discover_seed_infos(&project_dir, &config.paths);
@@ -114,8 +120,14 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
         );
     }
 
+    // Schema-qualified: emitted statements (`UPDATE t SET …`, `ALTER TABLE t
+    // …`) address the deployed table directly, with no session-level
+    // default schema to fall back on (`crates/smelt-backend-duckdb`
+    // qualifies every DDL/DML it authors the same way).
+    let qualified_table = format!("{}.{}", target_config.schema, db_name);
+
     let facts = ModelMigrationFacts {
-        table: db_name,
+        table: qualified_table,
         after_sql,
         row_identity,
         current_columns,
@@ -146,19 +158,98 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
     // approve": "An eclipsed-only delta is the one case with nothing to
     // approve; it completes on the next plan step.").
     if plan.eclipsed {
-        render(&canonical, &plan, &hash, previously_approved, args.json);
+        render(
+            &canonical,
+            &plan,
+            &hash,
+            previously_approved,
+            args.json,
+            None,
+        );
         return Ok(());
     }
 
     if args.apply {
         if previously_approved {
-            render(&canonical, &plan, &hash, previously_approved, args.json);
-            if !args.json {
-                println!(
-                    "\napproved — nothing to execute yet (execution lands with the apply path)"
-                );
+            let already_applied: BTreeSet<String> = approvals
+                .get(&canonical)
+                .map(|a| a.applied_groups.iter().cloned().collect())
+                .unwrap_or_default();
+
+            let backend_factory = CliBackendFactory {
+                database_override: args.database.clone(),
+            };
+            let backend = backend_factory
+                .create(&args.target, &target_config, &project_dir)
+                .await
+                .with_context(|| format!("Failed to connect to target '{}'", args.target))?;
+
+            let mut newly_applied: Vec<String> = Vec::new();
+            let apply_result =
+                apply_migration_plan(backend.as_ref(), &plan, &already_applied, |label: &str| {
+                    newly_applied.push(label.to_string())
+                })
+                .await;
+
+            for label in &newly_applied {
+                approvals.record_applied_group(&canonical, label, Utc::now());
             }
-            return Ok(());
+            if !newly_applied.is_empty() {
+                file_store
+                    .save_migration_approvals(&approvals)
+                    .with_context(|| "Failed to save migration approval store")?;
+            }
+
+            match apply_result {
+                Ok(()) => {
+                    let deployed_version = facts.deployed.as_ref().map(|d| d.version);
+                    save_deployed_schema(
+                        &file_store,
+                        &canonical,
+                        &facts.after_sql,
+                        &facts.current_columns,
+                        deployed_version,
+                    )
+                    .with_context(|| {
+                        format!("Failed to record deployed schema for {}", canonical)
+                    })?;
+                    render(
+                        &canonical,
+                        &plan,
+                        &hash,
+                        previously_approved,
+                        args.json,
+                        Some(&newly_applied),
+                    );
+                    if !args.json {
+                        println!("'{}' definition recorded", canonical);
+                    }
+                    return Ok(());
+                }
+                Err(MigrationApplyError::Refused(refusal)) => {
+                    render(
+                        &canonical,
+                        &plan,
+                        &hash,
+                        previously_approved,
+                        args.json,
+                        None,
+                    );
+                    return Err(CliError::PendingMigration(format!(
+                        "smelt migrate: '{}' apply refused: {} — the honest route is `smelt \
+                         build --full-refresh` or `smelt rebuild`",
+                        canonical, refusal
+                    ))
+                    .into());
+                }
+                Err(err @ MigrationApplyError::Backend { .. }) => {
+                    return Err(anyhow::anyhow!(
+                        "smelt migrate: '{}' apply failed: {}",
+                        canonical,
+                        err
+                    ));
+                }
+            }
         }
 
         // Absent or stale: re-record the freshly derived plan and refuse to
@@ -168,7 +259,14 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
         file_store
             .save_migration_approvals(&approvals)
             .with_context(|| "Failed to save migration approval store")?;
-        render(&canonical, &plan, &hash, previously_approved, args.json);
+        render(
+            &canonical,
+            &plan,
+            &hash,
+            previously_approved,
+            args.json,
+            None,
+        );
         return Err(CliError::PendingMigration(format!(
             "smelt migrate: '{}' has no approved plan matching its current definition — review \
              the plan above and run `smelt migrate {} --apply` again to approve it",
@@ -185,7 +283,14 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
     file_store
         .save_migration_approvals(&approvals)
         .with_context(|| "Failed to save migration approval store")?;
-    render(&canonical, &plan, &hash, previously_approved, args.json);
+    render(
+        &canonical,
+        &plan,
+        &hash,
+        previously_approved,
+        args.json,
+        None,
+    );
     Err(CliError::PendingMigration(format!(
         "smelt migrate: '{}' has a non-trivial migration plan pending — review the plan above \
          and run `smelt migrate {} --apply` to approve and (once execution lands) apply it",
@@ -194,12 +299,30 @@ pub async fn migrate(args: MigrateArgs, scope: Option<&str>) -> Result<()> {
     .into())
 }
 
-fn render(model_name: &str, plan: &MigrationPlan, hash: &str, approved: bool, json: bool) {
+/// `applied` is `Some(labels)` — the column groups this `--apply` call just
+/// executed (possibly empty, when every group was already applied) — only
+/// for a successful `--apply` call; `None` otherwise (plan mode, an
+/// eclipsed delta, or a refused `--apply`).
+fn render(
+    model_name: &str,
+    plan: &MigrationPlan,
+    hash: &str,
+    approved: bool,
+    json: bool,
+    applied: Option<&[String]>,
+) {
     if json {
-        print_plan_json(model_name, plan, hash, approved);
+        print_plan_json(model_name, plan, hash, approved, applied);
     } else {
         print_plan(model_name, plan);
         println!("\nplan hash: {hash}");
+        if let Some(applied) = applied {
+            if applied.is_empty() {
+                println!("applied: already applied — nothing executed");
+            } else {
+                println!("applied groups: {}", applied.join(", "));
+            }
+        }
     }
 }
 
@@ -281,12 +404,20 @@ fn cost_class_label(cost_class: CostClass) -> &'static str {
 /// (`smelt-logical`/`smelt-runtime` purity) — this builds a
 /// [`serde_json::Value`] directly in the CLI, the one layer allowed to know
 /// about JSON shape.
-fn print_plan_json(model_name: &str, plan: &MigrationPlan, hash: &str, approved: bool) {
+fn print_plan_json(
+    model_name: &str,
+    plan: &MigrationPlan,
+    hash: &str,
+    approved: bool,
+    applied: Option<&[String]>,
+) {
     let value = serde_json::json!({
         "model": model_name,
         "eclipsed": plan.eclipsed,
         "plan_hash": hash,
         "approved": approved,
+        "applied": applied.is_some(),
+        "applied_groups": applied.unwrap_or(&[]),
         "groups": plan.groups.iter().map(group_json).collect::<Vec<_>>(),
         "full_refresh": {
             "technique": format!("{:?}", plan.full_refresh.technique),

@@ -298,6 +298,33 @@ fn json_flag_emits_plan_hash_and_verdicts() {
 }
 
 #[test]
+fn json_flag_on_apply_reports_applied_groups() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+
+    let output = run_migrate_args(&project_dir, "orders", &["--apply", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("not valid JSON: {e}\n{stdout}"));
+
+    assert_eq!(json["applied"], true);
+    let applied_groups = json["applied_groups"].as_array().unwrap();
+    assert_eq!(applied_groups.len(), 1);
+    assert_eq!(applied_groups[0], "added column 'net_amount'");
+}
+
+#[test]
 fn apply_without_recorded_plan_refuses() {
     let (_tmp, project_dir) = stage_fixture();
     let build_output = run_build(&project_dir);
@@ -364,7 +391,7 @@ fn apply_refuses_when_definition_changed_since_plan() {
 }
 
 #[test]
-fn apply_with_matching_hash_is_accepted() {
+fn apply_backfills_added_column_and_rerecords_definition() {
     let (_tmp, project_dir) = stage_fixture();
     let build_output = run_build(&project_dir);
     assert!(build_output.status.success());
@@ -372,7 +399,6 @@ fn apply_with_matching_hash_is_accepted() {
     set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
     let plan_output = run_migrate(&project_dir, "orders");
     assert_eq!(plan_output.status.code(), Some(3));
-    let before_snapshot = table_row_snapshot(&project_dir, "orders");
 
     let apply_output = run_migrate_args(&project_dir, "orders", &["--apply"]);
     assert_eq!(
@@ -383,13 +409,148 @@ fn apply_with_matching_hash_is_accepted() {
     );
     let stdout = String::from_utf8_lossy(&apply_output.stdout);
     assert!(
-        stdout.contains("approved"),
-        "expected the approved-and-not-yet-executed message:\n{stdout}"
+        stdout.contains("applied"),
+        "expected the applied-group summary line:\n{stdout}"
+    );
+
+    let after_snapshot = table_row_snapshot(&project_dir, "orders");
+    assert_eq!(
+        after_snapshot.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+        vec![1, 2],
+        "row set unchanged by a backfill-in-place apply"
+    );
+
+    let db_path = project_dir.join("target/dev.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open deployed database");
+    let net_amounts: Vec<f64> = conn
+        .prepare("SELECT net_amount FROM orders ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(
+        net_amounts,
+        vec![90.0, 180.0],
+        "net_amount should be backfilled as amount * 0.9"
+    );
+
+    // The next plan step reports eclipsed — the deployed definition now
+    // matches the model's current SQL.
+    let next_plan = run_migrate(&project_dir, "orders");
+    assert_eq!(
+        next_plan.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&next_plan.stderr)
+    );
+    let next_stdout = String::from_utf8_lossy(&next_plan.stdout);
+    assert!(
+        next_stdout.contains("eclipsed: nothing to do"),
+        "expected the applied definition to be recorded, eclipsing the next plan:\n{next_stdout}"
+    );
+}
+
+#[test]
+fn apply_is_idempotent_on_reinvocation() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+
+    let first_apply = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(first_apply.status.code(), Some(0));
+    let after_first = table_row_snapshot(&project_dir, "orders");
+
+    let second_apply = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        second_apply.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&second_apply.stderr)
+    );
+
+    let after_second = table_row_snapshot(&project_dir, "orders");
+    assert_eq!(
+        after_first, after_second,
+        "a second --apply on an already-applied definition must execute nothing"
+    );
+}
+
+#[test]
+fn apply_with_stale_hash_leaves_the_table_untouched() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    set_orders_definition(&project_dir, ORDERS_SQL_V2_ADDED_COLUMN);
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+
+    // Edit again after the plan step recorded its hash — the recorded
+    // approval is now stale.
+    set_orders_definition(
+        &project_dir,
+        "SELECT id, amount, amount * 0.5 AS net_amount FROM (VALUES (1, 100.0), (2, 200.0)) AS \
+         t(id, amount)\n",
+    );
+    let before_snapshot = table_row_snapshot(&project_dir, "orders");
+
+    let apply_output = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        apply_output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&apply_output.stderr);
+    assert!(
+        stderr.contains("no approved plan matching"),
+        "expected the hash-mismatch refusal message:\n{stderr}"
     );
 
     let after_snapshot = table_row_snapshot(&project_dir, "orders");
     assert_eq!(
         before_snapshot, after_snapshot,
-        "execution has not landed yet — --apply must not mutate the table this phase"
+        "a stale-hash refusal must not execute anything"
+    );
+}
+
+#[test]
+fn apply_refuses_a_skeleton_change_plan() {
+    let (_tmp, project_dir) = stage_fixture();
+    let build_output = run_build(&project_dir);
+    assert!(build_output.status.success());
+
+    // Change the GROUP BY grain — a skeleton change (G1), never targetable.
+    set_orders_definition(
+        &project_dir,
+        "SELECT id, SUM(amount) AS amount FROM (VALUES (1, 100.0), (2, 200.0)) AS t(id, amount) \
+         GROUP BY id\n",
+    );
+    let plan_output = run_migrate(&project_dir, "orders");
+    assert_eq!(plan_output.status.code(), Some(3));
+    let before_snapshot = table_row_snapshot(&project_dir, "orders");
+
+    let apply_output = run_migrate_args(&project_dir, "orders", &["--apply"]);
+    assert_eq!(
+        apply_output.status.code(),
+        Some(3),
+        "stderr={}",
+        String::from_utf8_lossy(&apply_output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&apply_output.stderr);
+    assert!(
+        stderr.contains("apply refused"),
+        "expected the apply-refused message naming the skeleton-change group:\n{stderr}"
+    );
+
+    let after_snapshot = table_row_snapshot(&project_dir, "orders");
+    assert_eq!(
+        before_snapshot, after_snapshot,
+        "a skeleton-change plan must execute nothing"
     );
 }

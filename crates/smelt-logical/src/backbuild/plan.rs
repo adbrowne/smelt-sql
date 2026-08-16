@@ -13,6 +13,7 @@ use super::{
     AtomAnalysis, AtomicChange, BackbuildOption, BackbuildOptions, BackbuildRefusal, Technique,
     WriteScope,
 };
+use crate::maintenance::emit::{MaintenanceStatement, StatementGroup};
 
 /// This group's disposition, per `docs/specs/definition_deltas.md`
 /// §Overview's worked example.
@@ -218,6 +219,25 @@ pub struct MigrationPlan {
     pub full_refresh: BackbuildOption,
 }
 
+/// Wrap one [`TechniqueCandidate`]'s already-authored statements into the
+/// transactional [`StatementGroup`] `--apply` executes — the sole conversion
+/// from candidate statements to an executed group, so a backfill-in-place
+/// group's schema change and its backfilled values commit or roll back
+/// together (`docs/specs/definition_deltas.md` §"The atomicity rule"). Never
+/// re-authors the statement text: the emitted text is exactly what
+/// `smelt migrate` printed and the plan hash covered.
+pub fn statement_group_for_candidate(candidate: &TechniqueCandidate) -> StatementGroup {
+    StatementGroup {
+        statements: candidate
+            .statements
+            .iter()
+            .cloned()
+            .map(MaintenanceStatement::new)
+            .collect(),
+        transactional: true,
+    }
+}
+
 /// Derive a [`MigrationPlan`] from a [`BackbuildOptions`] value — pure,
 /// total, and exhaustive over every [`Technique`] classification can admit.
 pub fn derive_migration_plan(options: &BackbuildOptions) -> MigrationPlan {
@@ -361,6 +381,31 @@ mod tests {
         assert_eq!(plan.groups.len(), 1);
         assert_eq!(plan.groups[0].verdict, Verdict::SkeletonChange);
         assert!(plan.groups[0].candidates.is_empty());
+    }
+
+    #[test]
+    fn candidate_statement_group_is_transactional_and_preserves_emitter_text() {
+        let candidate = TechniqueCandidate::from_option(&option(
+            Technique::SelfDerivedColumnAdd,
+            WriteScope::ColumnScoped,
+            false,
+        ));
+
+        let group = statement_group_for_candidate(&candidate);
+
+        assert!(group.transactional);
+        assert_eq!(
+            group
+                .statements
+                .iter()
+                .map(|s| s.sql.as_str())
+                .collect::<Vec<_>>(),
+            candidate
+                .statements
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

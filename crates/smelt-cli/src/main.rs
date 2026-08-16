@@ -601,8 +601,16 @@ struct MigrateArgs {
     #[arg(long, default_value = "dev")]
     target: String,
 
+    /// DuckDB database file path override — only opened by `--apply` on a
+    /// matching hash, to execute the approved plan's statements.
+    #[arg(long)]
+    database: Option<PathBuf>,
+
     /// Execute the most recently approved plan — refuses (exit 3) if the
-    /// freshly re-derived plan hash doesn't match the recorded one.
+    /// freshly re-derived plan hash doesn't match the recorded one, or if
+    /// the approved plan itself refuses to execute (a skeleton-change
+    /// group, a group with no admissible candidate, or a destructive
+    /// candidate).
     #[arg(long)]
     apply: bool,
 

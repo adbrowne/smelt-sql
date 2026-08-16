@@ -30,7 +30,8 @@ All run state lives under a single project-local `.smelt/` root (gitignored in e
     snapshots.json            # expanded-logical-SQL / fingerprint snapshots (virtual environments)
     schemas/<model>.json      # deployed schema snapshot per model, including the definition SQL
                               # the table was last maintained under (see schema_evolution.md)
-    migration-approvals.json  # per-model approved migration plan hash (see definition_deltas.md)
+    migration-approvals.json  # per-model approved migration plan hash, plus which column groups
+                              # of that approved plan have already applied (resume; see definition_deltas.md)
     reports/<run_id>.json     # run-report artifact (see "Run report" below)
 ```
 

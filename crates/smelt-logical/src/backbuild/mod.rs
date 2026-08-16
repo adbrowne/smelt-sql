@@ -22,7 +22,8 @@ pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
 pub use hash::plan_hash;
 pub use plan::{
-    derive_migration_plan, ColumnGroupPlan, CostClass, MigrationPlan, TechniqueCandidate, Verdict,
+    derive_migration_plan, statement_group_for_candidate, ColumnGroupPlan, CostClass,
+    MigrationPlan, TechniqueCandidate, Verdict,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
