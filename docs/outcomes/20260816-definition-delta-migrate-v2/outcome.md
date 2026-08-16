@@ -85,7 +85,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
-| 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | pending |
+| 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | planned |
 | 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
 | 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
@@ -295,6 +295,23 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   keep the diff bounded to the identity the spec's Known Divergences bullet names.
   Recorded out of scope: phase 7's carry-forward FROM-alias bug (maintenance driver's live-cell
   resolution, not `smelt migrate`'s emission path — no criterion depends on it).
+
+- **2026-08-17 (phase 9 planning). No phase reshape.** The phase-8 summary's carry-forward was
+  exactly this row's scope. Reading the code settled the shape: the deployed column names become a
+  field on the existing project-scoped `ProjectInput` Salsa **input** (not a new input struct) —
+  the tracked `maintenance_plan` query already resolves its `ProjectInput` via `find_project`, and
+  `maintenance_plan_report` (`smelt explain`) can read the same field, so one field serves both
+  consumers. Populated in exactly one place, `workspace_ingest::ingest_loaded_workspace`, which
+  both the CLI's `init_db` and the LSP's `initialize` already call — the workspace-loading-parity
+  rule gives CLI↔LSP symmetry for free and keeps the file I/O at the edge, outside every Salsa
+  query (the Salsa-purity rule; `set_project_input` already reads `smelt.yml` from disk at this
+  same edge, so the precedent exists). The snapshot reader needs `smelt-state` as a new production
+  dependency of `smelt-db`; `smelt-state` depends only on `smelt-core`/`-types`/`-dialect` and not
+  on `smelt-db`, so no cycle. `maintenance_plan_diagnostics` gains a `deployed_column_names`
+  parameter and stays pure. Also scoped in rather than deferred: LSP staleness — the watcher glob
+  set (`derive_watch_globs`) gains `.smelt/targets/*/schemas/*.json` so a run that rewrites a
+  snapshot refreshes the diagnostic without an editor restart; without it the surfaced diagnostic
+  would be correct only until the next run, which criterion 6 would not honestly meet.
 
 ## Blocked
 
