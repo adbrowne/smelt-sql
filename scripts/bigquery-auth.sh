@@ -25,7 +25,22 @@ export CLOUDSDK_CONFIG="$BQ_CONFIG_DIR"
 command -v gcloud >/dev/null 2>&1 || { echo "gcloud not found on PATH" >&2; exit 1; }
 
 _plain="$(mktemp)"
-trap 'command -v shred >/dev/null 2>&1 && shred -u "$_plain" 2>/dev/null || rm -f "$_plain"' EXIT
+
+# `activate-service-account` makes the service account this config's ACTIVE
+# account, and that outlives this script. Left alone it silently re-identifies
+# every later gcloud/bq call in this config — including scripts/bigquery-provision.sh,
+# a human-identity operation that then fails with PERMISSION_DENIED on API
+# enablement. Record whoever was active first and put them back on the way out.
+_prev_account="$(gcloud config get-value account 2>/dev/null || true)"
+[[ "$_prev_account" == "(unset)" ]] && _prev_account=""
+
+_cleanup() {
+  command -v shred >/dev/null 2>&1 && shred -u "$_plain" 2>/dev/null || rm -f "$_plain"
+  if [[ -n "${_prev_account:-}" ]]; then
+    gcloud config set account "$_prev_account" --quiet >/dev/null 2>&1 || true
+  fi
+}
+trap _cleanup EXIT
 
 # --yes is required: mktemp already created the file, and gpg otherwise stops to
 # ask about overwriting it. NOT --batch, which would suppress the passphrase
@@ -34,7 +49,15 @@ gpg --quiet --yes --decrypt --output "$_plain" "$KEY_ENC"
 
 gcloud auth activate-service-account --key-file="$_plain" --quiet >/dev/null 2>&1
 
-TOKEN="$(gcloud auth print-access-token)"
+# Name the service account explicitly rather than relying on it being active:
+# the restore above may already have run in a previous invocation, and this is
+# the one command that genuinely must be the service account.
+_sa_email="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["client_email"])' "$_plain" 2>/dev/null || true)"
+if [[ -n "$_sa_email" ]]; then
+  TOKEN="$(gcloud auth print-access-token --account="$_sa_email")"
+else
+  TOKEN="$(gcloud auth print-access-token)"
+fi
 EXPIRES=$(( $(date +%s) + 3500 ))
 
 umask 077

@@ -28,6 +28,31 @@ SA="smelt-bq-test@${PROJECT}.iam.gserviceaccount.com"
 
 say() { printf '\n=== %s\n' "$1"; }
 
+# Provisioning is a human-identity operation: it enables APIs and edits IAM,
+# neither of which the service account it creates can (or should) do.
+#
+# The active account in this config cannot be trusted to be the human one.
+# `bigquery-auth.sh` activates the service account to mint each token, which
+# sets it as the config's active account — so after any token mint, an
+# unqualified gcloud call here would run as the service account and fail with
+# PERMISSION_DENIED. Pin the admin identity explicitly instead.
+#
+# CLOUDSDK_CORE_ACCOUNT is used rather than `gcloud config set account` because
+# it applies to `bq` as well (bq shells out to gcloud) and mutates no stored
+# state — this script leaves the config exactly as it found it.
+ADMIN_ACCOUNT="${SMELT_BQ_ADMIN_ACCOUNT:-$("$GCLOUD" auth list \
+  --format='value(account)' 2>/dev/null | grep -v 'gserviceaccount\.com' | head -n1)}"
+
+if [[ -z "$ADMIN_ACCOUNT" ]]; then
+  echo "No human account is signed in to this gcloud config." >&2
+  echo "Provisioning enables APIs and edits IAM, which the test service account cannot do." >&2
+  echo "Run: bash scripts/bigquery-login.sh" >&2
+  echo "(or set SMELT_BQ_ADMIN_ACCOUNT=<your-email> if you signed in elsewhere)" >&2
+  exit 1
+fi
+export CLOUDSDK_CORE_ACCOUNT="$ADMIN_ACCOUNT"
+say "Provisioning as $ADMIN_ACCOUNT"
+
 say "Enabling APIs"
 "$GCLOUD" services enable bigquery.googleapis.com --project="$PROJECT"
 "$GCLOUD" services enable iam.googleapis.com --project="$PROJECT"
