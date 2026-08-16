@@ -5,17 +5,23 @@
 //! oracle this module implements against. This is the diff-foundation phase
 //! (research §6 `diff.rs`): purely syntactic CST-level factoring of two
 //! definitions into a [`DefinitionDiff`]. No admission judgements and no
-//! classification happen here — that is later phases' `classify.rs`. This
-//! module is deliberately unwired: nothing outside `smelt-logical` calls it
-//! yet.
+//! classification happen here — that is later phases' `classify.rs`.
+//! `plan.rs` re-shapes a [`BackbuildOptions`] into the printable
+//! [`plan::MigrationPlan`] `smelt migrate` renders
+//! (`docs/specs/definition_deltas.md` §Overview); the ranged-rebuild path
+//! (`smelt backbuild`) does not consume this module.
 
 pub mod classify;
 pub mod diff;
 pub mod emit;
+pub mod plan;
 pub mod requalify;
 
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
+pub use plan::{
+    derive_migration_plan, ColumnGroupPlan, CostClass, MigrationPlan, TechniqueCandidate, Verdict,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 

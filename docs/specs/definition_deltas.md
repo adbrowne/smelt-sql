@@ -427,17 +427,20 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **The definition-delta synthesis layer is unwired.** The classification and emission machinery
-  (`crates/smelt-logical/src/backbuild/` — diff factoring, per-group verdicts, the technique
-  catalogue, script assembly) exists and is fully tested, but nothing outside its own crate
-  calls it: no CLI verb reaches it, no plan derivation consumes it. Tracked:
-  `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2 (no
-  implementation plan yet).
-- **`smelt migrate` does not exist**, and the ranged-rebuild verb ships under the name
-  `smelt backbuild` rather than `smelt rebuild`. The live handling of definition changes is a
-  narrower third mechanism covering **column additions only** (the definition-change trigger in
-  the maintenance driver); a changed column's redefinition falls to a full recompute. Same
-  tracking as above.
+- **The definition-delta synthesis layer's execution half is unwired.** The classification and
+  emission machinery (`crates/smelt-logical/src/backbuild/` — diff factoring, per-group
+  verdicts, the technique catalogue, script assembly) is now consumed by `smelt migrate`'s plan
+  derivation (`crates/smelt-runtime/src/migrate.rs`, `crates/smelt-cli/src/commands/migrate.rs`);
+  what remains unwired is execution — `--apply` does not exist yet, so no plan this layer derives
+  is ever run. Tracked:
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 2.
+- **`smelt migrate <model>` exists and derives/prints the plan-only migration plan**; `--apply`,
+  `--json`, and the approval store do not exist yet (phase 2), the ranged-rebuild verb still
+  ships under the name `smelt backbuild` rather than `smelt rebuild` (phase 3), and the live
+  handling of a definition change outside `smelt migrate` is still the narrower third mechanism
+  covering **column additions only** (the definition-change trigger in the maintenance driver);
+  a changed column's redefinition still falls to a full recompute there. Tracked:
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
 - **The atomicity rule is conditional in practice.** A model whose
   `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
   a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
@@ -451,14 +454,14 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
 - **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
   data structure per §Design "The plan hash covers the plan data structure, not only rendered
   SQL", is unbuilt. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 2.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
   add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
   sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
   `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7.
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 6.
 
 ## Future Extensions
 

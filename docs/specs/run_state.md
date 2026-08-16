@@ -28,7 +28,8 @@ All run state lives under a single project-local `.smelt/` root (gitignored in e
     intervals.json            # cumulative interval coverage across runs
     landed_deltas.json        # per-source landed-delta intervals + watermark, keyed by source address
     snapshots.json            # expanded-logical-SQL / fingerprint snapshots (virtual environments)
-    schemas/<model>.json      # deployed schema snapshot per model (see schema_evolution.md)
+    schemas/<model>.json      # deployed schema snapshot per model, including the definition SQL
+                              # the table was last maintained under (see schema_evolution.md)
     reports/<run_id>.json     # run-report artifact (see "Run report" below)
 ```
 

@@ -64,7 +64,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | planned |
+| 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 2 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
 | 3 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
 | 4 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
@@ -92,6 +92,15 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   rather than widening scope. Also decided: plan *derivation* is pure data in `smelt-logical`
   (`backbuild/plan.rs`), fact assembly lives in `smelt-runtime` (so the UI can consume it), and the
   CLI is a renderer only — keeping maintenance-plan purity and CLI↔UI parity intact.
+
+- **2026-08-16 (phase 1 implementation).** `smelt migrate <model>` diffs the model's raw SQL text
+  (`model.content`) against `DeployedSchema::definition_sql`, not `SqlCompiler`-compiled output —
+  `execute.rs` always records raw text as the deployed definition, and comparing compiled output
+  against it would spuriously diff every unchanged model. `SourceRef`s are built from
+  `DependencyGraph::get_upstream` (one entry per direct upstream model), not a full FROM-tree
+  alias walk — real for self-joins/multi-alias upstreams is deferred (see phase 1 summary "For
+  the next planner"). `MigrateArgs` dropped the plan's `--database` field: this command never
+  opens a backend connection, so the flag would be dead until `--apply` (phase 2) needs it.
 
 ## Blocked
 

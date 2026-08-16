@@ -287,6 +287,7 @@ pub async fn check_and_migrate(
                 deployed_at: Utc::now(),
                 model_hash,
                 columns: inferred_columns.to_vec(),
+                definition_sql: model_sql.to_string(),
             };
             file_store
                 .save_schema(&new_schema)
@@ -351,6 +352,7 @@ pub fn save_deployed_schema(
         deployed_at: Utc::now(),
         model_hash,
         columns: columns.to_vec(),
+        definition_sql: model_sql.to_string(),
     };
     file_store
         .save_schema(&schema)

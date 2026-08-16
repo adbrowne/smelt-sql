@@ -107,6 +107,9 @@ When a model is materialized by `smelt run` or `smelt build`, smelt writes the d
 - `deployment_timestamp`: ISO 8601 timestamp
 - `model_hash`: SHA-256 of the model SQL at deploy time
 - `columns`: Array of `{name, data_type, nullable}` objects
+- `definition_sql`: The model's raw SQL text at deploy time — the definition the stored table was
+  last maintained under (`definition_deltas.md` §Detection). Absent from a snapshot written before
+  this field existed, which reads back as "no recorded definition" rather than a guess.
 
 With no stored snapshot for a model — `.smelt/schemas/` never written, a snapshot deleted, or excluded under `state.mode: stateless` — `smelt diff` reports that model `new` and a migration proceeds as a first deployment; smelt never refuses and never infers a migration from an absent snapshot (the absent-state behaviour `state.md` §"The optionality rule" requires: degrade-and-say-so). Under `stateless`, no snapshot is ever written, so every run sees every model as `new` — this changes only what `smelt diff` can *tell* the operator, never what the deployed table equals.
 

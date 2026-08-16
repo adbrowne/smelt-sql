@@ -9,6 +9,7 @@ pub mod explain;
 pub mod history;
 pub mod init;
 pub mod list;
+pub mod migrate;
 pub mod run;
 mod run_setup;
 pub mod seed;

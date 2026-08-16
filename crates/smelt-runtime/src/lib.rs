@@ -29,6 +29,7 @@ pub mod fn_bodies;
 pub mod gate;
 pub mod maintenance_driver;
 pub mod meta_eval;
+pub mod migrate;
 pub mod model_probes;
 pub mod probe_plan;
 pub mod probes;

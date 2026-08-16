@@ -97,6 +97,7 @@ async fn test_schema_diff_detection() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:aaa".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -251,6 +252,7 @@ async fn test_e2e_struct_field_addition() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -347,6 +349,7 @@ async fn test_e2e_array_element_widening() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "scores".to_string(),
             data_type: "INTEGER[]".to_string(),
@@ -414,6 +417,7 @@ async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "meta".to_string(),
             data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
@@ -485,6 +489,7 @@ async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "meta".to_string(),
             data_type: "STRUCT(a INTEGER, b VARCHAR)".to_string(),
@@ -555,6 +560,7 @@ async fn test_e2e_complex_type_schema_persistence() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "meta".to_string(),
@@ -617,6 +623,7 @@ async fn test_e2e_nested_type_widening() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -710,6 +717,7 @@ async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "meta".to_string(),
             data_type: "STRUCT(a INTEGER)".to_string(),
@@ -774,6 +782,7 @@ async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "lookup".to_string(),
             data_type: "MAP(VARCHAR, INTEGER)".to_string(),
@@ -841,6 +850,7 @@ async fn test_e2e_struct_field_removal() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -937,6 +947,7 @@ async fn test_e2e_map_value_widening() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "lookup".to_string(),
             data_type: "MAP(VARCHAR, INTEGER)".to_string(),
@@ -1003,6 +1014,7 @@ async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "items".to_string(),
             data_type: "STRUCT(a INTEGER)[]".to_string(),
@@ -1082,6 +1094,7 @@ async fn test_e2e_nested_struct_field_addition() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "data".to_string(),
             data_type: "STRUCT(nested STRUCT(x INTEGER))".to_string(),
@@ -1160,6 +1173,7 @@ async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -1259,6 +1273,7 @@ async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![
             DeployedColumn {
                 name: "id".to_string(),
@@ -1406,6 +1421,7 @@ async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "data".to_string(),
             data_type: "STRUCT(nested STRUCT(x INTEGER))".to_string(),
@@ -1487,6 +1503,7 @@ async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "data".to_string(),
             data_type: "STRUCT(items INTEGER[])".to_string(),
@@ -1563,6 +1580,7 @@ async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "lookup".to_string(),
             data_type: "MAP(VARCHAR, STRUCT(a INTEGER))".to_string(),
@@ -1642,6 +1660,7 @@ async fn test_e2e_map_value_type_widening() -> Result<()> {
         version: 1,
         deployed_at: chrono::Utc::now(),
         model_hash: "sha256:v1".to_string(),
+        definition_sql: String::new(),
         columns: vec![DeployedColumn {
             name: "lookup".to_string(),
             data_type: "MAP(VARCHAR, INTEGER)".to_string(),

@@ -175,6 +175,7 @@ fn save_old_schema(file_store: &FileStore) {
             version: 1,
             deployed_at: chrono::Utc::now(),
             model_hash: "sha256:old".to_string(),
+            definition_sql: String::new(),
             columns: old_column_names()
                 .into_iter()
                 .map(|name| {
