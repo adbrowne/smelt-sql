@@ -137,6 +137,10 @@ impl RunReporter for CliReporter {
     fn probe_advisory(&self, _run_id: &str, model: &str, code: &str, message: &str) {
         eprintln!("smelt: warning: {}: model '{}': {}", code, model, message);
     }
+
+    fn dispatch_widened(&self, _run_id: &str, model: &str, reason: &str) {
+        eprintln!("smelt: warning: model '{}': {}", model, reason);
+    }
 }
 
 /// Coarse classification of why a model failed, inferred from its recorded

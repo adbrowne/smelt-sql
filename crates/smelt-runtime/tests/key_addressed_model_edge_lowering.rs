@@ -16,6 +16,7 @@ use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::output_delta::OutputDelta;
 use smelt_logical::maintenance::derive::ModelEdge;
 use smelt_runtime::maintenance_driver::resolve_live_key_addressed_model_edge_cell;
+use smelt_runtime::maintenance_driver::resolve_live_key_addressed_model_edge_cells;
 
 /// The downstream model this file's unit legs share: `grain: key`,
 /// `unique_key: user_id`, reading the upstream's own `total` column without
@@ -210,6 +211,116 @@ fn non_duckdb_dialect_refuses_key_addressed_discovery() {
     );
 }
 
+// ── 3b (phase 4 task 1: plural resolver) ───────────────────────────────────
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/04-plan.md`
+/// test 1: a downstream reading TWO clockless `keyed upsert` upstreams gets
+/// a cell for EACH, not just the first — the plural resolver
+/// [`resolve_live_key_addressed_model_edge_cells`] the run loop's dispatch
+/// composition (phase 4 tasks 2–5) depends on.
+#[test]
+fn resolve_key_addressed_cells_returns_one_cell_per_keyed_edge() {
+    // A COMPOSITE downstream grain, one column literally sourced from each
+    // upstream (`a.user_id`, `b.org_id`) — `derive_affected_keys` resolves
+    // a `KeyScope` over the model's FULL declared grain for whichever edge
+    // at least one grain column depends on
+    // (`crates/smelt-logical/src/analysis/affected_keys.rs`'s "sound
+    // over-approximation" contract), so both edges declare BOTH grain
+    // columns as their own `KeyedUpsert` keys to satisfy the resolver's
+    // own key_scope-subset-of-upstream-keys fail-loud check.
+    let text = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: [user_id, org_id]\n\
+         ---\n\
+         SELECT a.user_id, b.org_id, a.total AS a_total, b.total AS b_total\n\
+         FROM smelt.models.agg_a a\n\
+         JOIN smelt.models.agg_b b ON a.user_id = b.user_id\n";
+    let (metadata, sql) = metadata_and_sql(text);
+    let edges = vec![
+        keyed_edge("agg_a", &["user_id", "org_id"]),
+        keyed_edge("agg_b", &["user_id", "org_id"]),
+    ];
+
+    let resolved = resolve_live_key_addressed_model_edge_cells(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::DuckDB,
+    )
+    .expect("resolution must not error");
+
+    let mut edge_names: Vec<&str> = resolved.iter().map(|(name, ..)| name.as_str()).collect();
+    edge_names.sort_unstable();
+    assert_eq!(
+        edge_names,
+        vec!["agg_a", "agg_b"],
+        "expected one resolved cell per keyed upstream edge, got: {edge_names:?}"
+    );
+}
+
+// ── 3c (phase 4 task 1: fail-loud per cell) ─────────────────────────────────
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/04-plan.md`
+/// test 2: with two keyed edges where one's `key_scope` names a column the
+/// upstream relation does not actually carry, the plural resolver still
+/// refuses by name — it never silently drops the unhealthy edge and returns
+/// only the healthy one.
+#[test]
+fn resolve_key_addressed_cells_fails_loud_when_one_edge_key_is_missing() {
+    // `agg_a` is read straight (its own key column, `user_id`, matches the
+    // upstream's declared `KeyedUpsert` key). `agg_b` is read through a
+    // renamed alias (`uid`) that the downstream declares as ITS OWN grain
+    // column — the row-identity proof resolves a key scope of `uid` for
+    // that edge, which does not match `agg_b`'s own declared key column
+    // (`user_id`) at all.
+    let text = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: uid\n\
+         ---\n\
+         SELECT a.user_id, b.user_id AS uid, a.total AS a_total, b.total AS b_total\n\
+         FROM smelt.models.agg_a a\n\
+         JOIN smelt.models.agg_b b ON a.user_id = b.user_id\n";
+    let (metadata, sql) = metadata_and_sql(text);
+    let edges = vec![
+        keyed_edge("agg_a", &["user_id"]),
+        keyed_edge("agg_b", &["user_id"]),
+    ];
+
+    let result = resolve_live_key_addressed_model_edge_cells(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::DuckDB,
+    );
+    // The reachable outcome is either a by-name refusal, or — if the walk
+    // cannot resolve a key scope for `agg_a` under this declared grain
+    // either — no cells at all. Never a silent partial success (one healthy
+    // cell returned, the unhealthy edge dropped).
+    match result {
+        Err(e) => {
+            assert!(
+                e.to_string().contains("MaintenanceKeyScopeColumnMissing"),
+                "expected a MaintenanceKeyScopeColumnMissing refusal, got: {e}"
+            );
+        }
+        Ok(cells) => {
+            assert!(
+                cells.is_empty(),
+                "a mismatched key-scope column must never resolve alongside a silently \
+                 dropped unhealthy edge: {cells:?}"
+            );
+        }
+    }
+}
+
 // ── 4 ────────────────────────────────────────────────────────────────────
 #[test]
 fn affected_keys_select_restricts_to_the_changed_upstream_keys() {
@@ -400,6 +511,95 @@ mod chain {
              FROM smelt.agg a WHERE a.user_id IN (SELECT user_id FROM smelt.sources.flags) \
              GROUP BY a.user_id\n",
         );
+    }
+
+    /// Two clockless `keyed upsert` upstreams (`agg_a`, `agg_b`) both feed
+    /// ONE `grain: partition` downstream via a `FULL OUTER JOIN` keyed on
+    /// `COALESCE(a.user_id, b.user_id)` — the downstream's own grain column
+    /// literally depends on BOTH sides of the join, so BOTH edges resolve a
+    /// live key-addressed cell (phase 4 test 3,
+    /// `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+    /// 04-plan.md`) and the coverage gate can dispatch both in one tick.
+    fn stage_two_keyed_upstreams_project(project_dir: &std::path::Path) {
+        write(
+            project_dir,
+            "smelt.yml",
+            "name: key_addressed_chain\nversion: 1\npaths:\n  - models\n\
+             targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+             default_materialization: view\n",
+        );
+        for src in ["payments_a", "payments_b"] {
+            write(
+                project_dir,
+                &format!("models/sources/{src}.yml"),
+                "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+                 - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+                 mutation_profile:\n  kind: append_only\n\
+                 timeseries:\n  partition_column: d\n  event_time_column: d\n  \
+                 granularity: day\n",
+            );
+        }
+        write(
+            project_dir,
+            "models/agg_a.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: user_id\n---\n\
+             SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments_a\n\
+             GROUP BY user_id\n",
+        );
+        write(
+            project_dir,
+            "models/agg_b.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: user_id\n---\n\
+             SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments_b\n\
+             GROUP BY user_id\n",
+        );
+        write(
+            project_dir,
+            "models/downstream.sql",
+            "---\nmaterialization: table\ntimeseries:\n  event_time_column: d\n  \
+             partition_column: d\n  granularity: day\nrefresh: incremental\n\
+             grain: partition\n---\n\
+             SELECT DATE '2024-01-01' AS d, COALESCE(a.user_id, b.user_id) AS user_id, \
+             ANY_VALUE(a.total) AS total_a, ANY_VALUE(b.total) AS total_b \
+             FROM smelt.agg_a a FULL OUTER JOIN smelt.agg_b b ON a.user_id = b.user_id \
+             GROUP BY COALESCE(a.user_id, b.user_id)\n",
+        );
+    }
+
+    async fn seed_payments_table(backend: &dyn smelt_backend::Backend, table: &str) {
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.{table} (user_id INTEGER, amount DECIMAL(10,2), d DATE)"
+            ))
+            .await
+            .expect("create payments source table");
+        backend
+            .execute_sql(&format!(
+                "INSERT INTO main.{table} VALUES \
+                 (1, 100.00, DATE '2025-01-01'), (2, 70.00, DATE '2025-01-01'), \
+                 (3, 30.00, DATE '2025-01-01')"
+            ))
+            .await
+            .expect("seed payments");
+    }
+
+    /// A recording [`smelt_runtime::RunReporter`] that captures every
+    /// `dispatch_widened` advisory — the visible leg of §"Widen-never-
+    /// narrow at dispatch" (phase 4 tasks 6–7).
+    #[derive(Default)]
+    struct RecordingReporter {
+        widened: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    impl smelt_runtime::RunReporter for RecordingReporter {
+        fn dispatch_widened(&self, _run_id: &str, model: &str, reason: &str) {
+            self.widened
+                .lock()
+                .expect("lock")
+                .push((model.to_string(), reason.to_string()));
+        }
     }
 
     async fn seed_flags(backend: &dyn smelt_backend::Backend) {
@@ -860,5 +1060,342 @@ mod chain {
         )
         .await;
         assert_eq!(untouched, "70.00", "user 2's group must be unchanged");
+    }
+
+    // ── 9 (dispatch composition: two covered inbound edges) ────────────
+    /// Phase 4 test 3
+    /// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
+    /// 04-plan.md`): a `grain: partition` downstream reading TWO clockless
+    /// `keyed upsert` upstreams — one key changes in EACH upstream in the
+    /// SAME tick — dispatches BOTH resolved key-addressed cells rather than
+    /// falling back to the ordinary route as soon as a second covered edge
+    /// appears (phase 2's single-edge gate). The result equals a
+    /// full-refresh oracle, and a key touched by neither upstream (user 3)
+    /// is bit-identical.
+    #[tokio::test]
+    async fn two_keyed_upstreams_dispatch_both_cells() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_two_keyed_upstreams_project(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments_table(&backend, "sources_payments_a").await;
+            seed_payments_table(&backend, "sources_payments_b").await;
+        }
+
+        let models = ["agg_a", "agg_b", "downstream"];
+
+        // Run 1: creation.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "two-keyed-run-1".to_string(),
+                select_request(&models),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        // Mutate user 1 in `payments_a` and user 2 in `payments_b` — a
+        // DIFFERENT key changes in EACH upstream. User 3 is untouched in
+        // BOTH.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_payments_a SET amount = 200.00 \
+                     WHERE user_id = 1 AND amount = 100.00",
+                )
+                .await
+                .expect("mutate payments_a");
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_payments_b SET amount = 300.00 \
+                     WHERE user_id = 2 AND amount = 70.00",
+                )
+                .await
+                .expect("mutate payments_b");
+        }
+
+        // Run 2: `downstream` must resolve and dispatch BOTH key-addressed
+        // cells in one tick.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "two-keyed-run-2".to_string(),
+                select_request(&models),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run (composed key-addressed recompute) must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_eq!(
+                record.strategy, "per_group_recompute",
+                "a downstream with two fully-covered key-addressed inbound edges must dispatch \
+                 the repair family's composed cells, not the ordinary route"
+            );
+        }
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+
+        let user1 = scalar_text(
+            &backend,
+            "SELECT total_a || ',' || total_b FROM main.downstream WHERE user_id = 1",
+        )
+        .await;
+        assert_eq!(
+            user1, "200.00,100.00",
+            "user 1's total_a must reflect agg_a's mutated contribution; total_b (from the \
+             untouched agg_b) must be unchanged"
+        );
+        let user2 = scalar_text(
+            &backend,
+            "SELECT total_a || ',' || total_b FROM main.downstream WHERE user_id = 2",
+        )
+        .await;
+        assert_eq!(
+            user2, "70.00,300.00",
+            "user 2's total_b must reflect agg_b's mutated contribution; total_a (from the \
+             untouched agg_a) must be unchanged"
+        );
+        let user3 = scalar_text(
+            &backend,
+            "SELECT total_a || ',' || total_b FROM main.downstream WHERE user_id = 3",
+        )
+        .await;
+        assert_eq!(
+            user3, "30.00,30.00",
+            "user 3's group must be bit-identical — it was never in either upstream's affected-\
+             key set"
+        );
+
+        // Cross-check against a full-refresh oracle over the CURRENT source
+        // state.
+        let oracle_a1 = scalar_text(
+            &backend,
+            "SELECT SUM(amount) FROM main.sources_payments_a WHERE user_id = 1",
+        )
+        .await;
+        let oracle_b2 = scalar_text(
+            &backend,
+            "SELECT SUM(amount) FROM main.sources_payments_b WHERE user_id = 2",
+        )
+        .await;
+        assert_eq!(oracle_a1, "200.00");
+        assert_eq!(oracle_b2, "300.00");
+    }
+
+    // ── 10 (widen-never-narrow: the visible downgrade) ─────────────────
+    /// Phase 4 test 4: the SAME uncovered-input fixture test 8 exercises,
+    /// now run with a [`RecordingReporter`] — the ordinary route is still
+    /// taken and the result is still correct, but exactly one
+    /// `dispatch_widened` advisory fires naming the uncovered input
+    /// (§"Widen-never-narrow at dispatch": "an explain-visible downgrade,
+    /// never … silently").
+    #[tokio::test]
+    async fn uncovered_input_widens_and_reports_the_downgrade() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_chain_project_partition_downstream_with_uncovered_source(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments(&backend).await;
+            seed_flags(&backend).await;
+        }
+
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "widen-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.sources_payments SET amount = 200.00 WHERE user_id = 1 AND amount = 100.00")
+                .await
+                .expect("mutate payments");
+        }
+
+        let reporter = RecordingReporter::default();
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "widen-run-2".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &reporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_ne!(
+                record.strategy, "per_group_recompute",
+                "the ordinary route must still run when an input is uncovered"
+            );
+        }
+
+        let widened = reporter.widened.lock().expect("lock").clone();
+        assert_eq!(
+            widened.len(),
+            1,
+            "expected exactly one dispatch_widened advisory, got: {widened:?}"
+        );
+        assert_eq!(widened[0].0, "downstream");
+        assert!(
+            widened[0].1.contains("flags"),
+            "the advisory must name the uncovered input, got: {}",
+            widened[0].1
+        );
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let repaired = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 1",
+        )
+        .await;
+        assert_eq!(repaired, "250.00");
+    }
+
+    // ── 11 (widen-never-narrow: no downgrade when fully covered) ───────
+    /// Phase 4 test 5: the fully-covered two-upstream fixture (test 9)
+    /// fires no `dispatch_widened` advisory — the downgrade report is only
+    /// for the genuinely uncovered case.
+    #[tokio::test]
+    async fn full_coverage_reports_no_downgrade() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_two_keyed_upstreams_project(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments_table(&backend, "sources_payments_a").await;
+            seed_payments_table(&backend, "sources_payments_b").await;
+        }
+
+        let models = ["agg_a", "agg_b", "downstream"];
+
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "full-coverage-run-1".to_string(),
+                select_request(&models),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_payments_a SET amount = 200.00 \
+                     WHERE user_id = 1 AND amount = 100.00",
+                )
+                .await
+                .expect("mutate payments_a");
+        }
+
+        let reporter = RecordingReporter::default();
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "full-coverage-run-2".to_string(),
+                select_request(&models),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &reporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+        }
+
+        let widened = reporter.widened.lock().expect("lock");
+        assert!(
+            widened.is_empty(),
+            "a fully-covered downstream must fire no dispatch_widened advisory, got: {widened:?}"
+        );
     }
 }

@@ -151,6 +151,9 @@ enum ReporterEvent {
         code: String,
         message: String,
     },
+    DispatchWidened {
+        reason: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -233,6 +236,9 @@ impl EventSink {
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
                 ReporterEvent::ProbeAdvisory { code, message } => {
                     reporter.probe_advisory(run_id, model, code, message)
+                }
+                ReporterEvent::DispatchWidened { reason } => {
+                    reporter.dispatch_widened(run_id, model, reason)
                 }
             }
         }
@@ -323,6 +329,12 @@ impl RunReporter for EventSink {
         self.push(ReporterEvent::ProbeAdvisory {
             code: code.to_string(),
             message: message.to_string(),
+        });
+    }
+
+    fn dispatch_widened(&self, _run_id: &str, _model: &str, reason: &str) {
+        self.push(ReporterEvent::DispatchWidened {
+            reason: reason.to_string(),
         });
     }
 }
@@ -1883,24 +1895,25 @@ pub async fn execute_project(
         // local) for this model's upstream MODEL edges rather than its
         // declared sources.
         let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
-        let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
-            None
-        } else {
-            match plan.model_file.metadata.as_deref() {
-                Some(metadata) => {
-                    crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
-                        &clean_sql_for_merge,
-                        &db_table_name,
-                        metadata,
-                        &maint_source_facts,
-                        &explicitly_mutable,
-                        &keyed_model_edges,
-                        backend.dialect(),
-                    )?
+        let key_addressed_edge_cells: Vec<crate::maintenance_driver::LiveKeyAddressedModelEdgeCell> =
+            if keyed_model_edges.is_empty() {
+                Vec::new()
+            } else {
+                match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells(
+                            &clean_sql_for_merge,
+                            &db_table_name,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            backend.dialect(),
+                        )?
+                    }
+                    None => Vec::new(),
                 }
-                None => None,
-            }
-        };
+            };
 
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
@@ -1996,7 +2009,7 @@ pub async fn execute_project(
                 }
                 None => None,
             };
-            // `key_addressed_edge_cell` is resolved ONCE, above the
+            // `key_addressed_edge_cells` is resolved ONCE, above the
             // `plan_is_keyed` gate — read directly here, never re-derived
             // (maintenance-plan purity).
 
@@ -2044,40 +2057,90 @@ pub async fn execute_project(
             // own create path is what materializes the table
             // (`table_exists_before_run` was captured before any of this
             // model's writes).
-            let exec_result = match key_addressed_edge_cell
-                .as_ref()
-                .filter(|_| table_exists_before_run)
-            {
-                Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) => {
-                    used_per_group_recompute = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
-                    );
-                    used_diff_patch = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
-                    );
-                    let retry_policy =
-                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    dispatch_key_addressed_model_edge(
-                        backend,
-                        schema,
-                        &db_table_name,
-                        &plan.model_file,
-                        compiler,
-                        resolver,
-                        &clean_sql_for_merge,
-                        model_by_addr,
-                        config,
-                        &request.target,
-                        &plan.name,
-                        edge_name,
-                        key_scope,
-                        upstream_keys,
-                        digest_columns,
-                        write,
-                        &retry_policy,
-                    )
+            let leading_key_addressed_cells = if table_exists_before_run {
+                key_addressed_edge_cells.split_first()
+            } else {
+                None
+            };
+            let exec_result = match leading_key_addressed_cells {
+                // Every key-addressed cell resolved above targets the SAME
+                // `db_table_name` (they all restrict a recompute over this
+                // model's own key grain) — dispatch each in turn and keep
+                // the LAST result's `row_count` (the table's own count after
+                // every write), never a sum across cells, which would
+                // double-count rows every earlier cell's write already
+                // covers (`docs/outcomes/20260816-scheduler-delta-signatures/
+                // phases/04-plan.md` task 5).
+                Some((first, rest)) => {
+                    async {
+                        let (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) =
+                            first;
+                        used_per_group_recompute |= matches!(
+                            write,
+                            crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                        );
+                        used_diff_patch |= matches!(
+                            write,
+                            crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                        );
+                        let retry_policy =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                        let mut result = dispatch_key_addressed_model_edge(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            &clean_sql_for_merge,
+                            model_by_addr,
+                            config,
+                            &request.target,
+                            &plan.name,
+                            edge_name,
+                            key_scope,
+                            upstream_keys,
+                            digest_columns,
+                            write,
+                            &retry_policy,
+                        )
+                        .await?;
+                        for (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) in
+                            rest
+                        {
+                            used_per_group_recompute |= matches!(
+                                write,
+                                crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                            );
+                            used_diff_patch |= matches!(
+                                write,
+                                crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                            );
+                            let retry_policy =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            result = dispatch_key_addressed_model_edge(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                &plan.model_file,
+                                compiler,
+                                resolver,
+                                &clean_sql_for_merge,
+                                model_by_addr,
+                                config,
+                                &request.target,
+                                &plan.name,
+                                edge_name,
+                                key_scope,
+                                upstream_keys,
+                                digest_columns,
+                                write,
+                                &retry_policy,
+                            )
+                            .await?;
+                        }
+                        Ok(result)
+                    }
                     .await
                 }
                 None => match (start_date, end_date) {
@@ -2685,122 +2748,151 @@ pub async fn execute_project(
 
         // Non-keyed key-addressed model-edge dispatch (phase 2,
         // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
-        // 02-plan.md`): a widen-never-narrow substitution of the SAME
-        // `key_addressed_edge_cell` resolved once above — for the ordinary
-        // incremental/full-refresh route below, when this model's OWN
-        // driving trigger is not itself keyed
-        // (`docs/specs/incremental_models.md` §"Dispatch — from propagated
-        // components to run units": dispatch is keyed by the component's
-        // addressing, never by the downstream model's `grain`). Licensed
-        // ONLY when every inbound ref of this model is the ONE
+        // 02-plan.md`; lifted from a single-edge substitution gate to a
+        // coverage gate in phase 4,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 04-plan.md`): a widen-never-narrow substitution of the resolved
+        // `key_addressed_edge_cells` — for the ordinary incremental/full-
+        // refresh route below, when this model's OWN driving trigger is not
+        // itself keyed (`docs/specs/incremental_models.md` §"Dispatch —
+        // from propagated components to run units": dispatch is keyed by
+        // the component's addressing, never by the downstream model's
+        // `grain`). Licensed when EVERY inbound ref of this model is a
         // key-addressed model edge that resolved a cell — no declared
-        // source, no non-key-addressed model edge: a partition-grain
-        // downstream that ALSO reads an uncovered input keeps the ordinary
-        // route rather than risking a silently dropped component (composed
-        // multi-component dispatch is phase 3's scope). Never on the
-        // creation run — mirrors the keyed branch's own
-        // `table_exists_before_run` gate; there is nothing to repair yet.
-        if !plan_is_keyed {
-            if let Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) =
-                key_addressed_edge_cell
-                    .as_ref()
-                    .filter(|_| table_exists_before_run)
-            {
-                let has_declared_source_ref = plan.model_file.refs.iter().any(|r| {
-                    r.smelt_ref.to_path().first().map(|s| s.as_str()) == Some("sources")
-                });
-                let substitution_gate = !has_declared_source_ref
-                    && keyed_model_edges.len() == 1
-                    && plan.model_file.refs.len() == keyed_model_edges.len();
-                if substitution_gate {
-                    let compiler = compilers.get(model_target);
-                    let resolver = &ephemeral_resolvers[model_target];
-                    let used_diff_patch = matches!(
+        // source, no non-key-addressed model edge (a maintained-model ref
+        // that is not itself key-addressed, or one whose cell failed to
+        // resolve). A downstream with an uncovered input keeps the ordinary
+        // route rather than risking a silently dropped component, but the
+        // downgrade is reported (`dispatch_widened`) rather than silent
+        // (§"Widen-never-narrow at dispatch"). Never on the creation run —
+        // mirrors the keyed branch's own `table_exists_before_run` gate;
+        // there is nothing to repair yet.
+        if !plan_is_keyed && table_exists_before_run && !key_addressed_edge_cells.is_empty() {
+            let resolved_edge_names: HashSet<&str> = key_addressed_edge_cells
+                .iter()
+                .map(|(edge_name, ..)| edge_name.as_str())
+                .collect();
+            let mut uncovered_inputs: Vec<String> = Vec::new();
+            for r in &plan.model_file.refs {
+                let segs = r.smelt_ref.to_path();
+                if segs.first().map(|s| s.as_str()) == Some("sources") {
+                    uncovered_inputs.push(format!("source '{}'", segs.join(".")));
+                    continue;
+                }
+                let addr = segs.join(".");
+                if !resolved_edge_names.contains(addr.as_str()) {
+                    uncovered_inputs.push(format!("model edge '{addr}'"));
+                }
+            }
+            let coverage_gate = uncovered_inputs.is_empty();
+            if coverage_gate {
+                let compiler = compilers.get(model_target);
+                let resolver = &ephemeral_resolvers[model_target];
+                let mut used_diff_patch = false;
+                let mut exec_result: Option<smelt_backend::ExecutionResult> = None;
+                for (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) in
+                    &key_addressed_edge_cells
+                {
+                    used_diff_patch |= matches!(
                         write,
                         crate::maintenance_driver::RepairWrite::DiffPatch { .. }
                     );
-                    let strategy_label = if used_diff_patch {
-                        "diff_patch".to_string()
-                    } else {
-                        "per_group_recompute".to_string()
-                    };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let exec_result = dispatch_key_addressed_model_edge(
-                        backend,
-                        schema,
-                        &db_table_name,
-                        &plan.model_file,
-                        compiler,
-                        resolver,
-                        &clean_sql_for_merge,
-                        model_by_addr,
-                        config,
-                        &request.target,
-                        &plan.name,
-                        edge_name,
-                        key_scope,
-                        upstream_keys,
-                        digest_columns,
-                        write,
-                        &retry_policy,
-                    )
-                    .await?;
-                    total_rows = exec_result.row_count;
-                    total_rows_overall += total_rows;
-                    manifest_entries.insert(
-                        plan.name.clone(),
-                        ModelRunRecord {
-                            strategy: strategy_label,
-                            time_range: match (start_date, end_date) {
-                                (Some(s), Some(e)) => Some(TimeRangeRecord {
-                                    start: s.format("%Y-%m-%d").to_string(),
-                                    end: e.format("%Y-%m-%d").to_string(),
-                                }),
-                                _ => None,
-                            },
-                            partitions_updated: vec![],
-                            row_count: total_rows,
-                            duration_ms: model_start.elapsed().as_millis() as u64,
-                            batch_safety: Some("key_addressed".to_string()),
-                            outcome: smelt_state::RunOutcomeKind::Success,
-                            definition_hash: compute_model_hash(&plan.sql),
-                            error: None,
-                            retry_count: sink.retry_count(),
-                            // Mirrors the keyed branch's own key-addressed
-                            // arm: no declared-fact probes dispatch on this
-                            // route today.
-                            probes: Vec::new(),
-                            subsumed: None,
-                        },
-                    );
-                    reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
-                    // ── Check seam A': non-keyed key-addressed arm ────────
-                    if request.run_checks {
-                        let (outcomes, to_skip) = run_model_checks(
+                    exec_result = Some(
+                        dispatch_key_addressed_model_edge(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            &clean_sql_for_merge,
+                            model_by_addr,
+                            config,
+                            &request.target,
                             &plan.name,
-                            checks_by_model,
-                            compilers,
-                            backends,
-                            target_assignments,
-                            ephemeral_resolvers,
-                            config.as_ref(),
-                            upstream_map,
-                            selected,
-                            reporter,
-                            run_id,
+                            edge_name,
+                            key_scope,
+                            upstream_keys,
+                            digest_columns,
+                            write,
+                            &retry_policy,
                         )
-                        .await;
-                        check_results.extend(outcomes);
-                        skip_set.extend(to_skip);
-                    }
-                    return Ok(ModelOutcome::Completed(ModelSuccess {
-                        manifest_entries,
-                        check_results,
-                        skip_set,
-                        rows: total_rows,
-                    }));
+                        .await?,
+                    );
                 }
+                let strategy_label = if used_diff_patch {
+                    "diff_patch".to_string()
+                } else {
+                    "per_group_recompute".to_string()
+                };
+                // `key_addressed_edge_cells` is non-empty (checked above),
+                // so the loop ran at least once.
+                total_rows = exec_result.map(|r| r.row_count).unwrap_or(0);
+                total_rows_overall += total_rows;
+                manifest_entries.insert(
+                    plan.name.clone(),
+                    ModelRunRecord {
+                        strategy: strategy_label,
+                        time_range: match (start_date, end_date) {
+                            (Some(s), Some(e)) => Some(TimeRangeRecord {
+                                start: s.format("%Y-%m-%d").to_string(),
+                                end: e.format("%Y-%m-%d").to_string(),
+                            }),
+                            _ => None,
+                        },
+                        partitions_updated: vec![],
+                        row_count: total_rows,
+                        duration_ms: model_start.elapsed().as_millis() as u64,
+                        batch_safety: Some("key_addressed".to_string()),
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
+                        // Mirrors the keyed branch's own key-addressed
+                        // arm: no declared-fact probes dispatch on this
+                        // route today.
+                        probes: Vec::new(),
+                        subsumed: None,
+                    },
+                );
+                reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
+                // ── Check seam A': non-keyed key-addressed arm ────────
+                if request.run_checks {
+                    let (outcomes, to_skip) = run_model_checks(
+                        &plan.name,
+                        checks_by_model,
+                        compilers,
+                        backends,
+                        target_assignments,
+                        ephemeral_resolvers,
+                        config.as_ref(),
+                        upstream_map,
+                        selected,
+                        reporter,
+                        run_id,
+                    )
+                    .await;
+                    check_results.extend(outcomes);
+                    skip_set.extend(to_skip);
+                }
+                return Ok(ModelOutcome::Completed(ModelSuccess {
+                    manifest_entries,
+                    check_results,
+                    skip_set,
+                    rows: total_rows,
+                }));
+            } else {
+                reporter.dispatch_widened(
+                    run_id,
+                    &plan.name,
+                    &format!(
+                        "key-addressed dispatch widened to the ordinary route — uncovered \
+                         input(s): {}",
+                        uncovered_inputs.join(", ")
+                    ),
+                );
             }
         }
 

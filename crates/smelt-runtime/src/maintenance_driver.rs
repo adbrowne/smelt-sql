@@ -2098,20 +2098,26 @@ pub type LiveKeyAddressedModelEdgeCell = (
     RepairWrite,
 );
 
-/// Resolve a `Technique::PerGroupRecompute` cell derived over a
+/// Resolve **every** `Technique::PerGroupRecompute` cell derived over a
 /// **key-addressed model edge** (`docs/specs/incremental_models.md`
 /// §"Upstream model edges") — the sibling of
-/// [`resolve_live_per_group_recompute_cell`] for a cell whose bounded read is
+/// [`resolve_live_per_group_recompute_cell`] for cells whose bounded read is
 /// a `KeyScope` (an upstream's own affected key set) rather than a
 /// `ScanClamp` over a declared source. The plan is derived exactly once here
 /// via [`smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges`]
 /// (maintenance-plan purity, root `CLAUDE.md`) — `model_edges` must be the
 /// SAME edge list (with each upstream's own derived `output_shape`) that
-/// produced the cell this run will execute.
+/// produced the cells this run will execute.
 ///
-/// Two fail-loud legs run BEFORE any backend call
+/// Lifted from a single-cell resolver to a plural one
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/04-plan.md`):
+/// a model reading several key-addressed upstreams gets a cell PER covered
+/// edge, so the run loop can dispatch all of them in one tick instead of
+/// only the first.
+///
+/// Two fail-loud legs run BEFORE any backend call, per cell
 /// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
-/// - a non-DuckDB target dialect — the group-grain sidecar diff this cell's
+/// - a non-DuckDB target dialect — the group-grain sidecar diff a cell's
 ///   execution needs is DuckDB-only, matching every other sidecar consumer
 ///   in this module;
 /// - a `key_scope.keys` column the upstream relation does not actually
@@ -2120,7 +2126,7 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///   names), never against the downstream's own guess. A mismatch (the
 ///   downstream renamed the key column it read) is refused by name rather
 ///   than silently querying a column the upstream table does not have.
-pub fn resolve_live_key_addressed_model_edge_cell(
+pub fn resolve_live_key_addressed_model_edge_cells(
     sql: &str,
     table: &str,
     metadata: &smelt_core::ModelMetadata,
@@ -2128,7 +2134,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     dialect: SqlDialect,
-) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
+) -> Result<Vec<LiveKeyAddressedModelEdgeCell>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql,
         table,
@@ -2142,9 +2148,10 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &SourceReferentialIntegrity::new(),
         smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
+    let mut resolved = Vec::new();
     for cell in &result.plan.cells {
         if cell.technique != Technique::PerGroupRecompute {
             continue;
@@ -2242,16 +2249,41 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             FingerprintProjection::Columns(cols) => cols.into_iter().collect(),
             FingerprintProjection::FullRow { .. } => upstream_keys.clone(),
         };
-        return Ok(Some((
+        resolved.push((
             edge.name.clone(),
             cell.clone(),
             key_scope,
             upstream_keys.clone(),
             digest_columns,
             write,
-        )));
+        ));
     }
-    Ok(None)
+    Ok(resolved)
+}
+
+/// Delegating wrapper over [`resolve_live_key_addressed_model_edge_cells`]
+/// (first resolved cell) — kept for the pre-phase-4 callers/tests that only
+/// ever needed a single edge's cell.
+pub fn resolve_live_key_addressed_model_edge_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    dialect: SqlDialect,
+) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
+    Ok(resolve_live_key_addressed_model_edge_cells(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        model_edges,
+        dialect,
+    )?
+    .into_iter()
+    .next())
 }
 
 /// The affected-key relation a key-addressed model-edge cell reads

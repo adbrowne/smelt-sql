@@ -154,6 +154,15 @@ pub trait RunReporter: Send + Sync {
     /// where no manifest is ever written. Default: no-op; `smelt run`'s
     /// warning-line output is the consumer.
     fn probe_advisory(&self, _run_id: &str, _model: &str, _code: &str, _message: &str) {}
+
+    /// A key-addressed dispatch widened to the model's ordinary run route
+    /// instead of composing every resolved key-addressed cell
+    /// (`docs/specs/incremental_models.md` §"Widen-never-narrow at
+    /// dispatch") — the visible leg of that rule for the non-keyed
+    /// coverage-gate site: `reason` names the uncovered inbound input(s)
+    /// that forced the widening. Default: no-op; `smelt run`/`smelt
+    /// build`'s warning-line output is the consumer.
+    fn dispatch_widened(&self, _run_id: &str, _model: &str, _reason: &str) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

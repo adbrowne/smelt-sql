@@ -65,7 +65,7 @@ run shape.
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
-| 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | planned |
+| 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | pending |
 | 6 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
 | 7 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
@@ -166,6 +166,18 @@ run shape.
   outcome §"Upstream model edges" forbids). Phase 4 also lands the reporter-visible downgrade the
   spec's §"Widen-never-narrow at dispatch" already requires and phase 2 left silent; the
   `smelt explain` half of that visibility stays with row 8.
+
+- 2026-08-16 (phase 4 implemented): `resolve_live_key_addressed_model_edge_cells` (plural)
+  lands in `maintenance_driver.rs`; both `execute.rs` dispatch sites compose every resolved
+  cell in one tick; the non-keyed site is now a coverage gate (licensed only when EVERY inbound
+  ref resolved a key-addressed cell) with a `RunReporter::dispatch_widened` downgrade report on
+  refusal. Caught and fixed a real bug along the way: `EventSink` (the wavefront scheduler's
+  per-model event buffer) silently drops any `RunReporter` method it does not explicitly buffer
+  and replay — `dispatch_widened` needed its own `ReporterEvent` variant + buffer/replay arms,
+  or it would have silently no-op'd under the real concurrent run loop. Multi-edge admission
+  (both the new unit test and the new e2e fixture) required a COALESCE/composite-grain SQL
+  shape rather than a plain equi-join — `derive_affected_keys`'s provenance walk traces literal
+  SELECT-list lineage, not join-predicate equality. No reshape of the phase table.
 
 ## Blocked
 

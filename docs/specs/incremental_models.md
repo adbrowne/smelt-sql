@@ -1938,12 +1938,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   job, not yet wired live into propagation; and cross-model runs require the operator to state
   what landed upstream on the command line, because no per-source watermark is yet persisted (the
   watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no run yet writes or
-  reads one). A single-component key-addressed model edge now dispatches outside the `grain: key`
-  branch (a clockless `keyed upsert` upstream feeding a `grain: partition` downstream runs the
-  repair family's `PerGroupRecompute` cell, not the ordinary route); the residue is a downstream
-  that ALSO has an inbound edge or source the key-addressed cell does not cover — that composed
-  multi-component case still keeps the ordinary route rather than risk silently dropping the
-  uncovered component, pending dispatch-composition work. Tracked:
+  reads one). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:
+  a clockless `keyed upsert` upstream feeding a `grain: partition` downstream runs the repair
+  family's `PerGroupRecompute` cell, not the ordinary route, and several key-addressed edges into
+  one downstream compose — each dispatches in the same tick rather than only the first. The
+  residue is an inbound input that is not itself key-addressed (a declared source, or a model
+  edge that resolved no cell), which widens to the ordinary route with a reported
+  `dispatch_widened` downgrade rather than risking a silently dropped component. Tracked:
   `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
