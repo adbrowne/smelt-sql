@@ -88,6 +88,63 @@ fn key_addressed_cell_resolves_live_from_the_real_plan() {
     );
 }
 
+// ── 1b (phase 2 task: grain: partition characterization) ──────────────────
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/02-plan.md`
+/// test 3: the SAME derivation resolves identically for a `grain:
+/// partition` downstream with no declared `unique_key` — a constant `d`
+/// projected (never in `GROUP BY`, since it is trivially single-valued per
+/// group) and `GROUP BY user_id` alone, proving the downstream's row
+/// identity from the walk rather than a declared key. Pins that the
+/// `grain: key` / `grain: partition` gap phase 2 closes was ALWAYS
+/// dispatch-only — plan derivation (`resolve_live_key_addressed_model_edge_cell`)
+/// never depended on the downstream's own declared grain in the first
+/// place.
+#[test]
+fn key_addressed_cell_resolves_for_a_partition_grain_downstream() {
+    let text = "---\n\
+         materialization: table\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         ---\n\
+         SELECT DATE '2024-01-01' AS d, user_id, ANY_VALUE(total) AS total FROM \
+         smelt.models.agg GROUP BY user_id\n";
+    let (metadata, sql) = metadata_and_sql(text);
+    let edges = vec![keyed_edge("agg", &["user_id"])];
+
+    let resolved = resolve_live_key_addressed_model_edge_cell(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::DuckDB,
+    )
+    .expect("resolution must not error")
+    .expect("a live key-addressed cell must resolve for a grain: partition downstream too");
+
+    let (edge_name, cell, key_scope, upstream_keys, digest_columns, _write) = resolved;
+    assert_eq!(edge_name, "agg");
+    assert_eq!(
+        cell.technique,
+        smelt_logical::maintenance::Technique::PerGroupRecompute
+    );
+    assert_eq!(
+        key_scope.keys,
+        vec!["user_id".to_string()],
+        "the same key_scope as the grain: key leg (`key_addressed_cell_resolves_live_from_the_\
+         real_plan`) — the downstream's own declared grain never entered this proof"
+    );
+    assert_eq!(key_scope.from, "agg");
+    assert_eq!(upstream_keys, vec!["user_id".to_string()]);
+    assert!(
+        !digest_columns.is_empty(),
+        "the digest column set must never be empty — it is the group-grain sidecar's own hash \
+         input"
+    );
+}
+
 // ── 2 ────────────────────────────────────────────────────────────────────
 #[test]
 fn missing_key_scope_column_on_the_upstream_fails_loud() {
@@ -233,6 +290,130 @@ mod chain {
              unique_key: user_id\n---\n\
              SELECT user_id, ANY_VALUE(total) AS total FROM smelt.agg GROUP BY user_id\n",
         );
+    }
+
+    /// Same two-model chain as [`stage_chain_project`], except `downstream`
+    /// is `grain: partition` (a constant `d` projected but NOT in `GROUP
+    /// BY`, `GROUP BY user_id` alone — the `DagBody::PartitionOverKeyedId`
+    /// shape from `crates/smelt-maintenance-testkit/src/dag.rs::
+    /// keyed_partition_sink_dag`) rather than `grain: key`. A declared
+    /// `unique_key: user_id` alongside `grain: partition` trips
+    /// `GrainAssertionMismatch`, so the walk proves the downstream's own
+    /// row identity includes `user_id` from `GROUP BY` alone, and
+    /// `admit_key_addressed_recompute`'s grain proof resolves through
+    /// `user_id` — the same shape phase 7 flagged as deriving an admitted
+    /// but undispatched key-addressed cell. `d` is deliberately left OUT of
+    /// `GROUP BY` (a literal projection is trivially single-valued per
+    /// group): grouping by `d`'s own output ALIAS instead of leaving it out
+    /// would fail the walk's grain proof closed for the whole scope, since
+    /// `analysis::walk::group_by_output_keys` matches a grouping key
+    /// against a select item's own expression text, not its alias — see
+    /// `DagBody::PartitionOverKeyedId`'s own render comment for the same
+    /// note.
+    fn stage_chain_project_partition_downstream(project_dir: &std::path::Path) {
+        write(
+            project_dir,
+            "smelt.yml",
+            "name: key_addressed_chain\nversion: 1\npaths:\n  - models\n\
+             targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+             default_materialization: view\n",
+        );
+        write(
+            project_dir,
+            "models/sources/payments.yml",
+            "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+             - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+             mutation_profile:\n  kind: append_only\n\
+             timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+        );
+        write(
+            project_dir,
+            "models/agg.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: user_id\n---\n\
+             SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
+             GROUP BY user_id\n",
+        );
+        write(
+            project_dir,
+            "models/downstream.sql",
+            "---\nmaterialization: table\ntimeseries:\n  event_time_column: d\n  \
+             partition_column: d\n  granularity: day\nrefresh: incremental\n\
+             grain: partition\n---\n\
+             SELECT DATE '2024-01-01' AS d, user_id, ANY_VALUE(total) AS total \
+             FROM smelt.agg GROUP BY user_id\n",
+        );
+    }
+
+    /// Same as [`stage_chain_project_partition_downstream`], except
+    /// `downstream` reads a SECOND inbound ref — a clocked declared source
+    /// (`flags`) the key-addressed model-edge cell does not cover (it only
+    /// restricts the `agg` model edge's affected keys, never a declared
+    /// source). Pins the substitution gate (phase 2 task 5): a
+    /// partition-grain downstream with an uncovered input must keep its
+    /// ordinary route rather than risk silently dropping the uncovered
+    /// component (composed multi-component dispatch is phase 3's scope).
+    /// `flags` carries every `user_id` `payments` does, so the added `WHERE
+    /// ... IN` join changes no row — the test isolates the substitution
+    /// gate from any join-semantics correctness question.
+    fn stage_chain_project_partition_downstream_with_uncovered_source(
+        project_dir: &std::path::Path,
+    ) {
+        write(
+            project_dir,
+            "smelt.yml",
+            "name: key_addressed_chain\nversion: 1\npaths:\n  - models\n\
+             targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+             default_materialization: view\n",
+        );
+        write(
+            project_dir,
+            "models/sources/payments.yml",
+            "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+             - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+             mutation_profile:\n  kind: append_only\n\
+             timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+        );
+        write(
+            project_dir,
+            "models/sources/flags.yml",
+            "description: flags\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+             - name: d\n  type: DATE\n\
+             mutation_profile:\n  kind: append_only\n\
+             timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+        );
+        write(
+            project_dir,
+            "models/agg.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: user_id\n---\n\
+             SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
+             GROUP BY user_id\n",
+        );
+        write(
+            project_dir,
+            "models/downstream.sql",
+            "---\nmaterialization: table\ntimeseries:\n  event_time_column: d\n  \
+             partition_column: d\n  granularity: day\nrefresh: incremental\n\
+             grain: partition\n---\n\
+             SELECT DATE '2024-01-01' AS d, a.user_id, ANY_VALUE(a.total) AS total \
+             FROM smelt.agg a WHERE a.user_id IN (SELECT user_id FROM smelt.sources.flags) \
+             GROUP BY a.user_id\n",
+        );
+    }
+
+    async fn seed_flags(backend: &dyn smelt_backend::Backend) {
+        backend
+            .execute_sql("CREATE TABLE main.sources_flags (user_id INTEGER, d DATE)")
+            .await
+            .expect("create flags source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_flags VALUES \
+                 (1, DATE '2025-01-01'), (2, DATE '2025-01-01')",
+            )
+            .await
+            .expect("seed flags");
     }
 
     async fn seed_payments(backend: &dyn smelt_backend::Backend) {
@@ -465,5 +646,219 @@ mod chain {
         )
         .await;
         assert_eq!(oracle_user_1, repaired);
+    }
+
+    // ── 7 (dispatch outside `grain: key`) ──────────────────────────────
+    /// Phase 2 (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
+    /// 02-plan.md`): the derived key-addressed model-edge cell must
+    /// actually run for a `grain: partition` downstream of the SAME
+    /// clockless `keyed upsert` upstream test 6 exercises — dispatch is
+    /// keyed by the component's addressing (`docs/specs/incremental_models.md`
+    /// §"Dispatch — from propagated components to run units"), never by
+    /// the downstream model's own declared grain.
+    #[tokio::test]
+    async fn partition_grain_downstream_dispatches_key_addressed_cell() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_chain_project_partition_downstream(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments(&backend).await;
+        }
+
+        // Run 1: creation — nothing to repair yet.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "kpart-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        // Mutate user 1's contribution in place — user 2 is untouched.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.sources_payments SET amount = 200.00 WHERE user_id = 1 AND amount = 100.00")
+                .await
+                .expect("mutate payments");
+        }
+
+        // Run 2: `downstream` (grain: partition) must resolve and dispatch
+        // the SAME key-addressed model-edge cell the `grain: key` chain
+        // (test 6) dispatches — the repair family, not the ordinary
+        // correct-but-full route.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "kpart-run-2".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run (key-addressed recompute) must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_eq!(
+                record.strategy, "per_group_recompute",
+                "a grain: partition downstream of a clockless keyed-upsert upstream must \
+                 dispatch the repair family's key-addressed cell, not the ordinary route"
+            );
+        }
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+
+        let repaired = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 1",
+        )
+        .await;
+        assert_eq!(
+            repaired, "250.00",
+            "user 1's group must reflect the mutated contribution (50.00 + 200.00)"
+        );
+        let untouched = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 2",
+        )
+        .await;
+        assert_eq!(
+            untouched, "70.00",
+            "user 2's group must be bit-identical — it was never in the affected-key set"
+        );
+    }
+
+    // ── 8 (substitution gate: an uncovered second input) ───────────────
+    /// Phase 2 task 5's widen-never-narrow substitution gate: `downstream`
+    /// reads BOTH the key-addressed `agg` model edge AND a declared source
+    /// (`flags`) the key-addressed cell does not restrict. The non-keyed
+    /// dispatch site must refuse to substitute — the model keeps its
+    /// ordinary route rather than risk silently dropping the uncovered
+    /// `flags` component — and the result must still be multiset-correct.
+    #[tokio::test]
+    async fn partition_grain_downstream_with_an_uncovered_input_keeps_the_ordinary_route() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_chain_project_partition_downstream_with_uncovered_source(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments(&backend).await;
+            seed_flags(&backend).await;
+        }
+
+        // Run 1: creation.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "kpart-uncovered-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        // Mutate user 1's contribution — the SAME shape test 7 exercises.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.sources_payments SET amount = 200.00 WHERE user_id = 1 AND amount = 100.00")
+                .await
+                .expect("mutate payments");
+        }
+
+        // Run 2: the substitution gate must refuse (an uncovered `flags`
+        // ref is present), so `downstream` keeps its ordinary route.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "kpart-uncovered-run-2".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_ne!(
+                record.strategy, "per_group_recompute",
+                "a downstream with an uncovered second inbound ref must never substitute the \
+                 key-addressed cell for its ordinary route"
+            );
+        }
+
+        // Multiset-correctness is preserved regardless of which route ran.
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let repaired = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 1",
+        )
+        .await;
+        assert_eq!(
+            repaired, "250.00",
+            "user 1's group must reflect the mutated contribution (50.00 + 200.00) even via \
+             the ordinary route"
+        );
+        let untouched = scalar_text(
+            &backend,
+            "SELECT total FROM main.downstream WHERE user_id = 2",
+        )
+        .await;
+        assert_eq!(untouched, "70.00", "user 2's group must be unchanged");
     }
 }

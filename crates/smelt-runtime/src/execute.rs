@@ -1851,6 +1851,57 @@ pub async fn execute_project(
             }
         }
 
+        // Shared key-addressed model-edge resolution — hoisted above the
+        // `plan_is_keyed` gate (phase 2,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 02-plan.md`) so BOTH the keyed and non-keyed dispatch sites below
+        // read the SAME resolved cell rather than re-deriving it
+        // (maintenance-plan purity, `CLAUDE.md` §"Maintenance-plan
+        // purity"). `docs/specs/incremental_models.md` §"Dispatch — from
+        // propagated components to run units": dispatch is keyed by the
+        // component's own addressing, never by the downstream model's
+        // `grain` — this is what makes a `KeyedUpsert` upstream's cell
+        // reachable for a `grain: partition` downstream, not just a
+        // `grain: key` one. `table_exists_before_run` is captured BEFORE
+        // any of this model's own writes (the keyed branch's fold, or the
+        // non-keyed branch's incremental/full-refresh dispatch, may
+        // themselves create the table on a first run).
+        let db_table_name = plan.model_file.db_name_owned();
+        let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
+        let (maint_source_facts, explicitly_mutable) =
+            build_maint_source_facts(&plan.model_file, source_infos);
+        let table_exists_before_run = backend
+            .table_exists(schema, &db_table_name)
+            .await
+            .unwrap_or(false);
+        // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
+        // §"Upstream model edges"): an upstream maintained model whose own
+        // derived output-delta shape is `KeyedUpsert` folds via the repair
+        // family's own `Technique::PerGroupRecompute`, restricted to the
+        // upstream's affected key set rather than a source's `ScanClamp` —
+        // the sibling of `per_group_recompute_cell` (below, keyed-branch-
+        // local) for this model's upstream MODEL edges rather than its
+        // declared sources.
+        let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+        let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
+            None
+        } else {
+            match plan.model_file.metadata.as_deref() {
+                Some(metadata) => {
+                    crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
+                        &clean_sql_for_merge,
+                        &db_table_name,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &keyed_model_edges,
+                        backend.dialect(),
+                    )?
+                }
+                None => None,
+            }
+        };
+
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
         // loop (see `smelt_runtime::cumulative` and
@@ -1861,7 +1912,6 @@ pub async fn execute_project(
             .as_deref()
             .is_some_and(|m| m.is_keyed());
         if plan_is_keyed {
-            let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
 
@@ -1875,17 +1925,7 @@ pub async fn execute_project(
             // trigger; this owns the `UpstreamMutation` trigger, dispatched
             // ALONGSIDE it once a live cell resolves and the target table
             // already exists (never on the creation run — there is nothing
-            // to merge into yet). `table_exists_before_run` is captured
-            // BEFORE the fold below runs (which may itself create the
-            // table on a first run), mirroring the non-keyed branch's own
-            // "did the table exist before THIS run" capture.
-            let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
-            let (maint_source_facts, explicitly_mutable) =
-                build_maint_source_facts(&plan.model_file, source_infos);
-            let table_exists_before_run = backend
-                .table_exists(schema, &db_table_name)
-                .await
-                .unwrap_or(false);
+            // to merge into yet).
             let column_scoped_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                     &clean_sql_for_merge,
@@ -1956,32 +1996,9 @@ pub async fn execute_project(
                 }
                 None => None,
             };
-            // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
-            // §"Upstream model edges"): an upstream maintained model whose own
-            // derived output-delta shape is `KeyedUpsert` folds via the repair
-            // family's own `Technique::PerGroupRecompute`, restricted to the
-            // upstream's affected key set rather than a source's `ScanClamp` —
-            // the sibling of `per_group_recompute_cell` above for this
-            // model's upstream MODEL edges rather than its declared sources.
-            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
-            let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
-                None
-            } else {
-                match plan.model_file.metadata.as_deref() {
-                    Some(metadata) => {
-                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
-                            &clean_sql_for_merge,
-                            &db_table_name,
-                            metadata,
-                            &maint_source_facts,
-                            &explicitly_mutable,
-                            &keyed_model_edges,
-                            backend.dialect(),
-                        )?
-                    }
-                    None => None,
-                }
-            };
+            // `key_addressed_edge_cell` is resolved ONCE, above the
+            // `plan_is_keyed` gate — read directly here, never re-derived
+            // (maintenance-plan purity).
 
             // Classify up front, regardless of window presence, so the
             // derived run shape (`docs/specs/incremental_shapes.md` §"The
@@ -2042,60 +2059,26 @@ pub async fn execute_project(
                     );
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "keyed run path: model '{}' resolved a live key-addressed model-edge \
-                             cell on upstream '{edge_name}', but that upstream has no resolved \
-                             ModelFile — internal inconsistency",
-                            plan.name
-                        )
-                    })?;
-                    let upstream_target = config.get_target(
-                        edge_name,
-                        upstream_model.metadata.as_deref(),
-                        &request.target,
-                    );
-                    let upstream_schema = &config.targets[&upstream_target].schema;
-                    let upstream_table =
-                        format!("{upstream_schema}.{}", upstream_model.db_name_owned());
-                    let upstream_source_address = format!("smelt.models.{edge_name}");
-                    let compiled = compiler.compile_with_sql_and_ephemerals(
-                        &plan.model_file,
-                        schema,
-                        &clean_sql_for_merge,
-                        resolver,
-                    )?;
-                    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+                    dispatch_key_addressed_model_edge(
                         backend,
                         schema,
                         &db_table_name,
-                        &upstream_source_address,
-                        &upstream_table,
+                        &plan.model_file,
+                        compiler,
+                        resolver,
+                        &clean_sql_for_merge,
+                        model_by_addr,
+                        config,
+                        &request.target,
+                        &plan.name,
+                        edge_name,
+                        key_scope,
                         upstream_keys,
                         digest_columns,
-                        &key_scope.keys,
-                        &clean_sql_for_merge,
-                        &compiled.sql,
                         write,
                         &retry_policy,
                     )
                     .await
-                    {
-                        Ok(Some(result)) => Ok(result),
-                        Ok(None) => {
-                            let row_count = backend
-                                .get_row_count(schema, &db_table_name)
-                                .await
-                                .unwrap_or(0);
-                            Ok(smelt_backend::ExecutionResult {
-                                model_name: db_table_name.clone(),
-                                duration: StdDuration::default(),
-                                row_count,
-                                preview: None,
-                            })
-                        }
-                        Err(e) => Err(e),
-                    }
                 }
                 None => match (start_date, end_date) {
                 (Some(s), Some(e)) => {
@@ -2698,6 +2681,127 @@ pub async fn execute_project(
                 skip_set,
                 rows: total_rows,
             }));
+        }
+
+        // Non-keyed key-addressed model-edge dispatch (phase 2,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 02-plan.md`): a widen-never-narrow substitution of the SAME
+        // `key_addressed_edge_cell` resolved once above — for the ordinary
+        // incremental/full-refresh route below, when this model's OWN
+        // driving trigger is not itself keyed
+        // (`docs/specs/incremental_models.md` §"Dispatch — from propagated
+        // components to run units": dispatch is keyed by the component's
+        // addressing, never by the downstream model's `grain`). Licensed
+        // ONLY when every inbound ref of this model is the ONE
+        // key-addressed model edge that resolved a cell — no declared
+        // source, no non-key-addressed model edge: a partition-grain
+        // downstream that ALSO reads an uncovered input keeps the ordinary
+        // route rather than risking a silently dropped component (composed
+        // multi-component dispatch is phase 3's scope). Never on the
+        // creation run — mirrors the keyed branch's own
+        // `table_exists_before_run` gate; there is nothing to repair yet.
+        if !plan_is_keyed {
+            if let Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) =
+                key_addressed_edge_cell
+                    .as_ref()
+                    .filter(|_| table_exists_before_run)
+            {
+                let has_declared_source_ref = plan.model_file.refs.iter().any(|r| {
+                    r.smelt_ref.to_path().first().map(|s| s.as_str()) == Some("sources")
+                });
+                let substitution_gate = !has_declared_source_ref
+                    && keyed_model_edges.len() == 1
+                    && plan.model_file.refs.len() == keyed_model_edges.len();
+                if substitution_gate {
+                    let compiler = compilers.get(model_target);
+                    let resolver = &ephemeral_resolvers[model_target];
+                    let used_diff_patch = matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                    );
+                    let strategy_label = if used_diff_patch {
+                        "diff_patch".to_string()
+                    } else {
+                        "per_group_recompute".to_string()
+                    };
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    let exec_result = dispatch_key_addressed_model_edge(
+                        backend,
+                        schema,
+                        &db_table_name,
+                        &plan.model_file,
+                        compiler,
+                        resolver,
+                        &clean_sql_for_merge,
+                        model_by_addr,
+                        config,
+                        &request.target,
+                        &plan.name,
+                        edge_name,
+                        key_scope,
+                        upstream_keys,
+                        digest_columns,
+                        write,
+                        &retry_policy,
+                    )
+                    .await?;
+                    total_rows = exec_result.row_count;
+                    total_rows_overall += total_rows;
+                    manifest_entries.insert(
+                        plan.name.clone(),
+                        ModelRunRecord {
+                            strategy: strategy_label,
+                            time_range: match (start_date, end_date) {
+                                (Some(s), Some(e)) => Some(TimeRangeRecord {
+                                    start: s.format("%Y-%m-%d").to_string(),
+                                    end: e.format("%Y-%m-%d").to_string(),
+                                }),
+                                _ => None,
+                            },
+                            partitions_updated: vec![],
+                            row_count: total_rows,
+                            duration_ms: model_start.elapsed().as_millis() as u64,
+                            batch_safety: Some("key_addressed".to_string()),
+                            outcome: smelt_state::RunOutcomeKind::Success,
+                            definition_hash: compute_model_hash(&plan.sql),
+                            error: None,
+                            retry_count: sink.retry_count(),
+                            // Mirrors the keyed branch's own key-addressed
+                            // arm: no declared-fact probes dispatch on this
+                            // route today.
+                            probes: Vec::new(),
+                            subsumed: None,
+                        },
+                    );
+                    reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
+                    // ── Check seam A': non-keyed key-addressed arm ────────
+                    if request.run_checks {
+                        let (outcomes, to_skip) = run_model_checks(
+                            &plan.name,
+                            checks_by_model,
+                            compilers,
+                            backends,
+                            target_assignments,
+                            ephemeral_resolvers,
+                            config.as_ref(),
+                            upstream_map,
+                            selected,
+                            reporter,
+                            run_id,
+                        )
+                        .await;
+                        check_results.extend(outcomes);
+                        skip_set.extend(to_skip);
+                    }
+                    return Ok(ModelOutcome::Completed(ModelSuccess {
+                        manifest_entries,
+                        check_results,
+                        skip_set,
+                        rows: total_rows,
+                    }));
+                }
+            }
         }
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
@@ -4767,6 +4871,86 @@ fn maintenance_dialect_for_target(
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
+}
+
+/// Execute an already-resolved live key-addressed model-edge cell
+/// (`docs/specs/incremental_models.md` §"Upstream model edges") — shared by
+/// the `grain: key` run branch and the non-keyed dispatch site
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/02-plan.md`)
+/// so the SAME cell (resolved once, above the `plan_is_keyed` gate) drives
+/// whichever branch's own admission/substitution gate lets it dispatch —
+/// this function never re-derives the cell, only executes it
+/// (maintenance-plan purity, `CLAUDE.md` §"Maintenance-plan purity"). The
+/// caller is responsible for labeling its own manifest strategy from
+/// `write` (`Technique::PerGroupRecompute`'s two write legs,
+/// `RepairWrite::TargetedDeleteInsert` / `RepairWrite::DiffPatch`).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_key_addressed_model_edge(
+    backend: &dyn smelt_backend::Backend,
+    schema: &str,
+    db_table_name: &str,
+    model_file: &smelt_core::ModelFile,
+    compiler: &crate::SqlCompiler,
+    resolver: &EphemeralResolver,
+    clean_sql_for_merge: &str,
+    model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+    config: &smelt_core::config::Config,
+    target: &str,
+    plan_name: &str,
+    edge_name: &str,
+    key_scope: &smelt_logical::maintenance::KeyScope,
+    upstream_keys: &[String],
+    digest_columns: &[String],
+    write: &crate::maintenance_driver::RepairWrite,
+    retry_policy: &RetryPolicy<'_>,
+) -> Result<smelt_backend::ExecutionResult> {
+    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model '{}' resolved a live key-addressed model-edge cell on upstream '{edge_name}', \
+             but that upstream has no resolved ModelFile — internal inconsistency",
+            plan_name
+        )
+    })?;
+    let upstream_target = config.get_target(edge_name, upstream_model.metadata.as_deref(), target);
+    let upstream_schema = &config.targets[&upstream_target].schema;
+    let upstream_table = format!("{upstream_schema}.{}", upstream_model.db_name_owned());
+    let upstream_source_address = format!("smelt.models.{edge_name}");
+    let compiled = compiler.compile_with_sql_and_ephemerals(
+        model_file,
+        schema,
+        clean_sql_for_merge,
+        resolver,
+    )?;
+    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+        backend,
+        schema,
+        db_table_name,
+        &upstream_source_address,
+        &upstream_table,
+        upstream_keys,
+        digest_columns,
+        &key_scope.keys,
+        clean_sql_for_merge,
+        &compiled.sql,
+        write,
+        retry_policy,
+    )
+    .await?
+    {
+        Some(result) => Ok(result),
+        None => {
+            let row_count = backend
+                .get_row_count(schema, db_table_name)
+                .await
+                .unwrap_or(0);
+            Ok(smelt_backend::ExecutionResult {
+                model_name: db_table_name.to_string(),
+                duration: StdDuration::default(),
+                row_count,
+                preview: None,
+            })
+        }
+    }
 }
 
 /// Build `model_file`'s upstream **maintained-model** edge list

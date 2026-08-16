@@ -708,12 +708,17 @@ fn keyed_chain_maintains_only_the_changed_keys() {
 }
 
 /// `keyed_upstream_partition_downstream_matches_oracle` (phase 8 plan test
-/// 4): the [`keyed_partition_sink_dag`] combination phase 7 flagged as
-/// deriving a key-addressed model-edge cell the run loop never dispatches
-/// (`docs/specs/incremental_models.md` §"Known Divergences") — still
-/// multiset-equal to the full-refresh oracle (correctness pin for the
-/// inert-cell case; the divergence is about incrementality, never
-/// correctness).
+/// 4; incrementality assertion added by the scheduler-delta-signatures
+/// outcome's phase 2,
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/02-plan.md`):
+/// the [`keyed_partition_sink_dag`] combination — multiset-equal to the
+/// full-refresh oracle (correctness), AND the repair run's own manifest
+/// records `dag_kpart_b` maintaining via `per_group_recompute`
+/// (incrementality — the run loop actually dispatches the derived
+/// key-addressed model-edge cell, `docs/specs/incremental_models.md`
+/// §"Upstream model edges" / §"Dispatch — from propagated components to
+/// run units", rather than falling back to the ordinary correct-but-full
+/// route).
 #[test]
 fn keyed_upstream_partition_downstream_matches_oracle() {
     let mut runner = TestRunner::deterministic();
@@ -740,8 +745,19 @@ fn keyed_upstream_partition_downstream_matches_oracle() {
             let conn = inc.connect().expect("connect inc");
             insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
         }
-        rt.block_on(inc.run_quiet(&format!("kpart-{i}-repair"), base_request("dev")))
+        let repair_outcome = rt
+            .block_on(inc.run_quiet(&format!("kpart-{i}-repair"), base_request("dev")))
             .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+        let repair_record = repair_outcome.models.get("dag_kpart_b").unwrap_or_else(|| {
+            panic!("case {i}: repair run has no manifest entry for dag_kpart_b")
+        });
+        assert_eq!(
+            repair_record.strategy, "per_group_recompute",
+            "case {i}: dag_kpart_b (grain: partition) must dispatch the key-addressed model-\
+             edge cell's repair family on a repair run, not the ordinary route — got strategy \
+             '{}'",
+            repair_record.strategy
+        );
 
         {
             let conn = full.connect().expect("connect full");

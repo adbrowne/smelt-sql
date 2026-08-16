@@ -63,7 +63,7 @@ run shape.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
-| 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | planned |
+| 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
 | 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals; dispatch composition when a model receives several components in one tick (lifts phase 2's single-edge substitution gate) | pending |
 | 4 | Live observed-delta consumption: `--since-upstream` reads the recorded delta table; settle-bound × observed-delta "delta empty" leg | pending |
 | 5 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
@@ -103,6 +103,13 @@ run shape.
   `grain: partition` downstream (`derive.rs::append_model_edge_cells`, clock route inapplicable
   for a clockless upstream) — phase 2 is a dispatch-only gap, and the
   `keyed_partition_sink_dag` testkit fixture plus its oracle test already exist to extend.
+- 2026-08-16 (phase 2 implemented): dispatch lands — the key-addressed cell now runs for a
+  clockless `keyed upsert` → `grain: partition` edge when the substitution gate holds (single
+  resolved edge, no other inbound ref). Found and worked around (not fixed) a pre-existing
+  `smelt-logical` walk gap along the way: `group_by_output_keys` matches `GROUP BY` keys against
+  select-item expression text, not output alias, so grouping by a projected alias fails grain
+  proof entirely rather than dropping just that column — flagged for a future phase, see
+  `phases/02-summary.md` "For the next planner". No reshape of the phase table.
 
 ## Blocked
 

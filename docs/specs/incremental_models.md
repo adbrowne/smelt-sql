@@ -1840,16 +1840,18 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **The scheduler does not yet consume delta signatures end to end**, per the design now
   pinned in §"Dispatch — from propagated components to run units". Signatures shape admission
   and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
-  day-intervals: a clockless `keyed upsert` upstream feeding a `grain: partition` downstream
-  derives a key-addressed repair cell the run loop never dispatches (the result is correct but
-  not incremental — that route is wired only inside the `grain: key` run branch, so such an
-  upstream instead maintains its downstream via the ordinary run route); keyed dirt-sets carry
-  key columns and provenance, not yet the affected key *values* the pinned design requires
-  (§"Keyed dirt-sets and the narrowed refusal" — value-level discovery stays with the run-time
-  mechanism); and cross-model runs require the operator to state what landed upstream on the
-  command line, because no per-source watermark is yet persisted (the watermark's shape is
-  pinned, `run_state.md` §"Per-source watermark", but no run yet writes or reads one). Tracked:
-  `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
+  day-intervals in most respects: keyed dirt-sets carry key columns and provenance, not yet the
+  affected key *values* the pinned design requires (§"Keyed dirt-sets and the narrowed refusal"
+  — value-level discovery stays with the run-time mechanism); and cross-model runs require the
+  operator to state what landed upstream on the command line, because no per-source watermark is
+  yet persisted (the watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no
+  run yet writes or reads one). A single-component key-addressed model edge now dispatches
+  outside the `grain: key` branch (a clockless `keyed upsert` upstream feeding a `grain:
+  partition` downstream runs the repair family's `PerGroupRecompute` cell, not the ordinary
+  route); the residue is a downstream that ALSO has an inbound edge or source the key-addressed
+  cell does not cover — that composed multi-component case still keeps the ordinary route rather
+  than risk silently dropping the uncovered component, pending the dirt-set representation work
+  below. Tracked: `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
 - **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
