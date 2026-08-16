@@ -696,13 +696,20 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
+            cells: vec![cell.clone()],
+            refusals: vec![],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
             cells: vec![cell],
             refusals: vec![],
             key_locality: None,
         },
+        state_downgrades: vec![],
         column_groups: vec![ColumnGroup {
             columns: vec!["max_val".to_string()],
             mutation_sensitivity: Default::default(),
@@ -745,6 +752,115 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
     assert!(
         !report.contains("write mechanism: diff_patch"),
         "a non-repair cell must print no repair stanza: {report}"
+    );
+}
+
+/// `MaintenanceStateDowngraded` (`docs/specs/state.md` §"The degradation
+/// contract"): a downgraded cell prints BOTH its executed technique (the
+/// resolved plan's own `technique:` line) and the ideal one it would run
+/// with the missing structure available — the counterfactual `smelt
+/// explain` promises to keep printable even though it never runs.
+#[test]
+fn explain_prints_a_downgraded_cell_with_both_techniques() {
+    use std::collections::BTreeSet;
+
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::maintenance::availability::{StateDowngrade, StateStructure};
+    use smelt_logical::maintenance::{
+        ColumnGroup, Corner, MaintenancePlan, PartitionLocal, PlanCell, RecomputeFallback,
+        RowIdentity, RowIdentityVerdict, ScanClamp, Technique, Trigger,
+    };
+
+    let trigger = Trigger::NewData {
+        source: "events".to_string(),
+    };
+    let ideal_cell = PlanCell {
+        group: "{total}".to_string(),
+        trigger: trigger.clone(),
+        corner: Corner::FoldDelta,
+        technique: Technique::KeyedFold,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["user_id".to_string()]),
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+        key_scope: None,
+        recompute_fallback: Some(RecomputeFallback {
+            technique: Technique::PerGroupRecompute,
+            scans: vec![ScanClamp {
+                source: "events".to_string(),
+                column: "event_time".to_string(),
+                before: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+                after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+            }],
+            key_scope: None,
+        }),
+    };
+    let mut resolved_cell = ideal_cell.clone();
+    resolved_cell.technique = Technique::PerGroupRecompute;
+    resolved_cell.recompute_fallback = None;
+
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![resolved_cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
+            cells: vec![ideal_cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        state_downgrades: vec![StateDowngrade {
+            cell_group: "{total}".to_string(),
+            trigger: format!("{trigger:?}"),
+            ideal_technique: Technique::KeyedFold,
+            resolved_technique: Technique::PerGroupRecompute,
+            missing_structure: StateStructure::ReconciliationLedger,
+            why: "no reconciliation ledger on this backend; downgraded to the per-group \
+                  recompute fallback"
+                .to_string(),
+        }],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["total".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+        state_columns: vec![],
+    };
+
+    let report = build_maintenance_plan_report(
+        "downgraded_fixture",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    assert!(
+        report.contains("technique: PerGroupRecompute"),
+        "expected the resolved (executed) technique to print: {report}"
+    );
+    assert!(
+        report.contains("state downgrade: PerGroupRecompute (ideal: KeyedFold"),
+        "expected the ideal technique alongside the executed one: {report}"
+    );
+    assert!(
+        report.contains("ReconciliationLedger"),
+        "expected the missing structure named: {report}"
     );
 }
 

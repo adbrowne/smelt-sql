@@ -1832,6 +1832,11 @@ pub fn maintenance_plan_report(
         // own call site for the same rationale.
         &[],
         &source_referential_integrity,
+        // Not (yet) backend-aware at this call site — see
+        // `maintenance_plan_diagnostics`'s own `state_downgrade_diagnostics`
+        // call for the per-`active_backends` resolution `smelt explain`'s
+        // report actually surfaces downgrades through.
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
@@ -2593,6 +2598,33 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for state_downgrade in &plan_diags.state_downgrades {
+            let d = &state_downgrade.downgrade;
+            let structure = match d.missing_structure {
+                smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger => {
+                    "the reconciliation ledger"
+                }
+                smelt_logical::maintenance::availability::StateStructure::FrontierRecord => {
+                    "the frontier record"
+                }
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "MaintenanceStateDowngraded: cell {} on backend '{}' requires {structure}, \
+                     which is unavailable — downgraded from {:?} to {:?}: {}",
+                    d.trigger,
+                    state_downgrade.backend,
+                    d.ideal_technique,
+                    d.resolved_technique,
+                    d.why
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceStateDowngraded),
                 data: None,
             })
             .accumulate(db);

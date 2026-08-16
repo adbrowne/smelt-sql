@@ -25,6 +25,7 @@
 //! Nothing here is wired into diagnostics, planning, or execution; the module
 //! is pure data + pure functions (Salsa-purity compatible by construction).
 
+pub mod availability;
 pub mod choice;
 pub mod derive;
 pub mod diff_patch;
@@ -334,6 +335,30 @@ pub struct PlanCell {
     /// keyed dirt-set took over `Propagation`'s interval maps
     /// (`docs/outcomes/20260809-output-delta-typing/outcome.md` 2026-08-10
     /// decision log). `None` for every other cell — unaffected.
+    pub key_scope: Option<KeyScope>,
+    /// The equivalence-preserving recompute-family technique this cell
+    /// downgrades to when its own technique needs a state structure the
+    /// target backend cannot build (`availability::resolve_state_availability`,
+    /// `state.md` §"The degradation contract"). Populated only at the
+    /// `Technique::KeyedFold` push site (`derive::derive_new_data`) by
+    /// calling `repair::admit_per_group_recompute` with the same inputs
+    /// already in scope. `None` for every non-`KeyedFold` cell, and for a
+    /// `KeyedFold` cell with no admissible fallback — that `None` is what
+    /// drives a fail-loud `Refusal::NoAdmissibleTechnique` at resolution
+    /// time instead of a silent keyed fold on a ledger-less backend.
+    pub recompute_fallback: Option<RecomputeFallback>,
+}
+
+/// The recompute-family technique + read restriction a
+/// [`Technique::KeyedFold`] cell falls back to when the reconciliation
+/// ledger is unavailable (`PlanCell::recompute_fallback`). Carries only what
+/// [`availability::resolve_state_availability`] needs to rewrite the cell in
+/// place — the same `(technique, scans, key_scope)` triple `PlanCell` itself
+/// carries, not a second full cell shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecomputeFallback {
+    pub technique: Technique,
+    pub scans: Vec<ScanClamp>,
     pub key_scope: Option<KeyScope>,
 }
 

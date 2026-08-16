@@ -100,6 +100,7 @@ fn derive_plan_cells(model: &ModelFile, source_infos: &[SourceInfo]) -> Vec<Plan
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .map(|r| r.plan.cells)
     .unwrap_or_default()
@@ -373,6 +374,7 @@ fn synthetic_cell(technique: Technique, row_identity: RowIdentity) -> PlanCell {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     }
 }
 
@@ -702,6 +704,7 @@ fn choice_rs_execution_semantics_unchanged() {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            recompute_fallback: None,
         }],
         refusals: vec![],
         key_locality: None,

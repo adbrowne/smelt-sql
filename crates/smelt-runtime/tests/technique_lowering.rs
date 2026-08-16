@@ -119,6 +119,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -427,6 +428,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
+        recompute_fallback: None,
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -1180,6 +1182,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -2671,6 +2674,7 @@ mod write_pattern_registry_pin {
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
                 key_scope: None,
+                recompute_fallback: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -4017,6 +4021,7 @@ mod in_place_update_lowering {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 

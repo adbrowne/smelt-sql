@@ -919,6 +919,15 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+    /// Emitted (Warning) when a cell's derived technique requires a state
+    /// structure (the reconciliation ledger or its frontier record) with no
+    /// realisation on a target backend — the cell was downgraded to its
+    /// recompute-family equivalent (`docs/specs/state.md` §"The degradation
+    /// contract"). Advisory: the resolved plan already reflects the
+    /// downgrade, so this only reports it. Names the cell, the ideal
+    /// technique, the resolved technique, and the missing structure.
+    /// Anchored at the model SQL body start.
+    MaintenanceStateDowngraded,
 
     // ── Contract lattice diagnostic codes ────────────────────────────────────
     /// A `contract.frozen_horizon` is unparseable or declared on a

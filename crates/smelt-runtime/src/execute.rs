@@ -3763,7 +3763,16 @@ pub async fn execute_project(
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
                     } else {
-                        tracing::warn!(
+                        // Advisory, not user-facing here: the same fact is
+                        // now derived and reported ahead of the run as a
+                        // warning-severity `MaintenanceStateDowngraded`
+                        // diagnostic (`docs/specs/state.md` §"The
+                        // degradation contract",
+                        // `smelt_logical::maintenance::availability::
+                        // resolve_state_availability`) — this is only
+                        // internal instrumentation for the actual write
+                        // path that skips the record.
+                        tracing::debug!(
                             model = %plan.name,
                             dialect = %backend.dialect().name(),
                             "no engine-resident frontier builder for this dialect; the region \

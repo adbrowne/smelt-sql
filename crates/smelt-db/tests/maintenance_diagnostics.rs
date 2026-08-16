@@ -397,6 +397,7 @@ fn column_added_trigger_derived_from_deployed_schema() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -460,6 +461,7 @@ fn column_added_trigger_skeleton_position_refuses() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -548,6 +550,7 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -564,5 +567,119 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
          were a pure backfill of the old (now-absent) column: cells {:?}, refusals {:?}",
         result.plan.cells,
         result.plan.refusals
+    );
+}
+
+/// `MaintenanceStateDowngraded` (`docs/specs/state.md` §"The degradation
+/// contract"): a keyed-fold model against a `spark` target backend — no
+/// engine-resident reconciliation ledger or frontier builder — yields
+/// warning-severity `MaintenanceStateDowngraded` diagnostics naming each
+/// affected cell, the ideal technique, and the missing structure; against
+/// `duckdb` it yields none. Exercises the diagnostic through the real
+/// `smelt.yml` → `active_backends` → `state_downgrade_diagnostics` path
+/// (`crates/smelt-logical/tests/state_availability.rs` covers the pure
+/// resolution's per-technique behaviour, including a `KeyedFold` cell's own
+/// recompute-fallback downgrade, in isolation).
+const EVENTS_SOURCE: &str = r#"
+description: Raw events, append-only, clocked.
+timeseries:
+  partition_column: event_time
+  granularity: day
+mutation_profile:
+  kind: append_only
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: event_time, type: TIMESTAMP, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: true }
+"#;
+
+const KEYED_FOLD_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT user_id, SUM(amount) AS total
+FROM smelt.sources.events
+GROUP BY user_id
+"#;
+
+const SMELT_YML_DUCKDB: &str = r#"
+name: state_downgrade_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+
+const SMELT_YML_SPARK: &str = r#"
+name: state_downgrade_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: spark
+    schema: main
+
+default_materialization: view
+"#;
+
+#[test]
+fn state_downgrade_surfaces_as_an_advisory_diagnostic() {
+    let duckdb_diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML_DUCKDB),
+            ("models/sources/events.yml", EVENTS_SOURCE),
+            ("models/user_totals.sql", KEYED_FOLD_MODEL),
+        ],
+        "user_totals",
+    );
+    assert!(
+        duckdb_diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MaintenanceStateDowngraded)),
+        "duckdb ships an engine-resident reconciliation ledger — no downgrade should fire; \
+         got {duckdb_diags:?}"
+    );
+
+    let spark_diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML_SPARK),
+            ("models/sources/events.yml", EVENTS_SOURCE),
+            ("models/user_totals.sql", KEYED_FOLD_MODEL),
+        ],
+        "user_totals",
+    );
+    let downgrades: Vec<_> = spark_diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceStateDowngraded))
+        .collect();
+    assert!(
+        !downgrades.is_empty(),
+        "spark has no reconciliation ledger — expected at least one downgrade; got {spark_diags:?}"
+    );
+    assert!(
+        downgrades
+            .iter()
+            .all(|d| d.severity == smelt_db::DiagnosticSeverity::Warning),
+        "MaintenanceStateDowngraded must be advisory (Warning): {downgrades:?}"
+    );
+    assert!(
+        downgrades
+            .iter()
+            .any(|d| d.message.contains("MaintenanceStateDowngraded")
+                && d.message.contains("frontier record")),
+        "the region-recompute (backfill) cell's own frontier-record downgrade must be among \
+         them; got {downgrades:?}"
     );
 }

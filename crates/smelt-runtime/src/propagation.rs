@@ -805,6 +805,11 @@ fn derive_clamp_and_locality_pass(
             // `UpstreamMutation` cell's closure is real here too, never a
             // separately re-derived admission.
             &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
+            // Not (yet) backend-aware at this call site — the propagation
+            // graph walk reads dirt-interval facts, not the executed
+            // technique, so an un-downgraded ideal plan is the correct
+            // input here (same posture as `smelt explain`'s report path).
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         ) else {
             continue;
         };

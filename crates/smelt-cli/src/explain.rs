@@ -314,6 +314,26 @@ pub fn build_maintenance_plan_report(
             );
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            // State-availability downgrade (`docs/specs/state.md` §"The
+            // degradation contract"): print both the executed technique
+            // (above) and the ideal one this cell would run with the
+            // missing structure available — the counterfactual `smelt
+            // explain` promises, read straight from `result.state_downgrades`
+            // rather than re-resolved here.
+            if let Some(downgrade) = result
+                .state_downgrades
+                .iter()
+                .find(|d| d.cell_group == cell.group && d.trigger == format!("{:?}", cell.trigger))
+            {
+                let _ = writeln!(
+                    out,
+                    "      state downgrade: {:?} (ideal: {:?}, missing {:?}) — {}",
+                    downgrade.resolved_technique,
+                    downgrade.ideal_technique,
+                    downgrade.missing_structure,
+                    downgrade.why
+                );
+            }
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
             // Effective contract (`docs/specs/incremental_models.md` §"The
             // contract lattice"): default or a relaxed point, with its

@@ -939,6 +939,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -946,6 +947,8 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
             refusals: vec![],
             key_locality: None,
         },
+        ideal_plan: MaintenancePlan::default(),
+        state_downgrades: vec![],
         column_groups: vec![ColumnGroup {
             columns: vec!["user_name".to_string()],
             mutation_sensitivity: Default::default(),
@@ -1034,6 +1037,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     };
     let sibling_cell = PlanCell {
         group: "{event_type, user_id}".to_string(),
@@ -1055,6 +1059,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -1062,6 +1067,8 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
             refusals: vec![],
             key_locality: None,
         },
+        ideal_plan: MaintenancePlan::default(),
+        state_downgrades: vec![],
         column_groups: vec![
             ColumnGroup {
                 columns: vec!["user_name".to_string()],
@@ -1234,6 +1241,7 @@ mod write_variant_explain_surface {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 
@@ -1254,6 +1262,8 @@ mod write_variant_explain_surface {
                 refusals: vec![],
                 key_locality: None,
             },
+            ideal_plan: MaintenancePlan::default(),
+            state_downgrades: vec![],
             // `base_cell`'s group is `{tier}` (`ColumnGroup::name()` derives
             // the display name from `columns`), matching the single column
             // this fixture's pin tests target.

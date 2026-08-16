@@ -567,6 +567,7 @@ pub fn resolve_incremental_strategy(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     ) else {
         return backend_default;
     };
@@ -817,6 +818,7 @@ pub fn resolve_live_column_scoped_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     ) else {
         return Ok(None);
     };
@@ -1035,6 +1037,7 @@ pub fn resolve_live_in_place_update_cell(
         &[],
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )?;
     let cell = result
         .plan
@@ -1163,6 +1166,7 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     ) else {
         return Ok(None);
     };
@@ -1567,6 +1571,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -2115,6 +2120,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -3424,6 +3430,7 @@ pub fn resolve_live_delta_restriction_facts(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),
@@ -4225,6 +4232,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 
@@ -4249,6 +4257,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 

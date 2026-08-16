@@ -69,7 +69,7 @@ this outcome runs first in the programme.
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
-| 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | planned |
+| 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | pending |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | pending |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
@@ -78,6 +78,24 @@ this outcome runs first in the programme.
 
 ## Decision log
 
+- **2026-08-16 (phase 5 implement).** Phase 5 landed: the pure
+  `smelt_logical::maintenance::availability` module (`StateAvailability`,
+  `resolve_state_availability`, `StateDowngrade`), `PlanCell::recompute_fallback` (populated at
+  the `KeyedFold` push site via the existing `repair::admit_per_group_recompute`),
+  `MaintenancePlanResult::ideal_plan`/`state_downgrades`, the `StateAvailability` parameter on
+  both `smelt-db` derive entry points (resolved internally, edges variant resolves after
+  appending model-edge cells), `state_availability_for`/`state_downgrade_diagnostics`, the
+  warning-severity `MaintenanceStateDowngraded` diagnostic, and its `smelt explain` print. Only
+  two runtime call sites (the ones that already carry `dialect: SqlDialect` in scope) pass real
+  availability; every other call site — including `smelt explain`'s own report path and five of
+  `maintenance_driver.rs`'s seven resolvers — passes `StateAvailability::all()` unchanged, so
+  `smelt explain` does not yet show a downgrade for a project's real declared backends. Also
+  retired phase 4's `tracing::warn!` frontier-skip site (demoted to `debug!`) and excluded the
+  new advisory from the example-workspace zero-diagnostics gates (every `spark`-targeted example
+  now legitimately downgrades). All phase-5 gates green, including a re-check of
+  `smelt-lsp --test example_workspaces` (not in the plan's own Verification list but broken by
+  the same example-fixture effect). See `phases/05-summary.md` "For the next planner" for the
+  runtime-wiring gap and `smelt explain`'s own non-backend-awareness, left for a later phase.
 - **2026-08-16 (phase 5 plan).** Reshaped the tail into six rows. (a) Split the old row 5 in two:
   the availability-resolution downgrade (advisory, plan-derivation, `MaintenanceStateDowngraded`)
   and the declared-contract refusal (fail-loud, validation, `DeclaredContractRequiresState`) have

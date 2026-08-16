@@ -216,6 +216,7 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
+        recompute_fallback: None,
     }
 }
 

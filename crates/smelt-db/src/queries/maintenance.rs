@@ -47,7 +47,22 @@ use smelt_types::SqlFunction;
 /// consumers never re-derive it").
 #[derive(Debug, Clone, Default)]
 pub struct MaintenancePlanResult {
+    /// The plan actually executed: [`MaintenancePlan`]'s cells resolved
+    /// against the caller's [`smelt_logical::maintenance::availability::StateAvailability`]
+    /// (`docs/specs/state.md` §"The degradation contract"). Byte-identical
+    /// to `ideal_plan` for a caller that passed `StateAvailability::all()`
+    /// (every current call site not yet backend-aware).
     pub plan: MaintenancePlan,
+    /// The plan as if every state structure were available — never pruned
+    /// by resolution, so a counterfactual `smelt explain` print (or a
+    /// future availability change) always has the un-degraded plan to read
+    /// (`state.md` §"The degradation contract": "the ideal plan must exist
+    /// as a derived object even when it will not run").
+    pub ideal_plan: MaintenancePlan,
+    /// Every cell resolution downgraded against the caller's availability —
+    /// the `MaintenanceStateDowngraded` diagnostic's own data. Empty for
+    /// `StateAvailability::all()`.
+    pub state_downgrades: Vec<smelt_logical::maintenance::availability::StateDowngrade>,
     pub column_groups: Vec<ColumnGroup>,
     /// Every column whose provenance couldn't be resolved and whose
     /// derivation fell back to the whole-model group
@@ -347,8 +362,17 @@ pub fn derive_fold_spec(
 /// behaves byte-identically to this function's behaviour before this
 /// parameter existed — this only *adds* closure attempts for the sources
 /// the caller names.
+/// The shared body of [`derive_model_maintenance_plan`] and
+/// [`derive_model_maintenance_plan_with_edges`]: everything through the
+/// admitted `MaintenancePlan`, before either public entry point's own
+/// finishing step (availability resolution — [`finish_plan_result`] — and,
+/// for the edges variant, appending model-edge cells first). Kept private:
+/// an un-resolved plan is never a caller-visible shape, only an
+/// intermediate one both public functions share so state-availability
+/// resolution has exactly one call site per public function, covering
+/// model-edge cells too.
 #[allow(clippy::too_many_arguments)]
-pub fn derive_model_maintenance_plan(
+fn derive_model_maintenance_plan_raw(
     sql: &str,
     table: &str,
     metadata: &ModelMetadata,
@@ -358,7 +382,7 @@ pub fn derive_model_maintenance_plan(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
-) -> Option<MaintenancePlanResult> {
+) -> Option<(MaintenancePlan, Vec<ColumnGroup>, Vec<DegenerateColumn>)> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
     }
@@ -379,12 +403,11 @@ pub fn derive_model_maintenance_plan(
         // meaningful to derive here, so this bypasses
         // `derive_maintenance_plan` entirely rather than feeding it inputs
         // built from a grain it was never taught to admit.
-        return Some(MaintenancePlanResult {
-            plan: smelt_logical::maintenance::unsupported_grain_plan("key_per_partition"),
-            column_groups: Vec::new(),
-            degenerate: Vec::new(),
-            state_columns: Vec::new(),
-        });
+        return Some((
+            smelt_logical::maintenance::unsupported_grain_plan("key_per_partition"),
+            Vec::new(),
+            Vec::new(),
+        ));
     }
     let partition_col = metadata
         .timeseries
@@ -423,17 +446,16 @@ pub fn derive_model_maintenance_plan(
             // GROUP-BY derivation alone) has nothing to check against.
             if let Some(declared) = metadata.unique_key.as_deref() {
                 if let Err((declared, derived)) = declared_unique_key_matches(declared, sql) {
-                    return Some(MaintenancePlanResult {
-                        plan: locality_refused_plan(format!(
+                    return Some((
+                        locality_refused_plan(format!(
                             "model '{table}' declares unique_key: {declared:?} but its \
                              outermost SELECT's GROUP BY derives {derived:?} — the declared \
                              identity must restate the GROUP BY column set exactly \
                              (docs/specs/models.md §\"Constraint violations\")"
                         )),
-                        column_groups: Vec::new(),
-                        degenerate: Vec::new(),
-                        state_columns: Vec::new(),
-                    });
+                        Vec::new(),
+                        Vec::new(),
+                    ));
                 }
             }
             // A `grain: key` model that also declares a `timeseries:`
@@ -493,12 +515,11 @@ pub fn derive_model_maintenance_plan(
                 };
                 match establish_locality(&inputs) {
                     Err(refusal) => {
-                        return Some(MaintenancePlanResult {
-                            plan: locality_refused_plan(refusal.message(table)),
-                            column_groups: Vec::new(),
-                            degenerate: Vec::new(),
-                            state_columns: Vec::new(),
-                        });
+                        return Some((
+                            locality_refused_plan(refusal.message(table)),
+                            Vec::new(),
+                            Vec::new(),
+                        ));
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
                     // the plan's `key_locality` below (after
@@ -606,12 +627,71 @@ pub fn derive_model_maintenance_plan(
             settle_bound: bound,
         }
     });
-    Some(MaintenancePlanResult {
-        plan,
-        column_groups: grouping.groups,
-        degenerate: grouping.degenerate,
+    Some((plan, grouping.groups, grouping.degenerate))
+}
+
+/// The finishing step both public entry points share: resolve `plan`
+/// against `availability` (`smelt_logical::maintenance::availability::
+/// resolve_state_availability`, `docs/specs/state.md` §"The degradation
+/// contract") and wrap the result. `plan` is the caller's already-complete
+/// plan (model-edge cells appended, for the edges variant) — this is always
+/// the LAST step, so a downgrade never misses a cell.
+fn finish_plan_result(
+    plan: MaintenancePlan,
+    column_groups: Vec<ColumnGroup>,
+    degenerate: Vec<DegenerateColumn>,
+    availability: smelt_logical::maintenance::availability::StateAvailability,
+) -> MaintenancePlanResult {
+    let ideal_plan = plan.clone();
+    let resolved =
+        smelt_logical::maintenance::availability::resolve_state_availability(&plan, &availability);
+    MaintenancePlanResult {
+        plan: resolved.plan,
+        ideal_plan,
+        state_downgrades: resolved.downgrades,
+        column_groups,
+        degenerate,
         state_columns: Vec::new(),
-    })
+    }
+}
+
+/// See [`derive_model_maintenance_plan_raw`] for every parameter except
+/// `availability`: the target backend's [`smelt_logical::maintenance::
+/// availability::StateAvailability`] (`docs/specs/state.md` §"The
+/// degradation contract") to resolve the derived plan against. A caller
+/// that does not (yet) know its target backend passes `StateAvailability::
+/// all()` — byte-identical to this function's behaviour before this
+/// parameter existed (resolution downgrades zero cells).
+#[allow(clippy::too_many_arguments)]
+pub fn derive_model_maintenance_plan(
+    sql: &str,
+    table: &str,
+    metadata: &ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &std::collections::HashSet<String>,
+    driving_source_granularity: Option<Granularity>,
+    key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
+    deployed_column_names: &[String],
+    source_referential_integrity: &SourceReferentialIntegrity,
+    availability: smelt_logical::maintenance::availability::StateAvailability,
+) -> Option<MaintenancePlanResult> {
+    let (plan, column_groups, degenerate) = derive_model_maintenance_plan_raw(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        driving_source_granularity,
+        key_recurrences,
+        deployed_column_names,
+        source_referential_integrity,
+    )?;
+    Some(finish_plan_result(
+        plan,
+        column_groups,
+        degenerate,
+        availability,
+    ))
 }
 
 /// Like [`derive_model_maintenance_plan`], but additionally folds the
@@ -629,6 +709,10 @@ pub fn derive_model_maintenance_plan(
 /// Kept as a wrapper over [`derive_model_maintenance_plan`] so the many
 /// source-only callers (`smelt-runtime`'s maintenance driver and propagation
 /// walk) are unchanged; both entry points still call one pure derivation.
+/// See [`derive_model_maintenance_plan`] for `availability` — resolved
+/// AFTER model-edge cells are appended below, so a downgrade never misses
+/// an edge cell (`derive::append_model_edge_cells` can itself push a
+/// `Technique::DeleteInsert` creation cell for a clocked edge).
 #[allow(clippy::too_many_arguments)]
 pub fn derive_model_maintenance_plan_with_edges(
     sql: &str,
@@ -641,8 +725,9 @@ pub fn derive_model_maintenance_plan_with_edges(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
+    availability: smelt_logical::maintenance::availability::StateAvailability,
 ) -> Option<MaintenancePlanResult> {
-    let mut result = derive_model_maintenance_plan(
+    let (mut plan, column_groups, degenerate) = derive_model_maintenance_plan_raw(
         sql,
         table,
         metadata,
@@ -666,13 +751,18 @@ pub fn derive_model_maintenance_plan_with_edges(
         _ => None,
     };
     smelt_logical::maintenance::derive::append_model_edge_cells(
-        &mut result.plan,
+        &mut plan,
         sql,
         output_partition_col,
         model_edges,
         metadata.unique_key.as_deref().unwrap_or(&[]),
     );
-    Some(result)
+    Some(finish_plan_result(
+        plan,
+        column_groups,
+        degenerate,
+        availability,
+    ))
 }
 
 /// A `maintenance.cells[]` entry whose declared `columns` span more than one
@@ -875,6 +965,57 @@ pub struct MaintenancePlanDiagnostics {
     /// write addressing" → "User pins") — computed by
     /// [`write_pin_diagnostics`].
     pub write_pin_refusals: Vec<WritePinDiagnostic>,
+    /// Every cell downgraded against the project's `active_backends`
+    /// (`docs/specs/state.md` §"The degradation contract",
+    /// `MaintenanceStateDowngraded`) — computed by
+    /// [`state_downgrade_diagnostics`].
+    pub state_downgrades: Vec<StateDowngradeDiagnostic>,
+}
+
+/// One state-availability downgrade against a specific declared backend —
+/// the `MaintenanceStateDowngraded` diagnostic's own data, plus which
+/// backend it fired for (checked against every one of the project's
+/// `active_backends`, mirroring [`write_pin_diagnostics`]'s own per-backend
+/// loop — a downgrade on any one declared target backend is reported, not
+/// only a project with a single target).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateDowngradeDiagnostic {
+    pub backend: String,
+    pub downgrade: smelt_logical::maintenance::availability::StateDowngrade,
+}
+
+/// Resolve `ideal_plan` against every one of `active_backends`' own
+/// [`state_availability_for`] and collect every resulting downgrade
+/// (`docs/specs/state.md` §"The degradation contract"). Pure — reads the
+/// already-derived ideal plan, never re-derives it (`CLAUDE.md`
+/// §"Maintenance-plan purity").
+pub fn state_downgrade_diagnostics(
+    ideal_plan: &smelt_logical::maintenance::MaintenancePlan,
+    active_backends: &[String],
+) -> Vec<StateDowngradeDiagnostic> {
+    let backends: Vec<String> = if active_backends.is_empty() {
+        vec!["duckdb".to_string()]
+    } else {
+        active_backends.to_vec()
+    };
+    let mut out = Vec::new();
+    for backend in &backends {
+        let availability = state_availability_for(backend);
+        let resolved = smelt_logical::maintenance::availability::resolve_state_availability(
+            ideal_plan,
+            &availability,
+        );
+        out.extend(
+            resolved
+                .downgrades
+                .into_iter()
+                .map(|downgrade| StateDowngradeDiagnostic {
+                    backend: backend.clone(),
+                    downgrade,
+                }),
+        );
+    }
+    out
 }
 
 /// The open write-pattern registry's [`smelt_logical::maintenance::
@@ -903,6 +1044,23 @@ pub fn backend_write_capabilities_for(
     smelt_logical::maintenance::BackendWriteCapabilities {
         supports_merge: caps.supports_merge,
         supports_column_scoped_merge: caps.supports_column_scoped_merge,
+    }
+}
+
+/// The [`smelt_logical::maintenance::availability::StateAvailability`] for a
+/// declared backend name — the state-structure-side sibling of
+/// [`backend_write_capabilities_for`], same vocabulary and same "single
+/// owner stays `smelt_dialect`" posture. Only DuckDB ships an
+/// engine-resident reconciliation ledger and frontier builder today (a
+/// Spark builder is out of scope for `docs/outcomes/20260816-state-residency`,
+/// per that outcome's "Out of scope" section) — every other recognised
+/// backend, and any unrecognised name, reports neither structure available.
+pub fn state_availability_for(
+    backend_name: &str,
+) -> smelt_logical::maintenance::availability::StateAvailability {
+    match backend_name.to_ascii_lowercase().as_str() {
+        "duckdb" => smelt_logical::maintenance::availability::StateAvailability::all(),
+        _ => smelt_logical::maintenance::availability::StateAvailability::none(),
     }
 }
 
@@ -1124,6 +1282,7 @@ pub fn maintenance_plan_diagnostics(
         // is the production caller that supplies a real snapshot.
         &[],
         &source_referential_integrity,
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -1195,11 +1354,13 @@ pub fn maintenance_plan_diagnostics(
         &result.column_groups,
         active_backends,
     );
+    let state_downgrades = state_downgrade_diagnostics(&result.ideal_plan, active_backends);
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
         granularity_mismatch,
         write_pin_refusals,
+        state_downgrades,
     }
 }
 
@@ -1381,6 +1542,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1437,6 +1599,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1483,6 +1646,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -1548,6 +1712,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -1642,6 +1807,7 @@ mod tests {
             &[],
             &[],
             &real_ri,
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("model must derive a plan");
         let cell = with_real_ri
@@ -1666,6 +1832,7 @@ mod tests {
             &[],
             &[],
             &SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("model must derive a plan");
         let cell = with_empty_ri
@@ -1748,6 +1915,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         )
         .expect("route 1 must derive a plan");
         assert!(

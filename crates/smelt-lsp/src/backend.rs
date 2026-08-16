@@ -470,6 +470,7 @@ impl Backend {
                     "maintenance-write-pattern-unavailable"
                 }
                 DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
+                DbCode::MaintenanceStateDowngraded => "maintenance-state-downgraded",
                 DbCode::UnknownColumnTestKind => "unknown-column-test-kind",
                 DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
                 DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
