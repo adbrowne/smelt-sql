@@ -426,102 +426,13 @@ else
 fi
 
 # ── Stage 9 ───────────────────────────────────────────────────────────────
-stage "Generate the auth + env scripts"
-say "Two scripts get written into the repo:"
+stage "Verify the whole chain"
+say "The auth + env scripts are committed to the repo, not generated here:"
 note "  scripts/bigquery-auth.sh — you run this; decrypts the key, mints a 1h token"
 note "  scripts/bigquery-env.sh  — tests source this; exports project/dataset/token"
-
-cat > "$REPO_ROOT/scripts/bigquery-auth.sh" <<AUTHEOF
-#!/usr/bin/env bash
-# bigquery-auth.sh — mint a SHORT-LIVED (1 hour) BigQuery access token.
-#
-# Run this yourself at the start of a BigQuery test session:
-#
-#     bash scripts/bigquery-auth.sh
-#
-# It prompts for the passphrase protecting the service-account key, mints an
-# OAuth access token, and writes it to \$BQ_CONFIG_DIR/token with an expiry
-# stamp. The plaintext key is never written to disk.
-#
-# Outside the one-hour window there is no usable credential on this machine,
-# and minting a new one requires a human to type the passphrase.
-set -euo pipefail
-
-BQ_CONFIG_DIR="\${SMELT_BQ_CONFIG_DIR:-\$HOME/.config/gcloud-smelt-bq}"
-KEY_ENC="\$BQ_CONFIG_DIR/sa-key.json.gpg"
-TOKEN_FILE="\$BQ_CONFIG_DIR/token"
-
-[[ -f "\$KEY_ENC" ]] || { echo "no encrypted key at \$KEY_ENC — run scripts/bigquery-setup.sh" >&2; exit 1; }
-
-_plain="\$(mktemp)"
-trap 'command -v shred >/dev/null 2>&1 && shred -u "\$_plain" 2>/dev/null || rm -f "\$_plain"' EXIT
-
-if command -v gpg >/dev/null 2>&1; then
-  gpg --quiet --decrypt --output "\$_plain" "\$KEY_ENC"
-else
-  openssl enc -d -aes-256-cbc -pbkdf2 -in "\$KEY_ENC" -out "\$_plain"
-fi
-
-CLOUDSDK_CONFIG="\$BQ_CONFIG_DIR" gcloud auth activate-service-account \\
-  --key-file="\$_plain" --quiet >/dev/null 2>&1
-
-TOKEN="\$(CLOUDSDK_CONFIG="\$BQ_CONFIG_DIR" gcloud auth print-access-token)"
-EXPIRES=\$(( \$(date +%s) + 3500 ))
-
-umask 077
-printf '%s\\n%s\\n' "\$TOKEN" "\$EXPIRES" > "\$TOKEN_FILE"
-chmod 600 "\$TOKEN_FILE"
-
-echo "BigQuery token minted — valid until \$(date -d "@\$EXPIRES" '+%H:%M:%S')"
-echo "Now run:  source scripts/bigquery-env.sh"
-AUTHEOF
-chmod +x "$REPO_ROOT/scripts/bigquery-auth.sh"
-note "wrote scripts/bigquery-auth.sh"
-
-cat > "$REPO_ROOT/scripts/bigquery-env.sh" <<'ENVEOF'
-# bigquery-env.sh — source this (`source scripts/bigquery-env.sh`) to point
-# smelt's BigQuery integration tests at your provisioned GCP project.
-#
-#   SMELT_BQ_PROJECT      — gate + target project for the BigQuery backend tests.
-#                           When UNSET, all BigQuery-targeted tests skip (green).
-#   SMELT_BQ_DATASET      — base dataset; per-run test datasets are suffixed.
-#   SMELT_BQ_LOCATION     — dataset location (must match at query time).
-#   SMELT_BQ_ACCESS_TOKEN — short-lived OAuth token from bigquery-auth.sh.
-#
-# The adapter authenticates with SMELT_BQ_ACCESS_TOKEN *explicitly* and never
-# falls back to application-default credentials. That is deliberate: it makes
-# ambient credentials unusable, so the only way to reach GCP is the token this
-# script exports.
-_bq_config_dir="${SMELT_BQ_CONFIG_DIR:-$HOME/.config/gcloud-smelt-bq}"
-_bq_env_file="${_bq_config_dir}/config.env"
-
-if [ -f "${_bq_env_file}" ]; then
-  # shellcheck disable=SC1090
-  . "${_bq_env_file}"
-  export SMELT_BQ_PROJECT SMELT_BQ_DATASET SMELT_BQ_LOCATION
-else
-  echo "no config at ${_bq_env_file} — run: bash scripts/bigquery-setup.sh" >&2
-fi
-
-_bq_token_file="${_bq_config_dir}/token"
-if [ -f "${_bq_token_file}" ]; then
-  _bq_expires="$(sed -n '2p' "${_bq_token_file}")"
-  if [ -n "${_bq_expires}" ] && [ "$(date +%s)" -lt "${_bq_expires}" ]; then
-    SMELT_BQ_ACCESS_TOKEN="$(sed -n '1p' "${_bq_token_file}")"
-    export SMELT_BQ_ACCESS_TOKEN
-    echo "SMELT_BQ_ACCESS_TOKEN valid until $(date -d "@${_bq_expires}" '+%H:%M:%S')"
-  else
-    unset SMELT_BQ_ACCESS_TOKEN
-    echo "BigQuery token expired — run: bash scripts/bigquery-auth.sh" >&2
-  fi
-else
-  echo "no BigQuery token — run: bash scripts/bigquery-auth.sh" >&2
-fi
-
-echo "SMELT_BQ_PROJECT=${SMELT_BQ_PROJECT:-<unset>}"
-echo "SMELT_BQ_DATASET=${SMELT_BQ_DATASET:-<unset>}"
-ENVEOF
-note "wrote scripts/bigquery-env.sh"
+for _s in bigquery-auth.sh bigquery-env.sh; do
+  [[ -f "$REPO_ROOT/scripts/$_s" ]] || warn "missing scripts/$_s — is the checkout complete?"
+done
 
 say ""
 say "Let's prove the whole chain works end to end."
