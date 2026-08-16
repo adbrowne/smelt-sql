@@ -87,7 +87,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
 | 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | done |
 | 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | done |
-| 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
+| 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | planned |
 
 ## Decision log
 
@@ -348,6 +348,17 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   CLI reference section, the guide rewrite, and the `migrate_verb_is_documented` ratchet exactly
   as planned. No rework: the guide's page title never changed, so the plan's conditional
   `mkdocs.yml`/`incremental-models.md:716` follow-ups did not apply.
+
+- **2026-08-17 (phase 11 planning). No phase reshape — this is the last row.** Phase 10's
+  carry-forwards are follow-ups (phase 9's double-derivation collapse, pre-existing docs-site
+  anchor rot), not criteria work, so nothing new enters the table. Reading the spec surfaced the
+  concrete drift phase 11 must close: §References still says "User docs: none yet" and lists
+  neither `smelt-runtime/src/migrate.rs`, the CLI verb, nor the `ProjectInput::deployed_columns`
+  input; `last_reviewed` is stale. Decided: the four surviving §Known Divergences bullets are
+  re-verified against the code and each either deleted as stale or reworded to name the
+  "## Out of scope" entry that owns it — a bullet that outlives this outcome must not cite this
+  outcome as its tracker. Also scoped in: a standing `spec_references_are_live_paths` check in
+  `backbuild_docs.rs`, so the §References path list cannot rot again silently.
 
 ## Blocked
 
