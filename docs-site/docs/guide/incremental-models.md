@@ -785,12 +785,15 @@ double-count), and recomputing a region — a full `DELETE`+`INSERT` of that reg
 ledger entry, since the recompute already incorporates everything up to that point.
 
 This project-wide bookkeeping is the frontier's **reconciliation ledger** realization (see
-[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)). A
+[State — The reconciliation ledger lives in the warehouse](../reference/state.md#the-reconciliation-ledger-lives-in-the-warehouse)). A
 window-forward keyed model's own `MERGE` writes a second realization, the **transactional
 frontier write**, directly into the target table alongside the row data it accompanies, in the
 same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
 declare or configure either realization directly; `smelt explain <model>` shows whether a given
-cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell.
+cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell. On a
+target backend with no ledger/frontier builder (DuckDB has one; others don't yet), a cell that
+would need it downgrades to the recompute family instead of failing — see [`smelt explain` —
+State downgrade](../reference/smelt-explain.md#state-downgrade).
 
 ## grain: partition vs grain: key
 

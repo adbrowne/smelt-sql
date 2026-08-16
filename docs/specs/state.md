@@ -246,34 +246,22 @@ lands.
 
 ## Known Divergences / Open Questions
 
-- **The runtime ignores `state.mode` entirely.** `execute_project` unconditionally creates
-  the `.smelt/` file store, acquires the lock, and writes manifests, intervals,
-  reconciliation entries, landed deltas, and schema snapshots on every run
-  (`crates/smelt-runtime/src/execute.rs`) — `StateMode` is parsed (`smelt-core/src/config.rs`)
-  but never consulted. The optionality rule is therefore entirely unimplemented: today every
-  project behaves as (at least) `intervals`. No tracking plan yet; this spec is the intent.
-- **No ledger builder exists outside DuckDB.** Both gradings are now engine-resident and
+- **No ledger builder exists outside DuckDB.** Both gradings are engine-resident and
   transactional with the fold they guard — the additive grade in `_smelt_ledger`, the
   frontier grade in `_smelt_frontier` (`crates/smelt-state/src/ddl_duckdb.rs`) — closing the
   flagship gap this doctrine exists to close: deleting `.smelt/` can no longer affect
   correctness for keyed additive or region-recompute folds. The residual gap is dialect
   coverage: no ledger/frontier builder exists for a backend other than DuckDB (a Spark
-  builder is out of scope for this outcome, `incremental_models.md` §Known Divergences), so
-  an additive-graded cell there fails loudly today rather than downgrading — see the next
-  bullet.
-- **No availability-resolution step exists in derivation.** Today an additive-graded cell on
-  a backend without a ledger builder fails loudly instead of downgrading with
-  `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
-- **Structure-level degradation behaviours are specified but not yet honoured by the runtime.**
-  `--resume` (refuses) and forward propagation (falls back to full dirty set, `run_state.md`
-  §Known Divergences) both have named and implemented behaviours. Schema snapshots
+  builder is out of scope for this outcome, `incremental_models.md` §Known Divergences); an
+  additive-graded cell there downgrades to the recompute family via the availability
+  resolution below rather than failing.
+- **`ProbeBaselineUnavailable` has no `DiagnosticCode` variant.** Schema snapshots
   (`schema_evolution.md` §Semantics "Stored schemas"), source postures (`sources.md` §Semantics
-  4), and probe baselines (`incremental_models.md` §"The contract lattice") now have their
-  absent-state behaviour specified — all three degrade-and-say-so via the shared
-  `ProbeBaselineUnavailable` diagnostic (§Surface "Diagnostics") — but the implementation does
-  not yet match: `ProbeBaselineUnavailable` has no `DiagnosticCode` variant, and baselines are
-  still written unconditionally rather than gated on `state.mode`. Tracked by
-  `docs/outcomes/20260816-state-residency/outcome.md`.
+  4), and probe baselines (`incremental_models.md` §"The contract lattice") each have their
+  absent-state behaviour specified and implemented — all three degrade-and-say-so through
+  `smelt-runtime`'s source/contract probes and reporter — but the diagnostic is emitted as a
+  run-time advisory string, not through the `DiagnosticCode` enum in §Surface "Diagnostics".
+  Tracked by `docs/outcomes/20260816-state-residency/outcome.md`.
 - **Open question — opting out of warehouse bookkeeping tables.** The residency rule puts
   smelt-owned tables (merge ledger, sidecar) in the user's warehouse. A user who refuses any
   smelt-authored objects in the target schema has no knob today; the shape of that knob (and
@@ -290,10 +278,6 @@ lands.
   store trait boundary in `smelt-state`, locking semantics across writers, and whether
   `state.mode` grows a `store:` sibling key. Not now: single-user file state has no felt pain
   yet, and the trait is cheap to extract later.
-- **Conformance gate leg for state deletion.** A generative gate variant that interleaves
-  `.smelt/` deletion (and, later, downgrade-forcing) between run steps and asserts the
-  equivalence oracle still holds — the executable form of the "no correctness state outside
-  the engine" invariant. Sensible only after the reconciliation ledger's move makes it pass.
 
 ## References
 
@@ -302,9 +286,12 @@ lands.
   `source_postures.rs`, `frozen_band_baselines.rs`; backend ledger DDL: `ddl_duckdb.rs`,
   `ddl_spark.rs`); `crates/smelt-core/src/config.rs` (`StateMode`);
   `crates/smelt-runtime/src/execute.rs` (state-write sites)
-- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance.rs`
-  (the equivalence oracle this doctrine's gate leg would extend)
-- **User docs**: none yet — `docs-site/docs/reference/smelt-yml.md` documents `state.mode`
+- **Tests**: `crates/smelt-state/tests/`; `crates/smelt-cli/tests/maintenance_conformance/`
+  (the equivalence oracle; its `state_deletion` module is the executable form of "no
+  correctness state outside the engine")
+- **User docs**: `docs-site/docs/reference/smelt-yml.md` §"State Configuration" documents
+  `state.mode`; `docs-site/docs/reference/state.md` and
+  `docs-site/docs/guide/deployment.md#smelt-state-layout` document the engine-resident ledger
 - **Plans (history)**: none yet — this spec precedes its first implementation plan
 - **Related specs**: `run_state.md` (`.smelt/` layout and formats), `incremental_models.md`
   (frontier semantics, equivalence invariant, graph layer), `incremental_shapes.md` (merge

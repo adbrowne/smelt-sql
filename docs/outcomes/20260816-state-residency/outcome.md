@@ -74,7 +74,7 @@ this outcome runs first in the programme.
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
 | 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | done |
-| 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | planned |
+| 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | done |
 | 11 | Close-out: full standing-gate sweep (including one live-Spark execution of the `maintenance_conformance_spark` edits phase 9 could only compile-check, or a recorded reason it was not possible), criteria-vs-summaries judgment, outcome status flip | pending |
 
 ## Decision log
@@ -409,3 +409,13 @@ this outcome runs first in the programme.
   work; (c) open it as a standalone fast-follow outside this outcome. Spec work itself
   (docs/specs/{state,sources,schema_evolution,incremental_models,diagnostics}.md) is committed
   and sound regardless of which option is chosen.
+
+- **2026-08-16 (phase 10 implement).** Landed the docs sweep as planned: spec Known Divergences
+  narrowed/deleted per the plan's per-bullet verdicts, `docs-site/` gained a `state:` key
+  section, an engine-resident-ledger rewrite of `reference/state.md`, a
+  `smelt-explain.md` "State downgrade" section, and a new `state_docs.rs` doc-sync gate (3
+  tests). `/smelt:validate state`'s automated checks were folded into
+  `verify-phase.sh` rather than run as a separate 8-step pass — no drift found beyond what this
+  phase fixed. Found (not fixed) a pre-existing, unrelated flaky-vs-seed proptest divergence in
+  `smelt-parser-compat` (`top`-as-identifier parsing) during one `verify-phase.sh` run; reverted
+  its `.proptest-regressions` write and left it for a separate look — see phase 10's summary.

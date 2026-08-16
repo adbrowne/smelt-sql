@@ -1822,13 +1822,12 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
   Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
-- **The ledger/frontier warehouse substrate is DuckDB-only** — an additive-graded
-  cell on another backend fails loudly today, and a region recompute on another backend skips
-  its frontier reset with a warning rather than recording it; `state.md` §"The degradation
-  contract" specifies the intended behaviour instead (a recorded `MaintenanceStateDowngraded`
-  downgrade to the recompute family, explain-visible), and whether a Spark-dialect
-  ledger/frontier builder is worth building before a real Spark-targeted incremental workload
-  demands it remains undecided.
+- **The ledger/frontier warehouse substrate is DuckDB-only** — an additive-graded cell (or a
+  region recompute needing a frontier reset) on another backend downgrades to the recompute
+  family with a recorded, explain-visible `MaintenanceStateDowngraded` (`state.md` §"The
+  degradation contract") rather than realising the technique it would get on DuckDB. Whether a
+  Spark-dialect ledger/frontier builder is worth building before a real Spark-targeted
+  incremental workload demands it remains undecided.
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
   (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
   key-level dirt representation exists (intervals are the graph's only currency); the
