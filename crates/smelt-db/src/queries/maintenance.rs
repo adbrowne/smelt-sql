@@ -19,7 +19,10 @@ use smelt_core::config::{
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
-use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
+use smelt_logical::maintenance::derive::{
+    derive_maintenance_plan_with_referential_integrity, FoldSpec, ModelInputs,
+    SourceReferentialIntegrity,
+};
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::locality::{
@@ -33,6 +36,7 @@ use smelt_logical::maintenance::{
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
+    OnceWriteAdmission,
 };
 use smelt_types::SqlFunction;
 
@@ -55,6 +59,16 @@ pub struct MaintenancePlanResult {
     /// single-source model still has `column_groups.len() == 1` with only
     /// one source in `mutation_sensitivity`).
     pub degenerate: Vec<DegenerateColumn>,
+    /// This model's decomposed-state summary — one entry per presented
+    /// column that folds through hidden state columns
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 9), empty for a
+    /// rung-1 model or one this function derives without classifying (every
+    /// site here except `smelt_db::maintenance_plan_report`, which is the
+    /// single caller that runs the keyed classifier and populates this
+    /// field — `smelt-db/src/lib.rs`'s Salsa purity rule: this crate's own
+    /// internal derivation never re-decides which columns are
+    /// state-bearing).
+    pub state_columns: Vec<smelt_logical::StateColumnSummary>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -75,11 +89,26 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
         // assume append-only.
         _ => PlanMutationProfile::MutableSnapshot,
     };
+    // The source's own declared `unique_key:` (`sources.md` §"Row
+    // identity"). This is what `derive_column_groups`'
+    // `top_level_join_context` (`smelt-logical/src/maintenance/grouping.rs`)
+    // needs to prove a `JOIN ... ON`'s equality conjunct is 1:1 against this
+    // source — without it every join against this source fails closed to
+    // `Open` (never pruned), so an otherwise-closeable LEFT JOIN enrichment
+    // stays membership-sensitive forever, regardless of what the source YAML
+    // declares. Previously hardcoded to `vec![]` — this left
+    // `Technique::ColumnScopedMerge` structurally unreachable from any real
+    // source declaration (`docs/plans/20260809-sensitivity-precision.md`
+    // Phase 5).
+    let unique_key = info
+        .and_then(|s| s.unique_key.as_ref())
+        .cloned()
+        .unwrap_or_default();
     SourceFacts {
         name: name.to_string(),
         mutation,
         partition_col,
-        unique_key: vec![],
+        unique_key,
         allow_full_scan,
     }
 }
@@ -130,18 +159,137 @@ pub fn effective_scan_bounds(
 /// that is an aggregate but does not resolve to a recognised combiner
 /// refuses the *whole* derivation (`None`), never a partial fold over just
 /// the columns that did resolve.
-pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
+///
+/// An `ArgMax`/`ArgMin` (`MAX_BY`/`MIN_BY`) column decomposes to hidden
+/// `(v, o)` state (`docs/outcomes/20260809-rung2-state-shapes` row 5) — no
+/// companion projection is required. The runtime classifier
+/// (`smelt_logical::rules::cumulative::classify_order_monotone_column`)
+/// admits identically off the same arity check, so the two layers never
+/// diverge; only the wrong-arity shape (not exactly 2 arguments) still
+/// refuses the whole derivation (`None`), the same way an unrecognised
+/// combiner does — this keeps `smelt explain`/LSP diagnostics from
+/// reporting a `KeyedFold` admission the runtime then refuses with
+/// `KeyedUnknownCombiner` (`CLAUDE.md` §"Fail-loud discipline"). The
+/// decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+/// `docs/outcomes/20260809-rung2-state-shapes` row 7) mirrors this exactly,
+/// with an exact-1-argument/no-`DISTINCT` shape check instead.
+///
+/// `declared_functional_dependencies` is the model's own declared
+/// `functional_dependencies:` block, threaded straight into
+/// [`smelt_logical::rules::cumulative::classify_once_write`] — the SAME
+/// shared helper the runtime classifier
+/// (`smelt_logical::rules::cumulative::classify_cumulative`) uses for the
+/// once-write (`COALESCE`) family, so this plan-layer derivation and the
+/// runtime admission never diverge (`docs/plans/20260809-keyed-frontier.md`
+/// Phase 4's "single shared helper" review lesson from Phases 1/3).
+pub fn derive_fold_spec(
+    sql: &str,
+    declared_functional_dependencies: &[smelt_core::config::FunctionalDependency],
+) -> Option<FoldSpec> {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
     let select = file.select_stmt()?;
     let items = select_stmt_items(&select)?;
+    let unique_key = derive_group_by_unique_key(sql);
+    // The model's own GROUP BY expressions — `classify_once_write` consults
+    // them so a null-safe composite key (`COALESCE(x, 'n/a')` grouped by the
+    // same expression) stays a KEY column rather than being claimed by the
+    // once-write family.
+    let group_by_exprs = smelt_logical::analyze_select(sql)
+        .map(|a| a.group_by_exprs)
+        .unwrap_or_default();
+    let vector = smelt_logical::analysis::walk::model_property_vector(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    );
     let mut add_columns: Vec<(String, SqlFunction)> = Vec::new();
     for item in &items {
-        if let SelectItemKind::OtherAggregate { alias, expr, .. } = item {
-            let func = expr.as_function_call()?;
-            let name = func.name()?;
-            let combiner = SqlFunction::from_name(&name.to_uppercase())?;
-            add_columns.push((alias.clone(), combiner));
+        match item {
+            SelectItemKind::OtherAggregate { alias, expr, .. } => {
+                let func = expr.as_function_call()?;
+                let name = func.name()?;
+                let combiner = SqlFunction::from_name(&name.to_uppercase())?;
+                // `ANY_VALUE` is the plain-overwrite family
+                // (`docs/specs/incremental_shapes.md` §"The column-family
+                // catalogue") — not a fold-family combiner at all (no
+                // target/delta combine, incoming row always wins), so it never
+                // enters a `FoldSpec`. A model whose non-key columns are ONLY
+                // `ANY_VALUE` calls derives an empty `add_columns` here (→
+                // `None` below), which `derive_new_data`'s `Grain::Key` arm
+                // reads as "no fold-family column over this source" — the
+                // snapshot-reconcile shape, not a refusal
+                // (`docs/plans/20260809-keyed-frontier.md` Phase 3).
+                if combiner == SqlFunction::AnyValue {
+                    continue;
+                }
+                if matches!(combiner, SqlFunction::ArgMax | SqlFunction::ArgMin) {
+                    // Exact-2-argument requirement, mirroring the runtime
+                    // classifier's own arity check — the wrong-arity shape
+                    // still refuses the whole derivation.
+                    let args = func.arguments();
+                    if args.len() != 2 {
+                        return None;
+                    }
+                }
+                // The decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`,
+                // `docs/outcomes/20260809-rung2-state-shapes` row 7) mirrors
+                // the `ArgMax`/`ArgMin` precedent above: exact-1-argument, no
+                // `DISTINCT` — the same shape
+                // `rules::cumulative::classify_decomposed_fold_column` admits
+                // via `decompose_to_state`. Either violation refuses the
+                // whole derivation, the same way an unrecognised combiner
+                // does, so `smelt explain`/LSP never reports a `KeyedFold`
+                // admission the runtime classifier then refuses.
+                if matches!(
+                    combiner,
+                    SqlFunction::Avg
+                        | SqlFunction::Variance
+                        | SqlFunction::Stddev
+                        | SqlFunction::StddevPop
+                        | SqlFunction::StddevSamp
+                        | SqlFunction::VarPop
+                        | SqlFunction::VarSamp
+                ) {
+                    let args = func.arguments();
+                    if args.len() != 1 || smelt_logical::analysis::has_distinct_keyword(&func) {
+                        return None;
+                    }
+                }
+                add_columns.push((alias.clone(), combiner));
+            }
+            SelectItemKind::GroupByKey { text, alias, expr } => {
+                // The once-write family (`COALESCE`) is a non-aggregate
+                // scalar call, so it classifies as `GroupByKey`, not
+                // `OtherAggregate` — mirrors `classify_cumulative`'s own
+                // GroupByKey arm exactly.
+                match smelt_logical::rules::cumulative::classify_once_write(
+                    text,
+                    expr,
+                    &unique_key,
+                    &group_by_exprs,
+                    declared_functional_dependencies,
+                    vector.as_ref(),
+                    alias,
+                ) {
+                    OnceWriteAdmission::Admitted { .. } => {
+                        add_columns.push((alias.clone(), SqlFunction::Coalesce));
+                    }
+                    // A once-write column whose provenance proof does not hold
+                    // refuses the WHOLE derivation, exactly like an
+                    // unrecognised combiner — dropping it would leave a
+                    // partial `FoldSpec` over the model's other columns, so
+                    // `smelt explain`/LSP would report a `KeyedFold`
+                    // admission the runtime classifier refuses with
+                    // `KeyedOnceWriteUnproven` (`CLAUDE.md` §"Fail-loud
+                    // discipline").
+                    OnceWriteAdmission::Unproven { .. } => return None,
+                    // Not a once-write projection at all (a plain key column,
+                    // a null-safe composite GROUP BY key): no fold column,
+                    // no refusal.
+                    OnceWriteAdmission::NotOnceWrite => {}
+                }
+            }
+            SelectItemKind::CountDistinct { .. } => {}
         }
     }
     if add_columns.is_empty() {
@@ -165,7 +313,7 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// granularity, when the caller can determine it (used only by a `grain:
 /// key` model that also declares its own `timeseries:` block, to check the
 /// key-temporal-locality gate's granularity-equality structural
-/// precondition — `incremental_models.md` §"Key temporal locality").
+/// precondition — `incremental_shapes.md` §"Key temporal locality").
 /// `None` fails that precondition closed (an unproven match is never
 /// admitted); the runtime execution path (`smelt-runtime::cumulative`,
 /// which has the driving source's `TimeseriesConfig` directly from the
@@ -176,9 +324,30 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// `resolve_driving_source`'s resolved `driving.name` use) — consulted only
 /// by key temporal locality's route 3 (recurrence-bounded) as the declared
 /// fallback when no bound is statically derivable from the model's own SQL
-/// (`docs/specs/incremental_models.md` §"Key temporal locality"). Build via
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality"). Build via
 /// [`build_key_recurrences`], the sibling of [`build_source_facts`] over the
 /// same `(ref_string, source_info)` pairs.
+/// `deployed_column_names` is the model's previously-deployed output
+/// column names (world-fact, read by the caller from the deployed-schema
+/// snapshot the runtime's `schema_evolution` module already consults —
+/// `smelt-db` itself does no I/O, per the Salsa-purity rule). An empty
+/// slice means "no known deployed schema" and derives no `Trigger::
+/// ColumnAdded` at all — the same fail-closed posture as before this
+/// parameter existed (`docs/specs/definition_deltas.md` §"The verdict per column group"); every existing `smelt-db`-internal caller
+/// (diagnostics, `smelt explain`) has no such snapshot to hand and passes
+/// `&[]` unchanged. `smelt-runtime`'s maintenance driver is the one caller
+/// with real I/O access to the deployed-schema store, and is the only one
+/// that ever supplies a non-empty slice.
+/// `source_referential_integrity` is every referenced source's declared
+/// `referential_integrity` world-fact (`sources.md` §"Referential
+/// integrity"), keyed by bare source name — threaded into every
+/// `UpstreamMutation` cell's P1 skeleton-source-closure proof exactly like
+/// [`derive_maintenance_plan_with_referential_integrity`] does. An empty map
+/// (the caller's own default when it has not resolved the declaration)
+/// behaves byte-identically to this function's behaviour before this
+/// parameter existed — this only *adds* closure attempts for the sources
+/// the caller names.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_model_maintenance_plan(
     sql: &str,
     table: &str,
@@ -187,6 +356,8 @@ pub fn derive_model_maintenance_plan(
     explicitly_mutable: &std::collections::HashSet<String>,
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
+    deployed_column_names: &[String],
+    source_referential_integrity: &SourceReferentialIntegrity,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -212,6 +383,7 @@ pub fn derive_model_maintenance_plan(
             plan: smelt_logical::maintenance::unsupported_grain_plan("key_per_partition"),
             column_groups: Vec::new(),
             degenerate: Vec::new(),
+            state_columns: Vec::new(),
         });
     }
     let partition_col = metadata
@@ -260,6 +432,7 @@ pub fn derive_model_maintenance_plan(
                         )),
                         column_groups: Vec::new(),
                         degenerate: Vec::new(),
+                        state_columns: Vec::new(),
                     });
                 }
             }
@@ -268,7 +441,7 @@ pub fn derive_model_maintenance_plan(
             // plan is derived at all — the single entry point deciding
             // keyed+timeseries admissibility
             // (`smelt_logical::maintenance::locality::establish_locality`,
-            // `docs/specs/incremental_models.md` §"Key temporal locality").
+            // `docs/specs/incremental_shapes.md` §"Key temporal locality").
             if let Some(own_ts) = metadata.timeseries.as_ref() {
                 // The driving source is the single alias-scoped FROM/JOIN
                 // input that both is a referenced source and declares its
@@ -324,6 +497,7 @@ pub fn derive_model_maintenance_plan(
                             plan: locality_refused_plan(refusal.message(table)),
                             column_groups: Vec::new(),
                             degenerate: Vec::new(),
+                            state_columns: Vec::new(),
                         });
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
@@ -344,7 +518,7 @@ pub fn derive_model_maintenance_plan(
     let skeleton = skeleton_columns(sql, &[], partition_col.as_deref());
     let grouping = derive_column_groups(sql, sources, &skeleton);
     let fold = match grain {
-        ConfigGrain::Key => derive_fold_spec(sql),
+        ConfigGrain::Key => derive_fold_spec(sql, &metadata.functional_dependencies),
         _ => None,
     };
     let output = OutputSpec {
@@ -352,13 +526,23 @@ pub fn derive_model_maintenance_plan(
         grain: plan_grain,
         skeleton_columns: skeleton,
     };
+    // The definition-change trigger's inputs: `None`/unclassifiable and
+    // "no deployed snapshot supplied" both fall back to "no old columns, no
+    // added columns" — fail-closed, never a guessed `ColumnAdded` trigger
+    // (`definition_deltas.md` §"The verdict per column group").
+    let (old_columns, added_columns) = if deployed_column_names.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        smelt_logical::maintenance::derive::diff_deployed_columns(sql, deployed_column_names)
+            .unwrap_or_default()
+    };
     let inputs = ModelInputs {
         sql,
         output,
         sources: sources.to_vec(),
         column_groups: grouping.groups.clone(),
         fold,
-        column_add_proof: None,
+        old_columns,
     };
 
     let mut triggers = Vec::new();
@@ -404,8 +588,17 @@ pub fn derive_model_maintenance_plan(
         }
     }
     triggers.push(Trigger::Backfill);
+    if !added_columns.is_empty() {
+        triggers.push(Trigger::ColumnAdded {
+            columns: added_columns,
+        });
+    }
 
-    let mut plan = derive_maintenance_plan(&inputs, &triggers);
+    let mut plan = derive_maintenance_plan_with_referential_integrity(
+        &inputs,
+        &triggers,
+        source_referential_integrity,
+    );
     plan.key_locality = established_key_locality.map(|slice| {
         let bound = smelt_logical::maintenance::locality::settle_bound(&slice);
         smelt_logical::maintenance::KeyLocality {
@@ -417,6 +610,7 @@ pub fn derive_model_maintenance_plan(
         plan,
         column_groups: grouping.groups,
         degenerate: grouping.degenerate,
+        state_columns: Vec::new(),
     })
 }
 
@@ -445,6 +639,8 @@ pub fn derive_model_maintenance_plan_with_edges(
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     driving_source_granularity: Option<Granularity>,
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
+    deployed_column_names: &[String],
+    source_referential_integrity: &SourceReferentialIntegrity,
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -454,6 +650,8 @@ pub fn derive_model_maintenance_plan_with_edges(
         explicitly_mutable,
         driving_source_granularity,
         key_recurrences,
+        deployed_column_names,
+        source_referential_integrity,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -512,7 +710,7 @@ pub fn cell_column_group_violations(
 
 /// The single clocked referenced source's own declared granularity — for
 /// the key-temporal-locality gate's granularity-equality structural
-/// precondition (`incremental_models.md` §"Key temporal locality"). `None`
+/// precondition (`incremental_shapes.md` §"Key temporal locality"). `None`
 /// when zero or more than one referenced source declares a `timeseries:`
 /// block: an ambiguous or absent driving source fails that precondition
 /// closed rather than guess.
@@ -587,6 +785,27 @@ pub fn build_key_recurrences(
     out
 }
 
+/// Build the `SourceReferentialIntegrity` map (bare source name →
+/// declared `referential_integrity` columns) [`derive_model_maintenance_
+/// plan`]'s `source_referential_integrity` parameter needs, over the same
+/// `(ref_string, source_info)` pairs [`build_source_facts`] consumes.
+/// Sourced independently of `SourceFacts` (rather than adding a field
+/// there) so the many existing `SourceFacts` literal-construction call
+/// sites across the workspace stay unaffected by a route this phase alone
+/// introduces — the same rationale [`build_key_recurrences`] documents for
+/// its own sibling map.
+pub fn build_source_referential_integrity(
+    refs: &[(String, Option<SourceInfo>)],
+) -> SourceReferentialIntegrity {
+    let mut out = SourceReferentialIntegrity::new();
+    for (name, info) in refs {
+        if let Some(ri) = info.as_ref().and_then(|s| s.referential_integrity.clone()) {
+            out.insert(name.clone(), ri);
+        }
+    }
+    out
+}
+
 /// A Salsa-friendly (`PartialEq`) projection of a
 /// [`smelt_logical::maintenance::Refusal`] — the two refusal kinds this
 /// phase maps onto `Maintenance*` diagnostics. Mirrors the pure `Refusal`
@@ -610,6 +829,12 @@ pub enum MaintenanceRefusal {
     },
     LocalityNotEstablished {
         message: String,
+    },
+    /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
+    /// row-membership/identity (skeleton) position, a grain change rather
+    /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
+    SkeletonColumnAdded {
+        column: String,
     },
 }
 
@@ -837,7 +1062,7 @@ pub fn write_pin_diagnostics(
 /// `driving_source_granularity`'s "exactly one clocked candidate" rule, so
 /// a `grain: key` model may take a composed upstream model's own output as
 /// its driving source exactly as it would a declared source
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source").
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
@@ -884,6 +1109,7 @@ pub fn maintenance_plan_diagnostics(
     clocked_granularities.extend(extra_model_sources.iter().map(|(_, g)| *g));
     let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
+    let source_referential_integrity = build_source_referential_integrity(source_refs);
     let Some(result) = derive_model_maintenance_plan(
         sql,
         table,
@@ -892,6 +1118,12 @@ pub fn maintenance_plan_diagnostics(
         &explicitly_mutable,
         driving_source_granularity,
         &key_recurrences,
+        // `smelt-db` diagnostics/`smelt explain` have no I/O access to the
+        // deployed-schema snapshot (Salsa purity) — no `ColumnAdded`
+        // trigger is derivable here; `smelt-runtime`'s maintenance driver
+        // is the production caller that supplies a real snapshot.
+        &[],
+        &source_referential_integrity,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -915,10 +1147,11 @@ pub fn maintenance_plan_diagnostics(
                     why: why.clone(),
                 })
             }
-            // A definition-change grain refusal — not reachable in this
-            // phase (no `ColumnAdded` trigger is derived yet); leave
-            // unmapped so a future phase's own diagnostic lands it.
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. } => None,
+            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column } => {
+                Some(MaintenanceRefusal::SkeletonColumnAdded {
+                    column: column.clone(),
+                })
+            }
             // An underivable upstream-model clock. Recorded in the plan (and
             // surfaced by `smelt explain`'s Refusals section), but not yet
             // folded into `file_diagnostics()` — `MaintenanceReachNotDerivable`
@@ -938,6 +1171,17 @@ pub fn maintenance_plan_diagnostics(
                     message: message.clone(),
                 })
             }
+            // The repair family's two obligation refusals
+            // (`MaintenanceRepairKeysNotDiscoverable`/
+            // `MaintenanceRepairSliceUnbounded`). Not yet produced by any
+            // wired derivation — `derive_repair_cell` is standalone,
+            // callable machinery this phase, not yet consulted by
+            // `derive_maintenance_plan` — and has no `DiagnosticCode`
+            // variant yet. Left unmapped exactly as `ReachNotDerivable`
+            // above, for the same reason: a future phase's own diagnostic
+            // lands it.
+            smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
+            smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -961,6 +1205,8 @@ pub fn maintenance_plan_diagnostics(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use smelt_core::config::{MaintenanceCellConfig, PerSourceScanBounds};
 
@@ -968,6 +1214,7 @@ mod tests {
         ColumnGroup {
             columns: columns.iter().map(|s| s.to_string()).collect(),
             mutation_sensitivity: sensitivity.iter().map(|s| s.to_string()).collect(),
+            membership_sensitivity: BTreeSet::new(),
         }
     }
 
@@ -1052,14 +1299,15 @@ mod tests {
         // candidate — `derive_fold_spec` must return `None`, not fabricate
         // one, so the derivation's own admission refuses honestly.
         let sql = "SELECT user_id, amount FROM smelt.sources.payments";
-        assert!(derive_fold_spec(sql).is_none());
+        assert!(derive_fold_spec(sql, &[]).is_none());
     }
 
     #[test]
     fn grain_mismatch_detects_single_aggregate() {
         let sql =
             "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
-        let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("single SUM aggregate should be a fold candidate");
         assert_eq!(
             fold.add_columns,
             vec![("total".to_string(), SqlFunction::Sum)]
@@ -1071,7 +1319,7 @@ mod tests {
         let sql = "SELECT user_id, COUNT(*) AS n, MIN(event_ts) AS first_seen, \
                     MAX(event_ts) AS last_seen FROM smelt.sources.events GROUP BY user_id";
         let fold =
-            derive_fold_spec(sql).expect("multi-aggregate SELECT should be a fold candidate");
+            derive_fold_spec(sql, &[]).expect("multi-aggregate SELECT should be a fold candidate");
         assert_eq!(
             fold.add_columns,
             vec![
@@ -1088,7 +1336,8 @@ mod tests {
         // `FoldSpec` shape it did before multi-column folds were supported.
         let sql =
             "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
-        let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("single SUM aggregate should be a fold candidate");
         assert_eq!(fold.add_columns.len(), 1);
         assert_eq!(fold.add_columns[0], ("total".to_string(), SqlFunction::Sum));
     }
@@ -1105,7 +1354,7 @@ mod tests {
                     NOT_A_REAL_FUNCTION() OVER (ORDER BY amount) AS weird \
                     FROM smelt.sources.payments GROUP BY user_id";
         assert!(
-            derive_fold_spec(sql).is_none(),
+            derive_fold_spec(sql, &[]).is_none(),
             "an unresolvable aggregate/window item among the set must refuse the whole \
              derivation, not a partial fold"
         );
@@ -1130,6 +1379,8 @@ mod tests {
             &std::collections::HashSet::new(),
             None,
             &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1166,7 +1417,8 @@ mod tests {
                     MIN(event_time) AS event_ts, MIN(event_date) AS first_seen_date, \
                     MIN(utm_campaign) AS utm_campaign, MIN(payload) AS payload \
                     FROM smelt.sources.raw.events GROUP BY event_id";
-        let fold = derive_fold_spec(sql).expect("six-column MIN fold should be a fold candidate");
+        let fold =
+            derive_fold_spec(sql, &[]).expect("six-column MIN fold should be a fold candidate");
         assert_eq!(fold.add_columns.len(), 6);
         assert!(fold.add_columns.iter().all(|(_, c)| *c == SqlFunction::Min));
 
@@ -1183,6 +1435,8 @@ mod tests {
             &std::collections::HashSet::new(),
             None,
             &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1200,7 +1454,7 @@ mod tests {
     /// A `grain: key` model that also declares a `timeseries:` block, but
     /// whose `partition_column` is not a `unique_key` column and has no
     /// resolvable driving source, is refused by the key-temporal-locality
-    /// gate (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// gate (`docs/specs/incremental_shapes.md` §"Key temporal locality
     /// (the time-partitioned output)") — no route admits it.
     #[test]
     fn keyed_with_timeseries_refuses_via_locality_gate() {
@@ -1227,6 +1481,8 @@ mod tests {
             &std::collections::HashSet::new(),
             None,
             &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -1250,7 +1506,7 @@ mod tests {
     /// `partition_column` (`event_date`) is a `unique_key` column, the
     /// single referenced source is clocked at the same (day) granularity —
     /// the model derives an ordinary plan with no `LocalityNotEstablished`
-    /// refusal (`docs/specs/incremental_models.md` §"Key temporal
+    /// refusal (`docs/specs/incremental_shapes.md` §"Key temporal
     /// locality").
     #[test]
     fn keyed_with_timeseries_admits_via_route1_key_embedded() {
@@ -1290,6 +1546,8 @@ mod tests {
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
             &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -1299,6 +1557,126 @@ mod tests {
             )),
             "route 1 must admit — no locality refusal expected: {:?}",
             result.plan.refusals
+        );
+    }
+
+    /// A source declaring `referential_integrity` in its `.yml` reaches
+    /// `derive_model_maintenance_plan` as a real `SourceReferentialIntegrity`
+    /// entry (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md`
+    /// test 9) — the production Salsa call site's own always-empty map
+    /// (before this phase) is replaced by [`build_source_referential_
+    /// integrity`], threaded from `source_refs`. A `dim` source declaring
+    /// both `unique_key` and `referential_integrity` closes its own
+    /// `UpstreamMutation` cell's P1 verdict; the same call with an empty map
+    /// (byte-identical to the pre-phase-3 default) leaves it unattempted.
+    #[test]
+    fn source_declared_referential_integrity_reaches_the_derivation() {
+        let sql = "SELECT fact.event_id, fact.event_date, dim.tier \
+                    FROM smelt.sources.fact fact \
+                    LEFT JOIN smelt.sources.dim dim ON fact.dim_id = dim.id";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Partition),
+            timeseries: Some(smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let sources = vec![
+            SourceFacts {
+                name: "fact".to_string(),
+                mutation: PlanMutationProfile::AppendOnly,
+                partition_col: Some("event_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: true,
+            },
+            SourceFacts {
+                name: "dim".to_string(),
+                mutation: PlanMutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: vec!["id".to_string()],
+                allow_full_scan: true,
+            },
+        ];
+        let explicitly_mutable: std::collections::HashSet<String> =
+            std::collections::HashSet::from(["dim".to_string()]);
+        let dim_source_info = SourceInfo {
+            path: std::path::PathBuf::from("/tmp/dim.yml"),
+            address_segments: vec!["sources".to_string(), "dim".to_string()],
+            columns: vec![],
+            description: None,
+            name_override: None,
+            tags: vec![],
+            timeseries: None,
+            mutation_profile: None,
+            source_lateness: None,
+            watermark: None,
+            unique_key: Some(vec!["id".to_string()]),
+            retention: None,
+            referential_integrity: Some(vec!["id".to_string()]),
+        };
+        let source_refs: Vec<(String, Option<SourceInfo>)> =
+            vec![("dim".to_string(), Some(dim_source_info))];
+        let real_ri = build_source_referential_integrity(&source_refs);
+        assert_eq!(
+            real_ri.get("dim"),
+            Some(&vec!["id".to_string()]),
+            "build_source_referential_integrity must surface dim's declared \
+             referential_integrity, got {real_ri:?}"
+        );
+
+        let trigger = smelt_logical::maintenance::Trigger::UpstreamMutation {
+            source: "dim".to_string(),
+        };
+        let with_real_ri = derive_model_maintenance_plan(
+            sql,
+            "main.t",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            None,
+            &[],
+            &[],
+            &real_ri,
+        )
+        .expect("model must derive a plan");
+        let cell = with_real_ri
+            .plan
+            .cell_for(&trigger)
+            .expect("expected an UpstreamMutation cell for dim");
+        assert_eq!(
+            cell.skeleton_source_closure.as_ref().map(|c| c.is_closed()),
+            Some(true),
+            "a LEFT JOIN, payload-only, declared-unique_key dimension must close once its \
+             declared referential_integrity reaches the derivation, got {:?}",
+            cell.skeleton_source_closure
+        );
+
+        let with_empty_ri = derive_model_maintenance_plan(
+            sql,
+            "main.t",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            None,
+            &[],
+            &[],
+            &SourceReferentialIntegrity::new(),
+        )
+        .expect("model must derive a plan");
+        let cell = with_empty_ri
+            .plan
+            .cell_for(&trigger)
+            .expect("expected an UpstreamMutation cell for dim");
+        assert_eq!(
+            cell.skeleton_source_closure, None,
+            "an empty referential-integrity map (the pre-phase-3 default) must leave the \
+             closure proof unattempted, got {:?}",
+            cell.skeleton_source_closure
         );
     }
 
@@ -1368,6 +1746,8 @@ mod tests {
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
             &[],
+            &[],
+            &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
         )
         .expect("route 1 must derive a plan");
         assert!(

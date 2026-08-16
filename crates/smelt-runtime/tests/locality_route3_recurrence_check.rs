@@ -1,6 +1,6 @@
 //! Real-fixture, DuckDB-backed coverage for key temporal locality's
 //! **route 3** (recurrence-bounded, declared `r`) transactional runtime
-//! check (`docs/specs/incremental_models.md` §"Key temporal locality (the
+//! check (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 //! time-partitioned output)"; `docs/plans/20260715-composed-axes-
 //! conditional-maintenance.md` Phase A4).
 //!
@@ -82,10 +82,11 @@ fn classification() -> CumulativeClassification {
             output_name: "last_seen_date".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: "smelt.sources.raw.events".to_string(),
-            timeseries: timeseries(),
+            timeseries: Some(timeseries()),
         },
     }
 }
@@ -196,6 +197,7 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("in-bound redelivery must merge cleanly, not refuse");
@@ -232,6 +234,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -258,6 +261,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect_err("an out-of-bound redelivery must refuse the run");
@@ -437,6 +441,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -460,6 +465,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &unconditional(),
         compile_step,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("a derived slice must merge cleanly");

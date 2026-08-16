@@ -108,6 +108,98 @@ fn test_schema_extraction_from_ref() {
     }
 }
 
+/// State columns never enter the public schema smelt-db exposes: a keyed
+/// model's own `model_schema` reflects only its written SELECT list (state
+/// columns are appended by `smelt-runtime`'s `state_augmented_projection`
+/// at compile time, never written into the model's own source), and a
+/// downstream `SELECT *`'s `resolved_model_schema` inherits the same
+/// presented-only column set. A hand-written reference to a
+/// `__part`-suffixed name (as if it were a public column) is an ordinary
+/// unresolved-column diagnostic. Locks success criterion 4 at the analysis
+/// layer against a future regression (`docs/specs/incremental_models.md`
+/// §"Decomposed state (rung 2) in keyed models" → "Presentation
+/// projection").
+#[test]
+fn public_schema_excludes_state_columns() {
+    let mut db = TestDb::default();
+
+    let agg_path = PathBuf::from("models/agg.sql");
+    db.set_file_text(
+        agg_path.clone(),
+        Arc::new(
+            "SELECT\n  customer_id,\n  SUM(amount) / COUNT(amount) AS avg_amount\nFROM \
+             source.events\nGROUP BY customer_id"
+                .to_string(),
+        ),
+    );
+
+    let downstream_path = PathBuf::from("models/downstream.sql");
+    db.set_file_text(
+        downstream_path.clone(),
+        Arc::new("SELECT * FROM smelt.models.agg".to_string()),
+    );
+
+    let bad_ref_path = PathBuf::from("models/bad_ref.sql");
+    db.set_file_text(
+        bad_ref_path.clone(),
+        Arc::new("SELECT a.avg_amount__sum FROM smelt.models.agg AS a".to_string()),
+    );
+
+    db.set_all_files(Arc::new(vec![
+        agg_path.clone(),
+        downstream_path.clone(),
+        bad_ref_path.clone(),
+    ]));
+    db.set_file_project_root(agg_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(downstream_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(bad_ref_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    // The producer's own schema has no `__part`-suffixed state columns —
+    // state augmentation happens at compile time in `smelt-runtime`, never
+    // written into the model's own source.
+    let agg_schema = db.model_schema(agg_path.clone());
+    assert_eq!(
+        agg_schema
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["customer_id", "avg_amount"]
+    );
+
+    // A downstream `SELECT *` sees only agg's presented columns.
+    let resolved = db.resolved_model_schema(downstream_path);
+    assert_eq!(
+        resolved
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["customer_id", "avg_amount"]
+    );
+
+    // A hand-written `__part`-shaped column reference is an ordinary
+    // unresolved-column diagnostic — not part of `agg`'s public schema.
+    let diags = db.type_diagnostics(bad_ref_path);
+    let undeclared: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::UndeclaredColumn))
+        .collect();
+    assert_eq!(
+        undeclared.len(),
+        1,
+        "expected exactly 1 UndeclaredColumn diagnostic for the hand-written __part \
+         reference; got: {diags:?}"
+    );
+    assert!(
+        undeclared[0].message.contains("avg_amount__sum"),
+        "diagnostic should name the unresolved column; got: {:?}",
+        undeclared[0].message
+    );
+}
+
 #[test]
 fn test_available_columns_includes_upstream() {
     let mut db = TestDb::default();
@@ -5872,4 +5964,29 @@ fn mutual_recursion_body_cte_terminates_without_stack_overflow() {
             .map(|d| d.message.as_str())
             .collect::<Vec<_>>()
     );
+}
+#[test]
+fn debug_repro_ref_resolution2() {
+    let mut db = TestDb::default();
+    let raw_events_path = PathBuf::from("models/raw_events.sql");
+    db.set_file_text(
+        raw_events_path.clone(),
+        Arc::new("SELECT\n  user_id,\n  event_id\nFROM source.events".to_string()),
+    );
+    let sessions_path = PathBuf::from("models/user_sessions.sql");
+    db.set_file_text(
+        sessions_path.clone(),
+        Arc::new("SELECT\n  user_id,\n  COUNT(*) as session_count\nFROM smelt.models.raw_events\nGROUP BY user_id".to_string()),
+    );
+    db.set_all_files(Arc::new(vec![
+        raw_events_path.clone(),
+        sessions_path.clone(),
+    ]));
+    db.set_file_project_root(raw_events_path.clone(), PathBuf::from("."));
+    db.set_file_project_root(sessions_path.clone(), PathBuf::from("."));
+    db.set_project_sources_yaml(PathBuf::from("."), Arc::new(String::new()));
+    db.set_all_project_roots(Arc::new(vec![PathBuf::from(".")]));
+
+    let diags = db.file_diagnostics(sessions_path);
+    println!("DIAGS2: {:?}", diags);
 }

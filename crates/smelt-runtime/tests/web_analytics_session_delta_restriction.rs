@@ -60,12 +60,16 @@ fn model_edges() -> Vec<ModelEdge> {
         ModelEdge {
             name: "silver.events_deduped".to_string(),
             clock_col: Some("event_date".to_string()),
+            clock_col_aliases: vec![],
             unique_key: vec!["event_id".to_string()],
+            output_shape: None,
         },
         ModelEdge {
             name: "silver.sessions".to_string(),
             clock_col: Some("event_date".to_string()),
+            clock_col_aliases: vec![],
             unique_key: vec!["device_id".to_string()],
+            output_shape: None,
         },
     ]
 }
@@ -173,6 +177,7 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         "2026-07-02",
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
+        &smelt_runtime::probes::ProbePolicy::per_run(),
     )
     .await
     .expect("delta-restricted recompute executes");

@@ -57,6 +57,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     }
 }
 

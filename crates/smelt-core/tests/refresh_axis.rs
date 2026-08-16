@@ -145,7 +145,7 @@ fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
 /// be established is decided later, by the locality gate in plan
 /// derivation (`smelt_logical::maintenance::locality::establish_locality`),
 /// not by this pure frontmatter check
-/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)"). The combination now reaches plan derivation
 /// instead of failing here.
 #[test]
@@ -191,7 +191,7 @@ fn refresh_keyed_forbids_incremental() {
         grain: Some(Grain::Key),
         batched: Some(PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         }),
         ..Default::default()
@@ -450,7 +450,8 @@ models:
         grain: None,
         unique_key: Some(vec!["from_yaml".to_string()]),
         safety_overrides: None,
-        batched: None,
+        batched_retired: (),
+        merge_key: None,
         tags: vec![],
         target: None,
         format: None,
@@ -606,12 +607,14 @@ models:
     assert!(batched.safety_overrides.allow_having);
 }
 
-/// Declaring both the top-level `safety_overrides:` key and a non-default
-/// `batched.safety_overrides` sub-block on the same `smelt.yml` model entry
-/// is a conflict error, mirroring the SQL frontmatter refusal — never silent
-/// precedence between the two spellings.
+/// A `smelt.yml` `models.<name>.batched:` sub-block — regardless of its
+/// contents, including a `safety_overrides` key naming the exact same fact
+/// as a sibling top-level `safety_overrides:` — is a parse-time hard error;
+/// the double-declaration conflict this used to be validated after parsing
+/// is now unreachable (`docs/specs/models.md` §"Batched sub-block
+/// retirement").
 #[test]
-fn top_level_safety_overrides_conflicts_with_smelt_yml_batched_sub_block() {
+fn smelt_yml_batched_sub_block_is_hard_refused_regardless_of_contents() {
     use smelt_core::config::Config;
 
     let yaml = r#"
@@ -637,13 +640,12 @@ models:
       safety_overrides:
         allow_having: true
 "#;
-    let config: Config = serde_yaml::from_str(yaml).expect("smelt.yml must parse structurally");
-    let errors = config.validate_model_configs(&std::collections::HashMap::new());
+    let err = serde_yaml::from_str::<Config>(yaml)
+        .expect_err("smelt.yml `batched:` sub-block must be refused at parse time");
+    let message = err.to_string();
     assert!(
-        errors
-            .iter()
-            .any(|(name, msg)| name == "daily_revenue" && msg.contains("safety_overrides")),
-        "expected a safety_overrides double-declaration error, got {errors:?}"
+        message.contains("safety_overrides") && message.contains("allow_having"),
+        "fix-it must name safety_overrides: and the caller's own declared flag; got: {message}"
     );
 }
 
@@ -757,9 +759,12 @@ fn grain_assertion_is_check_only() {
     validate_timeseries(&metadata, "SELECT order_id FROM foo")
         .expect("grain: key agreeing with the facts-derived key shape must pass");
 
-    // clock + identity + `partition_column ∈ key` derives `key_per_partition`
-    // — the derivation agrees with the written assertion at the frontmatter
-    // level (still refused later, at plan derivation, by A0's fail-loud
+    // clock + identity + `partition_column ∈ key` derives `key_per_partition`.
+    // `key_per_partition` has no writable spelling (declaring `grain:
+    // key_per_partition` is a hard error at config parse,
+    // `crates/smelt-core/src/config.rs`'s `Grain` deserializer) — this model
+    // writes no `grain:` at all and still resolves to the derived label
+    // (still refused later, at plan derivation, by A0's fail-loud
     // `key_per_partition` guard — a separate, composing diagnostic, not this
     // one; `docs/plans/20260715-composed-axes-conditional-maintenance.md`
     // Phase A0).
@@ -767,7 +772,7 @@ fn grain_assertion_is_check_only() {
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
         refresh: Some(RefreshStrategy::Incremental),
-        grain: Some(Grain::KeyPerPartition),
+        grain: None,
         unique_key: Some(vec!["order_id".to_string(), "dt".to_string()]),
         timeseries: Some(TimeseriesConfig {
             event_time_column: "ts".to_string(),
@@ -778,8 +783,7 @@ fn grain_assertion_is_check_only() {
         }),
         ..Default::default()
     };
-    validate_timeseries(&metadata, "SELECT order_id, dt FROM foo").expect(
-        "grain: key_per_partition agreeing with a partition_column ∈ key derivation must pass",
-    );
+    validate_timeseries(&metadata, "SELECT order_id, dt FROM foo")
+        .expect("no grain: written, so there is nothing to validate against the derived facts");
     assert_eq!(metadata.resolved_grain(), Some(Grain::KeyPerPartition));
 }

@@ -28,6 +28,7 @@
 //! | `g_07_holistic_agg_append_only` | `BodyConstruct::HolisticAgg` | none (control) | [`hazard::holistic_agg_append_only_control`] |
 //! | `g_10_composite_key_join_fan_out` | composite-key join (self-rendered, [`hazard::g10`]) | none (control; the fan-out shape itself is the point) | [`hazard::composite_key_join_fan_out`] |
 //! | `g_12_keyed_merge_reprocessed_window` | `KeyedRecipe` (additive) | re-delivery of an already-folded keyed window | [`hazard::keyed_merge_reprocessed_window`] |
+//! | n/a — self-inverse additive fold (`BIT_XOR`, self-rendered) | keyed `BIT_XOR` fold | re-delivery of an already-folded keyed window | [`hazard::keyed_bit_xor_merge_reprocessed_window`] |
 //! | `p0_2_run_schedule`, `p0_4_mutation_profile_selfcheck`, `smoke` | n/a — self-checks of the retired `model_shapes`/`run_schedule` generator infrastructure itself | n/a | superseded outright by `s_tracker.rs`'s own unit tests, `schedule_gen.rs::check_profile`'s unit tests, and this whole standing gate (every case already proves `execute_project` derives a real filter and produces a correct result) |
 //!
 //! Every OTHER retired-probe construct not in this table (self-referential
@@ -55,7 +56,7 @@ use smelt_maintenance_testkit::verdict::{classify, Verdict};
 
 use crate::gate::{
     classify_keyed, classify_mixed, drive_and_assert, drive_keyed_and_assert, insert_fact_row,
-    stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
+    snapshot_table_rows, stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
 };
 
 fn day(offset: i64) -> NaiveDate {
@@ -443,6 +444,13 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         rt.block_on(drive_keyed_and_assert(&project, &recipe, &schedule))
             .expect("first fold must succeed");
 
+        let maintained_before = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+                .await
+                .expect("snapshot before the refused redelivery")
+        });
+
         let mut request = base_request("dev");
         request.start = Some("2024-01-01".to_string());
         request.end = Some("2024-01-02".to_string());
@@ -455,6 +463,156 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         assert!(
             message.contains("already reflected"),
             "refusal must name the never-fold-twice reason, got: {message}"
+        );
+        assert!(
+            message.contains("KeyedReprocessedWindow"),
+            "refusal must name the diagnostic code KeyedReprocessedWindow, got: {message}"
+        );
+        assert!(
+            message.contains("2024-01-01"),
+            "refusal must name the reprocessed window's bounds, got: {message}"
+        );
+        assert!(
+            message.contains("--full-refresh"),
+            "refusal must point at the --full-refresh remedy, got: {message}"
+        );
+
+        let maintained_after = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), &recipe.model_name)
+                .await
+                .expect("snapshot after the refused redelivery")
+        });
+        assert_eq!(
+            maintained_before, maintained_after,
+            "the refused redelivery must leave the maintained table's contents byte-identical \
+             — the refusal happens before any write"
+        );
+    }
+
+    /// `BIT_XOR` is an **additive fold** — a commutative *group*, not an
+    /// idempotent lattice (`docs/specs/incremental_shapes.md` §"The
+    /// column-family catalogue"). Because XOR is self-inverse, re-merging an
+    /// already-reflected delta computes `x XOR d XOR d == x`: it CANCELS the
+    /// window's contribution instead of converging, so `incremental_state(S)
+    /// == full_refresh(inputs ∈ S)` would be violated silently. The
+    /// reconciliation ledger must therefore cover this family exactly as it
+    /// covers `SUM` — the redelivery is refused (`KeyedReprocessedWindow`)
+    /// before any write, leaving state unchanged
+    /// (§"The transactional merge ledger").
+    ///
+    /// Hand-staged rather than drawn from [`KeyedRecipe`]: the typed keyed
+    /// pool renders the additive family as `SUM` only, so no generated case
+    /// reaches the `BIT_XOR` combiner.
+    pub fn keyed_bit_xor_merge_reprocessed_window() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().to_path_buf();
+        let db_path = project_dir.join("dev.duckdb");
+        std::fs::create_dir_all(project_dir.join("models/sources")).expect("mkdir");
+
+        std::fs::write(
+            project_dir.join("models/device_bits.sql"),
+            r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+---
+SELECT
+    device_id,
+    d,
+    BIT_XOR(bits) AS xor_bits
+FROM smelt.sources.events
+GROUP BY 1, 2
+"#,
+        )
+        .expect("write model");
+        std::fs::write(
+            project_dir.join("models/sources/events.yml"),
+            "description: pinned BIT_XOR keyed source.\ncolumns:\n  - name: device_id\n    type: BIGINT\n  - name: d\n    type: DATE\n  - name: bits\n    type: BIGINT\ntimeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\nmutation_profile:\n  kind: append_only\n",
+        )
+        .expect("write source");
+        std::fs::write(
+            project_dir.join("smelt.yml"),
+            format!(
+                "name: pinned_bit_xor\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {}\n    schema: main\ndefault_materialization: table\n",
+                db_path.display()
+            ),
+        )
+        .expect("write smelt.yml");
+
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            r#"
+            CREATE SCHEMA IF NOT EXISTS main;
+            CREATE OR REPLACE TABLE main.sources_events AS
+            SELECT * FROM (VALUES
+                (1, DATE '2024-01-01', 12),
+                (1, DATE '2024-01-01', 10)
+            ) AS t(device_id, d, bits);
+            "#,
+        )
+        .expect("seed source");
+        drop(conn);
+
+        let project = LinkCProject::load(project_dir, db_path).expect("load project");
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+        let mut first = base_request("dev");
+        first.start = Some("2024-01-01".to_string());
+        first.end = Some("2024-01-02".to_string());
+        rt.block_on(project.run_quiet("pinned-bitxor-first", first))
+            .expect("first fold must succeed");
+
+        let maintained_before = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), "device_bits")
+                .await
+                .expect("snapshot before the refused redelivery")
+        });
+        assert_eq!(
+            maintained_before,
+            vec![vec![
+                "1".to_string(),
+                "2024-01-01".to_string(),
+                "6".to_string()
+            ]],
+            "first fold must equal the full-refresh oracle (12 ^ 10 = 6)"
+        );
+
+        let mut rerun = base_request("dev");
+        rerun.start = Some("2024-01-01".to_string());
+        rerun.end = Some("2024-01-02".to_string());
+        let err = rt
+            .block_on(project.run_quiet("pinned-bitxor-redelivery", rerun))
+            .expect_err(
+                "re-running an already-folded BIT_XOR keyed window must be refused \
+                 (KeyedReprocessedWindow) — XOR is self-inverse, so the re-merge would cancel \
+                 the window's contribution rather than converge",
+            );
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("KeyedReprocessedWindow"),
+            "refusal must name the diagnostic code KeyedReprocessedWindow, got: {message}"
+        );
+        assert!(
+            message.contains("2024-01-01"),
+            "refusal must name the reprocessed window's bounds, got: {message}"
+        );
+
+        let maintained_after = rt.block_on(async {
+            let backend = project.backend().await.expect("backend");
+            snapshot_table_rows(backend.as_ref(), "device_bits")
+                .await
+                .expect("snapshot after the refused redelivery")
+        });
+        assert_eq!(
+            maintained_before, maintained_after,
+            "the refused redelivery must leave the maintained table unchanged — never the \
+             cancelled `x XOR d XOR d == x` state"
         );
     }
 }
@@ -471,4 +629,5 @@ fn hazard_schedules_are_pinned() {
     hazard::holistic_agg_append_only_control();
     hazard::composite_key_join_fan_out();
     hazard::keyed_merge_reprocessed_window();
+    hazard::keyed_bit_xor_merge_reprocessed_window();
 }

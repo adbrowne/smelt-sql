@@ -3,7 +3,9 @@
 //! §"Skeleton-source closure").
 
 use smelt_logical::analysis::join_shape::JoinContext;
-use smelt_logical::analysis::skeleton_closure::{skeleton_source_closure, SkeletonSourceClosure};
+use smelt_logical::analysis::skeleton_closure::{
+    skeleton_source_closure, RowPreservation, SkeletonSourceClosure,
+};
 
 /// Driving fact `LEFT JOIN` dimension, payload-only enrichment columns, no
 /// membership predicate on the enrichment side — all five conjuncts prove
@@ -15,7 +17,13 @@ fn left_join_dimension_payload_only_closes() {
                LEFT JOIN smelt.sources.customers d ON f.customer_id = d.id";
     let ctx = JoinContext::new().with_unique_key("d", "id");
     let verdict = skeleton_source_closure(sql, "customers", None, &ctx);
-    assert_eq!(verdict, SkeletonSourceClosure::Closed, "{verdict:?}");
+    assert_eq!(
+        verdict,
+        SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape
+        },
+        "{verdict:?}"
+    );
 }
 
 /// Inner JOIN **with** a declared `referential_integrity` on the dimension
@@ -29,7 +37,15 @@ fn inner_join_with_declared_referential_integrity_closes() {
     let ctx = JoinContext::new().with_unique_key("d", "id");
     let ri = vec!["id".to_string()];
     let verdict = skeleton_source_closure(sql, "customers", Some(&ri), &ctx);
-    assert_eq!(verdict, SkeletonSourceClosure::Closed, "{verdict:?}");
+    assert_eq!(
+        verdict,
+        SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                source: "customers".to_string()
+            }
+        },
+        "{verdict:?}"
+    );
 }
 
 /// A bare inner JOIN with no `referential_integrity` declared and no `LEFT

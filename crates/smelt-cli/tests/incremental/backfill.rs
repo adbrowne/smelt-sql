@@ -38,7 +38,7 @@ fn _unused_config_ref() -> (PartitionGrainConfig, TimeseriesConfig) {
     (
         PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         },
         TimeseriesConfig {

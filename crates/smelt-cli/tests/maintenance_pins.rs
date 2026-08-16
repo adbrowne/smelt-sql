@@ -8,32 +8,47 @@
 //! execution time. These tests drive the real `execute_project` pipeline
 //! (via `smelt_maintenance_testkit::link_c_harness::LinkCProject`, never a
 //! hand-injected filter — root `CLAUDE.md` §"Run pipeline parity rule") over
-//! a fact+dimension enrichment model whose `{user_name}` `UpstreamMutation`
-//! cell admits `Technique::ColumnScopedMerge` — the same shape
-//! `examples/timeseries/models/daily_events_enriched.sql` and
-//! `crates/smelt-runtime/tests/technique_lowering.rs`'s
-//! `column_scoped_merge_e2e` module use for MP11's "first live cell" story —
-//! so a `cells[].technique`/`cells[].prefer` entry on that cell has an
-//! observable effect to actually prove.
+//! a fact+dimension enrichment model.
 //!
-//! `docs/specs/incremental_models.md` §"Interchangeability and choice"
-//! documents the resolvable set for any one cell as exactly two members:
-//! the cell's own admitted technique and the always-available whole-region
-//! recompute — never a third named family. For THIS cell the two members
-//! are `{ColumnScopedMerge, RegionRecompute}`; `fold` (`KeyedFold`/
-//! `InPlaceUpdate`) is never a member for a fact+dimension enrichment cell,
-//! so both the hard `technique: fold` pin (`inadmissible_pin_fails_loud`)
-//! and the soft `prefer: fold` preference
-//! (`prefer_is_soft_and_never_refuses`) name a family this cell can never
-//! resolve to — the two tests together prove the hard/soft distinction: a
-//! hard pin naming a non-member is a loud `ChoiceRefusal`
-//! (`MaintenanceUnboundedFootprint`), a soft preference naming the same
-//! non-member is silently not applied (`resolve_cell_choice`'s own
-//! contract: "the cost model may still choose a different admissible
-//! technique") and the cell keeps resolving to its live default —
-//! `ColumnScopedMerge` here, never a fabricated "recompute" outcome that
-//! would contradict `choice.rs`'s documented two-member resolvable-set
-//! model for a cell whose only non-recompute member is `ColumnScopedMerge`.
+//! **Post-`docs/plans/20260808-membership-sensitivity.md` Phase 3 note:**
+//! `users` is read purely in the `JOIN`'s own `ON` predicate — a
+//! row-admission read — so the `{user_name}` `UpstreamMutation` cell (and
+//! its sibling `{event_id, event_type, user_id}` cell for the SAME
+//! trigger — membership sensitivity is row-scoped, not per-column) is now
+//! membership-sensitive (`Technique::DeleteInsert`), never
+//! `Technique::ColumnScopedMerge`. This model is `grain: partition`: there
+//! is no live runtime DISPATCH for a `grain: partition` `DeleteInsert`
+//! membership cell (`resolve_live_membership_recompute_cell`'s own doc
+//! comment — that fact is still true and unchanged by this note), so
+//! neither pin below ever steers a run onto a different write path.
+//!
+//! **What this note corrects (Phase 3 reviewer fix, same date):** a hard
+//! `cells[].technique:` pin is still validated even though it never steers
+//! anything — `resolve_live_column_scoped_cell`'s own pin-consulting loop
+//! (called unconditionally by the `grain: partition` batch loop, looking
+//! for a live `ColumnScopedMerge` opportunity that this shape no longer
+//! has) runs `resolve_cell_choice` over the trigger's admitted cell(s)
+//! regardless of whether the result ends up dispatching anything, and an
+//! inadmissible pin refuses loudly there via `?`, before the "not
+//! ColumnScopedMerge, discard" branch is ever reached. An EARLIER pass of
+//! this file (now corrected) mis-attributed the pin's *observed* silence to
+//! "no live dispatch exists, so the pin is never consulted" — the real
+//! cause was `MaintenancePlan::cell_for`'s first-match lookup: the
+//! `UpstreamMutation(users)` trigger derives TWO sibling cells (`{user_name}`
+//! and `{event_id, event_type, user_id}`), and the pin-consulting loop only
+//! ever evaluated an override against whichever sibling `cell_for` returned
+//! first — a `technique: fold` pin scoped to `columns: [user_name]` was
+//! silently never matched whenever the OTHER sibling happened to be first.
+//! Fixed in `crates/smelt-runtime/src/maintenance_driver.rs`
+//! (`MaintenancePlan::cells_for`, `crates/smelt-logical/src/maintenance/
+//! mod.rs`): every sibling cell sharing a trigger is now offered the
+//! override, matched against its OWN columns — so `inadmissible_pin_fails_
+//! loud` below is restored to its original loud-refusal expectation. Every
+//! test in this file implicitly exercises the fix's other half too: the
+//! `{event_id, event_type, user_id}` sibling — which no test's `columns:
+//! [user_name]` pin ever addresses — must still resolve cleanly to its own
+//! honest default every run, never refuse and never get silently skipped
+//! just because a DIFFERENT sibling carries the pin.
 
 use std::path::Path;
 
@@ -71,17 +86,16 @@ columns:
 fn stage_project(project_dir: &Path, db_path: &Path, cells_yaml: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).expect("create models/sources");
 
-    // The `.sql` frontmatter `batched:` sub-block is retired
-    // (`docs/specs/models.md` §"The Relation Contract") — this model's own
-    // row-shaped join can't become the composed key+clock shape a top-level
-    // `unique_key:` would derive (no `GROUP BY` to satisfy
-    // `KeyedRequiresGroupBy`), so the MERGE-dedup-only `unique_key` stays
-    // declared via the `smelt.yml` model override instead, which the
-    // sub-block retirement does not touch.
+    // The `batched:` sub-block is retired everywhere
+    // (`docs/specs/models.md` §"Batched sub-block retirement") — this
+    // model's own row-shaped join can't become the composed key+clock shape
+    // a top-level `unique_key:` would derive (no `GROUP BY` to satisfy
+    // `KeyedRequiresGroupBy`), so the MERGE-dedup-only `merge_key:` is
+    // declared via the `smelt.yml` model override instead.
     let smelt_yml = format!(
         "name: maintenance_pins_fixture\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    \
          type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n\
-         models:\n  daily_events_enriched:\n    batched:\n      unique_key: [event_id]\n",
+         models:\n  daily_events_enriched:\n    merge_key: [event_id]\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).expect("write smelt.yml");
@@ -235,11 +249,20 @@ async fn technique_pin_forces_region_recompute_at_runtime() {
 }
 
 /// A `cells[].technique: fold` hard pin names a technique outside the
-/// `{user_name}` cell's resolvable set (`{ColumnScopedMerge, RegionRecompute}`
-/// — `fold` maps to `KeyedFold`/`InPlaceUpdate`, neither of which this cell
-/// ever admits) — `resolve_cell_choice` must refuse loudly
-/// (`ChoiceRefusal`/`MaintenanceUnboundedFootprint`), never silently fall
-/// back to region recompute or the cell's own default.
+/// `{user_name}` cell's resolvable set (`{recompute, DeleteInsert}` —
+/// `fold` maps to `KeyedFold`/`InPlaceUpdate`, neither of which this cell,
+/// now membership-sensitive, ever admits) — `resolve_cell_choice` must
+/// refuse loudly (`ChoiceRefusal`/`MaintenanceUnboundedFootprint`), never
+/// silently fall back to region recompute or the cell's own default.
+///
+/// **Restored to its original loud-refusal expectation** (module doc
+/// comment above): the choice ladder is consulted on every run, including
+/// the very first (creation) run, and — once
+/// `resolve_live_column_scoped_cell` correctly offers the pin to EVERY
+/// sibling cell sharing the trigger, not only whichever one `cell_for`
+/// happened to return first — this pin (scoped to `[user_name]`, the
+/// FIRST-derived sibling here) is genuinely consulted and refuses
+/// immediately. No `run-2`/mutation is needed to observe the refusal.
 #[tokio::test]
 async fn inadmissible_pin_fails_loud() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -255,14 +278,9 @@ async fn inadmissible_pin_fails_loud() {
 
     let project = LinkCProject::load(project_dir.clone(), db_path.clone()).expect("load project");
 
-    // The choice ladder is consulted on every run, including the very first
-    // (creation) run — an inadmissible pin fails loud immediately rather
-    // than waiting for a mutation to make the cell actually matter for a
-    // batch's dispatch. No `run-2`/mutation is needed to observe the
-    // refusal.
     let err = project.run_quiet("run-1", day_request()).await.expect_err(
-        "a `technique: fold` pin on a cell that only ever admits ColumnScopedMerge must \
-         refuse the run loudly, never silently fall back",
+        "a `technique: fold` pin on a cell that only ever admits DeleteInsert (membership- \
+         sensitive) must refuse the run loudly, never silently fall back",
     );
     let message = format!("{err:#}");
     assert!(
@@ -277,7 +295,10 @@ async fn inadmissible_pin_fails_loud() {
 /// admissible technique". Since `fold` is not a member of this cell's
 /// resolvable set at all, the preference has no admissible target to steer
 /// toward and the cell keeps resolving to its own live default
-/// (`ColumnScopedMerge`) — the run succeeds, unlike the hard pin above.
+/// (`"deleteinsert"` — `Technique::DeleteInsert`, this shape's honest
+/// membership-sensitive default post-Phase-1, never `"column_scoped_merge"`,
+/// which is unreachable for this shape) — the run succeeds, unlike the hard
+/// pin above.
 #[tokio::test]
 async fn prefer_is_soft_and_never_refuses() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -309,7 +330,7 @@ async fn prefer_is_soft_and_never_refuses() {
         .get("daily_events_enriched")
         .expect("model ran");
     assert_eq!(
-        record.strategy, "column_scoped_merge",
+        record.strategy, "deleteinsert",
         "an unresolvable soft preference must not perturb the cell's own live default \
          technique — got strategy {:?}",
         record.strategy

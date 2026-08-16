@@ -1,7 +1,7 @@
 //! W10 Phase 3 (`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`):
 //! the key grain's `NewData` append-only obligation binds a
 //! FOLD-CONTRIBUTING source, not every source the model references
-//! (`incremental_models.md` §"The key grain (`grain: key`)"). A mutable
+//! (`incremental_shapes.md` §"The key grain (`grain: key`)"). A mutable
 //! source consumed only through a covered `UpstreamMutation` enrichment
 //! cell is admitted (no `NoAdmissibleTechnique` refusal, and its own
 //! `ColumnScopedMerge` cell still stands); a source that is BOTH a fold
@@ -56,6 +56,7 @@ fn dim_column_group() -> ColumnGroup {
     ColumnGroup {
         columns: strings(&["status"]),
         mutation_sensitivity: set(&["dim"]),
+        membership_sensitivity: BTreeSet::new(),
     }
 }
 
@@ -90,7 +91,7 @@ fn admits_enrich_only_covered_mutable_source() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let triggers = vec![
@@ -146,7 +147,7 @@ fn admits_enrich_only_covered_mutable_source() {
 /// though it is covered by an `UpstreamMutation` cell — coverage alone must
 /// never admit a fold-contributing mutable source. This test must stay
 /// green through the narrowing; it pins the safety carve-out
-/// (`incremental_models.md` §"The key grain (`grain: key`)").
+/// (`incremental_shapes.md` §"The key grain (`grain: key`)").
 #[test]
 fn both_fold_and_enrich_stays_refused() {
     let sql = "SELECT f.user_id AS user_id, SUM(f.amount) AS lifetime_spend, \
@@ -171,7 +172,7 @@ fn both_fold_and_enrich_stays_refused() {
                 ("bonus".to_string(), SqlFunction::Sum),
             ],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let triggers = vec![
@@ -237,7 +238,7 @@ fn uncovered_mutable_source_stays_refused() {
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // No `Trigger::UpstreamMutation` for dim: it is not in the covered set.

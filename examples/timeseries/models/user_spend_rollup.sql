@@ -9,7 +9,7 @@ timeseries:
 ---
 -- Downstream of the composed `user_daily_spend` model (`grain: key` +
 -- `timeseries:`, admitted via key temporal locality's route 1 — see that
--- model's own comment). `incremental_models.md` §"Key temporal locality
+-- model's own comment). `incremental_shapes.md` §"Key temporal locality
 -- (the time-partitioned output)" — "The output as a clocked source": an
 -- admitted composed output is visible to the rest of the DAG exactly like a
 -- declared source, so this ordinary `grain: partition` model gets the same

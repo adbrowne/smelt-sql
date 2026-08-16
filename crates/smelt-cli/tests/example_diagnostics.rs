@@ -134,7 +134,7 @@ fn fn_incremental_ts_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_incremental_ts");
 }
 
-/// `batched.nondeterministic_columns` opt-in fixture: an incremental model
+/// `columns.<c>.contract: plausible` opt-in fixture: an incremental model
 /// stamping every row with `NOW()` into a listed payload column. Verifies
 /// the workspace loads without any diagnostics (the non-determinism
 /// flow/taint check runs at build time in `smelt-logical::rules::incremental`,
@@ -1135,9 +1135,15 @@ fn broken_workspace_diagnostics_still_fire() {
 /// `grain: partition` model whose `enrichment_category` group is mutation-
 /// sensitive to an unclocked `maintenance_enrichment` source with no
 /// `allow_full_scan` acceptance — produces exactly one
-/// `MaintenanceScanUnbounded` diagnostic, anchored at that file, and no
-/// `MaintenanceScanUnbounded`/`MaintenanceNoAdmissibleTechnique` diagnostic
-/// fires from any other file in the shared `examples/broken/` workspace.
+/// `MaintenanceScanUnbounded` diagnostic per membership-sensitive payload
+/// group, anchored at that file, and no `MaintenanceScanUnbounded`/
+/// `MaintenanceNoAdmissibleTechnique` diagnostic fires from any other file
+/// in the shared `examples/broken/` workspace. `maintenance_enrichment` is
+/// read only in the JOIN's ON predicate — never in a select item for
+/// `o.order_id` — so BOTH payload groups (`{order_id}` and
+/// `{enrichment_category}`) are membership-sensitive to it
+/// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+/// column provenance", membership paragraph) and each refuses independently.
 ///
 /// Spec: `docs/specs/incremental_models.md` §Semantics "Partition-local
 /// maintenance (the K8 guardrail)".
@@ -1230,8 +1236,9 @@ fn broken_workspace_maintenance_scan_unbounded() {
 
     assert_eq!(
         target.len(),
-        1,
-        "expected exactly 1 maintenance diagnostic from '{expected_file}', got {}:\n  {}",
+        2,
+        "expected exactly 2 maintenance diagnostics (one per membership-sensitive \
+         payload group) from '{expected_file}', got {}:\n  {}",
         target.len(),
         target
             .iter()
@@ -1239,9 +1246,12 @@ fn broken_workspace_maintenance_scan_unbounded() {
             .collect::<Vec<_>>()
             .join("\n  ")
     );
-    assert_eq!(
-        target[0].code,
-        Some(DiagnosticCode::MaintenanceScanUnbounded)
+    assert!(
+        target
+            .iter()
+            .all(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded)),
+        "target: {:?}",
+        target
     );
 }
 
@@ -2700,13 +2710,13 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
 /// Before the fix, `validate_timeseries` returned `KeyedForbidsTimeseries`
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
 /// so the LSP showed no error even though keyed models must not declare
-/// `timeseries:` without key temporal locality (`incremental_models.md` §"Key-grain output shape").
+/// `timeseries:` without key temporal locality (`incremental_shapes.md` §"Key-grain output shape").
 ///
 /// The diagnostic now comes from the key-temporal-locality gate in plan
 /// derivation (`smelt_logical::maintenance::locality::establish_locality`),
 /// not frontmatter validation — the message must name all three routes and
 /// the nearest missing fact
-/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 /// time-partitioned output)").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {
@@ -4071,8 +4081,10 @@ fn check_excluded_from_run_and_explain() {
 
 /// Phase A0 TDD (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 /// `examples/timeseries_broken_key_per_partition/models/trajectory.sql`
-/// declares `refresh: incremental` + `grain: key_per_partition` — a grain
-/// maintenance-plan derivation does not yet support. It must produce exactly
+/// declares `refresh: incremental` with a `timeseries:` clock and a
+/// `unique_key:` identity whose `partition_column` is a member — derives the
+/// `key_per_partition` grain, which maintenance-plan derivation does not yet
+/// support. It must produce exactly
 /// one `MaintenanceUnsupportedGrain` diagnostic naming the grain and the
 /// tracking plan, not a silently-derived keyed plan with an empty
 /// `unique_key` (`crates/smelt-db/src/queries/maintenance.rs`).

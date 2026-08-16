@@ -18,8 +18,9 @@
 use std::path::Path;
 
 use crate::recipe::{
-    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedRecipe, ModelEdit,
-    ModelRecipe, SourcePosture,
+    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, ContractDecl,
+    KeyedCombiner, KeyedRecipe, ModelEdit, ModelRecipe, RepairRecipe, RepairWriteMode,
+    SourcePosture, REPAIR_BAND_ANCHOR,
 };
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
@@ -158,12 +159,29 @@ pub fn rewritten_unique_key(recipe: &ModelRecipe, edit: ModelEdit) -> Vec<String
 /// being re-embedded in frontmatter.
 pub fn render_model_file_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n{contract}---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
+        contract = render_contract_block(recipe),
         body = render_model_body_with_edit(recipe, edit),
     )
+}
+
+/// The `contract:` frontmatter block for `recipe.contract`, or the empty
+/// string when no relaxation is declared (phase 6) — every recipe
+/// [`arb_recipe`] draws has `contract: None`, so this renders byte-
+/// identically to before the field was added.
+fn render_contract_block(recipe: &ModelRecipe) -> String {
+    match recipe.contract {
+        None => String::new(),
+        Some(ContractDecl::FrozenHorizon { days }) => {
+            format!("contract:\n  frozen_horizon: '{days} days'\n")
+        }
+        Some(ContractDecl::Deferral { days }) => {
+            format!("contract:\n  deferral: '{days} days'\n")
+        }
+    }
 }
 
 /// The rewritten oracle query (Phase 9) — [`render_model_body_with_edit`]
@@ -186,10 +204,11 @@ pub fn render_oracle_sql_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> Str
 /// `Grain::Partition`), so dropping it changes no derived maintenance plan.
 pub fn render_model_file(recipe: &ModelRecipe) -> String {
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n{contract}---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
+        contract = render_contract_block(recipe),
         body = render_model_body(recipe),
     )
 }
@@ -274,8 +293,22 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
 /// `ConformanceTarget`-parametrized `render_smelt_yml`).
 pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String {
     let (name, block) = render_target_block(target, db_path);
+    // `probes: {cadence: off}` — this harness exists to prove maintenance-
+    // technique equivalence (`docs/specs/incremental_models.md` §"The
+    // equivalence invariant"), a property checked independently by the
+    // S-restricted oracle after every run step; it is not exercising
+    // declared-fact probe firing, which has its own dedicated coverage
+    // (`crates/smelt-runtime/tests/{model_probes,source_probes}.rs`,
+    // `crates/smelt-cli/tests/e2e/declared_fact_probe_firing.rs`). Left on,
+    // the source append-only posture probe
+    // (`docs/specs/model_properties.md` §"Probe obligation") spuriously
+    // fires on this pool's generated `AppendLateRow` schedules — a
+    // legitimate late append into an already-closed partition, which the
+    // probe cannot yet distinguish from an in-place mutation (the declared
+    // `mutation_profile.lateness` limitation recorded in that section's
+    // §Known Divergences).
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\n",
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nprobes:\n  cadence: off\n",
     )
 }
 
@@ -518,18 +551,50 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
     let src = format!("smelt.sources.{}", recipe.source.name);
     let key = &recipe.source.key_column;
     let val = &recipe.source.payload_column;
-    let (agg, alias) = recipe.combiner.agg_and_alias();
-    format!("SELECT {key}, {agg}({val}) AS {alias} FROM {src} GROUP BY {key}")
+    let clock = &recipe.source.clock_column;
+    let proj = recipe.combiner.projection_sql(val, clock);
+    format!("SELECT {key}, {proj} FROM {src} GROUP BY {key}")
 }
 
 /// The full `grain: key` model file: `refresh: incremental` + `grain: key`
 /// frontmatter — deliberately no `timeseries:` block (`incremental_models.md`
 /// §Known Divergences "The key grain": "every `timeseries:` block on a keyed model is refused
 /// unconditionally") and no `batched.unique_key` (keyed output has no
-/// partition column) — followed by [`render_keyed_model_body`].
+/// partition column) — followed by [`render_keyed_model_body`]. A
+/// [`SourcePosture::MutableSnapshot`] driving source (Phase 3,
+/// `docs/plans/20260809-keyed-frontier.md` — the snapshot-reconcile run
+/// shape) additionally declares `allow_full_scan` on itself: the
+/// maintenance-plan derivation's `Trigger::UpstreamMutation` cell over this
+/// same source (`derive_mutation`) requires it, the source having no
+/// partition-local proof of its own (unclocked).
 pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
+    let scan_bounds = match recipe.source.posture {
+        SourcePosture::MutableSnapshot => format!(
+            "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
+             allow_full_scan: true\n",
+            name = recipe.source.name,
+        ),
+        SourcePosture::AppendOnly => String::new(),
+    };
+    // The once-write family's provenance proof (`incremental_models.md`
+    // §"The column-family catalogue"): a declared `key -> <source payload
+    // column>` functional dependency. `determines` names the SOURCE column
+    // inside the `COALESCE(MAX(val))` reduction (`val`) — never the
+    // projection's output alias, which the model's own GROUP BY key
+    // determines by construction and which would therefore assert nothing
+    // (`rules::cumulative::classify_once_write`).
+    let fd_block = match recipe.combiner {
+        KeyedCombiner::OnceWrite
+        | KeyedCombiner::OnceWriteFallback
+        | KeyedCombiner::OnceWriteMultiCandidate => format!(
+            "functional_dependencies:\n  - key: [{key}]\n    determines: {value}\n",
+            key = recipe.source.key_column,
+            value = recipe.source.payload_column,
+        ),
+        _ => String::new(),
+    };
     format!(
-        "---\nrefresh: incremental\ngrain: key\n---\n{body}\n",
+        "---\nrefresh: incremental\ngrain: key\n{scan_bounds}{fd_block}---\n{body}\n",
         body = render_keyed_model_body(recipe),
     )
 }
@@ -562,6 +627,54 @@ pub fn stage_keyed(
     std::fs::write(
         project_dir.join(format!("models/{}.sql", recipe.model_name)),
         render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+        recipe.source.source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    let column_defs = match recipe.source.posture {
+        SourcePosture::AppendOnly => format!(
+            "{d} DATE, {id} INTEGER, {val} INTEGER",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+        SourcePosture::MutableSnapshot => format!(
+            "{id} INTEGER, {val} INTEGER",
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    };
+    create_source_table_via_backend(db_path, &recipe.source.name, &column_defs)?;
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+}
+
+/// [`stage_keyed`], additionally staging a downstream consumer model
+/// `models/<model>_downstream.sql` = `SELECT * FROM smelt.<model>`
+/// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in keyed
+/// models": state columns must stay invisible to a `ref()`-mediated
+/// consumer, not just a direct `information_schema` probe of the physical
+/// table). No frontmatter on the downstream model — `refresh: Full` is the
+/// default, and a full-refresh `SELECT *` read is exactly the "downstream
+/// consumer" shape this leg proves. Opt-in (a distinct function, not a flag
+/// on [`stage_keyed`]) so every pre-existing keyed recipe's staged project
+/// shape stays byte-identical.
+pub fn stage_keyed_with_downstream(
+    recipe: &KeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/{}_downstream.sql", recipe.model_name)),
+        format!("SELECT * FROM smelt.{}\n", recipe.model_name),
     )?;
     std::fs::write(
         project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
@@ -858,6 +971,129 @@ pub fn stage_composed_for_target(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// `RepairRecipe` rendering (`docs/outcomes/20260809-repair-family/phases/
+// 08-plan.md` task 2): the keyed non-invertible-fold-over-a-mutable-clocked-
+// source shape, mirroring `crates/smelt-runtime/tests/repair_lowering.rs`'s
+// hand-written fixture. Kept separate from `render_keyed_model_*` (a
+// `KeyedRecipe`'s driving source is always the generic `SourceRecipe`
+// `(d, id, val)`/`(id, attr)` shape; a repair recipe's driving source is the
+// fixed four-column `(order_id, customer_id, amount, order_date)` shape
+// `KeyedCombiner::projection_sql` was designed to be reusable over —
+// `combiner.projection_sql("amount", "order_date")` below is the exact same
+// call `render_keyed_model_body` makes with its own source's column names).
+// ---------------------------------------------------------------------
+
+/// The repair recipe's `SELECT` body: `SELECT customer_id, <combiner
+/// projection over (amount, order_date)> FROM smelt.sources.<source_name>
+/// WHERE order_date BETWEEN TIMESTAMP '<anchor>' - INTERVAL '<band> days'
+/// AND TIMESTAMP '<anchor>' GROUP BY customer_id` — the same Form B band
+/// shape `repair_lowering.rs`'s hand-written fixture uses
+/// ([`REPAIR_BAND_ANCHOR`]'s doc comment explains why the literal stays
+/// fixed regardless of which run window a schedule step later drives).
+pub fn render_repair_model_body(recipe: &RepairRecipe) -> String {
+    let src = format!("smelt.sources.{}", recipe.source_name);
+    let proj = recipe.combiner.projection_sql("amount", "order_date");
+    format!(
+        "SELECT customer_id, {proj} FROM {src} WHERE order_date BETWEEN TIMESTAMP \
+         '{REPAIR_BAND_ANCHOR}' - INTERVAL '{band} days' AND TIMESTAMP '{REPAIR_BAND_ANCHOR}' \
+         GROUP BY customer_id",
+        band = recipe.band_days,
+    )
+}
+
+/// The full repair model file: `materialization: table` + `refresh:
+/// incremental` + `grain: key` + `unique_key: customer_id` frontmatter
+/// (mirrors `repair_lowering.rs::REPAIR_FIXTURE_FILE`), plus a `maintenance:
+/// cells: [{on: <source>, columns: [<alias>...], write: diff_patch}]` block
+/// when [`RepairRecipe::write_mode`] pins `RepairWriteMode::DiffPatch`
+/// (mirrors `REPAIR_FIXTURE_DIFF_PATCH_FILE`), followed by
+/// [`render_repair_model_body`]. The pin's `columns:` list names every
+/// presented column the combiner projects (the value alias plus, for
+/// [`KeyedCombiner::OrderMonotone`], its ordering companion) — the derived
+/// plan cell's own column group is the FD-linked pair, never just the
+/// value alias alone, and `matching_write_pin` requires an exact match.
+pub fn render_repair_model_file(recipe: &RepairRecipe) -> String {
+    let maintenance_block = match recipe.write_mode {
+        RepairWriteMode::TargetedDeleteInsert => String::new(),
+        RepairWriteMode::DiffPatch => {
+            let mut columns = vec![recipe.value_alias().to_string()];
+            if let Some(ord) = recipe.combiner.ordering_alias() {
+                columns.push(ord.to_string());
+            }
+            format!(
+                "maintenance:\n  cells:\n  - on: {source}\n    columns: [{cols}]\n    write: \
+                 diff_patch\n",
+                source = recipe.source_name,
+                cols = columns.join(", "),
+            )
+        }
+    };
+    format!(
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\nunique_key: \
+         customer_id\n{maintenance_block}---\n{body}\n",
+        body = render_repair_model_body(recipe),
+    )
+}
+
+/// The repair recipe's driving-source YAML: `mutation_profile:
+/// mutable_snapshot`, a `timeseries:` block on `order_date` (CLOCKED, unlike
+/// [`crate::recipe::SourceRecipe::mutable_dimension`]'s unclocked shape),
+/// and a declared `unique_key: [order_id]` — mirrors
+/// `repair_lowering.rs::ORDERS_SOURCE_YML`. Fixed shape (does not vary by
+/// recipe), matching `stage`/`stage_keyed`'s convention of a bespoke YAML
+/// literal per fixed source shape.
+pub fn render_repair_source_yaml() -> String {
+    "description: generative-conformance repair-family mutable clocked source.\n\
+     mutation_profile:\n  kind: mutable_snapshot\n\
+     unique_key: [order_id]\n\
+     timeseries:\n  event_time_column: order_date\n  partition_column: order_date\n  \
+     granularity: day\n\
+     columns:\n  - name: order_id\n    type: INTEGER\n  - name: customer_id\n    type: \
+     INTEGER\n  - name: amount\n    type: DECIMAL(10,2)\n  - name: order_date\n    type: \
+     TIMESTAMP\n"
+        .to_string()
+}
+
+/// The repair recipe's oracle query over `source_table_ref` instead of
+/// `smelt.sources.<name>` — [`render_repair_model_body`] with the one
+/// substitution, "renders once, serves both" (design §4).
+pub fn render_repair_oracle_sql(recipe: &RepairRecipe, source_table_ref: &str) -> String {
+    render_repair_model_body(recipe).replace(
+        &format!("smelt.sources.{}", recipe.source_name),
+        source_table_ref,
+    )
+}
+
+/// Stage a [`RepairRecipe`] into a fresh project dir + DuckDB file: writes
+/// the model file, the driving source's YAML, `smelt.yml`, and creates the
+/// physical `(order_id, customer_id, amount, order_date)` source table — the
+/// repair-pool counterpart of [`stage_keyed`].
+pub fn stage_repair(
+    recipe: &RepairRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_repair_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source_name)),
+        render_repair_source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    create_source_table_via_backend(
+        db_path,
+        &recipe.source_name,
+        "order_id INTEGER, customer_id INTEGER, amount DECIMAL(10,2), order_date TIMESTAMP",
+    )?;
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
 #[cfg(test)]

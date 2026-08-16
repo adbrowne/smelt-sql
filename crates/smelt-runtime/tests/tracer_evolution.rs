@@ -18,6 +18,8 @@
 
 mod oracle;
 
+use std::collections::BTreeSet;
+
 use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
@@ -210,9 +212,10 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["user_id", "event_ts", "arrival_ts", "page"]),
             mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -309,9 +312,10 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["user_id", "event_ts", "arrival_ts", "page"]),
             mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -409,9 +413,10 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["session_id"]),
             mutation_sensitivity: set(&["sessions"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -513,14 +518,16 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["conversion_score"]),
                 mutation_sensitivity: set(&["conversions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // Introduction: catch up the added column per partition with the derived

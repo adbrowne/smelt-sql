@@ -6,7 +6,9 @@ use smelt_cli::{
     SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_logical::maintenance::Technique;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
+use smelt_runtime::diagnostics::build_model_diagnostics;
 use std::collections::HashMap;
 
 use crate::ExplainArgs;
@@ -132,6 +134,15 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
             .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+        let plausible_columns = metadata
+            .map(|m| {
+                m.columns
+                    .iter()
+                    .filter(|(_, c)| c.contract == Some(smelt_core::metadata::Contract::Plausible))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
             sql: model.content.clone(),
@@ -142,6 +153,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 .collect(),
             timeseries_config: ts_config,
             incremental_config: inc_config,
+            plausible_columns,
         });
     }
 
@@ -428,6 +440,46 @@ async fn explain_maintenance_plan(
     let (own_contract, edges) =
         smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
 
+    // Per-inbound-edge output-delta verdict (`docs/specs/incremental_models.md`
+    // §Surface "CLI"): a model edge reads the same `ModelEdge::output_shape`
+    // the run loop's admission derives (`smelt_db::model_edges_for`, phase 9
+    // of `docs/outcomes/20260809-output-delta-typing/outcome.md`); a source
+    // edge is seeded straight from its declared mutation profile
+    // (`output_delta::seed_shape_for_source`) — never re-derived, only
+    // matched to the `edges` list already built above so `smelt explain`'s
+    // rendering and this vector agree on which name labels which edge.
+    let edge_delta_types: Vec<(String, smelt_logical::analysis::output_delta::OutputDelta)> = {
+        let model_edges = smelt_db::model_edges_for(&db, ws, file);
+        edges
+            .iter()
+            .filter_map(|edge| match edge.provider {
+                smelt_cli::explain::RelationContractProvider::Model => {
+                    let bare_edge_name = edge.name.strip_prefix("models.").unwrap_or(&edge.name);
+                    model_edges
+                        .iter()
+                        .find(|me| {
+                            me.name.strip_prefix("models.").unwrap_or(&me.name) == bare_edge_name
+                        })
+                        .and_then(|me| me.output_shape.clone())
+                        .map(|shape| (edge.name.clone(), shape))
+                }
+                smelt_cli::explain::RelationContractProvider::Source => {
+                    let bare_name = edge.name.strip_prefix("sources.").unwrap_or(&edge.name);
+                    smelt_cli::explain::find_source_info(&source_infos, bare_name).map(|info| {
+                        let facts =
+                            smelt_logical::analysis::output_delta::SourceFacts::from_source_info(
+                                bare_name, info,
+                            );
+                        (
+                            edge.name.clone(),
+                            smelt_logical::analysis::output_delta::seed_shape_for_source(&facts),
+                        )
+                    })
+                }
+            })
+            .collect()
+    };
+
     let maintenance_cfg = model
         .metadata
         .as_deref()
@@ -435,31 +487,13 @@ async fn explain_maintenance_plan(
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
-    let report = build_maintenance_plan_report(
-        &canonical,
-        &result,
-        &own_contract,
-        &edges,
-        cells_cfg,
-        defaults_cfg,
-    )
-    .with_context(|| {
-        format!(
-            "Failed to build maintenance plan report for `{}`",
-            canonical
-        )
-    })?;
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
 
-    if !args.show_sql {
-        println!("{}", report);
-        return Ok(());
-    }
-
-    // `--show-sql`: print, after the report, the maintenance statements
-    // each cell executes — built from the same pure emitters a run
-    // executes (`docs/specs/incremental_models.md` §"Statement emission
-    // (single owner)"). Never connects to a backend: `CompilerRegistry`
-    // only needs `smelt.yml` target metadata, not a live connection.
+    // Target/schema/dialect derivation stays offline — only `smelt.yml`
+    // target metadata, never a live connection (`docs/specs/cli.md`
+    // §"`smelt explain <model>` maintenance-plan report") — so it is safe
+    // to compute up front and reuse for both the probe plan below and
+    // `--show-sql`'s statement rendering further down.
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();
     let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
     let schema = config
@@ -474,6 +508,60 @@ async fn explain_maintenance_plan(
         .map(backend_type_to_maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
+    // The declared-fact probe plan (`docs/specs/model_properties.md`
+    // §"Probe obligation"): built pure/offline by the shared
+    // `smelt_runtime::probe_plan` owner, never re-derived here
+    // (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+    // report").
+    let probe_entries = smelt_runtime::probe_plan::probe_plan_for_model(
+        &canonical,
+        &schema,
+        &model.db_name_owned(),
+        model.metadata.as_deref(),
+        model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()),
+        model,
+        &source_infos,
+        &target,
+        &result.plan.cells,
+        result.plan.key_locality.as_ref(),
+        dialect,
+    );
+
+    let report = build_maintenance_plan_report(
+        &canonical,
+        &result,
+        &own_contract,
+        &edges,
+        cells_cfg,
+        defaults_cfg,
+        contract_cfg,
+        &source_infos,
+        &probe_entries,
+        config.probes.cadence,
+        &edge_delta_types,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to build maintenance plan report for `{}`",
+            canonical
+        )
+    })?;
+
+    // `--json` is honored with or without `--show-sql` (`docs/specs/cli.md`
+    // §"`smelt explain <model>` maintenance-plan report") — the JSON schema is
+    // identical either way, so only the plain-text rendering short-circuits
+    // here. Falling through on `--json` alone must never print the text
+    // report: a machine consumer would get prose with exit 0 (fail-loud).
+    if !args.show_sql && !args.json {
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // `--show-sql`: print, after the report, the maintenance statements
+    // each cell executes — built from the same pure emitters a run
+    // executes (`docs/specs/incremental_models.md` §"Statement emission
+    // (single owner)"). Never connects to a backend: `CompilerRegistry`
+    // only needs `smelt.yml` target metadata, not a live connection.
     let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
     // Kept for the `--period` output-window derivation below (`expand_function_calls`
@@ -568,16 +656,63 @@ async fn explain_maintenance_plan(
         None => None,
     };
 
+    // `--technique <name>` (`docs/specs/ui_model_diagnostics.md` §Surface
+    // "CLI"): parsed once, up front, so a malformed name fails loud before
+    // any of the (expensive — one emitter call per technique per cell)
+    // shared-diagnostics work below runs.
+    let technique_requested = args
+        .technique
+        .as_deref()
+        .map(parse_technique_arg)
+        .transpose()?;
+
+    // The shared `smelt-runtime::diagnostics` builder is the single owner
+    // of the technique-preview set and the property set
+    // (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+    // boundary") — and, since this fix, the sole deriver of the *symbolic*
+    // statement shape the default `--show-sql` text report renders too
+    // (`build_admitted_statement_group` in `smelt_cli::explain` reads its
+    // `Admitted` preview entry rather than re-deriving); `smelt-cli` no
+    // longer keeps its own second copy of the no-`--period` derivation, so
+    // `diagnostics` is now always built (never gated behind `--json`/
+    // `--technique`).
+    let diagnostics = {
+        let bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
+        build_model_diagnostics(
+            model,
+            &models,
+            &upstream,
+            &source_infos,
+            &bound_ctx,
+            &result.plan.cells,
+            &schema,
+            &target,
+            &registry,
+            &resolver,
+            dialect,
+            &source_timeseries,
+            &unique_key,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?
+    };
+
+    // `statements` is this cell's *admitted*-technique rendering — read
+    // straight from `diagnostics.cells`' own `Admitted` preview entry for
+    // every cell except a `Technique::DeleteInsert` cell under a concrete
+    // `--period`, which still needs the real skew-aware/scan-widened
+    // derivation `build_technique_statements`'s symbolic preview
+    // deliberately does not attempt (`smelt_cli::explain::
+    // build_all_cell_statements`'s own doc comment).
     let statements = smelt_cli::explain::build_all_cell_statements(
         &result.plan.cells,
+        &diagnostics.cells,
         model,
         &schema,
         &target,
         &registry,
         &resolver,
         dialect,
-        &unique_key,
-        &source_timeseries,
         &region,
         derived_window.as_ref(),
     );
@@ -589,16 +724,33 @@ async fn explain_maintenance_plan(
             &statements,
             own_contract.clone(),
             edges.clone(),
+            &diagnostics.cells,
+            diagnostics.properties.clone(),
+            result.state_columns.clone(),
+            probe_entries.clone(),
+            config.probes.cadence,
+            &result.column_groups,
+            contract_cfg,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
 
     println!("{}", report);
-    print!(
-        "{}",
-        smelt_cli::explain::render_cell_statements_text(&statements)
-    );
+    match technique_requested {
+        Some(technique) => {
+            print!(
+                "{}",
+                smelt_cli::explain::render_technique_previews_text(&diagnostics.cells, technique)
+            );
+        }
+        None => {
+            print!(
+                "{}",
+                smelt_cli::explain::render_cell_statements_text(&statements)
+            );
+        }
+    }
 
     Ok(())
 }
@@ -740,6 +892,29 @@ fn parse_period(value: &str) -> Result<(String, String)> {
         anyhow::bail!("malformed --period range '{value}': end is before start");
     }
     Ok((start_date.to_string(), end_date.to_string()))
+}
+
+/// Parse `--technique <name>` into a [`Technique`]
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "CLI"): a named CLI error
+/// (never a panic) on an unrecognized name, listing the accepted set
+/// (fail-loud discipline, `CLAUDE.md` §"Fail-loud discipline"). `recompute`
+/// and `delete_insert` both resolve to `Technique::DeleteInsert` — `--show-
+/// sql`'s own maintenance-plan report already documents `DeleteInsert` as
+/// doubling for region recompute (`docs/specs/incremental_models.md`), and
+/// `smelt_runtime::diagnostics`'s technique registry has no separate
+/// recompute emitter or `Technique` variant.
+fn parse_technique_arg(value: &str) -> Result<Technique> {
+    match value {
+        "delete_insert" | "recompute" => Ok(Technique::DeleteInsert),
+        "keyed_fold" => Ok(Technique::KeyedFold),
+        "column_scoped_merge" => Ok(Technique::ColumnScopedMerge),
+        "in_place_update" => Ok(Technique::InPlaceUpdate),
+        "per_group_recompute" => Ok(Technique::PerGroupRecompute),
+        other => anyhow::bail!(
+            "unknown --technique '{other}': expected one of delete_insert, keyed_fold, \
+             column_scoped_merge, in_place_update, per_group_recompute, recompute"
+        ),
+    }
 }
 
 #[cfg(test)]

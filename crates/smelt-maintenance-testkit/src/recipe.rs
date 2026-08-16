@@ -287,7 +287,7 @@ impl SourceRecipe {
     /// additionally declaring a `key_recurrence` bound
     /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
     /// Phase A6) — route 3's declared fallback
-    /// (`incremental_models.md` §"Key temporal locality", route 3).
+    /// (`incremental_shapes.md` §"Key temporal locality", route 3).
     pub(crate) fn events_with_key_recurrence(key: Vec<String>, window: &str) -> Self {
         let mut source = Self::events(KeyShape::Single);
         source.key_recurrence = Some(KeyRecurrenceDecl {
@@ -321,6 +321,31 @@ impl SourceRecipe {
         }
     }
 
+    /// The physical `events(d, id, val)` shape ([`Self::events`]) — an
+    /// `AppendOnly`-postured source, `clock_column` set so the standard
+    /// `stage_keyed` AppendOnly DDL branch still applies — used by the
+    /// plan/classifier-agreement probe
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 3 review finding):
+    /// `crates/smelt-cli/tests/maintenance_conformance/gate.rs`'s
+    /// `snapshot_reconcile_unclocked_append_only_source_with_sum_is_refused`
+    /// stages this source's OWN bespoke source YAML with NO `timeseries:`
+    /// block (unlike [`Self::events`]'s [`Self::source_yaml`], which always
+    /// declares one for an `AppendOnly` posture) — an append-only source
+    /// with no declared clock anywhere in the model derives the
+    /// snapshot-reconcile run shape (`incremental_shapes.md` §"The two run
+    /// shapes") exactly like [`Self::mutable_dimension`] does, over a
+    /// posture that would otherwise (incorrectly) pass the faithful-fold
+    /// source-posture obligation on its own. `KeyedRecipe::
+    /// new_snapshot_reconcile` (mutable-snapshot posture) already exercises
+    /// the "declared posture also independently fails that obligation"
+    /// case; this shape isolates the run-shape gate alone.
+    pub fn unclocked_append_only_dimension(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            ..Self::events(KeyShape::Single)
+        }
+    }
+
     /// The declared `batched.unique_key` for `construct` over this source:
     /// row-shaped constructs use [`KeyShape`]; aggregate constructs always
     /// key on the partition column alone.
@@ -351,7 +376,7 @@ pub struct GrainDecl {
 /// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
 /// already-staged recipe's model body
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-/// `incremental_models.md` §"The definition-change trigger"). Both variants
+/// `definition_deltas.md` §"The verdict per column group"). Both variants
 /// are deliberately narrow, hand-picked shapes — not a generated construct
 /// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
 /// change invalidates the interval store; the run pipeline always compiles
@@ -395,6 +420,17 @@ fn applicable_evolutions(construct: BodyConstruct) -> Vec<ModelEdit> {
     }
 }
 
+/// A `contract:` declaration to render onto a [`ModelRecipe`]'s model file —
+/// day-valued `frozen_horizon`/`deferral` windows, mirroring
+/// `smelt_core::config::ContractConfig`'s own shape but confined to the
+/// single-relaxation-per-recipe fixtures the conformance gate needs
+/// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractDecl {
+    FrozenHorizon { days: i64 },
+    Deferral { days: i64 },
+}
+
 /// A fully-typed model recipe: one source, one body construct, one grain
 /// declaration, ready for [`crate::render`] to turn into SQL/YAML text.
 #[derive(Debug, Clone)]
@@ -406,6 +442,11 @@ pub struct ModelRecipe {
     /// The [`ModelEdit`]s a `RewriteModel` schedule step may apply to this
     /// recipe (Phase 9) — empty for constructs with no meaningful edit.
     pub evolution: Vec<ModelEdit>,
+    /// An optional `contract:` relaxation to render onto this recipe's model
+    /// file (phase 6) — `None` for every recipe [`arb_recipe`] draws, so
+    /// every existing recipe renders byte-identically to before this field
+    /// was added.
+    pub contract: Option<ContractDecl>,
 }
 
 impl ModelRecipe {
@@ -424,6 +465,7 @@ impl ModelRecipe {
             grain,
             construct,
             evolution: applicable_evolutions(construct),
+            contract: None,
         }
     }
 }
@@ -625,11 +667,16 @@ pub fn arb_adversarial_recipe() -> impl Strategy<Value = AdversarialLeafRecipe> 
 /// `examples/timeseries/models/daily_events_enriched.sql` shape): one
 /// append-only clocked fact source (`events(d, id, val)`) joined 1:1 to one
 /// unclocked `mutable_snapshot` dimension source
-/// ([`SourceRecipe::mutable_dimension`]), producing a
-/// `ColumnScopedMerge`-eligible cell (MP11) for the dimension-sourced `attr`
-/// column group, alongside a `{d, id, val}` group never sensitive to the
-/// dimension's mutations. Self-renders like [`AdversarialLeafRecipe`] — the
-/// join body sits outside [`BodyConstruct`]'s exhaustive match, and
+/// ([`SourceRecipe::mutable_dimension`]), whose key is read in the join's
+/// `ON` predicate (a row-admission read) and whose `attr` feeds the select
+/// list. Per `incremental_models.md` §"The plan matrix" the ON-read
+/// makes the dimension-sourced `attr` column group membership-sensitive, so
+/// the derived plan carries an `UpstreamMutation(dim)` cell assigned
+/// `Technique::DeleteInsert` (the recompute family), never
+/// `Technique::ColumnScopedMerge` — mirroring
+/// `gate.rs::keyed_enriched_recipe_admits_membership_recompute`'s outcome
+/// for the same join shape. Self-renders like [`AdversarialLeafRecipe`] —
+/// the join body sits outside [`BodyConstruct`]'s exhaustive match, and
 /// `render.rs` is outside this phase's edit scope (plan Critical files).
 #[derive(Debug, Clone)]
 pub struct MutableEnrichedRecipe {
@@ -745,6 +792,151 @@ impl MutableEnrichedRecipe {
     }
 }
 
+/// The closure-pruned column-scoped-`MERGE` recipe
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 5): the same
+/// `grain: partition` fact+dimension shape as [`MutableEnrichedRecipe`]
+/// (the `examples/timeseries/models/daily_events_enriched.sql` MP11
+/// column-scoped-`MERGE` mechanism) EXCEPT the fact/dimension join is a
+/// `LEFT JOIN` and the dimension declares its own `unique_key`. Those two
+/// facts are exactly the two conjuncts
+/// `crates/smelt-logical/src/analysis/skeleton_closure.rs`'s
+/// `skeleton_source_closure` needs to return `Closed` without any
+/// `referential_integrity` world-fact (which the closure-pruned membership
+/// pass never consults, `grouping.rs`'s own doc comment: conjunct 3
+/// one-to-one via the dimension's declared `unique_key`, conjunct 4
+/// row-preservation via the `LEFT JOIN` shape itself, unconditionally).
+/// Unlike [`MutableEnrichedRecipe`] (bare INNER `JOIN`, no declared
+/// dimension `unique_key`, membership-sensitive, `Technique::DeleteInsert`)
+/// and `KeyedEnrichedRecipe` in `gate.rs` (INNER JOIN, dimension read only
+/// in `ON`, never selected), this recipe SELECTS the dimension's own
+/// `attr` column directly through a closed `LEFT JOIN` — the one shape the
+/// closure proof can actually prune, so the `{attr}` column group's
+/// `UpstreamMutation(dim)` cell derives `Technique::ColumnScopedMerge`
+/// instead of falling back to the recompute family (mirrors
+/// `smelt-logical/tests/maintenance_tracer.rs::closed_outer_enrichment_join_upstream_mutation_derives_column_scoped_merge`'s
+/// hand-built `ModelInputs`, staged here through the real
+/// disk-backed/Salsa-backed derivation and the real `execute_project`
+/// pipeline).
+#[derive(Debug, Clone)]
+pub struct ValueEnrichedRecipe {
+    pub model_name: String,
+    pub fact: SourceRecipe,
+    pub dimension: SourceRecipe,
+}
+
+impl Default for ValueEnrichedRecipe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ValueEnrichedRecipe {
+    /// The pool's one fixed shape (mirrors [`MutableEnrichedRecipe::new`]'s
+    /// own doc comment: exactly one closure-pruned enrichment shape needs
+    /// to be reachable, not a generated construct family).
+    pub fn new() -> Self {
+        Self {
+            model_name: "recipe_value_enriched".to_string(),
+            fact: SourceRecipe::events(KeyShape::Single),
+            dimension: SourceRecipe::mutable_dimension("value_enrich_dim"),
+        }
+    }
+
+    /// The declared `batched.unique_key`: the fact's own row key — still
+    /// uniquely identifies each output row since the join is 1:1
+    /// ([`SourceRecipe::mutable_dimension`]'s doc comment).
+    pub fn unique_key(&self) -> Vec<String> {
+        vec![self.fact.key_column.clone()]
+    }
+
+    /// The model's `SELECT` body: the fact source passed through, enriched
+    /// by the dimension's `attr` column via a `LEFT JOIN` on the fact's own
+    /// row key — the dimension's `attr` is a SELECTED payload column, not
+    /// merely read in the join's `ON` predicate (unlike `KeyedEnrichedRecipe`
+    /// in `gate.rs`, whose whole point is the opposite shape). Otherwise
+    /// identical to [`MutableEnrichedRecipe::model_body`] with `JOIN`
+    /// swapped for `LEFT JOIN`.
+    pub fn model_body(&self) -> String {
+        let fact_src = format!("smelt.sources.{}", self.fact.name);
+        let dim_src = format!("smelt.sources.{}", self.dimension.name);
+        let d = &self.fact.clock_column;
+        let id = &self.fact.key_column;
+        let val = &self.fact.payload_column;
+        let dim_id = &self.dimension.key_column;
+        let attr = &self.dimension.payload_column;
+        format!(
+            "SELECT f.{d} AS {d}, f.{id} AS {id}, f.{val} AS {val}, dim.{attr} AS {attr} \
+             FROM {fact_src} f LEFT JOIN {dim_src} dim ON f.{id} = dim.{dim_id}"
+        )
+    }
+
+    /// The full model file: `timeseries:` + `refresh: incremental` +
+    /// `grain: partition` frontmatter (mirroring
+    /// [`MutableEnrichedRecipe::model_file`]) plus the dimension declared
+    /// `allow_full_scan` (its `ColumnScopedMerge` cell's admission
+    /// precondition). The column-scoped `MERGE`'s own `ON`-predicate key
+    /// (`decide_column_merge_dispatch`'s `model_declares_unique_key`
+    /// precondition, `smelt_core::PartitionGrainConfig::unique_key`) is NOT
+    /// declarable via the top-level `unique_key:` identity fact — that
+    /// instead flips the DERIVED grain to `Key`/`KeyPerPartition`
+    /// (`smelt_core::config::derive_grain`), conflicting with this recipe's
+    /// asserted `grain: partition`. The write/dedup-only spelling is
+    /// `merge_key:` — declarable in `.sql` frontmatter or as a smelt.yml
+    /// model override (`smelt_core::PartitionGrainConfig::unique_key`,
+    /// `Config::get_incremental_with_metadata`) — the staging harness
+    /// (`gate.rs::stage_value_enriched_recipe`) writes it into the generated
+    /// `smelt.yml` rather than here.
+    pub fn model_file(&self) -> String {
+        let d = &self.fact.clock_column;
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            dim_name = self.dimension.name,
+            body = self.model_body(),
+        )
+    }
+
+    /// The fact source YAML sidecar — the same append-only `events(d, id,
+    /// val)` shape [`MutableEnrichedRecipe::fact_source_yaml`] renders.
+    pub fn fact_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance closure-pruned-enrichment fact source.\n\
+             mutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  \
+             partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: \
+             DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.fact.clock_column,
+            id = self.fact.key_column,
+            val = self.fact.payload_column,
+        )
+    }
+
+    /// The dimension source YAML sidecar: unclocked,
+    /// `mutation_profile: mutable_snapshot`, WITH a declared `unique_key:`
+    /// (`sources.md` §"Row identity") — unlike
+    /// [`MutableEnrichedRecipe::dimension_source_yaml`], this is the one
+    /// fact the closure proof's one-to-one conjunct actually needs to prune
+    /// the LEFT JOIN's own `ON` read.
+    pub fn dimension_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance closure-pruned-enrichment mutable dimension.\nmutation_profile: mutable_snapshot\nunique_key: [{id}]\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {attr}\n    type: INTEGER\n",
+            id = self.dimension.key_column,
+            attr = self.dimension.payload_column,
+        )
+    }
+
+    /// The oracle query for this recipe: [`Self::model_body`] with the fact
+    /// source reference swapped for `fact_table_ref` (a full-refresh oracle
+    /// or an `STracker`-materialized `S_k` temp table) and the dimension's
+    /// reference swapped for its CURRENT physical table.
+    pub fn oracle_body_over(&self, fact_table_ref: &str) -> String {
+        self.model_body()
+            .replace(&format!("smelt.sources.{}", self.fact.name), fact_table_ref)
+            .replace(
+                &format!("smelt.sources.{}", self.dimension.name),
+                &format!("main.sources_{}", self.dimension.name),
+            )
+    }
+}
+
 /// A source's declared `batched.unique_key`/source-YAML rendering, factored
 /// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
 /// keyed output declares no `timeseries:`/`unique_key`, `incremental_models.md`
@@ -783,23 +975,92 @@ impl SourceRecipe {
 }
 
 /// The `grain: key` pool's combiner family
-/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
-/// `incremental_models.md` §"The algebraic maintenance ladder"): both are
-/// direct-monoid, admitted by the built classifier seed
-/// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
-/// `incremental_models.md` §Known Divergences "The key grain": "the classifier covers only the
-/// direct-monoid families").
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5,
+/// extended by `docs/plans/20260809-keyed-frontier.md` Phase 1;
+/// `incremental_models.md` §"The algebraic maintenance ladder"): `Additive`/
+/// `Idempotent` are direct-monoid; `OrderMonotone` is the order-monotone
+/// overwrite family (a semilattice fold, not a monoid) — all three are
+/// admitted by the built classifier
+/// (`crates/smelt-logical/src/rules/cumulative.rs`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyedCombiner {
     /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
     /// `Grade::Additive` reconciliation-ledger family: entries record delta
     /// identities and a repeat fold of an already-processed window is
-    /// refused (`KeyedReprocessedWindow`, `incremental_models.md` §"Reprocessing").
+    /// refused (`KeyedReprocessedWindow`, `incremental_shapes.md` §"Reprocessing").
     Additive,
     /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
     /// not a group). The `Grade::Idempotent` family: entries record only a
     /// frontier watermark, so re-folding a window is harmless.
     Idempotent,
+    /// `MAX_BY(val, d)` — the order-monotone overwrite family
+    /// (`incremental_shapes.md` §"The column-family catalogue",
+    /// `crates/smelt-logical/src/rules/cumulative.rs`
+    /// `classify_order_monotone_column`). Also `Grade::Idempotent`
+    /// (incumbent-wins re-merge of an already-reflected delta converges).
+    /// Admits on hidden decomposed `(v, o)` state (row 5) — the ordering
+    /// expression (the driving source's own clock column `d` — strictly
+    /// monotone across this pool's generated windows, §"Ordering ties":
+    /// ties are avoided by construction, not by luck) is folded as hidden
+    /// state, not a projection obligation; [`Self::projection_sql`] still
+    /// additionally projects its own running `MAX(d)` column, kept as an
+    /// ordinary output column rather than a required companion.
+    OrderMonotone,
+    /// `ANY_VALUE(val)` — the plain-overwrite family
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 3;
+    /// `incremental_shapes.md` §"The column-family catalogue"). Admitted
+    /// ONLY under the snapshot-reconcile run shape — a
+    /// [`KeyedRecipe::new_window_forward`] recipe must never draw this
+    /// variant (`arb_keyed_combiner` deliberately excludes it); only
+    /// [`KeyedRecipe::new_snapshot_reconcile`] uses it. Also
+    /// `Grade::Idempotent` (incoming-row-wins is idempotent by
+    /// construction — re-reconciling an unchanged snapshot converges), but
+    /// unlike every other combiner here, the snapshot-reconcile executor
+    /// keeps no ledger at all (`incremental_models.md` §"The transactional
+    /// merge ledger": "Snapshot-reconcile models keep no ledger").
+    PlainOverwrite,
+    /// `COALESCE(MAX(val))` — the once-write family
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 4;
+    /// `incremental_shapes.md` §"The column-family catalogue"). Admitted
+    /// window-forward only under the once-write provenance proof — this
+    /// recipe declares a `functional_dependencies: [{key: [id], determines:
+    /// val}]` entry ([`render_keyed_model_file`]) so the FD-backed route
+    /// admits it. `Grade::Idempotent`: `COALESCE(target, delta)` re-merged
+    /// against an already-reflected delta is a no-op. Deliberately excluded
+    /// from [`arb_keyed_combiner`] — the once-write world-fact (the payload
+    /// column is a genuine per-key constant) does not hold for
+    /// [`arb_keyed_schedule`]'s deliberately key-re-touching, varying-value
+    /// generated data; a dedicated recipe/schedule is required instead.
+    OnceWrite,
+    /// `COALESCE(MAX(val), 0) AS once_val` — the once-write family's
+    /// fallback-bearing spelling (`incremental_shapes.md` §"The
+    /// column-family catalogue", row 6). Admits onto hidden `(value,
+    /// written)` state (`decompose_once_write`) rather than
+    /// [`KeyedCombiner::OnceWrite`]'s stateless `COALESCE(target, delta)`
+    /// merge — the literal fallback makes the raw projection total, so the
+    /// classifier can no longer read "still NULL" off the presented column
+    /// alone. Deliberately excluded from [`arb_keyed_combiner`], for the
+    /// same once-write world-fact reason as [`KeyedCombiner::OnceWrite`]; a
+    /// dedicated recipe/schedule is required
+    /// ([`KeyedRecipe::new_window_forward_once_write_with`]).
+    OnceWriteFallback,
+    /// `COALESCE(MAX(val), MIN(val)) AS once_val` — the once-write family's
+    /// multi-candidate spelling (`incremental_shapes.md` §"The
+    /// column-family catalogue", row 6). Admits onto hidden
+    /// `(value, written)` state per candidate. Deliberately excluded from
+    /// [`arb_keyed_combiner`], same reason as [`KeyedCombiner::OnceWrite`].
+    OnceWriteMultiCandidate,
+    /// `AVG(val) AS avg_val` — the decomposed-fold family
+    /// (`incremental_shapes.md` §"The column-family catalogue", row 7):
+    /// admits onto hidden additive `(sum, count)` state via
+    /// `CrossPartitionCombiner::Recomputed`. No per-key world-fact is
+    /// required (unlike once-write), so this variant DOES join
+    /// [`arb_keyed_combiner`]'s draw pool.
+    DecomposedAvg,
+    /// `STDDEV_SAMP(val) AS stddev_val` — the decomposed-fold family's
+    /// stddev-class member: admits onto hidden `(n, Σx, Σx²)` state. Joins
+    /// [`arb_keyed_combiner`]'s draw pool alongside [`Self::DecomposedAvg`].
+    DecomposedStddev,
 }
 
 impl KeyedCombiner {
@@ -807,23 +1068,119 @@ impl KeyedCombiner {
         match self {
             KeyedCombiner::Additive => "additive",
             KeyedCombiner::Idempotent => "idempotent",
+            KeyedCombiner::OrderMonotone => "order_monotone",
+            KeyedCombiner::PlainOverwrite => "plain_overwrite",
+            KeyedCombiner::OnceWrite => "once_write",
+            KeyedCombiner::OnceWriteFallback => "once_write_fallback",
+            KeyedCombiner::OnceWriteMultiCandidate => "once_write_multi_candidate",
+            KeyedCombiner::DecomposedAvg => "decomposed_avg",
+            KeyedCombiner::DecomposedStddev => "decomposed_stddev",
         }
     }
 
     /// `(aggregate function, output column alias)` this combiner projects.
+    /// For [`KeyedCombiner::OrderMonotone`] this names only the *value*
+    /// column — see [`Self::ordering_alias`] for the companion tracking
+    /// column and [`Self::projection_sql`] for the full select-list
+    /// fragment.
     pub fn agg_and_alias(self) -> (&'static str, &'static str) {
         match self {
             KeyedCombiner::Additive => ("SUM", "total"),
             KeyedCombiner::Idempotent => ("MAX", "max_val"),
+            KeyedCombiner::OrderMonotone => ("MAX_BY", "max_by_val"),
+            KeyedCombiner::PlainOverwrite => ("ANY_VALUE", "current_val"),
+            KeyedCombiner::OnceWrite
+            | KeyedCombiner::OnceWriteFallback
+            | KeyedCombiner::OnceWriteMultiCandidate => ("COALESCE", "once_val"),
+            KeyedCombiner::DecomposedAvg => ("AVG", "avg_val"),
+            KeyedCombiner::DecomposedStddev => ("STDDEV_SAMP", "stddev_val"),
+        }
+    }
+
+    /// The output alias of the recipe's own running ordering-tracking
+    /// column — only [`KeyedCombiner::OrderMonotone`] projects one
+    /// ([`Self::projection_sql`]'s own `MAX(d)` column, kept as an
+    /// ordinary output; the classifier's hidden `(v, o)` state is separate
+    /// and unrelated to this alias).
+    pub fn ordering_alias(self) -> Option<&'static str> {
+        match self {
+            KeyedCombiner::OrderMonotone => Some("max_by_ord"),
+            KeyedCombiner::Additive
+            | KeyedCombiner::Idempotent
+            | KeyedCombiner::PlainOverwrite
+            | KeyedCombiner::OnceWrite
+            | KeyedCombiner::OnceWriteFallback
+            | KeyedCombiner::OnceWriteMultiCandidate
+            | KeyedCombiner::DecomposedAvg
+            | KeyedCombiner::DecomposedStddev => None,
+        }
+    }
+
+    /// The full select-list fragment (beyond the key) this combiner
+    /// projects, given the source's payload column (`val`) and clock column
+    /// (`clock`, used as the order-monotone family's ordering expression).
+    pub fn projection_sql(self, val: &str, clock: &str) -> String {
+        let (agg, alias) = self.agg_and_alias();
+        match self {
+            // `ordering_alias()` is `Some` for every `OrderMonotone` value —
+            // matched directly here rather than via `.expect(...)` so a
+            // future variant added to `ordering_alias()`'s match without a
+            // corresponding `projection_sql` arm fails to compile instead of
+            // panicking at runtime.
+            KeyedCombiner::OrderMonotone => match self.ordering_alias() {
+                Some(ord_alias) => {
+                    format!("{agg}({val}, {clock}) AS {alias}, MAX({clock}) AS {ord_alias}")
+                }
+                None => unreachable!("OrderMonotone always carries an ordering alias"),
+            },
+            KeyedCombiner::OnceWrite => {
+                // No fallback argument: a fallback would make the
+                // projection total, and the once-write merge
+                // (`COALESCE(target, delta)`) would then lock the default in
+                // for any key whose first window carried only NULL payloads
+                // — the shape the classifier refuses
+                // (`rules::cumulative::classify_once_write`).
+                format!("COALESCE(MAX({val})) AS {alias}")
+            }
+            KeyedCombiner::OnceWriteFallback => {
+                // A literal fallback argument makes the projection total —
+                // the shape that widens onto hidden `(value, written)` state
+                // rather than the bare spelling's stateless merge
+                // (`decompose_once_write`, `classify_once_write`).
+                format!("COALESCE(MAX({val}), 0) AS {alias}")
+            }
+            KeyedCombiner::OnceWriteMultiCandidate => {
+                // Two candidates (a leading `MAX` and a trailing `MIN`),
+                // no fallback — each candidate gets its own `(value,
+                // written)` state pair (`decompose_once_write`).
+                format!("COALESCE(MAX({val}), MIN({val})) AS {alias}")
+            }
+            KeyedCombiner::DecomposedAvg | KeyedCombiner::DecomposedStddev => {
+                format!("{agg}({val}) AS {alias}")
+            }
+            KeyedCombiner::Additive | KeyedCombiner::Idempotent | KeyedCombiner::PlainOverwrite => {
+                format!("{agg}({val}) AS {alias}")
+            }
         }
     }
 }
 
-/// A `Strategy` drawing uniformly from the two [`KeyedCombiner`] families.
+/// A `Strategy` drawing uniformly from the [`KeyedCombiner`] families that
+/// hold over [`arb_keyed_schedule`]'s deliberately key-re-touching, varying-
+/// value generated data — the once-write family's per-key-constant
+/// world-fact does not, so [`KeyedCombiner::OnceWrite`],
+/// [`KeyedCombiner::OnceWriteFallback`], and
+/// [`KeyedCombiner::OnceWriteMultiCandidate`] stay excluded (dedicated
+/// recipes/schedules instead, `KeyedRecipe::new_window_forward_once_write*`).
+/// The decomposed-fold family (`DecomposedAvg`/`DecomposedStddev`) needs no
+/// such world-fact, so it joins the pool.
 pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
     prop_oneof![
         Just(KeyedCombiner::Additive),
         Just(KeyedCombiner::Idempotent),
+        Just(KeyedCombiner::OrderMonotone),
+        Just(KeyedCombiner::DecomposedAvg),
+        Just(KeyedCombiner::DecomposedStddev),
     ]
 }
 
@@ -831,7 +1188,7 @@ pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
 /// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
 /// [`Self::new_window_forward`] uses the clocked append-only `events` shape
 /// (the run-shape derivation's window-forward posture,
-/// `incremental_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// `incremental_shapes.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
 /// uses the unclocked `mutable_snapshot` dimension shape (selecting the
 /// snapshot-reconcile posture, refused today — `incremental_models.md` §Known
 /// Divergences "The key grain": "the snapshot-reconcile executor is unbuilt").
@@ -855,6 +1212,56 @@ impl KeyedRecipe {
         Self {
             model_name: format!("recipe_keyed_snapshot_{}", combiner.kind_name()),
             source: SourceRecipe::mutable_dimension("keyed_snapshot_dim"),
+            combiner,
+        }
+    }
+
+    /// The once-write family's dedicated recipe
+    /// (`docs/plans/20260809-keyed-frontier.md` Phase 4): window-forward,
+    /// clocked append-only `events` source, [`KeyedCombiner::OnceWrite`].
+    /// [`render_keyed_model_file`] additionally declares
+    /// `functional_dependencies: [{key: [id], determines: val}]` for this
+    /// combiner — the once-write provenance proof — so the classifier
+    /// admits the `COALESCE(MAX(val))` projection. Not drawn from
+    /// [`arb_keyed_combiner`]/[`arb_keyed_schedule`] — see
+    /// [`KeyedCombiner::OnceWrite`]'s own doc comment for why a generic
+    /// schedule would violate the once-write world-fact.
+    pub fn new_window_forward_once_write() -> Self {
+        Self::new_window_forward_once_write_with(KeyedCombiner::OnceWrite)
+    }
+
+    /// [`Self::new_window_forward_once_write`], generalised over which
+    /// once-write spelling `combiner` names
+    /// (`KeyedCombiner::OnceWrite`/`OnceWriteFallback`/
+    /// `OnceWriteMultiCandidate`) — same FD-backed staging
+    /// ([`render_keyed_model_file`]'s `fd_block` covers all three), same
+    /// clocked append-only `events` source, same reason for staying out of
+    /// [`arb_keyed_combiner`]/[`arb_keyed_schedule`].
+    pub fn new_window_forward_once_write_with(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!("recipe_keyed_{}", combiner.kind_name()),
+            source: SourceRecipe::events(KeyShape::Single),
+            combiner,
+        }
+    }
+
+    /// [`Self::new_snapshot_reconcile`], but over
+    /// [`SourceRecipe::unclocked_append_only_dimension`] — the driving
+    /// source declares `mutation_profile: append_only` instead of
+    /// `mutable_snapshot`, while still carrying NO clock column anywhere in
+    /// the model. Isolates the run-shape gate (`docs/plans/
+    /// 20260809-keyed-frontier.md` Phase 3 review finding): a
+    /// `MutationProfile::AppendOnly` source passes the faithful-fold
+    /// source-posture obligation on posture alone, clock-independent, so a
+    /// fold-family column over this shape is admitted (wrongly) unless the
+    /// whole-model run-shape check also fires.
+    pub fn new_snapshot_reconcile_unclocked_append_only(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!(
+                "recipe_keyed_snapshot_unclocked_append_only_{}",
+                combiner.kind_name()
+            ),
+            source: SourceRecipe::unclocked_append_only_dimension("keyed_snapshot_dim_ao"),
             combiner,
         }
     }
@@ -931,14 +1338,14 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction (design §5 "Key-recurrence control": "where ordering-
 /// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
 /// made unique by construction so the documented ties carve-out cannot fire
-/// spuriously" — `incremental_models.md` §"Ordering ties"). The order-monotone
-/// overwrite combiner family this discipline targets is not yet an admitted
-/// technique (`incremental_models.md` §Known Divergences "The key grain": "the classifier union
-/// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
-/// so this generator is not wired into [`KeyedCombiner`] today — but the
-/// discipline it must uphold once that family lands is independently
-/// testable now: a strictly increasing sequence can never collide, by
-/// construction rather than by (unprovable) statistical luck.
+/// spuriously" — `incremental_shapes.md` §"Ordering ties"). [`KeyedCombiner::
+/// OrderMonotone`] itself uses the driving source's own clock column as its
+/// ordering expression (already strictly monotone across a generated
+/// [`KeyedSchedule`] by construction, without needing this generator) — this
+/// strategy remains available for any future recipe that needs an
+/// independent, non-clock ordering key with the same tie-free guarantee: a
+/// strictly increasing sequence can never collide, by construction rather
+/// than by (unprovable) statistical luck.
 pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
     (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
 }
@@ -947,10 +1354,10 @@ pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
 // Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
 // covering all three key-temporal-locality routes
 // (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
-// `incremental_models.md` §"Key temporal locality").
+// `incremental_shapes.md` §"Key temporal locality").
 // ---------------------------------------------------------------------
 
-/// The three key-temporal-locality routes (`incremental_models.md` §"Key
+/// The three key-temporal-locality routes (`incremental_shapes.md` §"Key
 /// temporal locality") a composed recipe may establish.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposedRoute {
@@ -1244,12 +1651,16 @@ impl EnrichmentEdgeRecipe {
             smelt_logical::maintenance::derive::ModelEdge {
                 name: self.driving_source().to_string(),
                 clock_col: Some("event_date".to_string()),
+                clock_col_aliases: vec![],
                 unique_key: vec!["event_id".to_string()],
+                output_shape: None,
             },
             smelt_logical::maintenance::derive::ModelEdge {
                 name: self.joined_source().to_string(),
                 clock_col: Some("event_date".to_string()),
+                clock_col_aliases: vec![],
                 unique_key: vec!["device_id".to_string()],
+                output_shape: None,
             },
         ]
     }
@@ -1298,6 +1709,118 @@ pub fn arb_enrichment_edge_recipe() -> impl Strategy<Value = EnrichmentEdgeRecip
 pub fn arb_enrichment_edge_schedule(total: usize) -> impl Strategy<Value = EnrichmentEdgeSchedule> {
     proptest::sample::subsequence((0..total).collect::<Vec<usize>>(), 1..total)
         .prop_map(|touched_indices| EnrichmentEdgeSchedule { touched_indices })
+}
+
+// =============================================================================
+// `RepairRecipe` (`docs/outcomes/20260809-repair-family/phases/08-plan.md`):
+// a keyed non-invertible fold over a mutable, CLOCKED source — the shape
+// `crates/smelt-runtime/tests/repair_lowering.rs`'s hand-written fixture
+// exercises (a `raw.orders`-shaped `(order_id, customer_id, amount,
+// order_date)` `mutation_profile: mutable_snapshot` source with a declared
+// `unique_key` and a `timeseries:` block, folded `MAX`/`MAX_BY` per
+// `customer_id` with an explicit Form B band on `order_date`) — generalized
+// into typed recipe data so the standing conformance gate can drive it
+// end-to-end rather than only the one hand-built fixture.
+// =============================================================================
+
+/// Which write the repair family's live `Technique::PerGroupRecompute` cell
+/// dispatches (`incremental_models.md` §"The repair family";
+/// `smelt_runtime::maintenance_driver::RepairWrite`): the family's own
+/// targeted `DELETE`+`INSERT`, or a `write: diff_patch` pin over it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairWriteMode {
+    /// No pin — the repair family's own default write
+    /// (`execute_per_group_recompute`).
+    TargetedDeleteInsert,
+    /// `maintenance: cells: [{on: <source>, columns: [...], write:
+    /// diff_patch}]` — routes through `execute_diff_patch` instead
+    /// (`RepairWrite::DiffPatch`).
+    DiffPatch,
+}
+
+/// The declared Form B band width (`order_date BETWEEN <end> - INTERVAL
+/// '<band> days' AND <end>`) every [`RepairRecipe`] declares on its model's
+/// own `WHERE` clause — the literal that discharges the repair family's
+/// bounded-per-group-read obligation and fixes the derived `ScanClamp` at
+/// `before = <band> days` (mirrors `repair_lowering.rs`'s fixed 3-day band).
+/// Not drawn from a generator — the band width is a shape constant the
+/// classifier consults structurally, not a value under test.
+pub const REPAIR_BAND_DAYS: u64 = 3;
+
+/// The fixed literal upper-bound date the model's own `WHERE order_date
+/// BETWEEN ... AND TIMESTAMP '<anchor>'` band uses
+/// (`render::render_repair_model_body`). Per `repair_lowering.rs`'s own
+/// fixture, this literal is consulted ONLY by the static Form B band parse
+/// that derives the cell's `ScanClamp` — the live affected-key window at run
+/// time is always `[request.start − band, request.end)` over the RUN's own
+/// requested window, independent of this literal (`repair_lowering.rs`'s
+/// run 2 drives `--event-time-start 2025-01-16` against this same anchor and
+/// still resolves the correct affected-key band). Kept as one shared
+/// constant so every generated recipe's model band and oracle band literal
+/// agree without threading the value through every call site.
+pub const REPAIR_BAND_ANCHOR: &str = "2025-01-14";
+
+/// A `Strategy` drawing from the repair family's non-invertible-under-
+/// retraction [`KeyedCombiner`] members: `Idempotent` (`MAX`) and
+/// `OrderMonotone` (`MAX_BY`) — the two combiners a fold cannot safely
+/// reflect a retracted contribution through (`incremental_models.md` §"The
+/// repair family": "a non-invertible combiner … cannot undo a retracted
+/// contribution"). `Additive`/decomposed members are excluded: they are
+/// invertible (or decomposable into an invertible state), so the SAME
+/// mutable/clocked source posture that narrows this pool into
+/// `Technique::PerGroupRecompute` for `Idempotent`/`OrderMonotone` instead
+/// derives a different cell for them — out of this recipe's scope.
+pub fn arb_repair_combiner() -> impl Strategy<Value = KeyedCombiner> {
+    prop_oneof![
+        Just(KeyedCombiner::Idempotent),
+        Just(KeyedCombiner::OrderMonotone),
+    ]
+}
+
+/// A repair-family recipe: `SELECT customer_id, <combiner>(amount[, order_date]) AS <alias>
+/// FROM smelt.sources.<source_name> WHERE order_date BETWEEN <band> GROUP BY
+/// customer_id` over a `mutable_snapshot`, CLOCKED `(order_id, customer_id,
+/// amount, order_date)` source with a declared `unique_key: [order_id]` —
+/// the one source shape today's pool has that is BOTH mutable (so a fold
+/// cannot trust an unretracted delta) AND clocked (so the repair narrowing,
+/// not an `UpstreamMutation` cell, is what the maintenance-plan derivation
+/// assigns — `derive_model_maintenance_plan`'s own doc comment: "repair is
+/// only derived for a CLOCKED mutable source").
+#[derive(Debug, Clone)]
+pub struct RepairRecipe {
+    pub model_name: String,
+    pub source_name: String,
+    pub combiner: KeyedCombiner,
+    pub band_days: u64,
+    pub write_mode: RepairWriteMode,
+}
+
+impl RepairRecipe {
+    pub fn new(combiner: KeyedCombiner, write_mode: RepairWriteMode) -> Self {
+        let mode_suffix = match write_mode {
+            RepairWriteMode::TargetedDeleteInsert => "targeted",
+            RepairWriteMode::DiffPatch => "diff_patch",
+        };
+        Self {
+            model_name: format!("repair_{}_{mode_suffix}", combiner.kind_name()),
+            source_name: "repair_orders".to_string(),
+            combiner,
+            band_days: REPAIR_BAND_DAYS,
+            write_mode,
+        }
+    }
+
+    /// The model's declared `unique_key` — always the fold's own `GROUP BY`
+    /// key, `customer_id`.
+    pub fn unique_key(&self) -> Vec<String> {
+        vec!["customer_id".to_string()]
+    }
+
+    /// The combiner's own output alias (`agg_and_alias`'s second element) —
+    /// the column the `write: diff_patch` pin's `columns:` block names.
+    pub fn value_alias(&self) -> &'static str {
+        self.combiner.agg_and_alias().1
+    }
 }
 
 #[cfg(test)]
@@ -1459,7 +1982,7 @@ mod tests {
     /// generator discipline for order-monotone combiners — a sample of
     /// generated ordering-key vectors of every sampled length is always
     /// pairwise distinct, so the documented ties carve-out
-    /// (`incremental_models.md` §"Ordering ties") can never fire spuriously
+    /// (`incremental_shapes.md` §"Ordering ties") can never fire spuriously
     /// against generated data.
     #[test]
     fn ordering_keys_are_unique_by_construction() {

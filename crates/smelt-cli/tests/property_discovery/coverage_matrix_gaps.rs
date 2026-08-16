@@ -80,9 +80,10 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
         column_groups: vec![ColumnGroup {
             columns: vec!["tier".to_string()],
             mutation_sensitivity: set(&["customers_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let plan = derive_maintenance_plan(
@@ -180,7 +181,7 @@ fn ex41_ex42_intersect_no_payload_column_still_delete_insert() {
             sources,
             column_groups: vec![],
             fold: None,
-            column_add_proof: None,
+            old_columns: Vec::new(),
         };
         let plan = derive_maintenance_plan(
             &inputs,

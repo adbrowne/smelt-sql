@@ -38,7 +38,8 @@ use smelt_logical::analysis::fingerprint::Projection;
 use smelt_runtime::maintenance_driver::{
     diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
 };
-use std::sync::{Arc, Mutex};
+use std::cell::RefCell;
+use std::sync::Once;
 use tracing_subscriber::layer::SubscriberExt;
 
 const SOURCE_ADDRESS: &str = "smelt.sources.dim_users";
@@ -775,12 +776,59 @@ async fn single_column_projection_survives_a_null_transition_and_matches_the_ora
 // cover every currently-existing source row, exactly like a first run
 // against a never-populated sidecar.
 
-/// A minimal `tracing_subscriber::Layer` capturing every WARN-level event's
-/// formatted `message` field into a shared buffer — used only by the
-/// corrupted-stamp test below to prove the mismatch is logged loudly
-/// (`tracing::warn!`), never silently swallowed.
-struct CapturingLayer {
-    messages: Arc<Mutex<Vec<String>>>,
+// Per-thread WARN buffer. `None` means "this thread is not capturing";
+// `Some` means a `capture_warnings` call is active on this thread and every
+// WARN event emitted here lands in the buffer. Keeping the buffer
+// thread-local (rather than handing a shared `Arc<Mutex<Vec<_>>>` to a
+// *scoped* subscriber) is what makes the capture safe under the
+// multi-threaded test harness: see `install_capturing_subscriber` below.
+thread_local! {
+    static CAPTURED_WARNINGS: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// A minimal `tracing_subscriber::Layer` recording every WARN-level event's
+/// formatted `message` field into the emitting thread's buffer (if that
+/// thread is capturing) — used by the corrupted-stamp test below to prove
+/// the mismatch is logged loudly (`tracing::warn!`), never silently
+/// swallowed.
+struct CapturingLayer;
+
+/// Installs the capturing layer as the process-wide *global* default
+/// subscriber, exactly once per test binary.
+///
+/// A global default is load-bearing, not incidental. `tracing` caches each
+/// callsite's `Interest` **globally**, and a brand-new callsite's interest is
+/// computed from whatever dispatcher is default *on the thread that happens
+/// to hit it first* (`tracing_core::callsite::register` →
+/// `Dispatchers::rebuilder` → `Rebuilder::JustOne` →
+/// `dispatcher::get_default`). With a thread-scoped
+/// `tracing::subscriber::set_default`, a sibling test running concurrently on
+/// another thread can therefore reach the `warn!` callsite first, see no
+/// subscriber, and have `Interest::never` cached for it process-wide — after
+/// which the capturing test's own `warn!` is elided before it is ever
+/// dispatched, and the capture comes back empty. Registering one global
+/// subscriber up front means every thread resolves the callsite through this
+/// layer, so interest is `always` no matter who wins the race, while the
+/// thread-local buffer keeps each test's captured messages its own.
+fn install_capturing_subscriber() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let subscriber = tracing_subscriber::registry().with(CapturingLayer);
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("install the WARN-capturing global subscriber");
+    });
+}
+
+/// Runs `future` with WARN capture enabled on this thread, returning its
+/// output alongside every WARN message the future logged.
+async fn capture_warnings<F: std::future::Future>(future: F) -> (F::Output, Vec<String>) {
+    install_capturing_subscriber();
+    CAPTURED_WARNINGS.with(|c| *c.borrow_mut() = Some(Vec::new()));
+    let output = future.await;
+    let captured = CAPTURED_WARNINGS
+        .with(|c| c.borrow_mut().take())
+        .expect("WARN capture buffer must still be installed on this thread");
+    (output, captured)
 }
 
 impl<S> tracing_subscriber::Layer<S> for CapturingLayer
@@ -806,10 +854,11 @@ where
         }
         let mut message = String::new();
         event.record(&mut MessageVisitor(&mut message));
-        self.messages
-            .lock()
-            .expect("capture mutex poisoned")
-            .push(message);
+        CAPTURED_WARNINGS.with(|c| {
+            if let Some(buffer) = c.borrow_mut().as_mut() {
+                buffer.push(message);
+            }
+        });
     }
 }
 
@@ -986,17 +1035,7 @@ async fn a_hand_corrupted_stamp_is_detected_treated_as_absent_and_logged_loudly(
         .await
         .expect("hand-corrupt the stored stamp");
 
-    let messages = Arc::new(Mutex::new(Vec::<String>::new()));
-    let layer = CapturingLayer {
-        messages: messages.clone(),
-    };
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    let changed = diff(&backend).await;
-
-    drop(_guard);
-    let captured = messages.lock().expect("capture mutex poisoned").clone();
+    let (changed, captured) = capture_warnings(diff(&backend)).await;
 
     assert_eq!(
         changed.len(),

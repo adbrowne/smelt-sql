@@ -277,7 +277,12 @@ fn admitted_family(technique: &Technique) -> Option<CellTechnique> {
     match technique {
         Technique::KeyedFold | Technique::InPlaceUpdate => Some(CellTechnique::Fold),
         Technique::ColumnScopedMerge => Some(CellTechnique::RederiveColumns),
-        Technique::DeleteInsert => None,
+        // No cell derives this technique yet (`smelt_logical::maintenance::
+        // repair::derive_repair_cell` is standalone, not yet wired into
+        // `derive_maintenance_plan`), and it has no `CellTechnique` family
+        // pin of its own — mirrors `DeleteInsert`'s own "not a bakeoff
+        // candidate" verdict.
+        Technique::DeleteInsert | Technique::PerGroupRecompute => None,
     }
 }
 

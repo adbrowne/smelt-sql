@@ -47,11 +47,12 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -114,12 +115,27 @@ fn retractions_into_noninvertible_fail_faithful_fold() {
              got {:?}",
             plan.cells
         );
+        // The repair narrowing also attempts a per-group recompute over the
+        // posture failure; `payments` declares no `unique_key`, so its own
+        // affected-key discovery fails closed too, pushing an additive
+        // `RepairKeysNotDiscoverable` refusal alongside the pre-existing one
+        // (`incremental_models.md` §"The repair family" — fail-closed
+        // refusal is additive, never a replacement).
+        let no_admissible: Vec<_> = plan
+            .refusals
+            .iter()
+            .filter(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. }))
+            .collect();
         assert!(
-            matches!(&plan.refusals[..], [Refusal::NoAdmissibleTechnique { .. }]),
+            matches!(&no_admissible[..], [Refusal::NoAdmissibleTechnique { .. }]),
             "{combiner:?}: expected exactly one NoAdmissibleTechnique refusal, got {:?}",
             plan.refusals
         );
-        let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+        assert!(plan
+            .refusals
+            .iter()
+            .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
+        let Refusal::NoAdmissibleTechnique { why, .. } = no_admissible[0] else {
             unreachable!()
         };
         assert!(
@@ -146,10 +162,17 @@ fn retractions_also_refuse_an_invertible_monoid() {
     let (inputs, trigger) = inputs(SqlFunction::Sum, MutationProfile::MutableSnapshot);
     let plan = derive_maintenance_plan(&inputs, &[trigger]);
     assert!(plan.cells.is_empty());
-    assert!(matches!(
-        &plan.refusals[..],
-        [Refusal::NoAdmissibleTechnique { .. }]
-    ));
+    // Additive repair refusal, same rationale as the test above: `payments`
+    // declares no `unique_key`, so the repair narrowing's own affected-key
+    // discovery fails closed too.
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::NoAdmissibleTechnique { .. })));
+    assert!(plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 }
 
 fn multi_column_inputs(
@@ -170,6 +193,7 @@ fn multi_column_inputs(
         column_groups: vec![ColumnGroup {
             columns: add_columns.iter().map(|(c, _)| c.to_string()).collect(),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: add_columns
@@ -177,7 +201,7 @@ fn multi_column_inputs(
                 .map(|(c, combiner)| (c.to_string(), combiner))
                 .collect(),
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -245,5 +269,46 @@ fn multi_column_one_non_monoid_combiner_refuses_the_whole_cell() {
     assert!(
         why.contains("typical") && why.contains("Median"),
         "refusal should name the offending column and combiner, got: {why}"
+    );
+}
+
+/// The once-write family's waiver is scoped to the ALGEBRA leg only. A
+/// `Coalesce` fold column is exempt from the combiner-algebra condition
+/// (its admission rests on the independent once-write provenance proof,
+/// `rules::cumulative::classify_once_write`), but it is NOT exempt from the
+/// source-posture / delta-discovery condition: over a retracting
+/// (`MutableSnapshot`) source the cell still refuses.
+#[test]
+fn once_write_waives_algebra_only_not_source_posture() {
+    // Append-only: the algebra leg alone would refuse a non-monoid,
+    // non-order-monotone combiner — the once-write waiver admits it.
+    let (append_only, trigger) = inputs(SqlFunction::Coalesce, MutationProfile::AppendOnly);
+    let plan = derive_maintenance_plan(&append_only, &[trigger]);
+    assert!(
+        plan.refusals.is_empty(),
+        "once-write is exempt from the algebra leg, got {:?}",
+        plan.refusals
+    );
+    assert_eq!(
+        plan.cells.len(),
+        1,
+        "expected one cell, got {:?}",
+        plan.cells
+    );
+
+    // Retracting source: the posture leg is NOT waived.
+    let (mutable, trigger) = inputs(SqlFunction::Coalesce, MutationProfile::MutableSnapshot);
+    let plan = derive_maintenance_plan(&mutable, &[trigger]);
+    assert!(
+        plan.cells.is_empty(),
+        "the source-posture leg must still bind for a once-write column, got {:?}",
+        plan.cells
+    );
+    let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+        unreachable!()
+    };
+    assert!(
+        why.contains("append-only") || why.contains("retract"),
+        "refusal should cite the source-posture obligation, got: {why}"
     );
 }

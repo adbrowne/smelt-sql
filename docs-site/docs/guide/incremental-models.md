@@ -573,6 +573,36 @@ FROM smelt.events
 
 Here the model's own `RANGE BETWEEN INTERVAL '2 hours'` frame derives a 2-hour horizon, comfortably inside the declared 30-day ceiling — no warning. If a future edit widened that frame past 30 days, smelt would emit a compile-time warning naming both the derived reach and the declared ceiling. Either way, **the clamp always uses the derived value** — the ceiling narrows nothing; it only tells you when the model's real reach has grown further than expected.
 
+## Contract relaxations
+
+Every incremental model defaults to the equivalence invariant: its maintained state always equals a full refresh over the same inputs. A model can declare a bounded, checked relaxation of that guarantee with a `contract:` block:
+
+```yaml
+contract:
+  frozen_horizon: '90 days'      # partition grain only
+  deferral: '6 hours'
+  cells:                          # optional per-cell refinement, addressed like maintenance.cells
+    - columns: [<col>, ...]
+      on: <source-address> | backfill
+      deferral: '1 day'
+```
+
+Two relaxations are available:
+
+- **`frozen_horizon`** — partitions older than `end - frozen_horizon` are never revisited by maintenance. Admitted only on a partition-grain model (`grain: partition`), since a key-grain model has no write-eligibility clamp to narrow. A genuinely late arrival outside the frozen horizon is diagnosed (`ContractLateArrivalOutsideHorizon`), never silently dropped. An unparseable or negative interval, or declaring it on a key-grain model, is `ContractFrozenHorizonInvalid`.
+- **`deferral`** — the maintained state may lag its inputs by up to the declared window, licensing a run to be skipped while the pending work stays inside that window, and a later catch-up run to prove it subsumed the skipped work. Admitted on either grain, model-level or per cell, but only where there is a clock to measure lag against — a model-level `deferral` needs a `timeseries:` clock, and a `cells[]` entry's `deferral` needs its `on:` trigger to be a clocked, interval-representable source. A cell whose measured lag exceeds its declared window raises `ContractDeferralExceeded`. An unparseable/negative interval, or a `deferral` with no clock to measure against, is `ContractDeferralInvalid`.
+
+Model-level values are the default for every cell; a `contract.cells[]` entry — addressed the same way as `maintenance.cells[].columns` / `.on` — refines one cell's `deferral`. `frozen_horizon` is model-level only. A per-cell `deferral` refinement validates and prints as declared, but is not yet scheduled — it needs a per-cell maintained frontier the interval ledger does not track yet.
+
+`smelt explain <model>` prints each cell's effective contract — `default` when no `contract:` applies, otherwise the applicable relaxations with their declared intervals:
+
+```
+      contract:  default
+      contract:  frozen_horizon 90 days, deferral 6 hours (cell)
+```
+
+A relaxation is never silent: absent `contract:` is always the default point, and a declared relaxation always shows up here, per cell.
+
 ## Batching
 
 When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.
@@ -683,6 +713,8 @@ The `+` prefix means "include upstream dependencies." smelt will:
 
 Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
+Backbuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+
 ## Incremental strategies
 
 smelt supports multiple strategies for how data is updated. The strategy is chosen based on your configuration and the backend's capabilities:
@@ -716,7 +748,7 @@ Cells (4):
       ...
 ```
 
-The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. Declare the dimension's mutability explicitly on its source YAML so smelt derives this cell instead of assuming worst-case immutability:
+The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. That targeted repair is only available when the join cannot change *which* fact rows exist: a `LEFT JOIN` against a dimension that declares its own `unique_key` proves this (the join can only ever change a value, never admit or drop a fact row), so only the dimension-derived column group repairs column-scoped while everything else the dimension's `ON` predicate might otherwise gate stays untouched. A plain (inner) `JOIN`, or a `LEFT JOIN` against a dimension with no declared `unique_key`, cannot be proven this way — every column group the join touches falls back to the region `DELETE`+`INSERT` recompute instead, since a row-admitting join can change which rows exist, not just their values. Declare the dimension's mutability explicitly on its source YAML so smelt derives a mutation cell at all instead of assuming worst-case immutability:
 
 ```yaml
 # models/sources/raw/users.yml
@@ -742,9 +774,23 @@ That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutab
 
 ### The reconciliation ledger
 
-Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed folds**: each run applies a source delta on top of the target's existing state rather than recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order runs, smelt records, per output region × column group, which source deltas are already reflected in that region. An already-reflected delta is refused rather than folded a second time (it would double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from `--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's ledger entry, since the recompute already incorporates everything up to that point.
+A **frontier** is the record of which typed deltas a cell has absorbed — smelt's one ledger
+concept. Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed
+folds**: each run applies a source delta on top of the target's existing state rather than
+recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order
+runs, smelt records, per output region × column group, which source deltas are already reflected
+in that region. An already-reflected delta is refused rather than folded a second time (it would
+double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from
+`--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's
+ledger entry, since the recompute already incorporates everything up to that point.
 
-The ledger is backend-resident: it lives alongside the target table for the transactional keyed-merge path, not in a separate smelt-managed store. You don't declare or configure it directly; `smelt explain <model>` shows whether a given cell routes through it via the `ledger_catch_up` flag on that cell.
+This project-wide bookkeeping is the frontier's **reconciliation ledger** realization (see
+[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)). A
+window-forward keyed model's own `MERGE` writes a second realization, the **transactional
+frontier write**, directly into the target table alongside the row data it accompanies, in the
+same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
+declare or configure either realization directly; `smelt explain <model>` shows whether a given
+cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell.
 
 ## grain: partition vs grain: key
 
@@ -839,6 +885,60 @@ Chain a few of these stages together and the payoff compounds: a stable upstream
 `smelt explain <model>` surfaces both halves directly. Each `ColumnScopedMerge` cell — the only technique family recording is wired for today; `KeyedFold` and the staged-candidate write family do not record yet, so their cells print no such line at all — prints an `observed-delta recording:` line. That line reads `yes` only when the cell's matched arm actually suppresses (the same two proofs above: a proven per-row identity, `region key: Key(...)`, over columns all proven comparable across runs); a `WholeRow`-identity cell, or one with an incomparable compared column, prints `no` — there's nothing to record when the write always rewrites every matched row unconditionally. A composed model's `Key temporal locality:` block prints an `observed-delta projection:` line alongside its route and settle bound: `exact (key-embedded)` / `exact (key-determined)` for routes 1–2, `` widened by `r` + margins `` for route 3. A bare keyed model (no established locality) prints no projection line at all — there's no partition axis to project onto.
 
 Recording and projection are both static facts about the derived plan — `smelt explain` never opens a backend connection, so it reports what a cell's technique *would* record and how its route *would* project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is `smelt run --since-upstream`'s job, not `explain`'s.
+
+## Repairing only the affected groups
+
+A non-invertible combiner (`MAX`, `MAX_BY`, and similar overwrite-family folds) can't undo a retracted contribution — when its input changes underneath it, the plan normally refuses to fold at all and falls back to a full refresh. The repair family narrows that refusal for the common case where the change is a **retraction or mutation over a mutable dimension**: if the affected output keys are provably finite, smelt recomputes only those groups from their bounded input slice instead of rebuilding the whole table.
+
+```sql
+---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: customer_id
+---
+SELECT customer_id, MAX(order_total) AS max_order
+FROM smelt.sources.orders
+WHERE order_date BETWEEN TIMESTAMP '2026-01-01' - INTERVAL '3 days' AND TIMESTAMP '2026-01-01'
+GROUP BY customer_id
+```
+
+If `orders` is declared `mutation_profile: mutable_snapshot` (a table whose rows can be updated or deleted in place), a correction to an existing order — or its deletion — narrows to a per-group recompute over just the affected `customer_id`s, rather than refusing outright.
+
+`smelt explain <model>` prints the repair cell's own stanza — the affected-key slice (labelled a sound over-approximation: it may include more keys than were truly touched, never fewer), the bounded per-group read slice, and how the affected keys were discovered:
+
+```
+  - group {max_order} on trigger NewData { source: "orders" }
+      corner:    ColumnMerge
+      technique: PerGroupRecompute
+      ...
+      repair key slice: customer_id (sound over-approximation)
+      repair read bound: source=orders column=order_date before=... after=...
+      affected-key discovery: group-grain fingerprint-sidecar diff (mutable_snapshot, obligation 7)
+```
+
+For an append-only source (no native deletion), the discovery mechanism is the ordinary clamped current-source scan instead of the sidecar diff — a `mutable_snapshot` source needs the sidecar because a key whose entire window contribution was deleted leaves no row for a scan to witness.
+
+### Pinning `write: diff_patch`
+
+By default a repair cell writes its recomputed groups with a targeted `DELETE`+`INSERT`. Pinning `write: diff_patch` instead computes the candidate slice, diffs it against stored state, and writes only the difference:
+
+```yaml
+maintenance:
+  cells:
+  - on: orders
+    columns: [max_order]
+    write: diff_patch
+```
+
+`smelt explain` reports the resolved write mechanism and its delete-leg verdict alongside the repair stanza:
+
+```
+      write mechanism: diff_patch
+      diff_patch delete leg: complete
+```
+
+A `PerGroupRecompute` cell's own key-temporal-locality premise (the same bounded slice that discharges the repair family's admission) is what makes the delete leg **complete** — the diff can safely delete a stored key absent from the recomputed slice, because that slice provably contains every row that could contribute to any key in it.
 
 ## Schema evolution
 

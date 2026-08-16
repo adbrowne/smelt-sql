@@ -295,7 +295,7 @@ fn key_per_partition_upstream_propagates_by_granularity_not_refused_as_keyed() {
     write(
         root,
         "models/trajectory.sql",
-        "---\nmaterialization: table\nrefresh: incremental\ngrain: key_per_partition\n\
+        "---\nmaterialization: table\nrefresh: incremental\nunique_key: [user_id, d]\n\
          timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
          SELECT user_id, d, amount FROM smelt.sources.payments\n",
     );
@@ -654,12 +654,23 @@ fn bare_keyed_upstream_still_refuses() {
     let source_infos = discover_source_infos(root, &["models".to_string()]);
 
     let order = vec!["bare_keyed".to_string()];
-    let err = plan_since_upstream(&models, &source_infos, &order, &[])
-        .expect_err("a bare keyed node reached by the graph must still refuse");
+    let err = plan_since_upstream(&models, &source_infos, &order, &[]).expect_err(
+        "a bare keyed node whose inbound edge reads a mutable-snapshot source must \
+                     still refuse — its own GROUP BY key includes a mutable-snapshot column \
+                     ('region'), so the derived shape degrades to General rather than admitting \
+                     a Keyed component (phase 5, docs/outcomes/20260809-output-delta-typing)",
+    );
     let msg = err.to_string();
     assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
-    assert!(msg.contains("without an admitted time axis"), "{msg}");
     assert!(msg.contains("bare_keyed"), "{msg}");
+    assert!(
+        msg.contains("degraded to general"),
+        "the refusal must name the General degrade, not the old bare-keyed wording: {msg}"
+    );
+    assert!(
+        msg.contains("dims"),
+        "the refusal must name the degrading source ('dims' is a mutable snapshot): {msg}"
+    );
 }
 
 /// Phase B3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
@@ -1263,4 +1274,100 @@ fn cyclic_composed_model_refs_return_an_error_instead_of_hanging() {
         message.contains("did not converge") || message.contains("cycle"),
         "expected the iteration-cap error to name non-convergence/cycle, got: {message}"
     );
+}
+
+/// Phase 5 (`docs/outcomes/20260809-output-delta-typing/phases/05-plan.md`):
+/// `refuse_bare_keyed_origins` consults the model's own derived output-delta
+/// verdict — a `--source` delta naming a bare keyed model whose derived
+/// shape is `KeyedUpsert` is admitted; the same origin with a `General`
+/// shape (a mutable-snapshot join key) still refuses, narrowed from the old
+/// blanket "any bare keyed origin refuses" rule.
+#[test]
+fn bare_keyed_origin_refusal_narrows_to_general() {
+    fn payments(root: &Path) {
+        write(
+            root,
+            "models/sources/payments.yml",
+            "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+             - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+             mutation_profile:\n  kind: append_only\n\
+             timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+        );
+    }
+
+    // A bare keyed origin whose derived shape is KeyedUpsert (a plain
+    // GROUP BY over one append-only source, no other edge in the graph to
+    // poison the call) must be admitted.
+    let admitted_tmp = tempfile::TempDir::new().unwrap();
+    let admitted_root = admitted_tmp.path();
+    smelt_yml(admitted_root);
+    payments(admitted_root);
+    write(
+        admitted_root,
+        "models/keyed_upsert_agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id\n",
+    );
+    let admitted_discovery =
+        ModelDiscovery::new(admitted_root.to_path_buf(), vec!["models".to_string()]);
+    let admitted_models = admitted_discovery
+        .discover_models()
+        .expect("discover models");
+    let admitted_source_infos = discover_source_infos(admitted_root, &["models".to_string()]);
+    let admitted = plan_since_upstream(
+        &admitted_models,
+        &admitted_source_infos,
+        &[],
+        &[SourceDelta {
+            source: "keyed_upsert_agg".to_string(),
+            landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+        }],
+    );
+    assert!(
+        admitted.is_ok(),
+        "a bare keyed origin whose derived shape is KeyedUpsert must be admitted: {admitted:?}"
+    );
+
+    // The same shape of origin, but its own derived shape is General (its
+    // GROUP BY key includes a column read off a mutable-snapshot join) —
+    // must still refuse, narrowed to name the degrading operator.
+    let refused_tmp = tempfile::TempDir::new().unwrap();
+    let refused_root = refused_tmp.path();
+    smelt_yml(refused_root);
+    payments(refused_root);
+    write(
+        refused_root,
+        "models/sources/dims.yml",
+        "description: dims\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: region\n  type: VARCHAR\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    );
+    write(
+        refused_root,
+        "models/general_agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT p.user_id, SUM(p.amount) AS total, d.region\n\
+         FROM smelt.sources.payments p\n\
+         JOIN smelt.sources.dims d ON p.user_id = d.user_id\n\
+         GROUP BY p.user_id, d.region\n",
+    );
+    let refused_discovery =
+        ModelDiscovery::new(refused_root.to_path_buf(), vec!["models".to_string()]);
+    let refused_models = refused_discovery
+        .discover_models()
+        .expect("discover models");
+    let refused_source_infos = discover_source_infos(refused_root, &["models".to_string()]);
+    let refused = plan_since_upstream(
+        &refused_models,
+        &refused_source_infos,
+        &[],
+        &[SourceDelta {
+            source: "general_agg".to_string(),
+            landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+        }],
+    )
+    .expect_err("a bare keyed origin whose derived shape is General must still refuse");
+    let msg = refused.to_string();
+    assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
+    assert!(msg.contains("general_agg"), "{msg}");
 }

@@ -27,18 +27,25 @@
 
 pub mod choice;
 pub mod derive;
+pub mod diff_patch;
+pub mod edge_type;
 pub mod emit;
 pub mod granularity;
 pub mod grouping;
 pub mod locality;
+pub mod probe_cadence;
 pub mod propagate;
+pub mod repair;
 pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 pub use crate::analysis::fingerprint::Projection as FingerprintProjection;
-pub use crate::analysis::skeleton_closure::SkeletonSourceClosure;
+pub use crate::analysis::skeleton_closure::{RowPreservation, SkeletonSourceClosure};
 use crate::analysis::walk::{ColumnComparability, Comparability};
+pub use probe_cadence::{should_dispatch, ProbeDispatch, SkipReason};
 
 /// How a source's rows change after they first appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,13 +78,33 @@ pub struct SourceFacts {
 
 /// A named group of output columns sharing mutation-sensitivity
 /// (`01-framework.md` §5), derived by [`grouping::derive_column_groups`].
+///
+/// Sensitivity has two independent kinds (`docs/specs/model_properties.md`
+/// §"Per-column mutation-sensitivity / column provenance", membership
+/// paragraph). **Value sensitivity** (`mutation_sensitivity`) is per-column:
+/// which sources' deltas can change a column's *stored value*. **Membership
+/// sensitivity** (`membership_sensitivity`) is row-scoped: a mutable source
+/// read in row-admission position (a JOIN's `ON` predicate) can retroactively
+/// add or remove rows the model already materialized, even when no
+/// select-item expression ever reads that source — so it attaches to
+/// *every* payload group the admission read governs, not only the groups
+/// that happen to read the source's columns. A source can be in one set, the
+/// other, both, or neither. A membership-sensitive group must be repaired by
+/// a technique that can create and delete rows — the recompute family,
+/// never a column-scoped merge (`docs/specs/incremental_models.md`
+/// §"The plan matrix").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnGroup {
     pub columns: Vec<String>,
-    /// Sources whose *post-creation* deltas can change these columns'
-    /// values. Empty = never mutated after creation (pass-through columns,
-    /// or a pure function of stored columns).
+    /// Value sensitivity: sources whose *post-creation* deltas can change
+    /// these columns' stored values. Empty = never mutated after creation
+    /// (pass-through columns, or a pure function of stored columns).
     pub mutation_sensitivity: BTreeSet<String>,
+    /// Membership sensitivity: mutable sources read in row-admission
+    /// position (a JOIN's `ON` predicate) whose deltas can add or remove
+    /// rows this group covers. Empty = no admission read of a mutable
+    /// source governs this group's rows.
+    pub membership_sensitivity: BTreeSet<String>,
 }
 
 impl ColumnGroup {
@@ -137,7 +164,13 @@ pub enum Corner {
 }
 
 /// The physical op a cell emits (the technique realizing its corner).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`: consumed directly as [`crate::maintenance::choice::
+/// ChosenTechnique`]'s payload and, via the `smelt-runtime` diagnostics
+/// builder, as a technique preview's own label
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder") —
+/// a plain additive derive, no variant or admission logic changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Technique {
     /// Region overwrite: `DELETE` the write window, `INSERT` its recompute.
     DeleteInsert,
@@ -149,6 +182,14 @@ pub enum Technique {
     ColumnScopedMerge,
     /// In-place `UPDATE` from already-stored columns; no upstream read.
     InPlaceUpdate,
+    /// The repair family's per-group recompute (`incremental_models.md`
+    /// §"The repair family"): a full-input read, targeted-write technique
+    /// (the `ColumnMerge` corner) that recomputes and writes only the
+    /// affected key groups a retraction/mutation delta names — `DELETE` the
+    /// stored rows for those keys, `INSERT` their bounded recompute, never a
+    /// whole-table operation. Admitted by [`repair::admit_per_group_recompute`]
+    /// and emitted by [`emit::emit_per_group_recompute`].
+    PerGroupRecompute,
 }
 
 /// Whether a cell's maintenance is partition-local in each source it reads
@@ -177,9 +218,26 @@ pub struct ScanClamp {
 }
 
 impl ScanClamp {
-    /// The reflected footprint (`01-framework.md` §5): a delta of this
-    /// source at time `t` writes output over `[t − after, t + before]`.
-    /// Scan `(before, after)` and footprint are reflections of each other.
+    /// The derived write footprint (`model_properties.md` §"Footprint
+    /// reflection / bounded write footprint"): a delta of this source at
+    /// time `t` writes output over `[t − after, t + before]`.
+    ///
+    /// For a **partition-addressed output** this is the *derived* verdict,
+    /// not an assumed mirror: clamp construction (`derive::project_source_link`)
+    /// consults [`crate::analysis::footprint::reflect_footprint`] and only
+    /// builds a clamp when the derived footprint is
+    /// [`crate::analysis::footprint::FootprintResult::Bounded`] — whose
+    /// value is by definition the mirror `(after, before)` of the read
+    /// reach this clamp carries, so reading the mirror here IS reading the
+    /// derived value. A source whose derived footprint is `Unbounded` (a
+    /// trajectory column) or `NotDerivable` never receives a clamp at all;
+    /// its cell falls back to the fail-closed non-local verdict instead.
+    ///
+    /// For a **keyed-grain output** (no output partition axis) the footprint
+    /// question is not posed at clamp construction, so this mirror is
+    /// unverified there — a locality-admitted keyed model's propagation
+    /// edges still size dirt intervals from it. Recorded as a residue in
+    /// `model_properties.md` §Known Divergences.
     pub fn footprint(
         &self,
     ) -> (
@@ -198,7 +256,7 @@ impl ScanClamp {
 /// consumer re-derives it (`CLAUDE.md` §"Maintenance-plan purity").
 /// Fail-closed: a proven key that does not cover the output (a fan-out join)
 /// is never trusted, even as a partial key — `WholeRow` instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum RowIdentity {
     /// Rows are addressed individually by this key.
     Key(Vec<String>),
@@ -213,7 +271,7 @@ pub enum RowIdentity {
 /// precedence, but the disagreement is surfaced here rather than silently
 /// dropped, so a caller (`smelt explain`, a future admission audit) can see
 /// that the two facts disagree instead of only ever seeing the winner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RowIdentityVerdict {
     pub identity: RowIdentity,
     /// `Some(proven)` exactly when a declared key was used *and* the walk
@@ -267,6 +325,28 @@ pub struct PlanCell {
     /// upstream maintained models. No consumer reads this yet (that is
     /// F3's sidecar-build/diff-query scope).
     pub fingerprint_projections: BTreeMap<String, FingerprintProjection>,
+    /// The key-addressed read restriction (`incremental_models.md`
+    /// §"Upstream model edges"), when this cell's technique is
+    /// [`Technique::PerGroupRecompute`] over a `KeyedUpsert`-shaped upstream
+    /// model edge rather than a partition-interval scan clamp. Additive
+    /// alongside `scans` (empty for a key-addressed cell — there is no
+    /// partition axis to clamp), the same additive-channel shape phase 5's
+    /// keyed dirt-set took over `Propagation`'s interval maps
+    /// (`docs/outcomes/20260809-output-delta-typing/outcome.md` 2026-08-10
+    /// decision log). `None` for every other cell — unaffected.
+    pub key_scope: Option<KeyScope>,
+}
+
+/// A key-addressed read restriction: recompute only the rows identified by
+/// `keys` (the upstream's own change-feed identity columns), sourced from
+/// `from` (the upstream model edge's name). Carried on [`PlanCell`] rather
+/// than folded into [`ScanClamp`] — a key set is not an interval, and the
+/// existing partition-locality proof (`derive::project_source_link`) is not
+/// posed for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct KeyScope {
+    pub keys: Vec<String>,
+    pub from: String,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting
@@ -304,6 +384,17 @@ pub enum Refusal {
     /// diagnostic (`locality::LocalityRefusal::message`): it names all
     /// three routes and the nearest missing fact.
     LocalityNotEstablished { message: String },
+    /// The repair family's affected-key obligation (P7,
+    /// `model_properties.md` §"Affected-key discovery") could not resolve a
+    /// finite key set for `source`'s delta — the
+    /// `MaintenanceRepairKeysNotDiscoverable` diagnostic. `why` carries
+    /// [`crate::analysis::affected_keys::AffectedKeys::NotDiscoverable`]'s
+    /// own reason, verbatim.
+    RepairKeysNotDiscoverable { source: String, why: String },
+    /// The repair family's per-group read could not be bounded to a slice
+    /// (no reach / key-temporal-locality route applies) — the
+    /// `MaintenanceRepairSliceUnbounded` diagnostic.
+    RepairSliceUnbounded { source: String, why: String },
 }
 
 /// The admitted key-temporal-locality verdict for a `grain: key` model that
@@ -339,10 +430,41 @@ pub struct MaintenancePlan {
 }
 
 impl MaintenancePlan {
-    /// The admitted cell for `trigger`, if any (v0 plans hold at most one
-    /// cell per trigger × group).
+    /// The FIRST admitted cell for `trigger`, if any (v0 plans hold at most
+    /// one cell per trigger × group, but a trigger commonly has MULTIPLE
+    /// sibling cells — one per membership-sensitive group a shared join
+    /// admits, `docs/plans/20260808-membership-sensitivity.md` Phase 1).
+    ///
+    /// **First-match, not "the" cell.** A caller resolving a per-cell
+    /// override (`maintenance.cells[].technique`/`prefer`/`write`) must
+    /// never use this alone to decide admissibility — the override's own
+    /// `columns` may address a DIFFERENT sibling cell than whichever one
+    /// this happens to return first. Use [`Self::cells_for`] and match each
+    /// sibling's own derived column group instead (`docs/plans/
+    /// 20260808-membership-sensitivity.md` Phase 3's own fix — the bug this
+    /// doc comment now flags: `smelt-runtime`'s pin-resolution loops used to
+    /// call this and evaluate overrides against only the first sibling,
+    /// silently never consulting a pin scoped to a later sibling's
+    /// columns). Safe call sites for `cell_for` alone are ones that only
+    /// ever derive a single cell per trigger for their own shape (e.g. a
+    /// `NewData`/`Backfill` whole-row `{*}` trigger, or a keyed model's
+    /// single-group recipe) — read the call site's own shape before adding
+    /// a new one.
     pub fn cell_for(&self, trigger: &Trigger) -> Option<&PlanCell> {
         self.cells.iter().find(|c| &c.trigger == trigger)
+    }
+
+    /// Every admitted cell sharing `trigger` — one per column group the
+    /// trigger's mutation source contributes sensitivity to. Iteration
+    /// order matches `self.cells`' own derivation order (not
+    /// group-name-sorted); a caller that needs to pick ONE specific sibling
+    /// must match on the sibling's own derived group/columns, never rely on
+    /// this order to mean anything.
+    pub fn cells_for<'a, 'b>(
+        &'a self,
+        trigger: &'b Trigger,
+    ) -> impl Iterator<Item = &'a PlanCell> + use<'a, 'b> {
+        self.cells.iter().filter(move |c| &c.trigger == trigger)
     }
 }
 
@@ -491,6 +613,13 @@ pub enum WriteSelection {
     /// must have admitted — the mechanism-within-the-technique choice stays
     /// [`choice::resolve_keyed_write_mechanism`]'s job.
     Technique(Technique),
+    /// `diff_patch` selects the diff-then-patch write pattern
+    /// (`incremental_models.md` §"The write-pattern set is open"): compute
+    /// the candidate slice, diff against stored state, write only the
+    /// difference. Its own admission ([`diff_patch::admit_diff_patch`]) is a
+    /// separate proof from any `Technique`'s admission — a selection-name
+    /// marker, no payload, matching `RegionRecompute`'s own shape.
+    DiffPatch,
 }
 
 impl WritePattern {
@@ -506,6 +635,7 @@ impl WritePattern {
             }
             "column" => WriteSelection::Technique(Technique::ColumnScopedMerge),
             "update" => WriteSelection::Technique(Technique::InPlaceUpdate),
+            "diff_patch" => WriteSelection::DiffPatch,
             other => unreachable!(
                 "write-pattern registry entry '{other}' has no WriteSelection mapping — extend \
                  WritePattern::selects when adding a new registry entry"
@@ -557,6 +687,11 @@ pub const WRITE_PATTERN_REGISTRY: &[WritePattern] = &[
     },
     WritePattern {
         name: "staged_candidate",
+        required_facts: &[ContractFact::Identity],
+        capability: WriteCapability::Always,
+    },
+    WritePattern {
+        name: "diff_patch",
         required_facts: &[ContractFact::Identity],
         capability: WriteCapability::Always,
     },
@@ -769,6 +904,7 @@ mod write_pattern_registry_tests {
             "full_rebuild",
             "keyed_conditional",
             "staged_candidate",
+            "diff_patch",
         ] {
             assert!(
                 names.contains(&expected),

@@ -93,7 +93,18 @@ pub enum SchemaEvolutionResult {
     /// No schema changes detected.
     NoChange,
     /// ALTER TABLE statements were executed successfully.
-    Migrated { statements: Vec<String> },
+    Migrated {
+        statements: Vec<String>,
+        /// Names of newly-added columns whose backfill `UPDATE` was folded
+        /// into this SAME `StatementGroup` as the `ALTER TABLE ... ADD
+        /// COLUMN` (declared `backfill:`/`default:` directives, or a
+        /// derived `Technique::InPlaceUpdate` assignment the caller merged
+        /// into `backfill_exprs` before calling `check_and_migrate` —
+        /// `docs/plans/20260809-sensitivity-precision.md` Phase 6). Callers
+        /// that separately dispatch an `InPlaceUpdate` cell's backfill use
+        /// this to skip columns already backfilled atomically here.
+        backfilled_columns: Vec<String>,
+    },
     /// Full refresh required due to destructive changes.
     FullRefreshRequired { reason: String },
     /// Column removal blocked — requires --allow-column-removal flag.
@@ -212,8 +223,27 @@ pub async fn check_and_migrate(
         MigrationAction::NoChange => Ok(SchemaEvolutionResult::NoChange),
 
         MigrationAction::AlterTable { statements } => {
+            // Columns this migration's ADD COLUMN will backfill in the
+            // same group, computed from the diff (not the raw statement
+            // text) so it stays correct regardless of DDL phrasing.
+            let backfilled_columns: Vec<String> = diff
+                .changes
+                .iter()
+                .filter_map(|c| match c {
+                    smelt_state::schema_tracking::SchemaChange::AddColumn { name, .. }
+                        if backfill_exprs.contains_key(name.as_str()) =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+
             if dry_run {
-                return Ok(SchemaEvolutionResult::Migrated { statements });
+                return Ok(SchemaEvolutionResult::Migrated {
+                    statements,
+                    backfilled_columns,
+                });
             }
 
             // Execute ALTER TABLE statements
@@ -264,6 +294,7 @@ pub async fn check_and_migrate(
 
             Ok(SchemaEvolutionResult::Migrated {
                 statements: statements.clone(),
+                backfilled_columns,
             })
         }
 

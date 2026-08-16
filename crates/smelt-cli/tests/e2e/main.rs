@@ -13,6 +13,7 @@ mod cohort_count_acceptance;
 mod combined_generators_e2e;
 mod cross_midnight_rebase;
 mod cumulative_classifier_gate;
+mod declared_fact_probe_firing;
 mod diagnostic_gate;
 mod dry_run_visibility;
 mod events_deduped_redelivery_equivalence;

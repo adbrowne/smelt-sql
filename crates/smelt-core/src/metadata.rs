@@ -277,7 +277,8 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
 
-    /// Declared grain (`partition` | `key` | `key_per_partition`) — an
+    /// Declared grain (`partition` | `key`; `key_per_partition` is
+    /// derived-only and has no writable spelling) — an
     /// optional **check-only assertion** over the derived output shape
     /// (`docs/specs/models.md` §"Refresh axis"). When written it is checked
     /// against the label derived from the two shape-defining facts
@@ -316,6 +317,23 @@ pub struct ModelMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
 
+    /// The write/dedup key a column-scoped MERGE technique writes on
+    /// (`docs/specs/models.md` §"Constraint violations") — never the
+    /// identity-conferring fact `unique_key:` is, and never a driver of
+    /// grain. A single string is sugar for a one-element list. Same
+    /// precedence as `unique_key:`: SQL frontmatter wins over the
+    /// `smelt.yml` model override when both set it. Consumed and cleared
+    /// during extraction (`fold_top_level_merge_key`) into the internal
+    /// [`ModelMetadata::batched`] representation's `unique_key` field, the
+    /// same internal slot the retired `batched.unique_key` sub-block used to
+    /// populate.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::sources::opt_string_or_vec"
+    )]
+    pub merge_key: Option<Vec<String>>,
+
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
     /// §"Model-scoped declarations".
@@ -349,6 +367,13 @@ pub struct ModelMetadata {
     /// `docs/specs/incremental_models.md` §Surface "Frontmatter".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<crate::config::MaintenanceConfig>,
+
+    /// A declared relaxation of the equivalence invariant — the contract
+    /// lattice's default point is absent (`None`). See
+    /// `docs/specs/incremental_models.md` §"The contract lattice" and
+    /// §"Contract relaxations (`contract:`)".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<crate::config::ContractConfig>,
 }
 
 impl ModelMetadata {
@@ -502,6 +527,18 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
+    /// A `columns.<c>.contract: plausible` declaration names a column that
+    /// also serves as the model's `event_time_column`, `partition_column`,
+    /// or a `unique_key` member — those skeleton positions govern windowing,
+    /// partition placement, or dedup identity and must stay deterministic
+    /// (`docs/specs/models.md` §"Constraint violations"). Ports the bar the
+    /// retired `batched.nondeterministic_columns` list form used to enforce.
+    #[error(
+        "PlausibleContractOnSkeletonColumn: `columns.{column}.contract: plausible` cannot be \
+         declared — '{column}' is {role}, which must stay deterministic"
+    )]
+    PlausibleContractOnSkeletonColumn { column: String, role: String },
+
     /// A model declares `refresh: incremental` + `grain: key` and a
     /// `timeseries:` block, and key temporal locality cannot be
     /// established for it. Not raised by [`validate_timeseries`] — the
@@ -510,7 +547,7 @@ pub enum MetadataError {
     /// made by the locality gate in plan derivation
     /// (`smelt_logical::maintenance::locality::establish_locality`) and
     /// surfaced from there instead (see
-    /// `docs/specs/incremental_models.md` §"Key temporal locality (the
+    /// `docs/specs/incremental_shapes.md` §"Key temporal locality (the
     /// time-partitioned output)"). The variant is kept here so the
     /// `MetadataError` type remains the shared vocabulary every consumer's
     /// exhaustive match already handles.
@@ -564,7 +601,7 @@ pub enum MetadataError {
     /// `refresh: incremental` is admitted on the facts alone
     /// (`docs/specs/models.md` §"Refresh axis"); with neither declared there
     /// is nothing maintainable (`models.md` §"Constraint violations").
-    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key | key_per_partition` assertion)")]
+    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key` assertion)")]
     GrainRequiredForIncremental,
 
     /// A model declares `grain:` without `refresh: incremental`. `grain:` is
@@ -637,6 +674,85 @@ pub enum MetadataError {
     /// contrast with the silent-drop rule for other `columns:` keys).
     #[error("ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema")]
     ColumnTestOnUnknownColumn { model: String, column: String },
+
+    /// A `contract.frozen_horizon` value fails `DataLatency::parse` —
+    /// unparseable interval syntax (`docs/specs/incremental_models.md`
+    /// §"Contract relaxations (`contract:`)"). Raised at frontmatter-parse
+    /// time by `extract_single_model`'s strict pre-validation, mirroring the
+    /// `reuse`/`state` fail-loud pattern, rather than surfacing as a generic
+    /// `YamlParseError`. Grain-admissibility (declared on a
+    /// non-partition-grain model) is a distinct check made downstream by
+    /// `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`
+    /// (needs the derived grain, unavailable to this pure parse) — both
+    /// surface under the same `ContractFrozenHorizonInvalid` diagnostic
+    /// code.
+    #[error(
+        "ContractFrozenHorizonInvalid: contract.frozen_horizon is not a valid interval — {why}"
+    )]
+    ContractFrozenHorizonInvalid { why: String },
+
+    /// A `contract.deferral` value (model-level or a `contract.cells[]`
+    /// entry's `deferral`) fails `DataLatency::parse` — unparseable interval
+    /// syntax (`docs/specs/incremental_models.md` §"Contract relaxations
+    /// (`contract:`)"). Raised at frontmatter-parse time by
+    /// `extract_single_model`'s strict pre-validation, the same pattern as
+    /// `ContractFrozenHorizonInvalid`. Clock-admissibility (declared with no
+    /// interval-representable clock to measure lag against) is a distinct
+    /// check made downstream by
+    /// `smelt_logical::contract::deferral::validate_deferral` (needs the
+    /// parsed `ModelMetadata`/resolved source facts, unavailable to this pure
+    /// parse) — both surface under the same `ContractDeferralInvalid`
+    /// diagnostic code.
+    #[error("ContractDeferralInvalid: contract.deferral is not a valid interval — {why}")]
+    ContractDeferralInvalid { why: String },
+}
+
+/// Disambiguates a `contract:` block's `"invalid data_latency"` deserialize
+/// failure by which key's raw value is itself unparseable — `frozen_horizon`
+/// vs `deferral`/`cells[].deferral` — rather than by the error text, which
+/// carries no field path at this struct depth (`ContractConfig` fails as a
+/// whole; serde_yaml's custom-error message from `DataLatency`'s
+/// `Deserialize` impl is just the bare "invalid data_latency '…'" string).
+/// Walks the still-unvalidated YAML mapping directly, re-parsing each
+/// candidate field's raw string with `DataLatency::parse` to find the
+/// offender. Falls back to `ContractFrozenHorizonInvalid` if no candidate
+/// field is individually unparseable (defensive — should not happen given
+/// the caller only reaches here on an "invalid data_latency" failure).
+fn classify_contract_data_latency_error(value: &serde_yaml::Value, why: String) -> MetadataError {
+    let is_bad_latency = |v: &serde_yaml::Value| -> bool {
+        v.as_str()
+            .is_some_and(|s| crate::config::DataLatency::parse(s).is_none())
+    };
+    let Some(mapping) = value.as_mapping() else {
+        return MetadataError::ContractFrozenHorizonInvalid { why };
+    };
+    if mapping
+        .get(serde_yaml::Value::String("frozen_horizon".to_string()))
+        .is_some_and(is_bad_latency)
+    {
+        return MetadataError::ContractFrozenHorizonInvalid { why };
+    }
+    if mapping
+        .get(serde_yaml::Value::String("deferral".to_string()))
+        .is_some_and(is_bad_latency)
+    {
+        return MetadataError::ContractDeferralInvalid { why };
+    }
+    let cells_bad = mapping
+        .get(serde_yaml::Value::String("cells".to_string()))
+        .and_then(|c| c.as_sequence())
+        .is_some_and(|cells| {
+            cells.iter().any(|cell| {
+                cell.as_mapping().is_some_and(|cm| {
+                    cm.get(serde_yaml::Value::String("deferral".to_string()))
+                        .is_some_and(&is_bad_latency)
+                })
+            })
+        });
+    if cells_bad {
+        return MetadataError::ContractDeferralInvalid { why };
+    }
+    MetadataError::ContractFrozenHorizonInvalid { why }
 }
 
 /// Build the fix-it message for a refused `batched:` sub-block, naming each
@@ -648,7 +764,7 @@ pub enum MetadataError {
 /// `raw_value` is the still-unvalidated YAML value under the `batched:` key.
 /// When it deserializes cleanly into [`PartitionGrainConfig`], each declared sub-key
 /// is named with its own value under the replacement spelling
-/// (`unique_key` -> top-level `unique_key:`; `safety_overrides` -> top-level
+/// (`unique_key` -> top-level `merge_key:`; `safety_overrides` -> top-level
 /// `safety_overrides:`; each `nondeterministic_columns` entry `<c>` ->
 /// `columns.<c>.contract: plausible`). When the raw value doesn't
 /// deserialize (e.g. a legacy nested field like `event_time_column`), the
@@ -657,11 +773,38 @@ pub enum MetadataError {
 fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
     let header = "the `batched:` sub-block has been removed — declare each key at the \
                   model's top level instead:";
-    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(raw_value.clone()) {
+
+    // `nondeterministic_columns`'s retirement sentinel always errors when the key is
+    // present (`PartitionGrainConfig::nondeterministic_columns_retired`), which would
+    // otherwise fail the whole-struct deserialize below and lose the caller's own
+    // `unique_key`/`safety_overrides` values. Extract its raw column list directly from
+    // the mapping first, then deserialize the remainder.
+    let raw_nondeterministic_columns: Vec<String> = raw_value
+        .as_mapping()
+        .and_then(|m| {
+            m.get(serde_yaml::Value::String(
+                "nondeterministic_columns".to_string(),
+            ))
+        })
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut sans_nondeterministic_columns = raw_value.clone();
+    if let Some(m) = sans_nondeterministic_columns.as_mapping_mut() {
+        m.remove(serde_yaml::Value::String(
+            "nondeterministic_columns".to_string(),
+        ));
+    }
+
+    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(sans_nondeterministic_columns) {
         Ok(cfg) => cfg,
         Err(_) => {
             return format!(
-                "{header}\n  - `batched.unique_key` -> top-level `unique_key:`\n  - \
+                "{header}\n  - `batched.unique_key` -> top-level `merge_key:`\n  - \
                  `batched.safety_overrides` -> top-level `safety_overrides:`\n  - \
                  `batched.nondeterministic_columns: [c]` -> `columns.c.contract: plausible`"
             );
@@ -671,7 +814,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
     let mut lines = vec![header.to_string()];
     if !cfg.unique_key.is_empty() {
         lines.push(format!(
-            "  - `batched.unique_key: {:?}` -> top-level `unique_key: {:?}`",
+            "  - `batched.unique_key: {:?}` -> top-level `merge_key: {:?}`",
             cfg.unique_key, cfg.unique_key
         ));
     }
@@ -701,7 +844,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
             flags.join(", ")
         ));
     }
-    for col in &cfg.nondeterministic_columns {
+    for col in &raw_nondeterministic_columns {
         lines.push(format!(
             "  - `batched.nondeterministic_columns: [{col}]` -> `columns.{col}.contract: plausible`"
         ));
@@ -749,6 +892,36 @@ fn fold_top_level_safety_overrides(metadata: &mut ModelMetadata) -> Result<(), M
         }
     }
     Ok(())
+}
+
+/// Fold the top-level `merge_key:` frontmatter key ([`ModelMetadata::merge_key`])
+/// into the internal `batched:` representation ([`ModelMetadata::batched`]),
+/// the same internal slot the retired `batched.unique_key` sub-block used to
+/// populate — so `Config::get_incremental_with_metadata` and every other
+/// `batched:`-shaped consumer sees it identically (`docs/specs/models.md`
+/// §"Constraint violations"). Called once, right after a
+/// `ModelMetadata` is deserialized from frontmatter, alongside
+/// [`fold_top_level_safety_overrides`].
+///
+/// Unlike `safety_overrides`, there is no double-declaration hazard here: the
+/// literal `batched:` sub-block is refused at parse time before a
+/// `ModelMetadata` exists, so `metadata.batched.unique_key` can never already
+/// be populated from user YAML when this runs.
+fn fold_top_level_merge_key(metadata: &mut ModelMetadata) {
+    let Some(merge_key) = metadata.merge_key.take() else {
+        return;
+    };
+    match &mut metadata.batched {
+        Some(existing) => {
+            existing.unique_key = merge_key;
+        }
+        None => {
+            metadata.batched = Some(PartitionGrainConfig {
+                unique_key: merge_key,
+                ..Default::default()
+            });
+        }
+    }
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -861,7 +1034,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // Keyed + timeseries: is NOT rejected here. Admission depends on
     // whether key temporal locality can be established (three routes:
     // key-embedded, key-determined, recurrence-bounded —
-    // `docs/specs/incremental_models.md` §"Key temporal locality (the
+    // `docs/specs/incremental_shapes.md` §"Key temporal locality (the
     // time-partitioned output)"), a decision that needs the model's derived
     // `unique_key`/partition-column provenance, not just the frontmatter
     // shape. That decision is made by the single locality-gate entry point
@@ -975,40 +1148,34 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: `batched.nondeterministic_columns` must not name a column that
-    // governs windowing, partition placement, or dedup identity — those
-    // roles must stay deterministic regardless of any opt-in
-    // (`incremental_models.md` §"Partition-grain constraints" #12;
-    // §"Non-determinism and the payload rule").
-    if let Some(batched) = &metadata.batched {
-        for col in &batched.nondeterministic_columns {
-            if col == &ts.event_time_column {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is the \
-                         event_time_column, which governs windowing and must stay \
-                         deterministic"
-                    ),
-                });
-            }
-            if col == &ts.partition_column {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is the \
-                         partition_column, which governs partition placement and must \
-                         stay deterministic"
-                    ),
-                });
-            }
-            if batched.unique_key.contains(col) {
-                return Err(MetadataError::MalformedTimeseries {
-                    message: format!(
-                        "nondeterministic_columns cannot list '{col}' — it is a \
-                         unique_key column, which governs dedup identity and must stay \
-                         deterministic"
-                    ),
-                });
-            }
+    // Rule: a `columns.<c>.contract: plausible` declaration must not name a
+    // column that governs windowing, partition placement, or dedup identity
+    // — those roles must stay deterministic regardless of any opt-in
+    // (`incremental_shapes.md` §"Partition-grain constraints" #12;
+    // §"Non-determinism and the payload rule"). Ports the bar the retired
+    // `batched.nondeterministic_columns` list form used to enforce.
+    let declared_unique_key = metadata.unique_key.as_deref().unwrap_or(&[]);
+    for (col, col_meta) in &metadata.columns {
+        if col_meta.contract != Some(Contract::Plausible) {
+            continue;
+        }
+        if col == &ts.event_time_column {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "the event_time_column".to_string(),
+            });
+        }
+        if col == &ts.partition_column {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "the partition_column".to_string(),
+            });
+        }
+        if declared_unique_key.contains(col) {
+            return Err(MetadataError::PlausibleContractOnSkeletonColumn {
+                column: col.clone(),
+                role: "a unique_key column".to_string(),
+            });
         }
     }
 
@@ -1556,6 +1723,25 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     batched_subblock_fixit_message(value),
                 )));
+            // `contract:` is strictly pre-validated: an unparseable
+            // `frozen_horizon` or `deferral` (model-level or
+            // `cells[].deferral`) is a dedicated `ContractFrozenHorizonInvalid`
+            // / `ContractDeferralInvalid` error (never a generic YAML error),
+            // disambiguated by which key's raw value fails to parse rather
+            // than by the error text (serde_yaml's custom-error message
+            // carries no field path at this struct depth) — both fail-loud
+            // rather than silently stripped (fail-loud discipline; the
+            // lattice's single-owner rule).
+            } else if key_str == "contract" {
+                if let Err(e) =
+                    serde_yaml::from_value::<crate::config::ContractConfig>(value.clone())
+                {
+                    let msg = e.to_string();
+                    if msg.contains("invalid data_latency") {
+                        return Err(classify_contract_data_latency_error(value, msg));
+                    }
+                    return Err(MetadataError::YamlParseError(e));
+                }
             }
         }
 
@@ -1576,6 +1762,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
     };
 
     fold_top_level_safety_overrides(&mut metadata)?;
+    fold_top_level_merge_key(&mut metadata);
 
     // Populate the derived `check` config for check declarations.
     metadata.check = check_config;
@@ -1698,6 +1885,7 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
         };
 
         fold_top_level_safety_overrides(&mut metadata)?;
+        fold_top_level_merge_key(&mut metadata);
 
         // Set model name from delimiter
         metadata.name = Some(model_name);
@@ -2479,11 +2667,20 @@ FROM smelt.orders_raw"#;
         );
     }
 
-    /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
-    /// configuration error (`incremental_models.md` §"Partition-grain constraints" #12) — that
-    /// column governs windowing and can never tolerate non-determinism.
+    /// A `columns.<c>.contract: plausible` declaration naming the
+    /// `event_time_column` is a configuration error (`incremental_models.md`
+    /// §"Partition-grain constraints" #12) — that column governs windowing
+    /// and can never tolerate non-determinism.
     #[test]
-    fn test_nondeterministic_columns_rejects_event_time_column() {
+    fn test_plausible_contract_on_event_time_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_ts".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
@@ -2495,27 +2692,32 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec![],
-                nondeterministic_columns: vec!["order_ts".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
-            .expect_err("listing event_time_column in nondeterministic_columns must error");
+            .expect_err("plausible contract on event_time_column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_ts"));
     }
 
-    /// Listing `partition_column` in `batched.nondeterministic_columns` is a
-    /// configuration error — that column governs partition placement.
+    /// A `columns.<c>.contract: plausible` declaration naming the
+    /// `partition_column` is a configuration error — that column governs
+    /// partition placement.
     #[test]
-    fn test_nondeterministic_columns_rejects_partition_column() {
+    fn test_plausible_contract_on_partition_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_date".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
@@ -2527,31 +2729,35 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec![],
-                nondeterministic_columns: vec!["order_date".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
-            .expect_err("listing partition_column in nondeterministic_columns must error");
+            .expect_err("plausible contract on partition_column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_date"));
     }
 
-    /// Listing a `unique_key` column in `batched.nondeterministic_columns` is a
-    /// configuration error — that column governs dedup identity.
+    /// A `columns.<c>.contract: plausible` declaration naming a `unique_key`
+    /// column is a configuration error — that column governs dedup
+    /// identity.
     #[test]
-    fn test_nondeterministic_columns_rejects_unique_key_column() {
+    fn test_plausible_contract_on_unique_key_column_is_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_id".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
-            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -2559,31 +2765,35 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec!["order_id".to_string()],
-                nondeterministic_columns: vec!["order_id".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            unique_key: Some(vec!["order_id".to_string()]),
+            columns,
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT order_ts, order_date, order_id FROM foo")
-            .expect_err("listing a unique_key column in nondeterministic_columns must error");
+            .expect_err("plausible contract on a unique_key column must error");
         assert!(
-            matches!(err, MetadataError::MalformedTimeseries { .. }),
-            "Expected MalformedTimeseries, got: {}",
+            matches!(err, MetadataError::PlausibleContractOnSkeletonColumn { .. }),
+            "Expected PlausibleContractOnSkeletonColumn, got: {}",
             err
         );
         assert!(err.to_string().contains("order_id"));
     }
 
-    /// A payload column not overlapping event_time/partition/unique_key is a
-    /// legitimate `nondeterministic_columns` entry and parses cleanly.
+    /// A `columns.<c>.contract: plausible` declaration on a payload column
+    /// not overlapping event_time/partition/unique_key parses cleanly.
     #[test]
-    fn test_nondeterministic_columns_accepts_payload_column() {
+    fn test_plausible_contract_on_payload_column_validates() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "inserted_at".to_string(),
+            ColumnMetadata {
+                contract: Some(Contract::Plausible),
+                ..Default::default()
+            },
+        );
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
-            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -2591,18 +2801,15 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::PartitionGrainConfig {
-                unique_key: vec!["order_id".to_string()],
-                nondeterministic_columns: vec!["inserted_at".to_string()],
-                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
-            }),
+            unique_key: Some(vec!["order_id".to_string()]),
+            columns,
             ..Default::default()
         };
         validate_timeseries(
             &metadata,
             "SELECT order_ts, order_date, order_id, inserted_at FROM foo",
         )
-        .expect("payload-only nondeterministic_columns must pass validation");
+        .expect("payload-only plausible contract must pass validation");
     }
 
     // ── functional_dependencies: validation (DC2) ────────────────────────────
@@ -2832,12 +3039,47 @@ SELECT dt FROM foo"#;
             .expect_err("batched.unique_key: must be refused with a fix-it");
         let message = err.to_string();
         assert!(
-            message.contains("unique_key")
+            message.contains("merge_key")
                 && message.contains("order_id")
                 && message.contains("order_date"),
-            "fix-it must name unique_key: and the caller's own values; got: {}",
+            "fix-it must name the top-level merge_key: replacement and the caller's own values; got: {}",
             message
         );
+    }
+
+    /// Top-level `merge_key:` in `.sql` frontmatter parses and folds into
+    /// the internal `batched.unique_key` representation every existing
+    /// `batched:`-shaped consumer already reads — the same internal slot the
+    /// retired `batched.unique_key` sub-block used to populate
+    /// (`docs/specs/models.md` §"Constraint violations").
+    #[test]
+    fn merge_key_parses_in_frontmatter() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+merge_key: [order_id]
+---
+SELECT dt FROM foo"#;
+        let result = extract_file_metadata(source).expect("merge_key: must parse");
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert!(
+                    metadata.merge_key.is_none(),
+                    "merge_key: is consumed and cleared during extraction"
+                );
+                let batched = metadata
+                    .batched
+                    .clone()
+                    .expect("merge_key: folds into an implicit batched: block");
+                assert_eq!(batched.unique_key, vec!["order_id".to_string()]);
+            }
+            _ => panic!("Expected Single variant"),
+        }
     }
 
     /// `batched.safety_overrides: {...}` is refused with a fix-it naming the
@@ -3037,7 +3279,7 @@ GROUP BY device_id, user_id"#;
     /// frontmatter validation — whether key temporal locality can be
     /// established is a plan-derivation decision (the locality gate in
     /// `smelt_logical::maintenance::locality`), not a frontmatter shape
-    /// check (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// check (`docs/specs/incremental_shapes.md` §"Key temporal locality
     /// (the time-partitioned output)").
     #[test]
     fn test_keyed_with_timeseries_reaches_plan_derivation() {
@@ -3077,7 +3319,7 @@ GROUP BY device_id, user_id"#;
             grain: Some(crate::config::Grain::Key),
             batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
@@ -3154,7 +3396,7 @@ GROUP BY device_id, user_id"#;
             refresh: Some(crate::config::RefreshStrategy::MaterializedView),
             batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
-                nondeterministic_columns: vec![],
+                nondeterministic_columns_retired: (),
                 safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()

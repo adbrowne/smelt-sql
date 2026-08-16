@@ -34,7 +34,7 @@ safety_overrides:
 -- below) to learn which sessions are still open and when they rooted. See
 -- `docs/research/20260711-clock-vs-root-anchored-sessions.md`
 -- §"silver.sessions_chained — root-anchored cut" for the design and
--- `docs/specs/incremental_models.md` §"Window independence and self-referential
+-- `docs/specs/incremental_shapes.md` §"Window independence and self-referential
 -- models" for why a backward-bounded (no forward reach) self-read proves
 -- `Ordered`: the planner forces this model's partitions to build strictly in
 -- temporal order, one at a time — backfills of this table cannot be
@@ -259,7 +259,7 @@ sessionized AS (
 -- declares that reach, so a run touching day D also rewrites its
 -- skew-reached prior partitions — the same ±-day Form B write rebase
 -- `silver.sessions` gets, composed with the self-edge's own `Ordered`
--- forcing (`docs/specs/incremental_models.md` §"Window independence and
+-- forcing (`docs/specs/incremental_shapes.md` §"Window independence and
 -- self-referential models").
 --
 -- `aggregated` is a named CTE (rather than the model's own bare final

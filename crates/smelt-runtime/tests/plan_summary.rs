@@ -50,6 +50,7 @@ fn make_config() -> Arc<Config> {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     })
 }
 
@@ -207,7 +208,7 @@ async fn test_plan_summary_lists_strategies() {
 #[tokio::test]
 async fn test_planner_override_applied() {
     use smelt_core::config::{ModelConfig, TimeseriesConfig};
-    use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
+    use smelt_core::Granularity;
 
     let project_dir = tempfile::tempdir().expect("tempdir");
     let project_dir = project_dir.path();
@@ -242,11 +243,8 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
             grain: Some(smelt_core::config::Grain::Partition),
             unique_key: None,
             safety_overrides: None,
-            batched: Some(PartitionGrainConfig {
-                unique_key: vec![],
-                nondeterministic_columns: vec![],
-                safety_overrides: PartitionGrainSafetyOverrides::default(),
-            }),
+            batched_retired: (),
+            merge_key: None,
             tags: vec![],
             target: None,
             format: None,

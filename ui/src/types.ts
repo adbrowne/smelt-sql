@@ -124,6 +124,123 @@ export interface PlanBatch {
   filter_end: string;
 }
 
+// --- Model Diagnostics Types ---
+//
+// Mirrors `smelt_runtime::diagnostics::ModelDiagnostics`
+// (`crates/smelt-runtime/src/diagnostics.rs`), the shared builder both
+// `smelt explain` and `GET /api/models/:name/diagnostics` render verbatim
+// (`docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder").
+
+export interface ModelDiagnosticsResponse {
+  model: string;
+  properties: PropertySet;
+  contract: RelationContractView;
+  inbound_edges: InboundEdgeContract[];
+  cells: PlanCellDiagnostics[];
+}
+
+export interface PropertySet {
+  columns: string[];
+  grain: Grain;
+  functional_dependencies: DerivedFd[];
+  determinism: ColumnDeterminism[];
+  comparability: ColumnComparability[];
+  discriminants: ColumnDiscriminant[];
+  literal_columns: [string, string][];
+  has_set_op_barrier: boolean;
+  has_fan_out_join: boolean;
+  row_identity: RowIdentityVerdict;
+  source_bounds: Record<string, BoundResult>;
+}
+
+export interface Grain {
+  keys: string[][];
+}
+
+export interface DerivedFd {
+  key: string[];
+  determines: string;
+}
+
+export interface ColumnDeterminism {
+  output: string;
+  level: 'Clean' | 'Run' | 'Row';
+}
+
+export interface ColumnComparability {
+  output: string;
+  comparability: 'Comparable' | 'Incomparable';
+}
+
+export interface ColumnDiscriminant {
+  output: string;
+  discriminants: Discriminants;
+}
+
+export interface Discriminants {
+  is_monoid: boolean;
+  needs_inverse: boolean;
+  decomposable: boolean;
+  monotone: 'Value' | 'Order' | 'None';
+}
+
+export type RowIdentity = { Key: string[] } | 'WholeRow';
+
+export interface RowIdentityVerdict {
+  identity: RowIdentity;
+  proven_mismatch: string[] | null;
+}
+
+export type BoundResult =
+  | { type: 'bounded'; source_partition_col: string; before: string; after: string }
+  | { type: 'unbounded' }
+  | { type: 'not_derivable' };
+
+export interface RelationContractClock {
+  event_time_column: string;
+  partition_column: string;
+  granularity: string;
+}
+
+export interface RelationContractView {
+  clock?: RelationContractClock;
+  identity?: string[];
+  derived_grain?: 'partition' | 'key' | 'key_per_partition';
+}
+
+export interface InboundEdgeContract {
+  name: string;
+  provider: 'source' | 'model';
+  contract: RelationContractView;
+}
+
+export type Technique = 'DeleteInsert' | 'KeyedFold' | 'ColumnScopedMerge' | 'InPlaceUpdate';
+
+export interface PreviewStatement {
+  sql: string;
+}
+
+export type Admissibility =
+  | { verdict: 'admitted' }
+  | { verdict: 'interchangeable_alternative' }
+  | { verdict: 'not_applicable'; reason: string };
+
+export interface TechniquePreview {
+  technique: Technique;
+  transactional: boolean;
+  statements: PreviewStatement[];
+  admissibility: Admissibility;
+}
+
+export interface PlanCellDiagnostics {
+  group: string;
+  trigger: string;
+  corner: string;
+  admitted_technique: Technique;
+  row_identity: RowIdentity;
+  technique_previews: TechniquePreview[];
+}
+
 // --- Run Execution Types ---
 
 export interface RunExecuteRequest {

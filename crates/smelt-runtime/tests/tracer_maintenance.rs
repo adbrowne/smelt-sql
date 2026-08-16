@@ -240,14 +240,16 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
             ColumnGroup {
                 columns: strings(&["revenue"]),
                 mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["order_count"]),
                 mutation_sensitivity: set(&["payments"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -347,11 +349,13 @@ fn ex36_in_place_field_backfill_equals_full_refresh_of_the_new_definition() {
                 "referrer_domain".to_string(),
                 "regexp_extract(referrer, '://([^/]+)', 1)".to_string(),
             )],
-            "event_date",
-            &Region {
-                start: day("2026-01-01"),
-                end: day("2026-01-03"),
-            },
+            Some((
+                "event_date",
+                &Region {
+                    start: day("2026-01-01"),
+                    end: day("2026-01-03"),
+                },
+            )),
         ),
     );
     let v2_body = "SELECT event_id, event_date, referrer, \
@@ -401,11 +405,12 @@ fn ex24_keyed_fold_of_a_delta_equals_full_refresh_at_the_advanced_s() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["payments"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,

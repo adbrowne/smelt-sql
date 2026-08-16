@@ -7,8 +7,19 @@
 //! dimension}`. Whether an *existing* column's semantics changed is **not**
 //! derivable from the column/dependency-set diff alone — that residue falls
 //! to a declared migration intent, out of scope here (L3).
+//!
+//! [`collect_dependencies`] is `pub(crate)`: `backbuild::classify`'s B1
+//! admission (`docs/research/20260802-backbuild-synthesis.md` §4 "B1") reuses
+//! this same walk rather than forking it. It also carries a registry-backed
+//! opaqueness/volatility leaf check on function calls (an unregistered or
+//! non-deterministic function refuses) — the one sanctioned behaviour
+//! change over the walk's prior posture, which silently treated an unknown
+//! zero-arg function call as having no dependencies at all.
 
+use crate::analysis::expr_util::same_modulo_trivia;
+use crate::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
 use smelt_parser::{Expr, SyntaxKind};
+use smelt_types::signatures::BuiltinRegistry;
 use std::collections::HashSet;
 
 /// One column of a model version: its name and the expression that computes
@@ -67,7 +78,7 @@ pub fn additive_only_diff(
                 };
             }
             Some(new_col) => {
-                if old.expr.text().trim() != new_col.expr.text().trim() {
+                if !same_modulo_trivia(old.expr.syntax(), new_col.expr.syntax()) {
                     return ModelDiff::NotAdditive {
                         reason: format!(
                             "existing column '{}' changed its expression — a rebuild or declared \
@@ -118,7 +129,13 @@ pub fn additive_only_diff(
 /// pure-scalar/aggregate shapes. Any shape not explicitly recognised here (a
 /// subquery, a window `OVER`, an opaque/unrecognised construct) fails closed
 /// with a reason rather than guessing at its dependencies.
-fn collect_dependencies(expr: &Expr) -> Result<HashSet<String>, String> {
+///
+/// `pub(crate)`: shared with `backbuild::classify`'s B1 admission (research
+/// `docs/research/20260802-backbuild-synthesis.md` §4 "B1"), which reuses
+/// this walk rather than forking it (`docs/specs/architecture.md` §"Property
+/// composition walk rule" — this is the admissible leaf-classifier reuse,
+/// not a new ad hoc scan).
+pub(crate) fn collect_dependencies(expr: &Expr) -> Result<HashSet<String>, String> {
     if expr
         .syntax()
         .descendants()
@@ -147,6 +164,30 @@ fn walk(expr: &Expr, deps: &mut HashSet<String>) -> Result<(), String> {
     }
 
     if let Some(func) = expr.as_function_call() {
+        let name = func
+            .name()
+            .ok_or_else(|| "function call has no resolvable name".to_string())?;
+        // Determinism leaf check first (research §2 "Determinism caveat"): a
+        // volatile or run-nondeterministic function in an added/changed
+        // expression can never match a full rebuild, whether or not the
+        // registry also knows its type — refuse before the registry lookup
+        // so the reason names the real problem.
+        if classify_function_determinism(&name) != FunctionDeterminism::Neither {
+            return Err(format!(
+                "calls the non-deterministic function '{name}', which can never match a full \
+                 rebuild deterministically"
+            ));
+        }
+        // Registry-backed opaqueness check: an unrecognised function is
+        // refused fail-closed rather than assumed pure (this is the
+        // sanctioned tightening over the previous behaviour, which silently
+        // treated an unknown zero-arg function call as having no
+        // dependencies at all).
+        if BuiltinRegistry::resolve(&name).is_none() {
+            return Err(format!(
+                "calls the unregistered function '{name}', which this walk cannot prove pure"
+            ));
+        }
         for arg in func.arguments() {
             walk(&arg, deps)?;
         }
@@ -278,6 +319,47 @@ mod tests {
     fn no_op_edit_is_additive_only() {
         let old = vec![col("amount", "amount")];
         let new = vec![col("amount", "amount")];
+        let verdict = additive_only_diff(&old, &new, &[]);
+        assert_eq!(verdict, ModelDiff::AdditiveOnly);
+    }
+
+    /// Sanctioned tightening (backbuild Phase 3, research §2 "Determinism
+    /// caveat"): a new column calling an unregistered zero-arg function used
+    /// to be silently `Ok(∅)` (no dependencies at all — the walk had nothing
+    /// to recurse into). It must now fail closed instead of being treated as
+    /// derivable from nothing.
+    #[test]
+    fn unregistered_zero_arg_function_call_fails_closed() {
+        let old = vec![col("amount", "amount")];
+        let new = vec![col("amount", "amount"), col("mystery", "mystery_func()")];
+        let verdict = additive_only_diff(&old, &new, &[]);
+        assert!(!verdict.is_additive_only());
+    }
+
+    #[test]
+    fn nondeterministic_function_call_fails_closed() {
+        let old = vec![col("amount", "amount")];
+        let new = vec![col("amount", "amount"), col("r", "random()")];
+        let verdict = additive_only_diff(&old, &new, &[]);
+        assert!(!verdict.is_additive_only());
+    }
+
+    #[test]
+    fn run_deterministic_function_call_still_fails_closed() {
+        // NOW()/CURRENT_TIMESTAMP are run- (not row-) nondeterministic, but
+        // the determinism caveat refuses both classes for an added
+        // expression — a value frozen at run time still can never match a
+        // rebuild performed at a different time.
+        let old = vec![col("amount", "amount")];
+        let new = vec![col("amount", "amount"), col("ts", "NOW()")];
+        let verdict = additive_only_diff(&old, &new, &[]);
+        assert!(!verdict.is_additive_only());
+    }
+
+    #[test]
+    fn registered_pure_function_call_still_additive() {
+        let old = vec![col("amount", "amount")];
+        let new = vec![col("amount", "amount"), col("amount_abs", "ABS(amount)")];
         let verdict = additive_only_diff(&old, &new, &[]);
         assert_eq!(verdict, ModelDiff::AdditiveOnly);
     }

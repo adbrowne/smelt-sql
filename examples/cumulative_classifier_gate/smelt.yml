@@ -2,7 +2,7 @@ name: cumulative_classifier_gate
 version: 1
 
 # Hermetic fixture for the refresh: keyed classifier gate
-# (docs/specs/incremental_models.md §"Key-grain diagnostic codes";
+# (docs/specs/incremental_shapes.md §"Diagnostics";
 # §"Key-grain constraints" #4: "The catalogue is closed and the classifier
 # is fail-closed"). The driving
 # source is a self-contained VALUES literal so the workspace runs via

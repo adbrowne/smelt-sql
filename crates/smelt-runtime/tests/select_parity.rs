@@ -43,6 +43,7 @@ fn config_with_targets(targets: &[&str]) -> Config {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     }
 }
 

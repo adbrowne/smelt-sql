@@ -31,16 +31,21 @@ use smelt_logical::maintenance::choice::{
     resolve_write_suppression, resolve_write_variant, ChosenTechnique, RecomputeRestriction,
     WriteSuppression,
 };
+use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
-    emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, MaintenanceDialect, MaintenanceStatement, Region,
-    StatementGroup, TargetSlicePredicate,
+    emit_column_scoped_merge, emit_column_scoped_merge_suppressed,
+    emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
+    emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
+    emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
+    emit_repair_group_digest_select, emit_repair_group_sidecar_diff,
+    emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
+    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
+use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, ScanClamp, SkeletonSourceClosure,
-    SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation, ScanClamp,
+    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -168,7 +173,7 @@ pub trait WindowedKeyedRule: Send + Sync {
 
     /// Build the out-of-slice match probe SQL for a **checked** route-3
     /// (recurrence-bounded, declared `r`) slice
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 3) — the single-owner emitter is
     /// `smelt_logical::maintenance::emit::emit_recurrence_bound_probe`;
     /// this method's only job is supplying it the rule's own `unique_key`
@@ -216,7 +221,7 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// with the action via [`Backend::fold_ledger_delta`]. A step whose delta is
 /// already reflected — a reprocessed window — refuses the run with a
 /// `KeyedReprocessedWindow`-shaped error
-/// (`docs/specs/incremental_models.md` §"Reprocessing") instead of silently
+/// (`docs/specs/incremental_shapes.md` §"Reprocessing") instead of silently
 /// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
 /// warehouse table is ever created for them.
 #[allow(clippy::too_many_arguments)]
@@ -231,6 +236,7 @@ pub async fn run_windowed_keyed_maintenance(
     suppression: &WriteSuppression,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
         bail!(
@@ -267,7 +273,7 @@ pub async fn run_windowed_keyed_maintenance(
         };
         // Resolve this step's concrete target-scan slice predicate from the
         // caller's established `LocalitySlice` (`docs/specs/
-        // incremental_models.md` §"Key temporal locality"). The two routes
+        // incremental_shapes.md` §"Key temporal locality"). The two routes
         // resolve to structurally different predicates:
         //   - route 1 (`Window`): the step's own partition value, widened
         //     by the derived margins. Date arithmetic is shared with the
@@ -317,7 +323,7 @@ pub async fn run_windowed_keyed_maintenance(
         };
 
         // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
-        // is admitted only **checked** (`incremental_models.md` §"Key
+        // is admitted only **checked** (`incremental_shapes.md` §"Key
         // temporal locality": "A declared `r` is admitted only checked"):
         // before this step's merge action ever runs, probe the target for
         // any delta key that also matches a stored row outside the slice —
@@ -347,54 +353,36 @@ pub async fn run_windowed_keyed_maintenance(
                     smelt_backend::maintenance_dialect(backend.dialect()),
                 ) {
                     Some(probe_sql) => {
-                        let batches = backend.execute_sql(&probe_sql).await.map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to execute recurrence-bound probe for model '{}':\n  \
-                                 SQL: {}\n  Error: {}",
-                                model_name,
-                                probe_sql,
-                                e
-                            )
-                        })?;
-                        let rows = crate::check_runner::batches_to_rows(&batches);
-                        let violation_count: u64 = rows
-                            .first()
-                            .and_then(|r| r.get("violation_count"))
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "recurrence-bound probe for model '{}' returned no \
-                                     `violation_count` row — refusing to trust an unchecked \
-                                     result for a declared key-recurrence bound",
-                                    model_name
-                                )
-                            })?
-                            .parse::<u64>()
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "recurrence-bound probe for model '{}' returned an \
-                                     unparseable `violation_count`: {}",
+                        let ctx = crate::probes::ProbeContext {
+                            probe_code: "KeyedRecurrenceBoundViolated".to_string(),
+                            fact: "key_recurrence".to_string(),
+                            model: model_name.to_string(),
+                            cell: format!("{schema}.{table} keyed merge"),
+                            remedy: "correct or widen the declared key-recurrence bound `r`, or \
+                                     backfill the affected key"
+                                .to_string(),
+                        };
+                        match crate::probes::dispatch_probe(backend, probe_policy, &ctx, &probe_sql)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{e}"))?
+                        {
+                            crate::probes::ProbeVerdict::Skipped(_)
+                            | crate::probes::ProbeVerdict::Held => {}
+                            crate::probes::ProbeVerdict::Violated { count, sample_keys } => {
+                                bail!(
+                                    "KeyedRecurrenceBoundViolated: model '{}' declared a \
+                                     key-recurrence bound that {} delta row(s) violate at \
+                                     partition {} — matched (or would duplicate) a stored key \
+                                     outside the recurrence-bound slice. Sample keys: {}. The run \
+                                     is refused before any write (`docs/specs/\
+                                     incremental_models.md` §\"Key temporal locality\", route 3).{}",
                                     model_name,
-                                    e
-                                )
-                            })?;
-                        if violation_count > 0 {
-                            let sample_keys = rows
-                                .first()
-                                .and_then(|r| r.get("sample_keys"))
-                                .cloned()
-                                .unwrap_or_default();
-                            bail!(
-                                "KeyedRecurrenceBoundViolated: model '{}' declared a \
-                                 key-recurrence bound that {} delta row(s) violate at \
-                                 partition {} — matched (or would duplicate) a stored key \
-                                 outside the recurrence-bound slice. Sample keys: {}. The run \
-                                 is refused before any write (`docs/specs/\
-                                 incremental_models.md` §\"Key temporal locality\", route 3).",
-                                model_name,
-                                violation_count,
-                                step.partition_value,
-                                sample_keys
-                            );
+                                    count,
+                                    step.partition_value,
+                                    sample_keys,
+                                    crate::probes::probe_violation_suffix(&ctx)
+                                );
+                            }
                         }
                     }
                     None => {
@@ -451,13 +439,15 @@ pub async fn run_windowed_keyed_maintenance(
                     Ok(()) => {}
                     Err(BackendError::AlreadyReflected { message }) => {
                         bail!(
-                            "windowed-keyed-maintenance driver refused model '{}': partition \
-                             {} from input '{}' is already reflected in the reconciliation \
-                             ledger (never-fold-twice — docs/specs/incremental_models.md \
-                             §Reprocessing). {}. Mitigations: drop the target table and re-run \
-                             for a full rebuild, or perform a manual cascade rebuild.",
+                            "KeyedReprocessedWindow: model '{}' refused — partition {} \
+                             (window {}..{}) from input '{}' is already reflected in the \
+                             reconciliation ledger (never-fold-twice — \
+                             docs/specs/incremental_models.md §Reprocessing). {}. Re-run with \
+                             `--full-refresh` to rebuild the target from scratch.",
                             model_name,
                             step.partition_value,
+                            step.range.start,
+                            step.range.end,
                             rule.ledger_input(),
                             message
                         );
@@ -572,6 +562,11 @@ pub fn resolve_incremental_strategy(
         // (a locality refusal already yields an empty-cells plan either
         // way, falling back to `backend_default` below).
         &[],
+        // This resolver only reads the creation (`NewData`) cell — a
+        // `ColumnAdded` trigger never affects it, so no deployed-schema
+        // snapshot is needed here.
+        &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return backend_default;
     };
@@ -707,6 +702,19 @@ pub fn resolve_cell_technique_with_write_pin(
                  than silently substituting a different technique than the one pinned",
                 pattern.name
             ),
+            // `diff_patch` is not reachable through this dimension-merge
+            // resolver (only `ColumnScopedMerge` and the always-available
+            // region recompute are) — no live routing exists for it yet in
+            // any case (a later phase's scope), so this refuses the same
+            // way the `Technique(other)` arm above does rather than
+            // silently substituting a different technique.
+            WriteSelection::DiffPatch => bail!(
+                "MaintenanceUnboundedFootprint: write pin '{}' for {trigger:?} selects diff_patch, \
+                 which this dimension-merge resolver has no lowering for (only ColumnScopedMerge \
+                 and the always-available region recompute are reachable here) — refusing rather \
+                 than silently substituting a different technique than the one pinned",
+                pattern.name
+            ),
         };
     }
 
@@ -804,6 +812,11 @@ pub fn resolve_live_column_scoped_cell(
         // this resolver only inspects mutation-trigger cells, which key
         // temporal locality's routes do not gate.
         &[],
+        // This resolver only inspects `UpstreamMutation` cells — a
+        // `ColumnAdded` trigger never affects them, so no deployed-schema
+        // snapshot is needed here.
+        &[],
+        &SourceReferentialIntegrity::new(),
     ) else {
         return Ok(None);
     };
@@ -841,99 +854,1528 @@ pub fn resolve_live_column_scoped_cell(
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
+        // A trigger commonly derives MULTIPLE sibling cells, one per
+        // membership-sensitive column group a shared join admits
+        // (`docs/plans/20260808-membership-sensitivity.md` Phase 1) — every
+        // one of them must be offered a chance to match a `cells[]`
+        // override scoped to ITS OWN columns, never only the first
+        // (`MaintenancePlan::cell_for`'s own doc comment on this exact bug,
+        // `docs/plans/20260808-membership-sensitivity.md` Phase 3's fix).
+        let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+        if sibling_cells.is_empty() {
             continue;
-        };
-        let group_columns = result
-            .column_groups
+        }
+        let sibling_group_columns: Vec<Vec<String>> = sibling_cells
             .iter()
-            .find(|g| g.name() == cell.group)
-            .map(|g| g.columns.clone())
-            .unwrap_or_default();
-        // An already-validated `cells[].write` pin for this trigger's cell
-        // (`smelt-db`'s pre-execution diagnostic gate already ran
-        // `resolve_write_pin`'s registry/capability/equivalence checks — an
-        // invalid pin never reaches here, the run would already have been
-        // refused with `MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
-        // *name* to its registry entry so `resolve_cell_choice` can consult
-        // which [`smelt_logical::maintenance::WriteSelection`] it maps to,
-        // never re-deriving admission itself.
-        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
-            &cell,
-            &result.column_groups,
-            cells_cfg,
-        )
-        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
-        // The override ladder (`defaults.prefer` → `cells[].prefer` →
-        // `cells[].technique`, narrower scope winning) narrowed to this
-        // cell's own trigger + column group — the SAME `overrides` value
-        // feeds both the family choice below and the write-suppression
-        // variant resolution further down, so a `cells[].technique` entry
-        // naming e.g. `suppress`/`unconditional` for this cell is visible
-        // to both dimensions from one ladder evaluation.
-        let overrides = effective_override(
-            metadata
-                .maintenance
-                .as_ref()
-                .and_then(|m| m.defaults.as_ref()),
+            .map(|c| {
+                result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == c.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Fail-loud: a HARD `cells[on: source].technique` pin whose
+        // `columns` address NONE of this trigger's own sibling groups is a
+        // dangling/misconfigured pin — under the pre-Phase-3 first-match
+        // lookup it would silently never be consulted by anything; refuse
+        // instead of vanishing (root `CLAUDE.md` §"Fail-loud discipline").
+        // A soft `prefer` in the same situation is not flagged here — it
+        // never refuses even when it names a resolvable technique the cell
+        // doesn't have (`resolve_cell_choice`'s own contract).
+        if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
             &combined_cells,
             source,
-            &group_columns,
-        );
-        let chosen = resolve_cell_choice(
-            &result.plan,
-            &trigger,
-            &overrides,
-            write_pin,
-            backend_supports_column_scoped_merge,
-        )
-        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-        if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+            &sibling_group_columns,
+        ) {
+            bail!(
+                "MaintenanceUnboundedFootprint: cells[on: {source}].technique pin (columns: \
+                 {:?}) does not address any of this trigger's own derived column groups ({:?}) \
+                 — a hard technique pin must name columns belonging to exactly one of the \
+                 trigger's admitted cells, never columns absent from every one of them",
+                dangling.columns,
+                sibling_group_columns,
+            );
+        }
+        for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+            // An already-validated `cells[].write` pin for this cell
+            // (`smelt-db`'s pre-execution diagnostic gate already ran
+            // `resolve_write_pin`'s registry/capability/equivalence checks —
+            // an invalid pin never reaches here, the run would already have
+            // been refused with `MaintenanceWritePatternUnavailable`/
+            // `MaintenanceWriteAddressingRefused`); this only re-resolves
+            // the *name* to its registry entry so `resolve_cell_choice` can
+            // consult which [`smelt_logical::maintenance::WriteSelection`]
+            // it maps to, never re-deriving admission itself.
+            let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            )
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+            // The override ladder (`defaults.prefer` → `cells[].prefer` →
+            // `cells[].technique`, narrower scope winning) narrowed to THIS
+            // sibling cell's own trigger + column group — the SAME
+            // `overrides` value feeds both the family choice below and the
+            // write-suppression variant resolution further down, so a
+            // `cells[].technique` entry naming e.g. `suppress`/
+            // `unconditional` for this cell is visible to both dimensions
+            // from one ladder evaluation.
+            let overrides = effective_override(
+                metadata
+                    .maintenance
+                    .as_ref()
+                    .and_then(|m| m.defaults.as_ref()),
+                &combined_cells,
+                source,
+                group_columns,
+            );
+            let chosen = resolve_cell_choice(
+                Some(cell),
+                &trigger,
+                &overrides,
+                write_pin,
+                backend_supports_column_scoped_merge,
+            )
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+            if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+                continue;
+            }
+            let comparability = model_property_vector(sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let raw_suppression =
+                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+            // Fold the first-build/definition-change-backfill posture (or an
+            // explicit `prefer`/`technique` override on this dimension) into
+            // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
+            // or `Trigger::Backfill` — no prior stored state on this group to
+            // diff against) resolves the unconditional matched arm by default,
+            // exactly as if the P2/P3 proof itself had refused — unless an
+            // explicit pin/preference overrides that default. This is the
+            // resolver's own rule, never a runtime special case here.
+            //
+            // A `technique: suppress` pin forcing suppression on over a genuine
+            // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
+            // dimension just resolved above — where `resolve_cell_choice`'s
+            // refusal is now a real run error — there is currently NO
+            // pre-execution diagnostic gate for this write-*variant* pin
+            // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
+            // `continue` below on `Err` is a REAL silent fallback: an
+            // inadmissible variant pin is not refused here, it just falls
+            // through to the safe region-recompute batch loop instead of
+            // failing the run loudly. This is a known gap, not by design; see
+            // `docs/specs/incremental_models.md` §"Known Divergences" and
+            // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+            // Phase G1 for the tracked follow-up to extend the diagnostic gate
+            // to this dimension — out of scope for Phase 2 of
+            // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
+            // family (Fold/Recompute/RederiveColumns) dimension.
+            let write_variant_result = resolve_write_variant(
+                &raw_suppression,
+                &cell.trigger,
+                cell.ledger_catch_up,
+                &overrides,
+            );
+            let Ok((suppression, _variant_reason)) = write_variant_result else {
+                continue;
+            };
+            return Ok(Some((source.clone(), cell.clone(), suppression)));
+        }
+    }
+    Ok(None)
+}
+
+/// Resolve a live `Trigger::ColumnAdded` cell that resolves to
+/// `Technique::InPlaceUpdate` (`docs/plans/20260809-sensitivity-precision.md`
+/// Phase 6, `docs/specs/definition_deltas.md` §"The verdict per column group") — the production entry point for the definition-change
+/// trigger, distinct from [`resolve_live_column_scoped_cell`]/
+/// [`resolve_live_membership_recompute_cell`] above (which only ever
+/// inspect `NewData`/`UpstreamMutation` cells).
+///
+/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` is the
+/// one caller with real access to the deployed-schema snapshot the runtime
+/// `schema_evolution` module already reads/writes
+/// (`crate::schema_evolution::infer_deployed_columns`/
+/// `save_deployed_schema`) — `derive_model_maintenance_plan` itself does no
+/// I/O (Salsa-purity rule). An empty slice (no known deployed schema) derives
+/// no trigger at all, same as `smelt-db`'s own diagnostic path.
+///
+/// Returns the admitted cell plus its ready-to-execute `(column,
+/// expression)` assignment pairs — the added columns' own defining
+/// expressions read straight from the model's current SQL via
+/// [`smelt_logical::maintenance::derive::column_def_from_sql`], the SAME
+/// source [`crate::diagnostics::build_technique_statements`]'s
+/// `Technique::InPlaceUpdate` preview arm reads, and the same source the
+/// `PureBackfill` classification (`smelt_logical::analysis::
+/// definition_change::classify_definition_change`) was proven against —
+/// never a fresh re-derivation of either the trigger or the assignments.
+/// `None` when the model carries no maintenance plan, no deployed snapshot
+/// is known, or no cell resolves to `InPlaceUpdate` (no `ColumnAdded`
+/// trigger fired, the added column(s) classified `UpstreamRederive`, or a
+/// skeleton add refused).
+pub fn resolve_live_in_place_update_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    deployed_column_names: &[String],
+) -> Option<(PlanCell, Vec<(String, String)>)> {
+    if deployed_column_names.is_empty() {
+        return None;
+    }
+    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        &HashSet::new(),
+        None,
+        &[],
+        deployed_column_names,
+        &SourceReferentialIntegrity::new(),
+    )?;
+    let cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| {
+            matches!(c.trigger, Trigger::ColumnAdded { .. })
+                && c.technique == Technique::InPlaceUpdate
+        })?
+        .clone();
+    let Trigger::ColumnAdded { columns } = &cell.trigger else {
+        unreachable!("filtered above")
+    };
+    let mut assignments = Vec::with_capacity(columns.len());
+    for col in columns {
+        let def = smelt_logical::maintenance::derive::column_def_from_sql(sql, col)?;
+        assignments.push((col.clone(), def.expr.syntax().text().to_string()));
+    }
+    Some((cell, assignments))
+}
+
+/// Execute the `Technique::InPlaceUpdate` cell [`resolve_live_in_place_update_cell`]
+/// resolved: an unconditional (whole-table) `UPDATE` backfilling every
+/// added column's own defining expression over every currently-stored row.
+/// Unconditional (not partition-scoped) because a definition-change
+/// backfill is a one-time migration over the model's *existing* rows — the
+/// same posture `schema_evolution`'s own `ALTER TABLE ... ADD COLUMN`
+/// (which must already have run first, physically creating the column) —
+/// not a windowed catch-up over a moving horizon (`docs/specs/
+/// definition_deltas.md` §"The verdict per column group": "instantiating
+/// their ledger entries at `S = ∅`").
+///
+/// The statement is built and executed exactly once via
+/// [`emit_in_place_update`] — the single-owner emitter — never
+/// re-authored here (`CLAUDE.md` §"Maintenance-plan purity").
+pub async fn execute_in_place_update(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    assignments: &[(String, String)],
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let group = StatementGroup {
+        statements: emit_in_place_update(&full_table, assignments, None)
+            .into_iter()
+            .map(|sql| MaintenanceStatement { sql })
+            .collect(),
+        transactional: false,
+    };
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| anyhow::anyhow!("in-place UPDATE failed for '{full_table}': {e}"))?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// Find the first `explicitly_mutable` source whose `Trigger::
+/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` over a
+/// proven `RowIdentity::Key` — the membership-sensitive counterpart of
+/// [`resolve_live_column_scoped_cell`] above, added for the **keyed run
+/// loop only** (`docs/plans/20260808-membership-sensitivity.md` Phase 2).
+///
+/// Per `incremental_models.md` §"The plan matrix": "A membership-sensitive
+/// group … must be repaired by a technique that can create and delete rows:
+/// the recompute family (delete+insert, change-suppressed where the staged
+/// candidate is comparable), never a column-scoped merge, which cannot fix
+/// which rows exist." `derive_model_maintenance_plan` (Phase 1 of that plan)
+/// now assigns exactly such a cell `Technique::DeleteInsert` +
+/// `Corner::RecomputeRegion` for a membership-sensitive column group.
+///
+/// A `Technique::DeleteInsert` cell is deliberately **not** surfaced here
+/// unless the cell's own [`RowIdentity`] proved a real `Key(_)` — a `grain:
+/// partition` output's `WholeRow` identity has no key
+/// `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` can
+/// join stored rows to candidate rows on (that emitter panics on an empty
+/// key), and the whole-row `EXCEPT ALL`-both-ways realisation for a keyless
+/// region remains unbuilt (`docs/specs/model_transforms.md` §Known
+/// Divergences). A `grain: partition` model's `DeleteInsert` membership cell
+/// is left to the existing unconditional region `DELETE`+`INSERT` batch loop
+/// (`execute.rs`'s plain incremental path, unchanged by this phase) — the
+/// always-correct, always-available fallback the plan matrix names for
+/// exactly this shape.
+///
+/// This function only ever surfaces a cell when [`resolve_write_variant`]
+/// resolves `WriteSuppression::Suppressed` — `emit_staged_candidate_
+/// conditional` has no unconditional counterpart (unlike the column-scoped
+/// `MERGE` family), so an `Unconditional`/refused verdict falls through to
+/// `None`, same fail-soft posture `resolve_live_column_scoped_cell` already
+/// has for its own write-variant dimension (see that function's own doc
+/// comment on the "known gap" this mirrors).
+///
+/// **Departed keys.** Dispatches to [`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`] (`docs/plans/
+/// 20260808-membership-sensitivity.md` Phase 3), not the region-scoped
+/// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional`] —
+/// this resolver's `candidate_select` is always the model's own FULL
+/// (unwindowed) recompute, so a stored row whose key is entirely absent from
+/// it has genuinely *departed* (e.g. the dimension row a fact joined on was
+/// itself deleted) rather than merely being out of a run's touched region,
+/// and the recompute variant's extra anti-join `DELETE` removes it.
+pub fn resolve_live_membership_recompute_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    technique_overrides: &[crate::types::CellTechniqueOverride],
+) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        None,
+        &[],
+        // This resolver only inspects `UpstreamMutation` cells — a
+        // `ColumnAdded` trigger never affects them, so no deployed-schema
+        // snapshot is needed here.
+        &[],
+        &SourceReferentialIntegrity::new(),
+    ) else {
+        return Ok(None);
+    };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
+    for source in explicitly_mutable {
+        let trigger = Trigger::UpstreamMutation {
+            source: source.clone(),
+        };
+        // Same sibling-cell fix as `resolve_live_column_scoped_cell` above
+        // (`docs/plans/20260808-membership-sensitivity.md` Phase 3) — a
+        // trigger can derive multiple membership-sensitive sibling cells,
+        // and a `cells[]` override must be matched against each one's own
+        // columns, never only the first.
+        let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+        if sibling_cells.is_empty() {
             continue;
+        }
+        let sibling_group_columns: Vec<Vec<String>> = sibling_cells
+            .iter()
+            .map(|c| {
+                result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == c.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
+            &combined_cells,
+            source,
+            &sibling_group_columns,
+        ) {
+            bail!(
+                "MaintenanceUnboundedFootprint: cells[on: {source}].technique pin (columns: \
+                 {:?}) does not address any of this trigger's own derived column groups ({:?}) \
+                 — a hard technique pin must name columns belonging to exactly one of the \
+                 trigger's admitted cells, never columns absent from every one of them",
+                dangling.columns,
+                sibling_group_columns,
+            );
+        }
+        for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+            if cell.technique != Technique::DeleteInsert {
+                continue;
+            }
+            let RowIdentity::Key(key) = &cell.row_identity.identity else {
+                continue;
+            };
+            if key.is_empty() {
+                continue;
+            }
+            let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            )
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+            let overrides = effective_override(
+                metadata
+                    .maintenance
+                    .as_ref()
+                    .and_then(|m| m.defaults.as_ref()),
+                &combined_cells,
+                source,
+                group_columns,
+            );
+            // `resolve_cell_choice`'s resolvable set for this cell is `{recompute,
+            // DeleteInsert}` (the cell's own admitted technique IS the always-
+            // available region recompute for this family, per `resolve_cell_
+            // choice`'s own doc comment: "the second live alternative … is the
+            // always-admissible whole-region recompute"). Absent an override that
+            // asks for something this narrow resolver has no lowering for, both
+            // resolvable members land here as `Admitted(Technique::DeleteInsert)`
+            // — a `RegionRecompute` choice from a `technique: recompute` pin/
+            // `prefer` is handled the same way `resolve_live_column_scoped_cell`
+            // handles it: it simply isn't THIS live cell, so this source is
+            // skipped and the caller's own default (the plain incremental batch
+            // loop, unaware of this dimension) applies.
+            let chosen = resolve_cell_choice(
+                Some(cell),
+                &trigger,
+                &overrides,
+                write_pin,
+                // Column-scoped MERGE backend capability is irrelevant to this
+                // resolver's own resolvable set (`{recompute, DeleteInsert}`
+                // never contains `ColumnScopedMerge`) — passed `false` so a
+                // `write_pin`/pin naming `ColumnScopedMerge` correctly refuses
+                // here rather than appearing spuriously "live".
+                false,
+            )
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+            if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
+                continue;
+            }
+            let comparability = model_property_vector(sql, &JoinContext::new())
+                .map(|v| v.comparability)
+                .unwrap_or_default();
+            let raw_suppression =
+                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
+            let write_variant_result = resolve_write_variant(
+                &raw_suppression,
+                &cell.trigger,
+                cell.ledger_catch_up,
+                &overrides,
+            );
+            let Ok((suppression, _variant_reason)) = write_variant_result else {
+                continue;
+            };
+            // `emit_staged_candidate_conditional` has no unconditional
+            // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
+            // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
+            // sound lowering this resolver can hand the caller, so it is treated
+            // exactly like a refused write-variant: skip this source, fall
+            // through to the caller's safe default.
+            if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
+                continue;
+            }
+            return Ok(Some((source.clone(), cell.clone(), suppression)));
+        }
+    }
+    Ok(None)
+}
+
+/// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
+/// (`resolve_live_membership_recompute_cell` above) via the staged-candidate
+/// conditional `DELETE`+`INSERT`, full-recompute variant
+/// (`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`) — the "full-model recompute
+/// staged, change-suppressed where comparable" realisation
+/// `incremental_models.md` §"The plan matrix" names for a
+/// membership-sensitive group. `key` is the cell's own proven
+/// `RowIdentity::Key` (never `WholeRow` — the caller only reaches here when
+/// the resolver above already proved a real key); `candidate_select` is the
+/// model's own FULL (unwindowed) recompiled SQL — the entire current
+/// admitted+enriched state, not a time-windowed slice — so a departed OR
+/// newly-admitted key is represented correctly, and the recompute variant's
+/// own anti-join `DELETE` removes a departed key rather than leaving it
+/// stale. `compared_columns` is the already fail-closed-admitted
+/// `WriteSuppression::Suppressed` set.
+pub async fn execute_staged_membership_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = format!("__smelt_staged_{table}");
+    let group = emit_staged_candidate_conditional_recompute(
+        &full_table,
+        &staged_relation,
+        key,
+        candidate_select,
+        compared_columns,
+        dialect,
+    );
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
+        })?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// Which write leg a live `Technique::PerGroupRecompute` cell resolves to —
+/// the repair family's own targeted `DELETE`+`INSERT`
+/// ([`execute_per_group_recompute`]), or a `write: diff_patch` pin over that
+/// same cell ([`execute_diff_patch`]). Both read the identical affected-key
+/// set, candidate select and key — only the write leg differs
+/// (`docs/outcomes/20260809-repair-family/phases/07-plan.md`), so this is a
+/// mode carried alongside the resolved cell rather than a second resolver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepairWrite {
+    /// `ChosenTechnique::Admitted(Technique::PerGroupRecompute)` — the
+    /// repair family's own targeted delete+insert.
+    TargetedDeleteInsert,
+    /// `ChosenTechnique::DiffPatch { recompute: Technique::PerGroupRecompute,
+    /// .. }`, admitted via [`smelt_logical::maintenance::diff_patch::
+    /// admit_diff_patch`].
+    DiffPatch {
+        compared_columns: Vec<String>,
+        delete_leg: smelt_logical::maintenance::diff_patch::DeleteLeg,
+    },
+}
+
+/// How a live `Technique::PerGroupRecompute` cell discovers its affected-key
+/// relation (P9, `docs/specs/incremental_models.md` §"The repair family" —
+/// "Obligation 7 over a `mutable_snapshot` source"): the append-only clamped
+/// rescan, or — for a [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source with no
+/// native change feed — the group-grain fingerprint sidecar diff, the only
+/// route that can witness a group whose entire window contribution departed
+/// the source (a vanished group leaves no row for a clamped scan to select,
+/// but the sidecar keeps a stored comparandum for it).
+#[derive(Debug, Clone)]
+pub enum RepairDiscovery {
+    /// The append-only widened-scan `SELECT DISTINCT`
+    /// ([`repair_affected_keys_select`]).
+    ClampedScan,
+    /// The group-grain sidecar diff ([`diff_repair_group_sidecar_changed_keys`]).
+    /// `digest_columns` is the P4 fingerprint projection's column set for
+    /// this source, read straight off the cell's own derived
+    /// `fingerprint_projections` — never re-derived.
+    SidecarDiff { digest_columns: Vec<String> },
+}
+
+/// A live repair cell as [`resolve_live_per_group_recompute_cell`] returns
+/// it: the trigger's source name, the cell itself, its proven
+/// `RowIdentity::Key`, the cell's own derived bounded read slice, the
+/// resolved write leg ([`RepairWrite`]), and how its affected-key relation
+/// is discovered ([`RepairDiscovery`]).
+pub type LiveRepairCell = (
+    String,
+    PlanCell,
+    Vec<String>,
+    ScanClamp,
+    RepairWrite,
+    RepairDiscovery,
+);
+
+/// Resolve a `Technique::PerGroupRecompute` cell's already-chosen
+/// [`ChosenTechnique`] (`resolve_cell_choice`'s output — the override ladder
+/// has already run) into the [`RepairWrite`] this lowering executes, or
+/// `Ok(None)` when `chosen` is not this cell's live technique at all
+/// (`RegionRecompute`, or `Admitted` of a technique other than
+/// `PerGroupRecompute` — never reachable in practice since
+/// [`resolve_live_per_group_recompute_cell`] only ever calls this with a
+/// cell whose own `technique` is `PerGroupRecompute`, but a defensive arm
+/// nonetheless).
+///
+/// Pure and independently unit-testable — split out of
+/// `resolve_live_per_group_recompute_cell`'s loop body so the fail-loud
+/// `DiffPatch { recompute: <not PerGroupRecompute> }` arm ("a `diff_patch`
+/// pin over the region `DeleteInsert` default fails loud by name rather
+/// than falling through to the default write",
+/// `docs/outcomes/20260809-repair-family/phases/07-plan.md`) is exercisable
+/// without needing a full plan derivation to reach it.
+pub fn resolve_repair_write(
+    chosen: &ChosenTechnique,
+    group_columns: &[String],
+    comparability: &[smelt_logical::analysis::walk::ColumnComparability],
+    row_identity: &smelt_logical::maintenance::RowIdentityVerdict,
+    group_label: &str,
+) -> Result<Option<RepairWrite>> {
+    match chosen {
+        ChosenTechnique::Admitted(Technique::PerGroupRecompute) => {
+            Ok(Some(RepairWrite::TargetedDeleteInsert))
+        }
+        ChosenTechnique::DiffPatch {
+            recompute: Technique::PerGroupRecompute,
+            delete_leg,
+        } => {
+            let slice_complete = match delete_leg {
+                smelt_logical::maintenance::diff_patch::DeleteLeg::Complete => Ok(()),
+                smelt_logical::maintenance::diff_patch::DeleteLeg::Omitted { why } => {
+                    Err(why.clone())
+                }
+            };
+            let admitted = smelt_logical::maintenance::diff_patch::admit_diff_patch(
+                group_columns,
+                comparability,
+                row_identity,
+                slice_complete,
+            )
+            .map_err(|refusal| {
+                anyhow::anyhow!(
+                    "MaintenanceDiffPatchRefused: a `write: diff_patch` pin over a \
+                     Technique::PerGroupRecompute cell for group '{group_label}' could not be \
+                     admitted: {refusal:?}"
+                )
+            })?;
+            Ok(Some(RepairWrite::DiffPatch {
+                compared_columns: admitted.compared_columns,
+                delete_leg: admitted.delete_leg,
+            }))
+        }
+        ChosenTechnique::DiffPatch { recompute, .. } => {
+            bail!(
+                "MaintenanceDiffPatchUnroutable: a `write: diff_patch` pin over group \
+                 '{group_label}' resolved over technique {recompute:?} — only \
+                 Technique::PerGroupRecompute has a diff_patch lowering today; the region \
+                 DeleteInsert default fails loud rather than silently falling through to the \
+                 default write",
+            );
+        }
+        ChosenTechnique::RegionRecompute | ChosenTechnique::Admitted(_) => Ok(None),
+    }
+}
+
+/// The proven group key of a `Technique::PerGroupRecompute` cell — the
+/// repair family's fail-loud identity check
+/// (`docs/specs/incremental_models.md` §"The repair family").
+///
+/// `smelt_logical::maintenance::repair::derive_repair_cell` only ever builds
+/// a `RowIdentity::Key`, so a `WholeRow` (or empty-key) identity on a
+/// per-group-recompute cell is an internal inconsistency, never a shape this
+/// lowering may quietly widen: a repair with no group key to restrict its
+/// `DELETE`/`INSERT` to would rewrite every stored row. Refuse by name
+/// instead (root `CLAUDE.md` §"Fail-loud discipline"), never a skip.
+pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
+    let RowIdentity::Key(key) = &cell.row_identity.identity else {
+        bail!(
+            "MaintenanceRepairIdentityUnproven: a Technique::PerGroupRecompute cell for group \
+             '{}' carries RowIdentity::WholeRow — the repair family recomputes whole key \
+             groups and has no meaning without a proven group key; widening it to every stored \
+             row is never the fallback",
+            cell.group
+        );
+    };
+    if key.is_empty() {
+        bail!(
+            "MaintenanceRepairIdentityUnproven: a Technique::PerGroupRecompute cell for group \
+             '{}' carries an empty RowIdentity::Key — the repair family recomputes whole key \
+             groups and has no meaning without a proven group key",
+            cell.group
+        );
+    }
+    Ok(key.clone())
+}
+
+/// Find the first source whose `Trigger::NewData` cell resolves live to
+/// `Technique::PerGroupRecompute` — the repair family's counterpart of
+/// [`resolve_live_column_scoped_cell`]/[`resolve_live_membership_recompute_cell`]
+/// (`docs/specs/incremental_models.md` §"The repair family").
+///
+/// Unlike those two, this resolver scans the model's **own driving/fold**
+/// trigger, not an enrichment dimension's mutation trigger:
+/// `derive_new_data`'s key-grain branch narrows a faithful-fold
+/// source-posture refusal into a repair cell attached to that same
+/// `Trigger::NewData { source }`
+/// (`smelt_logical::maintenance::derive::derive_new_data`). The repair cell
+/// is therefore an **alternative to** the `KeyedFold` cell for that trigger,
+/// not a technique dispatched alongside one — which is why the keyed run
+/// loop routes it *instead of* the cumulative fold rather than after it.
+/// `Trigger::UpstreamMutation` cells are scanned too, so a future derivation
+/// that admits repair for a mutation trigger needs no second resolver.
+///
+/// Returns the source name, the cell, its proven `RowIdentity::Key`
+/// ([`repair_cell_key`] — a `WholeRow` identity is a fail-loud `bail!`,
+/// never a skip) and the cell's own derived [`ScanClamp`] (the bounded
+/// per-group read slice `repair::admit_per_group_recompute` proved as
+/// obligation 4), and how its affected-key relation is discovered
+/// ([`RepairDiscovery`]). The plan is derived exactly once here
+/// (maintenance-plan purity, root `CLAUDE.md`); nothing downstream
+/// re-derives admission.
+///
+/// `dialect` gates [`RepairDiscovery::SidecarDiff`]: a
+/// [`smelt_logical::maintenance::MutationProfile::MutableSnapshot`] source routes to the group-grain
+/// sidecar diff, which is DuckDB-only (matching the per-row sidecar's own
+/// posture, `diff_fingerprint_sidecar_changed_keys`) — a non-DuckDB target
+/// fails loud here, before any backend call, rather than silently falling
+/// back to the unsound current-source scan.
+pub fn resolve_live_per_group_recompute_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
+) -> Result<Option<LiveRepairCell>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        // Same `None`/`&[]` posture as the sibling resolvers above: the
+        // repair cell's own admission (affected-key discovery + bounded
+        // slice) reads neither the driving source's declared granularity,
+        // nor declared key recurrences, nor a deployed-schema snapshot.
+        None,
+        &[],
+        &[],
+        &SourceReferentialIntegrity::new(),
+    ) else {
+        return Ok(None);
+    };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
+
+    for facts in sources {
+        for trigger in [
+            Trigger::NewData {
+                source: facts.name.clone(),
+            },
+            Trigger::UpstreamMutation {
+                source: facts.name.clone(),
+            },
+        ] {
+            let sibling_cells: Vec<PlanCell> = result.plan.cells_for(&trigger).cloned().collect();
+            if sibling_cells.is_empty() {
+                continue;
+            }
+            let sibling_group_columns: Vec<Vec<String>> = sibling_cells
+                .iter()
+                .map(|c| {
+                    result
+                        .column_groups
+                        .iter()
+                        .find(|g| g.name() == c.group)
+                        .map(|g| g.columns.clone())
+                        .unwrap_or_default()
+                })
+                .collect();
+            // Same dangling-pin fail-loud gate the sibling resolvers apply
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 3).
+            if let Some(dangling) = smelt_logical::maintenance::choice::unaddressed_technique_pin(
+                &combined_cells,
+                &facts.name,
+                &sibling_group_columns,
+            ) {
+                bail!(
+                    "MaintenanceUnboundedFootprint: cells[on: {}].technique pin (columns: \
+                     {:?}) does not address any of this trigger's own derived column groups \
+                     ({:?}) — a hard technique pin must name columns belonging to exactly one \
+                     of the trigger's admitted cells, never columns absent from every one of \
+                     them",
+                    facts.name,
+                    dangling.columns,
+                    sibling_group_columns,
+                );
+            }
+            for (cell, group_columns) in sibling_cells.iter().zip(sibling_group_columns.iter()) {
+                if cell.technique != Technique::PerGroupRecompute {
+                    continue;
+                }
+                // Fail-loud BEFORE the choice ladder: an unprovable group
+                // key is an internal inconsistency, not an override
+                // outcome.
+                let key = repair_cell_key(cell)?;
+                let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+                    cell,
+                    &result.column_groups,
+                    cells_cfg,
+                )
+                .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+                let overrides = effective_override(
+                    metadata
+                        .maintenance
+                        .as_ref()
+                        .and_then(|m| m.defaults.as_ref()),
+                    &combined_cells,
+                    &facts.name,
+                    group_columns,
+                );
+                let chosen = resolve_cell_choice(
+                    Some(cell),
+                    &trigger,
+                    &overrides,
+                    write_pin,
+                    // `{recompute, PerGroupRecompute}` never contains
+                    // `ColumnScopedMerge`, so the backend's MERGE capability
+                    // is irrelevant to this resolver's resolvable set — the
+                    // same `false` the membership resolver passes.
+                    false,
+                )
+                .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+                // A `technique: recompute` pin (→ `RegionRecompute`) is
+                // simply not THIS live cell: skip the source and let the
+                // caller's own default apply, exactly as the sibling
+                // resolvers do for a choice they have no lowering for. A
+                // `write: diff_patch` pin routes here too, but only when its
+                // underlying recompute is `PerGroupRecompute` — the sole
+                // recompute `resolve_cell_choice` ever grants
+                // `DeleteLeg::Complete` (the region `DeleteInsert` default
+                // has no lowering and fails loud by name rather than
+                // silently falling through to the default write);
+                // [`resolve_repair_write`] carries the full decision table.
+                let comparability = model_property_vector(sql, &JoinContext::new())
+                    .map(|v| v.comparability)
+                    .unwrap_or_default();
+                let Some(write) = resolve_repair_write(
+                    &chosen,
+                    group_columns,
+                    &comparability,
+                    &cell.row_identity,
+                    &cell.group,
+                )?
+                else {
+                    continue;
+                };
+                // The cell's own derived slice — obligation 4's bounded
+                // per-group read footprint, matched to the trigger's own
+                // source (never another source's clamp).
+                let Some(slice) = cell
+                    .scans
+                    .iter()
+                    .find(|c| c.source == facts.name)
+                    .or_else(|| cell.scans.first())
+                else {
+                    bail!(
+                        "MaintenanceRepairSliceMissing: a Technique::PerGroupRecompute cell for \
+                         group '{}' on source '{}' carries no derived ScanClamp — the bounded \
+                         per-group read slice is admission obligation 4 and is never assumed",
+                        cell.group,
+                        facts.name,
+                    );
+                };
+                // P9 (`docs/specs/incremental_models.md` §"The repair
+                // family" — "Obligation 7 over a `mutable_snapshot`
+                // source"): a source with no native change feed and no
+                // tombstone/change history needs the group-grain sidecar
+                // diff to witness a wholly-deleted group; every other
+                // posture keeps the ordinary clamped current-source scan.
+                let discovery =
+                    if discovery_posture(facts.mutation) == RepairDiscoveryPosture::SidecarDiff {
+                        if dialect != SqlDialect::DuckDB {
+                            return Err(BackendError::unsupported(
+                                dialect.name(),
+                                "group-grain fingerprint-sidecar affected-key discovery for a \
+                             mutable_snapshot repair source (P9)",
+                            )
+                            .into());
+                        }
+                        let digest_columns: Vec<String> =
+                            match cell.fingerprint_projections.get(&facts.name) {
+                                Some(FingerprintProjection::Columns(cols)) => {
+                                    cols.iter().cloned().collect()
+                                }
+                                _ => Vec::new(),
+                            };
+                        if digest_columns.is_empty() {
+                            bail!(
+                            "MaintenanceRepairDigestColumnsMissing: a Technique::PerGroupRecompute \
+                             cell for group '{}' resolved a MutableSnapshot delta posture on \
+                             source '{}' with no P4 fingerprint projection columns — the \
+                             group-grain sidecar digest has nothing to hash",
+                            cell.group,
+                            facts.name,
+                        );
+                        }
+                        RepairDiscovery::SidecarDiff { digest_columns }
+                    } else {
+                        RepairDiscovery::ClampedScan
+                    };
+                return Ok(Some((
+                    facts.name.clone(),
+                    cell.clone(),
+                    key,
+                    slice.clone(),
+                    write,
+                    discovery,
+                )));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// The affected-key relation a repair reads: the distinct group keys present
+/// in the mutated source over the cell's own bounded slice, projected as a
+/// single canonical `delta_key` column — the same expression
+/// ([`smelt_logical::maintenance::emit::key_expr_for_columns`])
+/// [`emit_fingerprint_sidecar_diff`]/[`emit_repair_group_sidecar_diff`]
+/// project, so the append-only clamped-scan path and the `mutable_snapshot`
+/// group-grain sidecar-diff path ([`diff_repair_group_sidecar_changed_keys`] +
+/// [`repair_keys_literal_select`])
+/// yield the SAME one-column relation shape — [`emit_per_group_recompute`]
+/// joins against it by key EXPRESSION, never by raw key columns, because a
+/// deleted group's typed column values are unrecoverable by construction.
+///
+/// Pure string builder, per this module's "callers resolve strings, emitters
+/// assemble" contract — [`emit_per_group_recompute`] consumes this as opaque
+/// `SELECT` text. The clamp is pushed into **this** read (and only this
+/// one): the widened source band is what bounds how many groups a repair
+/// touches, while the recompute of each touched group must stay unbounded
+/// so the group is recomputed whole (see
+/// [`repair_candidate_select`]).
+///
+/// `clamp: None` yields the unpredicated read. That branch is only reachable
+/// where admission already proved the slice by another route —
+/// `repair::admit_per_group_recompute` refuses `RepairSliceUnbounded` rather
+/// than admitting a clamp-less cell, so this is not a silent widening path.
+pub fn repair_affected_keys_select(
+    source_table: &str,
+    key: &[String],
+    clamp: Option<&ScanClamp>,
+    region: &Region,
+) -> String {
+    let key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(key);
+    match clamp {
+        Some(clamp) => format!(
+            "SELECT DISTINCT {key_expr} AS delta_key FROM {source_table} WHERE {}",
+            widened_scan_predicate(clamp, region)
+        ),
+        None => format!("SELECT DISTINCT {key_expr} AS delta_key FROM {source_table}"),
+    }
+}
+
+/// The candidate relation a repair stages: the model's **full** (unwindowed)
+/// recompiled SQL, semi-joined to `affected_keys_select`'s single-column
+/// `delta_key` relation.
+///
+/// Full, not windowed, because the repair family's promise is that an
+/// affected group's stored value equals a full refresh of that group — a
+/// non-invertible combiner (`MAX`) over a retracted contribution cannot be
+/// fixed from a window's rows alone. The semi-join is what keeps the
+/// recompute *bounded*: only the groups the affected-keys read named are
+/// recomputed. `EXISTS` rather than a row-value `IN`, so a composite key
+/// lowers identically across dialects. The join compares
+/// [`repair_affected_keys_select`]'s own canonical key expression over the
+/// candidate's key columns against `delta_key`, mirroring
+/// [`repair_slice_predicate`]'s and `emit_per_group_recompute`'s identical
+/// shape.
+/// Widen `clean_sql` (the model's own raw, pre-compile SELECT) with one
+/// `, <per_partition_expr> AS <name>` per `state_columns` — a named wrapper
+/// over [`smelt_logical::maintenance::emit::state_augmented_projection`]
+/// with the repair path's own error text, so the widening is independently
+/// unit-testable rather than inlined at each call site
+/// (`docs/outcomes/20260809-repair-family/phases/10-plan.md`). Mirrors
+/// `smelt-runtime::cumulative::execute_windowed_keyed`/
+/// `execute_snapshot_reconcile`'s own use of the same emitter: the fold's
+/// create/merge path already carries a decomposed combiner's hidden state
+/// columns in the physical table, so a repair's own candidate/insert must
+/// supply them too, or the `INSERT`'s implicit column list mismatches the
+/// table. `state_columns.is_empty()` returns `clean_sql` unchanged.
+pub fn repair_augmented_model_sql(
+    clean_sql: &str,
+    state_columns: &[smelt_logical::analysis::decomposed_state::StateColumn],
+) -> Result<String> {
+    smelt_logical::maintenance::emit::state_augmented_projection(clean_sql, state_columns).map_err(
+        |_| {
+            anyhow::anyhow!(
+                "Failed to append decomposed-state columns to a repair candidate: the model's \
+                 SELECT could not be parsed"
+            )
+        },
+    )
+}
+
+pub fn repair_candidate_select(
+    full_model_sql: &str,
+    key: &[String],
+    affected_keys_select: &str,
+) -> String {
+    let candidate_key_columns: Vec<String> = key
+        .iter()
+        .map(|k| format!("__smelt_repair_candidate.{k}"))
+        .collect();
+    let candidate_key_expr =
+        smelt_logical::maintenance::emit::key_expr_for_columns(&candidate_key_columns);
+    format!(
+        "SELECT __smelt_repair_candidate.* FROM ({full_model_sql}) AS __smelt_repair_candidate \
+         WHERE EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
+         {candidate_key_expr} = __smelt_repair_keys.delta_key)"
+    )
+}
+
+/// Inputs to refresh the group-grain fingerprint sidecar transactionally
+/// with a repair write (P9, `docs/outcomes/20260809-repair-family/phases/
+/// 09-plan.md` task 6) — passed to [`execute_per_group_recompute`]/
+/// [`execute_diff_patch`] only when the live cell's discovery is
+/// [`RepairDiscovery::SidecarDiff`]; `None` for the ordinary clamped-scan
+/// path, which has no sidecar partition to refresh.
+pub struct RepairSidecarRefresh<'a> {
+    pub schema: &'a str,
+    pub source_address: &'a str,
+    pub source_table: &'a str,
+    pub group_key: &'a [String],
+    pub digest_columns: &'a [String],
+    pub model_sql: &'a str,
+}
+
+/// Execute a live `Technique::PerGroupRecompute` cell
+/// ([`resolve_live_per_group_recompute_cell`]) via the repair family's
+/// targeted `DELETE`+`INSERT` over the affected-key relation
+/// ([`emit_per_group_recompute`]) — the same emitter → `retry_backend_call`
+/// → [`Backend::execute_statement_group`] shape
+/// [`execute_staged_membership_recompute`] uses, so the executed text is
+/// exactly the single owner's output (`docs/specs/incremental_models.md`
+/// §"Statement emission (single owner)").
+///
+/// `sidecar_refresh: Some(..)` (a [`RepairDiscovery::SidecarDiff`] cell)
+/// routes the SAME emitted [`StatementGroup`] through
+/// [`refresh_repair_group_sidecar`] instead of a bare
+/// [`Backend::execute_statement_group`] call — the group-grain sidecar
+/// partition refreshes in the SAME backend transaction as this write
+/// (mirroring [`refresh_fingerprint_sidecar`]'s own transactional shape),
+/// so a failed write leaves the sidecar untouched rather than
+/// half-committed.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_per_group_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    affected_keys_select: &str,
+    candidate_select: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+    sidecar_refresh: Option<&RepairSidecarRefresh<'_>>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = repair_staged_relation(table);
+    let group = emit_per_group_recompute(
+        &full_table,
+        &staged_relation,
+        key,
+        affected_keys_select,
+        candidate_select,
+        dialect,
+    );
+    match sidecar_refresh {
+        None => {
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("per-group recompute failed for '{full_table}': {e}")
+                })?;
+        }
+        Some(refresh) => {
+            crate::execute::retry_backend_call(retry, || {
+                refresh_repair_group_sidecar(
+                    backend,
+                    refresh.schema,
+                    refresh.source_address,
+                    refresh.source_table,
+                    refresh.group_key,
+                    refresh.digest_columns,
+                    refresh.model_sql,
+                    &group,
+                )
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "per-group recompute (with group-grain sidecar refresh) failed for \
+                     '{full_table}': {e}"
+                )
+            })?;
+        }
+    }
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// The staged temp relation name a repair uses for `table` — one derivation,
+/// so a parity test (and the technique preview) can name the same relation
+/// the live run does without guessing.
+pub fn repair_staged_relation(table: &str) -> String {
+    format!("__smelt_repair_{table}")
+}
+
+/// The staged temp relation name a `diff_patch` write over a repair cell
+/// uses for `table` — a distinct prefix from [`repair_staged_relation`] so a
+/// parity test can name each group's own relation without ambiguity.
+pub fn diff_patch_staged_relation(table: &str) -> String {
+    format!("__smelt_diff_patch_{table}")
+}
+
+/// The `diff_patch` slice restriction for a repair cell: the candidate's own
+/// slice is the affected-key set, not a partition region
+/// ([`emit_diff_patch`]'s doc comment) — an `EXISTS` over the affected-keys
+/// read's single-column `delta_key` relation, `table`-qualified on every key
+/// column (via the same canonical key expression
+/// [`repair_affected_keys_select`]/[`repair_candidate_select`] use) so it
+/// composes unambiguously into both the update-leg and delete-leg `DELETE`s
+/// `emit_diff_patch` builds.
+pub fn repair_slice_predicate(table: &str, key: &[String], affected_keys_select: &str) -> String {
+    let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
+    let table_key_expr = smelt_logical::maintenance::emit::key_expr_for_columns(&table_key_columns);
+    format!(
+        "EXISTS (SELECT 1 FROM ({affected_keys_select}) AS __smelt_repair_keys WHERE \
+         {table_key_expr} = __smelt_repair_keys.delta_key)"
+    )
+}
+
+/// Execute a `write: diff_patch` pin over a live `Technique::PerGroupRecompute`
+/// cell ([`resolve_live_per_group_recompute_cell`]) via [`emit_diff_patch`] —
+/// same emitter → `retry_backend_call` → [`Backend::execute_statement_group`]
+/// shape [`execute_per_group_recompute`] uses, so the executed text is
+/// exactly the single owner's output (`docs/specs/incremental_models.md`
+/// §"Statement emission (single owner)"). `sidecar_refresh` carries the same
+/// meaning as [`execute_per_group_recompute`]'s own parameter.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_diff_patch(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    slice_predicate: &str,
+    delete_leg: &smelt_logical::maintenance::diff_patch::DeleteLeg,
+    retry: &crate::execute::RetryPolicy<'_>,
+    sidecar_refresh: Option<&RepairSidecarRefresh<'_>>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = diff_patch_staged_relation(table);
+    let group = smelt_logical::maintenance::emit::emit_diff_patch(
+        &full_table,
+        &staged_relation,
+        key,
+        candidate_select,
+        compared_columns,
+        slice_predicate,
+        delete_leg,
+        dialect,
+    );
+    match sidecar_refresh {
+        None => {
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
+                .map_err(|e| anyhow::anyhow!("diff_patch write failed for '{full_table}': {e}"))?;
+        }
+        Some(refresh) => {
+            crate::execute::retry_backend_call(retry, || {
+                refresh_repair_group_sidecar(
+                    backend,
+                    refresh.schema,
+                    refresh.source_address,
+                    refresh.source_table,
+                    refresh.group_key,
+                    refresh.digest_columns,
+                    refresh.model_sql,
+                    &group,
+                )
+            })
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "diff_patch write (with group-grain sidecar refresh) failed for \
+                     '{full_table}': {e}"
+                )
+            })?;
+        }
+    }
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// A live key-addressed model-edge cell as
+/// [`resolve_live_key_addressed_model_edge_cell`] returns it: the upstream
+/// edge's own name (`== key_scope.from`), the cell itself, its `KeyScope`
+/// (the downstream's own key columns to restrict the recompute to), the
+/// upstream's own `KeyedUpsert` key columns (the group-grain sidecar's own
+/// `group_key`), the digest column set the sidecar hashes (derived from the
+/// downstream's own CLEAN sql — never recomputed against compiled SQL, which
+/// carries physical table names rather than `smelt.*` refs the walk-backed
+/// fingerprint classifier matches against), and the resolved write leg.
+pub type LiveKeyAddressedModelEdgeCell = (
+    String,
+    PlanCell,
+    smelt_logical::maintenance::KeyScope,
+    Vec<String>,
+    Vec<String>,
+    RepairWrite,
+);
+
+/// Resolve a `Technique::PerGroupRecompute` cell derived over a
+/// **key-addressed model edge** (`docs/specs/incremental_models.md`
+/// §"Upstream model edges") — the sibling of
+/// [`resolve_live_per_group_recompute_cell`] for a cell whose bounded read is
+/// a `KeyScope` (an upstream's own affected key set) rather than a
+/// `ScanClamp` over a declared source. The plan is derived exactly once here
+/// via [`smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges`]
+/// (maintenance-plan purity, root `CLAUDE.md`) — `model_edges` must be the
+/// SAME edge list (with each upstream's own derived `output_shape`) that
+/// produced the cell this run will execute.
+///
+/// Two fail-loud legs run BEFORE any backend call
+/// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
+/// - a non-DuckDB target dialect — the group-grain sidecar diff this cell's
+///   execution needs is DuckDB-only, matching every other sidecar consumer
+///   in this module;
+/// - a `key_scope.keys` column the upstream relation does not actually
+///   carry — checked against the upstream edge's own declared
+///   `ModelEdge::unique_key` (the upstream's real output-table column
+///   names), never against the downstream's own guess. A mismatch (the
+///   downstream renamed the key column it read) is refused by name rather
+///   than silently querying a column the upstream table does not have.
+pub fn resolve_live_key_addressed_model_edge_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    dialect: SqlDialect,
+) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        model_edges,
+        None,
+        &[],
+        &[],
+        &SourceReferentialIntegrity::new(),
+    ) else {
+        return Ok(None);
+    };
+
+    for cell in &result.plan.cells {
+        if cell.technique != Technique::PerGroupRecompute {
+            continue;
+        }
+        let Some(key_scope) = cell.key_scope.clone() else {
+            continue;
+        };
+        let Some(edge) = model_edges.iter().find(|e| e.name == key_scope.from) else {
+            bail!(
+                "MaintenanceKeyAddressedEdgeMissing: a key-addressed model-edge cell names \
+                 upstream '{}' but no matching ModelEdge was supplied — internal \
+                 inconsistency between plan derivation and the caller's own edge list",
+                key_scope.from
+            );
+        };
+        // The upstream's own proven `KeyedUpsert` key columns — the SAME
+        // `edge.output_shape` fact `append_model_edge_cells` reads to admit
+        // this cell in the first place (`derive.rs`'s `let Some(OutputDelta::
+        // KeyedUpsert { keys }) = &edge.output_shape`), never `edge.
+        // unique_key` (a separate, often-undeclared metadata field the walk-
+        // derived shape does not depend on).
+        let Some(smelt_logical::analysis::output_delta::OutputDelta::KeyedUpsert {
+            keys: upstream_keys,
+        }) = &edge.output_shape
+        else {
+            bail!(
+                "MaintenanceKeyAddressedEdgeMissing: a key-addressed model-edge cell names \
+                 upstream '{}', but its own ModelEdge no longer carries a KeyedUpsert \
+                 output_shape — internal inconsistency between plan derivation (which required \
+                 this fact to admit the cell) and the caller's own edge list",
+                edge.name
+            );
+        };
+        if dialect != SqlDialect::DuckDB {
+            return Err(BackendError::unsupported(
+                dialect.name(),
+                "key-addressed model-edge affected-key discovery over a KeyedUpsert upstream \
+                 (group-grain fingerprint-sidecar diff)",
+            )
+            .into());
+        }
+        if !key_scope
+            .keys
+            .iter()
+            .all(|k| upstream_keys.iter().any(|u| u.eq_ignore_ascii_case(k)))
+        {
+            bail!(
+                "MaintenanceKeyScopeColumnMissing: a key-addressed model-edge cell for upstream \
+                 '{}' names key column(s) {:?}, but the upstream's own proven KeyedUpsert key \
+                 columns are {:?} — a key_scope column absent from the upstream relation is \
+                 refused, never widened to every key",
+                edge.name,
+                key_scope.keys,
+                upstream_keys,
+            );
         }
         let comparability = model_property_vector(sql, &JoinContext::new())
             .map(|v| v.comparability)
             .unwrap_or_default();
-        let raw_suppression =
-            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
-        // Fold the first-build/definition-change-backfill posture (or an
-        // explicit `prefer`/`technique` override on this dimension) into
-        // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
-        // or `Trigger::Backfill` — no prior stored state on this group to
-        // diff against) resolves the unconditional matched arm by default,
-        // exactly as if the P2/P3 proof itself had refused — unless an
-        // explicit pin/preference overrides that default. This is the
-        // resolver's own rule, never a runtime special case here.
-        //
-        // A `technique: suppress` pin forcing suppression on over a genuine
-        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
-        // dimension just resolved above — where `resolve_cell_choice`'s
-        // refusal is now a real run error — there is currently NO
-        // pre-execution diagnostic gate for this write-*variant* pin
-        // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
-        // `continue` below on `Err` is a REAL silent fallback: an
-        // inadmissible variant pin is not refused here, it just falls
-        // through to the safe region-recompute batch loop instead of
-        // failing the run loudly. This is a known gap, not by design; see
-        // `docs/specs/incremental_models.md` §"Known Divergences" and
-        // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
-        // Phase G1 for the tracked follow-up to extend the diagnostic gate
-        // to this dimension — out of scope for Phase 2 of
-        // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
-        // family (Fold/Recompute/RederiveColumns) dimension.
-        let write_variant_result = resolve_write_variant(
-            &raw_suppression,
+        let chosen = resolve_cell_choice(
+            Some(cell),
             &cell.trigger,
-            cell.ledger_catch_up,
-            &overrides,
-        );
-        let Ok((suppression, _variant_reason)) = write_variant_result else {
+            &smelt_logical::maintenance::choice::EffectiveOverride {
+                prefer: None,
+                technique: None,
+            },
+            None,
+            false,
+        )
+        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+        let Some(write) = resolve_repair_write(
+            &chosen,
+            &key_scope.keys,
+            &comparability,
+            &cell.row_identity,
+            &cell.group,
+        )?
+        else {
             continue;
         };
-        return Ok(Some((source.clone(), cell, suppression)));
+        // The digest column set the group-grain sidecar hashes: whatever
+        // columns of the upstream this downstream's own (clean) SQL
+        // actually reads (`fingerprint::fingerprint_projection`, the same
+        // walk-backed leaf classifier `delta_shape_for_source` reuses for
+        // the ordinary repair-family sidecar), falling back to the
+        // upstream's own key columns alone when the projection cannot be
+        // classified — a narrower digest than the ideal (misses a
+        // payload-only mutation the downstream's SQL does not itself read),
+        // never a widening. Derived here, from `sql` (clean), not at
+        // execution time from compiled SQL — a compiled model's `smelt.*`
+        // refs are already rewritten to physical table names, which this
+        // walk cannot match against.
+        let digest_columns: Vec<String> = match fingerprint::fingerprint_projection(sql, &edge.name)
+        {
+            FingerprintProjection::Columns(cols) => cols.into_iter().collect(),
+            FingerprintProjection::FullRow { .. } => upstream_keys.clone(),
+        };
+        return Ok(Some((
+            edge.name.clone(),
+            cell.clone(),
+            key_scope,
+            upstream_keys.clone(),
+            digest_columns,
+            write,
+        )));
     }
     Ok(None)
+}
+
+/// The affected-key relation a key-addressed model-edge cell reads
+/// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
+/// group-grain fingerprint sidecar diff over the upstream's own output
+/// table, at the upstream's `KeyedUpsert` key grain, projected onto the
+/// downstream's own key columns
+/// ([`smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select`]).
+/// A DuckDB-only discovery route — `resolve_live_key_addressed_model_edge_cell`
+/// already refused a non-DuckDB dialect before any backend call is reached.
+///
+/// Returns an empty resolved key list when the sidecar diff discovers no
+/// changed upstream keys — the caller reports a no-op rather than executing
+/// an empty-but-real write.
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_key_addressed_affected_keys(
+    backend: &dyn Backend,
+    schema: &str,
+    upstream_source_address: &str,
+    upstream_table: &str,
+    upstream_output_table: &str,
+    upstream_keys: &[String],
+    digest_columns: &[String],
+    downstream_keys: &[String],
+    model_sql: &str,
+) -> std::result::Result<(Vec<String>, String), BackendError> {
+    let changed_keys = diff_repair_group_sidecar_changed_keys(
+        backend,
+        schema,
+        upstream_source_address,
+        upstream_table,
+        upstream_output_table,
+        upstream_keys,
+        digest_columns,
+        model_sql,
+    )
+    .await?;
+    let dialect = maintenance_dialect(backend.dialect());
+    let affected_keys_select =
+        smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
+            upstream_table,
+            upstream_keys,
+            downstream_keys,
+            &changed_keys,
+            dialect,
+        );
+    Ok((changed_keys, affected_keys_select))
+}
+
+/// Execute a live key-addressed model-edge cell
+/// ([`resolve_live_key_addressed_model_edge_cell`]): discover the upstream's
+/// changed keys via the group-grain fingerprint sidecar diff over its own
+/// output table, project them onto the downstream's own key columns
+/// ([`resolve_key_addressed_affected_keys`]), stage the downstream's full
+/// SQL semi-joined to that key relation
+/// ([`repair_candidate_select`]), and write via the resolved
+/// [`RepairWrite`] leg — [`execute_per_group_recompute`] for
+/// `TargetedDeleteInsert`, [`execute_diff_patch`] for `DiffPatch`. The
+/// upstream sidecar refreshes in the SAME backend transaction as this write
+/// ([`RepairSidecarRefresh`]), so a failed write never leaves the sidecar
+/// advanced past a change it did not actually consume.
+///
+/// An empty changed-key set is a legitimate no-op: this returns
+/// `Ok(None)` rather than executing an empty-but-real write, matching
+/// [`emit_key_addressed_affected_keys_select`]'s own well-typed-empty
+/// convention (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`
+/// task 5).
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_key_addressed_model_edge_cell(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    upstream_source_address: &str,
+    upstream_table: &str,
+    upstream_keys: &[String],
+    digest_columns: &[String],
+    downstream_keys: &[String],
+    clean_model_sql: &str,
+    compiled_model_sql: &str,
+    write: &RepairWrite,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<Option<ExecutionResult>> {
+    let full_table = format!("{schema}.{table}");
+    let (changed_keys, affected_keys_select) = resolve_key_addressed_affected_keys(
+        backend,
+        schema,
+        upstream_source_address,
+        upstream_table,
+        &full_table,
+        upstream_keys,
+        digest_columns,
+        downstream_keys,
+        clean_model_sql,
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "key-addressed affected-key discovery failed over upstream '{upstream_table}' for \
+             '{full_table}': {e}"
+        )
+    })?;
+    if changed_keys.is_empty() {
+        return Ok(None);
+    }
+    let candidate_select =
+        repair_candidate_select(compiled_model_sql, downstream_keys, &affected_keys_select);
+    let sidecar_refresh = RepairSidecarRefresh {
+        schema,
+        source_address: upstream_source_address,
+        source_table: upstream_table,
+        group_key: upstream_keys,
+        digest_columns,
+        model_sql: clean_model_sql,
+    };
+    let result = match write {
+        RepairWrite::TargetedDeleteInsert => {
+            execute_per_group_recompute(
+                backend,
+                schema,
+                table,
+                downstream_keys,
+                &affected_keys_select,
+                &candidate_select,
+                retry,
+                Some(&sidecar_refresh),
+            )
+            .await?
+        }
+        RepairWrite::DiffPatch {
+            compared_columns,
+            delete_leg,
+        } => {
+            let slice_predicate =
+                repair_slice_predicate(table, downstream_keys, &affected_keys_select);
+            execute_diff_patch(
+                backend,
+                schema,
+                table,
+                downstream_keys,
+                &candidate_select,
+                compared_columns,
+                &slice_predicate,
+                delete_leg,
+                retry,
+                Some(&sidecar_refresh),
+            )
+            .await?
+        }
+    };
+    Ok(Some(result))
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
@@ -1415,8 +2857,17 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         dialect,
     );
     let batches = backend.execute_sql(&diff_sql).await?;
+    Ok(extract_delta_keys(&batches))
+}
+
+/// Extract every non-NULL `delta_key` value from a query's result batches —
+/// shared by [`diff_fingerprint_sidecar_changed_keys`],
+/// [`diff_repair_group_sidecar_changed_keys`], and the stored-output-key
+/// read that function's degenerate-comparandum leg falls back to, so the
+/// arrow-array downcast lives in exactly one place.
+fn extract_delta_keys(batches: &[arrow::record_batch::RecordBatch]) -> Vec<String> {
     let mut keys = Vec::new();
-    for batch in &batches {
+    for batch in batches {
         let Some(col) = batch.column_by_name("delta_key") else {
             continue;
         };
@@ -1429,7 +2880,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
             }
         }
     }
-    Ok(keys)
+    keys
 }
 
 /// Write-side: refresh the fingerprint sidecar to match `source_table`'s
@@ -1479,6 +2930,224 @@ pub async fn refresh_fingerprint_sidecar(
     let dialect = maintenance_dialect(backend.dialect());
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, &digest_columns, dialect);
+    let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+        schema,
+        source_address,
+        &identity,
+        &stamp,
+        &digest_select,
+    );
+    let gc_sql = ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+        schema,
+        source_address,
+        &identity,
+        &digest_select,
+    );
+    backend
+        .execute_write_and_refresh_fingerprint_sidecar(
+            &ensure_sql,
+            write_group,
+            &refresh_sql,
+            &gc_sql,
+        )
+        .await
+}
+
+// ── P9: group-grain fingerprint sidecar (the repair family) ────────────
+// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`;
+// `docs/specs/sources.md` §"The fingerprint sidecar" — "Partition grain";
+// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+// over a `mutable_snapshot` source")
+//
+// Same sidecar table, same stamp/invalidation machinery as the per-row
+// grain above — only the partition identity and what one sidecar row
+// represents differ. A group-grain partition never collides with a P4
+// per-row partition: `repair_group_partition_identity`'s `repair:group=...`
+// text can never equal `fingerprint::projection_identity`'s own `cols:...`/
+// `full_row` shapes.
+
+/// The repair-scoped sidecar partition identity for a group-grain digest:
+/// `model` (via the caller's own `source_address`, unchanged — the
+/// partition key stays `(source_address, projection_identity, source_key)`)
+/// plus the group-key and digest-column sets, so two different repair cells
+/// over the SAME source (a different group key, or a different digest
+/// column set) land in different, non-colliding partitions, and neither
+/// collides with the per-row [`fingerprint::projection_identity`] partition
+/// a P4-driven consumer of the same source might also hold (that always
+/// starts `cols:` or is exactly `full_row`; this always starts `repair:`).
+fn repair_group_partition_identity(group_key: &[String], digest_columns: &[String]) -> String {
+    format!(
+        "repair:group={}:digest={}",
+        group_key.join(","),
+        digest_columns.join(",")
+    )
+}
+
+/// Build a single-column `delta_key` relation (the same shape
+/// [`repair_affected_keys_select`] and the sidecar-diff emitters project)
+/// from an already-resolved list of literal key values — the bridge between
+/// [`diff_repair_group_sidecar_changed_keys`]'s resolved `Vec<String>` (an
+/// executed read, not opaque SQL text) and every downstream repair builder
+/// ([`repair_candidate_select`], [`repair_slice_predicate`],
+/// [`emit_per_group_recompute`]), which all consume `affected_keys_select`
+/// as SQL text regardless of which discovery route produced it.
+///
+/// An empty `keys` list yields a well-typed EMPTY relation (`WHERE FALSE`),
+/// never an invalid `VALUES ()` — a repair with no affected keys this run is
+/// a legitimate (if unusual) outcome, not an error.
+pub fn repair_keys_literal_select(keys: &[String]) -> String {
+    if keys.is_empty() {
+        return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
+    }
+    let values = keys
+        .iter()
+        .map(|k| format!("('{}')", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT * FROM (VALUES {values}) AS __smelt_repair_group_keys(delta_key)")
+}
+
+/// Read-side: the repair family's group-grain affected-key set for a
+/// `MutationProfile::MutableSnapshot` source with no native change feed
+/// (P9). Mirrors [`diff_fingerprint_sidecar_changed_keys`]'s shape (ensure
+/// the sidecar table, detect staleness, run the emitter-authored diff), but
+/// over [`emit_repair_group_sidecar_diff`]'s group-grain digest and a
+/// repair-scoped partition identity ([`repair_group_partition_identity`]),
+/// and with one further obligation the per-row read has no analogue for:
+/// **an absent or stale-stamped comparandum cannot distinguish "a group
+/// that vanished" from "a group that never existed"**
+/// (`docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"), so for such a run the returned set
+/// additionally unions every key currently present in the stored
+/// `output_table` — a sound over-approximation that degenerates to a
+/// whole-table repair for that one run and self-heals once
+/// [`refresh_repair_group_sidecar`] populates a trustworthy comparandum.
+///
+/// DuckDB-only, matching every other sidecar consumer in this module — a
+/// non-DuckDB backend fails loud (`BackendError::unsupported`) rather than
+/// silently falling back to the unsound current-source scan.
+#[allow(clippy::too_many_arguments)]
+pub async fn diff_repair_group_sidecar_changed_keys(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    output_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    model_sql: &str,
+) -> std::result::Result<Vec<String>, BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    backend.execute_sql(&ensure_sql).await?;
+
+    let identity = repair_group_partition_identity(group_key, digest_columns);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
+
+    let exists_sql = ddl_duckdb::generate_fingerprint_sidecar_partition_exists_sql(
+        schema,
+        source_address,
+        &identity,
+    );
+    let exists_rows = backend.execute_sql(&exists_sql).await?;
+    let partition_absent = !exists_rows.iter().any(|batch| batch.num_rows() > 0);
+
+    let stale_check_sql = ddl_duckdb::generate_fingerprint_sidecar_stale_check_sql(
+        schema,
+        source_address,
+        &identity,
+        &stamp,
+    );
+    let stale_rows = backend.execute_sql(&stale_check_sql).await?;
+    let has_stale = stale_rows.iter().any(|batch| batch.num_rows() > 0);
+    if has_stale {
+        tracing::warn!(
+            source_address,
+            projection_identity = %identity,
+            "group-grain fingerprint sidecar stamp mismatch detected (model definition or \
+             digest inputs changed, or the stored stamp was corrupted); treating the stale \
+             partition as absent and widening the affected set to every currently-observed \
+             group plus every stored output group"
+        );
+    }
+
+    let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
+    let dialect = maintenance_dialect(backend.dialect());
+    let diff_sql = emit_repair_group_sidecar_diff(
+        source_table,
+        group_key,
+        digest_columns,
+        &sidecar_table,
+        source_address,
+        &identity,
+        &stamp,
+        dialect,
+    );
+    let batches = backend.execute_sql(&diff_sql).await?;
+    let mut keys = extract_delta_keys(&batches);
+
+    if partition_absent || has_stale {
+        let output_key_columns: Vec<String> = group_key
+            .iter()
+            .map(|k| format!("{output_table}.{k}"))
+            .collect();
+        let output_key_expr =
+            smelt_logical::maintenance::emit::key_expr_for_columns(&output_key_columns);
+        let stored_keys_sql = format!("SELECT {output_key_expr} AS delta_key FROM {output_table}");
+        let stored_batches = backend.execute_sql(&stored_keys_sql).await?;
+        keys.extend(extract_delta_keys(&stored_batches));
+        keys.sort();
+        keys.dedup();
+    }
+
+    Ok(keys)
+}
+
+/// Write-side: refresh the group-grain sidecar partition to match
+/// `source_table`'s CURRENT group-grain digests, riding in the SAME backend
+/// transaction as `write_group` — the repair's own write. Mirrors
+/// [`refresh_fingerprint_sidecar`]'s shape and transactional contract
+/// exactly (call AFTER [`diff_repair_group_sidecar_changed_keys`] has
+/// already read the affected set this refresh's write is about to
+/// consume), reusing the SAME DDL/DML the per-row sidecar uses
+/// (`generate_fingerprint_sidecar_table_ddl`,
+/// `generate_fingerprint_sidecar_refresh_sql`,
+/// `generate_fingerprint_sidecar_gc_sql`) — only the digest select and
+/// partition identity differ.
+///
+/// Populating this on the create/full-refresh path (in addition to every
+/// live repair run) is what keeps a model's FIRST incremental repair from
+/// taking the absent-comparandum degradation every single time: without an
+/// initial populate, every run would find no partition, union in the whole
+/// stored output, and never build a trustworthy baseline.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_repair_group_sidecar(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    model_sql: &str,
+    write_group: &StatementGroup,
+) -> std::result::Result<(), BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "group-grain fingerprint-sidecar refresh for a mutable_snapshot repair source (P9)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    let identity = repair_group_partition_identity(group_key, digest_columns);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
+    let dialect = maintenance_dialect(backend.dialect());
+    let digest_select =
+        emit_repair_group_digest_select(source_table, group_key, digest_columns, dialect);
     let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
         schema,
         source_address,
@@ -1569,15 +3238,106 @@ pub async fn execute_delete_insert_with_delta_restriction(
     window_end: &str,
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
-    let delta = if restrict_column.is_some() && closed {
+    let mut delta = if restrict_column.is_some() && closed {
         read_observed_delta_changed_keys(backend, schema, upstream_model, window_start, window_end)
             .await?
     } else {
         None
     };
+    // The declared-`referential_integrity` route's row-preservation leg is
+    // an *unverified* world-fact until a run actually probes it
+    // (`model_properties.md` §"Skeleton-source closure", §"Probe
+    // obligation"): a `JoinShape` (`LEFT JOIN`) route needs no runtime
+    // check, but a `DeclaredReferentialIntegrity` route must dispatch the
+    // count-preservation probe over the touched region *before* trusting
+    // the restriction it licenses — never after the write, and never
+    // silently skipped.
+    let restriction_taken =
+        restrict_column.is_some() && delta.as_deref().is_some_and(|d| !d.is_empty());
+    if restriction_taken {
+        if let Some(SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::DeclaredReferentialIntegrity { source },
+        }) = skeleton_source_closure
+        {
+            let ctx = crate::probes::ProbeContext {
+                probe_code: "SourceCountPreservationViolated".to_string(),
+                fact: "referential_integrity".to_string(),
+                model: table.to_string(),
+                cell: format!("{full_table} declared-route delta restriction"),
+                remedy: "correct or backfill the dimension's missing key, or drop the \
+                         declaration"
+                    .to_string(),
+            };
+            // The count-preservation probe's `driving_count`/`enriched_count`
+            // row shape does not match the shared `violation_count`/
+            // `sample_keys` contract `dispatch_probe` parses, so this site
+            // consults `should_dispatch` directly (the same cadence policy,
+            // the same single decision function) rather than reusing
+            // `dispatch_probe`'s generic executor.
+            match smelt_logical::maintenance::should_dispatch(
+                probe_policy.cadence,
+                probe_policy.run_ordinal,
+            ) {
+                smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
+                smelt_logical::maintenance::ProbeDispatch::Dispatch => {
+                    match emit_count_preservation_probe_from_body(body, source) {
+                        Some(probe) => {
+                            let batches = backend.execute_sql(&probe.sql).await?;
+                            let rows = crate::check_runner::batches_to_rows(&batches);
+                            let (driving_count, enriched_count) = rows
+                                .first()
+                                .and_then(|r| {
+                                    Some((
+                                        r.get("driving_count")?.clone(),
+                                        r.get("enriched_count")?.clone(),
+                                    ))
+                                })
+                                .ok_or_else(|| BackendError::ExecutionFailed {
+                                    model: table.to_string(),
+                                    message: format!(
+                                        "count-preservation probe for declared \
+                                         referential_integrity on '{source}' returned no \
+                                         driving_count/enriched_count row — refusing to trust \
+                                         an unchecked declared-route narrowing"
+                                    ),
+                                })?;
+                            let driving_count: i64 = driving_count.parse().unwrap_or(i64::MAX);
+                            let enriched_count: i64 = enriched_count.parse().unwrap_or(-1);
+                            if enriched_count < driving_count {
+                                return Err(BackendError::ExecutionFailed {
+                                    model: table.to_string(),
+                                    message: format!(
+                                        "SourceCountPreservationViolated: '{source}' declares \
+                                         referential_integrity, but the enrichment join over the \
+                                         touched region ({window_start}..{window_end}) returned \
+                                         {enriched_count} row(s) against {driving_count} driving \
+                                         row(s) — some driving row's join key has no match in the \
+                                         dimension; correct or backfill the dimension's missing \
+                                         key, or drop the declaration.{}",
+                                        crate::probes::probe_violation_suffix(&ctx)
+                                    ),
+                                });
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                source = %source,
+                                table = %table,
+                                "declared referential_integrity closure could not build a \
+                                 count-preservation probe from this model's own body — dropping \
+                                 the delta restriction and falling back to the widened scan"
+                            );
+                            delta = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
     let group = build_delete_insert_group_dispatched(
         &full_table,
         partition_col,
@@ -1659,6 +3419,11 @@ pub fn resolve_live_delta_restriction_facts(
         // which key temporal locality's routes do not gate.
         None,
         &[],
+        // This resolver only reads the model-edge `NewData` creation cell —
+        // a `ColumnAdded` trigger never affects it, so no deployed-schema
+        // snapshot is needed here.
+        &[],
+        &SourceReferentialIntegrity::new(),
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),
@@ -2203,6 +3968,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await;
         assert!(result.is_err());
@@ -2233,6 +3999,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();
@@ -2280,6 +4047,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();
@@ -2328,6 +4096,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap_err();
@@ -2348,7 +4117,7 @@ mod tests {
     /// `LocalitySlice::DeltaValues` through to `merge_sql` as a
     /// `TargetSlicePredicate::DeltaValues` over the step's *own* delta
     /// relation, never a margin-based range
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 2: "the slice is the delta's own partition values — exact
     /// regardless of key age").
     struct CapturingRule {
@@ -2401,6 +4170,7 @@ mod tests {
                 ))
             },
             &no_retry_policy(),
+            &crate::probes::ProbePolicy::per_run(),
         )
         .await
         .unwrap();
@@ -2454,6 +4224,7 @@ mod tests {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }
     }
 
@@ -2477,6 +4248,7 @@ mod tests {
             },
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
         }
     }
 

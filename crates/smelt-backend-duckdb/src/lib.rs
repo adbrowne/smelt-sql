@@ -1175,7 +1175,7 @@ mod tests {
     }
 
     // ── delete_and_insert_transactional: per-chunk transaction boundary ─────────
-    // (`incremental_models.md` §"First-run and backfill": "Each chunk's
+    // (`incremental_shapes.md` §"First-run and backfill": "Each chunk's
     // DELETE+INSERT is one backend transaction. INSERT failure rolls back
     // the chunk's DELETE.")
 
@@ -1647,7 +1647,7 @@ mod tests {
 
         let config_with_key = PartitionGrainConfig {
             unique_key: vec!["id".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(
@@ -1657,7 +1657,7 @@ mod tests {
 
         let config_without_key = PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(

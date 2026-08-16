@@ -161,11 +161,11 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | `name` | string | Model name (optional, inferred from filename) |
 | `materialization` | `table` \| `view` \| `ephemeral` | How to materialize. See [Materializations](materializations.md) for details on each type. |
 | `refresh` | `full` \| `incremental` \| `materialized_view` | Who keeps a stored table current, and how. See [Materializations](materializations.md#refresh-axis). |
-| `grain` | `partition` \| `key` \| `key_per_partition` | Required with `refresh: incremental` — what a stored row *is* and how it is addressed. See [Materializations](materializations.md#refresh-axis). |
+| `grain` | `partition` \| `key` | Optional check-only assertion with `refresh: incremental` — what a stored row *is* and how it is addressed. `key_per_partition` is a third derived label with no writable spelling. See [Materializations](materializations.md#refresh-axis). |
 | `timeseries.event_time_column` | string | Source-of-truth time column for time-based filtering |
 | `timeseries.partition_column` | string | Column the engine prunes / deletes on |
 | `timeseries.granularity` | `hour` \| `day` \| `week` \| `month` \| `quarter` \| `year` | Time granularity for partitioning |
-| `batched.unique_key` | string[] | Columns for row-level merge (optional, `grain: partition` only) |
+| `merge_key` | string[] | The write/dedup key a column-scoped MERGE technique writes on — never identity-conferring (optional). See [smelt.yml reference — Incremental Fields](../reference/smelt-yml.md#incremental-fields). |
 | `safety_overrides` | object | Named escape hatches for the partition-grain safety checks (`grain: partition` only). See [smelt.yml reference — Safety Overrides](../reference/smelt-yml.md#safety-overrides). |
 | `schema_evolution` | object | Schema-change strategy for incremental models. Controls how smelt handles output schema changes (e.g., `alter_and_backfill` or `full_refresh`). See [Schema Evolution](schema-evolution.md). |
 | `columns` | object/map | Per-column metadata (defaults and backfill expressions) used during schema evolution. See [Schema Evolution](schema-evolution.md). |

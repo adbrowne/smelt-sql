@@ -18,6 +18,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 duckdb = { workspace = true }
+proptest = { workspace = true }
 
 [features]
 default = []

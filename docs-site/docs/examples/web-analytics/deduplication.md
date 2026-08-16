@@ -153,20 +153,22 @@ Cells (2):
       corner:    FoldDelta
       technique: KeyedFold
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
-      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
       write variant: suppressed (preference — steady-state trigger over prior state)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      contract:  default
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
-      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
 
 Key temporal locality:
@@ -187,6 +189,18 @@ Inbound edges: sources.raw.events
       clock:    event_time_column=event_date partition_column=event_date granularity=Day
       identity: (none)
       derived grain: partition
+      delta type: append-only within window
+
+Probes (2):
+  cadence: per_run
+  - fact: mutation_profile.kind: append_only
+      probe: SourceMutationProfileViolated
+      licensed cell: main.silver_events_deduped (declared)
+      cost: +1 query per consuming run
+  - fact: key_recurrence
+      probe: KeyedRecurrenceBoundViolated
+      licensed cell: main.silver_events_deduped keyed merge
+      cost: +1 query per consuming run
 ```
 
 Two things the previous page's refusal didn't have:
@@ -337,14 +351,9 @@ of the whole table.
 A third capability — skipping the merge's write entirely when a key's
 folded state didn't actually change — needs to read the stored rows to
 compare against, and only a bounded target scan makes that comparison
-cheap enough to be worth doing. That's exactly the `write variant:
-suppressed` line in the `smelt explain` output above: on a steady-state
-run like this one, the merge's matched arm gains an `IS DISTINCT FROM`
-guard, and a re-run whose delta reproduces the stored state writes zero
-rows. The locality this page establishes is what keeps that comparison
-proportional to the touched slice instead of a scan of every stored key —
-see [Conditional writes](../../guide/incremental-models.md#conditional-writes)
-for the full mechanism.
+cheap enough to be worth doing. That machinery isn't wired up yet; the
+locality this page establishes is what will make it affordable when it
+lands.
 
 If you've built this in other tools: dbt and SQLMesh both treat "dedup a
 key" and "partition a table" as separate concerns you reach for

@@ -264,12 +264,6 @@ pub trait Backend: Send + Sync {
                             self.delete_and_insert_transactional(schema, name, &partition, sql)
                                 .await?;
                         }
-                        IncrementalStrategy::Append => {
-                            self.insert_into_from_query(schema, name, sql).await?;
-                        }
-                        IncrementalStrategy::InsertOverwrite => {
-                            self.insert_overwrite(schema, name, sql, &partition).await?;
-                        }
                     }
                 }
             }
@@ -326,7 +320,7 @@ pub trait Backend: Send + Sync {
     ) -> Result<(), BackendError>;
 
     /// Delete a partition range and insert the replacement rows as **one**
-    /// backend transaction (`docs/specs/incremental_models.md` §"First-run and
+    /// backend transaction (`docs/specs/incremental_shapes.md` §"First-run and
     /// backfill" — "Each chunk's DELETE+INSERT is one backend transaction.
     /// INSERT failure rolls back the chunk's DELETE; earlier committed
     /// chunks do not roll back.").

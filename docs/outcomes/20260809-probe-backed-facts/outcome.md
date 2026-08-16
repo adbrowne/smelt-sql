@@ -1,0 +1,257 @@
+# Outcome: Probe-backed world-facts
+
+**Created:** 2026-08-09
+**Status:** done
+**Source:** `docs/research/20260809-incremental-rethink.md` §2 P-C, §6 step 3
+**Spec anchors:** `docs/specs/model_properties.md` (model-scoped declarations), `docs/specs/incremental_models.md` (declared contract facts)
+
+## The outcome
+
+Every declared world-fact derives a cheap runtime probe that can falsify it —
+the way the recurrence-bound and count-preservation probes already work.
+"Declared" comes to mean "checked at run time", not "trusted forever": a
+declaration is admissible only if a probe exists for it, a firing probe is a
+named diagnostic with a remedy path, and the declared-facts surface becomes
+safe to grow (the contract lattice will grow it).
+
+## Success criteria (checkable)
+
+1. The `referential_integrity` tripwire exists: the closure narrowing it
+   licenses is verified by a probe in the runs that rely on it (closing the
+   admitted-ahead-of-verification divergence in `model_properties.md`).
+2. Declared functional dependencies, `bounded_domain`, source posture
+   (append-only), and `assert_monotonic` each have a probe emitter in the
+   single-owner maintenance layer; probe statements pass `statement_parity`.
+3. The spec states the admissibility rule: no probe, no declaration; each
+   declaration's section names its probe and firing semantics.
+4. A firing probe produces a named diagnostic carrying the violated fact and
+   the remedy (repair/refresh the affected cells), never a silent continue.
+5. Probe cadence is controllable (per-run default, off/periodic override) and
+   probe cost is visible in `smelt explain`.
+6. Conformance gate includes fact-violation recipes: a violated declaration is
+   caught by its probe, not by wrong output. All standing gates green.
+
+## Out of scope
+
+- Declared source lateness wiring into live scans (belongs to the contract
+  lattice's frozen-horizon work).
+- New declaration kinds — this outcome hardens the existing ones.
+- Widening *which* maintenance cells consult a declared `referential_integrity`
+  closure (today only the source-enrichment `UpstreamMutation` route can; a
+  model-edge creation cell's closure is always derived with RI `None`). Making
+  the tripwire fire for every run that relies on the declaration is criterion 1;
+  giving more runs a reason to rely on it is a separate narrowing-widening
+  decision, tracked in `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+
+## Phases
+
+| # | Phase | Status |
+|---|-------|--------|
+| 1 | Spec: the probe obligation rule — per-declaration probe, firing semantics, cadence, admissibility | done |
+| 2 | Probe emitters for FD, bounded_domain, append-only posture, assert_monotonic | done |
+| 3 | `referential_integrity` tripwire wired into the runs that consume the closure narrowing | done |
+| 4 | Runtime probe policy: `probes:` in `smelt-core`'s `Config`, cadence decision, single-owner dispatch + firing → named diagnostic (fact, cell, remedy); the two already-wired probes routed through it | done |
+| 5 | Live dispatch of the model-scoped probes (`assert_monotonic`, `functional_dependencies:`, `bounded_domain:`) at the pre-write site | done |
+| 6 | Live dispatch of the source append-only posture probe (recorded per-partition counts + frontier-fingerprint re-check) | done |
+| 7 | Conformance recipes: violated-fact scenarios caught by probes | done |
+| 8 | Surface: `ModelRunRecord.probes` population from the dispatch sites, explain rendering of probes + cost, docs-site update | done |
+
+## Decision log
+
+<!-- Dated one-liners appended by plan/implement steps. -->
+
+- 2026-08-10: Phase 3 done. `SkeletonSourceClosure::Closed` names its row-preservation route
+  (`RowPreservation::JoinShape`/`DeclaredReferentialIntegrity{source}`); `emit_count_preservation_
+  probe_from_body` builds the tripwire directly from a model's compiled body (matching the join by
+  physical table identifier, a new `TableRef::bare_path_text`, never `smelt.<path>`-ref resolution
+  — compiled bodies carry no unresolved refs); `execute_delete_insert_with_delta_restriction`
+  dispatches it before trusting a declared-route restriction, failing loud
+  (`SourceCountPreservationViolated`) before any write, or falling back to the widened scan when
+  unbuildable. `derive_model_maintenance_plan` gained a `source_referential_integrity` param,
+  threaded with real facts at the production Salsa call sites (`build_source_referential_integrity`,
+  mirroring `build_key_recurrences`). Runtime dispatch reachability for the declared route stays
+  scoped to the model-edge call site (model edges never carry RI, per Out of scope); a live
+  UpstreamMutation-driven dispatch path is unbuilt and not this phase's target. See
+  `phases/03-summary.md`.
+
+- 2026-08-10: Outcome activated. Phase table kept as scaffolded (no prior summary to reshape from). Phase 1 plans the probe registry as a spec-parsed standing gate (`crates/smelt-logical/tests/probe_obligation.rs`) so later phases flip Status cells from `not-yet` to `built` under test, rather than the table drifting from the emitters.
+- 2026-08-10: Phase 1 done. §"Probe obligation" lands in `model_properties.md` with an 8-row registry (2 built/built-unwired, 5 not-yet, 2 exempt); `sources.md`/`diagnostics.md`/`smelt_yml.md` cross-reference it. `diagnostics.md`'s unified table also picked up `SourceMutationProfileViolated`/`SourceUniqueKeyViolated`, previously defined only in `sources.md`'s own local table — a pre-existing gap the registry's citations exposed. `probes:` (`smelt_yml.md`) is spec-only; no `Config` field yet. See `phases/01-summary.md`.
+- 2026-08-10: Reshape — phase 4's row now names `probes:` landing in `crates/smelt-core/src/config.rs`
+  explicitly (phase 1's summary found no such field exists, and cadence has no runtime effect without
+  it); the work stays inside the outcome rather than becoming a rediscovery. Phase 2 planned as
+  pure emitters only: the four probes land as registry Status `built (unwired)`, all sharing one
+  `violation_count`/`sample_keys` result row (the contract `maintenance_driver`'s existing recurrence
+  gate already reads), with real-DuckDB executability tests since dispatch is phases 3–4. The
+  `unique_key`/`delta_identity` registry row stays `not-yet` — it is outside success criterion 2's
+  named four and is already recorded in `model_properties.md` §Known Divergences.
+
+- 2026-08-10: Phase 2 done. Four new pure emitters (`emit_functional_dependency_probe`,
+  `emit_bounded_domain_probe`, `emit_monotonicity_probe`, `emit_append_only_posture_probe`) land
+  in `crates/smelt-logical/src/maintenance/emit.rs`, each proven against a real DuckDB to
+  discriminate conforming from violating data; registry rows move `not-yet` → `built (unwired)`.
+  A design correction surfaced by the executability tests: the monotonicity probe's `LAG` must
+  order by a processed-row ordinal (`ROW_NUMBER() OVER ()`), never by the event-time column
+  itself, or every partition trivially sorts and no violation is detectable. See
+  `phases/02-summary.md`.
+
+- 2026-08-10: Phase 3 planned. Two facts found while planning shaped it: (a)
+  `SkeletonSourceClosure::Closed` records no *route* for its row-preservation
+  conjunct, so a consumer cannot tell a `LEFT JOIN`-proven closure from a
+  declaration-licensed one — phase 3 adds `Closed { row_preservation }` so the
+  probe obligation is structural, not a comment; (b) the production Salsa
+  derivation (`smelt-db/src/queries/maintenance.rs`) always passes an *empty*
+  `SourceReferentialIntegrity` map, so `derive_maintenance_plan_with_referential_integrity`
+  exists but has no production caller — the plan plumbs it, otherwise the wiring
+  would be unreachable in a real run. No phase rows added or reordered; the
+  which-cells-consult-RI widening is recorded under "## Out of scope" instead,
+  since criterion 1 asks that every run *relying* on the declaration probe, not
+  that more runs rely on it.
+
+- 2026-08-10: Reshape + phase 4 planned. The old phase 4 row bundled three separable jobs —
+  policy (`probes:` config + cadence), dispatch mechanics (execute, read the one-row contract,
+  raise the named diagnostic), and *four* new live dispatch sites with different scopes. Split:
+  phase 4 lands the policy + the one dispatch helper and re-routes the two probes that already
+  dispatch; phase 5 wires the three model-scoped probes (all share the run's compiled delta as
+  `scope_select`); phase 6 wires the append-only posture probe, whose scope is per-partition
+  recorded counts + a frontier fingerprint and therefore needs persisted state the other three
+  do not. Nothing left the outcome — criterion 6's fact-violation recipes need all four
+  dispatched, so all four keep a row. Conformance and surface rows shift to 7 and 8.
+  Decisions taken while planning: (a) phase 3's open question — cadence *does* govern the RI
+  and recurrence dispatches, per `smelt_yml.md` Semantics 10's project-wide policy; (b) a
+  **policy skip** trusts the declaration and records it unverified on the run, while a
+  **probe that cannot be built** stays fail-closed exactly as today — two distinct
+  non-dispatch cases that must not be collapsed; (c) `periodic`'s run ordinal comes from the
+  model's existing manifest history (`HistoryQuery::for_model`), so no new counter state.
+
+- 2026-08-10: Phase 4 done. `probes:` lands in `Config` (`ProbesConfig`/`ProbeCadence`,
+  fail-loud `periodic` cross-validation); `smelt-logical::maintenance::probe_cadence::
+  should_dispatch` is the pure cadence decision; `smelt-runtime::probes::dispatch_probe` is the
+  shared executor for probes speaking the `violation_count`/`sample_keys` contract. The
+  recurrence-bound probe routes through it directly; the count-preservation probe's
+  `driving_count`/`enriched_count` row shape (locked by `statement_parity`'s golden SQL) doesn't
+  fit the shared contract, so that site consults `should_dispatch` directly and reuses only the
+  shared `probe_violation_suffix` trailer — `dispatch_probe` stays the generic path for probes
+  that do speak the contract (phases 5–6's four). `ModelRunRecord.probes` exists and round-trips
+  legacy manifests but is not yet populated by any dispatch site — recorded as follow-up, not a
+  blocker. See `phases/04-summary.md`.
+
+- 2026-08-10: Reshape + phase 5 planned. Phase 4's deferred follow-up (`ModelRunRecord.probes` is
+  declared and round-trips but no dispatch site populates it) serves criterion 5 — probe status
+  visible in `smelt explain` — so it stays inside the outcome: phase 8's row now names it
+  explicitly rather than leaving it as a loose note in a summary. It is placed there, not in
+  phase 5, because phase 6 adds a fourth dispatch site and `explain` is the only consumer;
+  wiring the log once, after every site exists, avoids touching the sites twice. Phase 5 itself
+  is scoped to one new owner (`smelt-runtime::model_probes`) plus two `execute.rs` call sites —
+  the full-refresh/standard pre-write site and the incremental batch pre-write site — both of
+  which already have the run's `compiled.sql` (the run's own processed rows, exactly the
+  `scope_select` the three phase-2 emitters expect) and the existing
+  `probe_policy_for_model(...)` policy in scope.
+
+- 2026-08-10: Phase 5 done. `smelt_runtime::model_probes` (`declared_model_probes` +
+  `dispatch_declared_model_probes`) wires the three model-scoped probes into both the
+  full-refresh and incremental-batch pre-write sites in `execute.rs`, over the run's own
+  compiled SQL, governed by the existing `probe_policy_for_model`. The three registry rows
+  flip `built (unwired)` → `built`; only the append-only posture probe (phase 6) remains
+  unwired. Monotonicity's partition key is the declared `unique_key` else the timeseries
+  `partition_column` — always available. `dispatch_declared_model_probes` returns
+  `Vec<ProbeRecord>` for held/skipped probes, still unconsumed until phase 8 wires
+  `ModelRunRecord.probes`. See `phases/05-summary.md`.
+
+- 2026-08-10: Phase 6 planned. No reshape — phase 5's summary surfaced nothing new outside the
+  outcome, and its one deferred item (`ModelRunRecord.probes` population) already has phase 8's
+  row. Three decisions taken while planning, all forced by the fact that the phase-2 emitter
+  compares against a caller-held baseline that nothing yet persists: (a) the baseline lives in a
+  new `smelt-state` store (`source_postures.json`), written under the existing `state_io_lock`
+  critical section the landed-delta recording already uses; (b) a whole-partition fingerprint
+  changes on a *legitimate* append, so the fingerprint leg is gated to partitions strictly below
+  the recorded maximum ("frontier") while the count leg stays ungated — the gate is caller data
+  (`AppendOnlyBaselinePartition.check_fingerprint`), keeping the emitter pure, and a matching
+  `emit_append_only_baseline_snapshot` guarantees recorded and compared fingerprints are the same
+  construction; (c) a cadence-skipped run does NOT refresh the baseline, so the next dispatched
+  run still compares against the last verified point. Declared `mutation_profile.lateness` is not
+  consulted (outcome §Out of scope) — recorded as a known divergence rather than absorbed.
+
+- 2026-08-10: Phase 6 done. `source_postures.json` (`smelt-state::source_postures`) records a
+  per-source, per-partition baseline; `SourcePostureStore::closed_baseline` applies the frontier
+  gate (string-max partition value). `emit_append_only_posture_probe` gained
+  `AppendOnlyBaselinePartition.check_fingerprint` (a 4th `VALUES` column, `OR (check_fingerprint
+  AND …)` predicate); `emit_append_only_baseline_snapshot` is the extracted shared per-partition
+  current-state `SELECT`, reused by both the probe and the runtime's baseline refresh so recorded
+  and compared fingerprints are the same construction by definition. `smelt-runtime::source_probes`
+  (`append_only_posture_probes` + `dispatch_and_record_append_only_postures`) wires both the
+  full-refresh and incremental-batch pre-write sites in `execute.rs`, mirroring
+  `smelt-runtime::model_probes`'s shape. One design point the plan left open: an eligible source
+  with **no** recorded baseline yet builds a `SourcePostureAction::Establish` (not a `Verify`) —
+  nothing to compare against, so its first observation is unconditionally recorded as the baseline
+  under the same cadence gate a verification would use, rather than silently never establishing one.
+  This surfaced only once real DuckDB coverage existed and drove a mid-implementation redesign
+  (`DeclaredSourceProbe.action: SourcePostureAction` replacing a flat probe-SQL field). The
+  standing `maintenance_conformance` generative gate's `AppendLateRow` schedules legitimately
+  append into an already-closed partition — exactly the undispatched `mutation_profile.lateness`
+  gap this phase's spec edit documents — so `smelt-maintenance-testkit::render::render_smelt_yml`
+  now declares `probes: {cadence: off}`: that harness proves maintenance-technique equivalence,
+  a property already checked independently by its S-restricted oracle, not probe-firing behaviour
+  (which has its own dedicated coverage in `smelt-runtime`/`smelt-cli` tests). See
+  `phases/06-summary.md`.
+
+- 2026-08-10: Phase 7 planned. No reshape — phase 6's summary surfaced nothing new that serves the
+  success criteria and is not already carried by a row (`ModelRunRecord.probes` population sits in
+  phase 8; the `mutation_profile.lateness`/frontier-gate interaction is already under "## Out of
+  scope" and recorded as a known divergence). Three decisions taken while planning: (a) the
+  fact-violation recipes land as a new module *inside* the standing `maintenance_conformance`
+  target rather than as more `e2e` binary tests — criterion 6 says the **conformance gate**
+  includes them, and in-process `execute_project` staging keeps six recipes affordable; (b) the
+  pool is pinned to the spec by a coverage assertion that parses the §"Probe obligation" registry
+  and fails when a `built` row has no recipe, so the pool cannot drift behind the registry the way
+  a hand-listed set would; (c) criterion 6's "caught by its probe, not by wrong output" is made
+  checkable by a third leg — the same violating data under `probes: {cadence: off}` must produce
+  output that *differs* from the full-refresh oracle — but only for recipes whose violation is
+  end-state observable, with the non-observable ones carrying an explicit printed skip reason
+  rather than being quietly omitted. Phase 6's `render_smelt_yml` `probes: {cadence: off}` default
+  does not leak into this pool: these recipes are hand-staged projects that declare `probes:`
+  explicitly per leg.
+
+- 2026-08-10: Phase 7 done. `crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs`
+  lands a six-recipe pool (one per `built` registry row) inside the standing
+  `maintenance_conformance` target, with a spec-registry coverage parse pinning the pool to the
+  registry. Four recipes (`functional_dependencies`, `bounded_domain`, `append_only`,
+  `assert_monotonic`) are not end-state observable in their staged full-refresh/unconditional
+  shapes — each reason is recorded and printed as an explicit skip, never silently omitted; the
+  two narrowing-technique recipes (`referential_integrity`, `key_recurrence`) are, and their
+  `probes: {cadence: off}` legs show a real, silent divergence from the full-refresh oracle.
+  `referential_integrity`'s recipe drives `execute_delete_insert_with_delta_restriction` directly
+  (its only live production dispatch site, per phase 3's "Out of scope" note), not a staged
+  project — the same accommodation `key_recurrence`'s recipe (mirroring
+  `locality_route3_recurrence_check.rs`) already needed. A production finding surfaced and is
+  recorded, not fixed: `crates/smelt-runtime/tests/model_probes.rs`'s existing
+  `monotonicity_probe_fires_named_diagnostic` test passes for the wrong reason (a DuckDB binder
+  error's wrapped text happens to contain the diagnostic string). See `phases/07-summary.md`.
+
+- 2026-08-10: Phase 8 planned (the outcome's last row). No new rows: phase 7's one loose finding —
+  `smelt-runtime/tests/model_probes.rs::monotonicity_probe_fires_named_diagnostic` passes for the
+  wrong reason (a DuckDB binder error's wrapped text contains the diagnostic name) — is folded in
+  as a task rather than deferred, because criterion 6's "caught by its probe" evidence rests on
+  that test actually exercising the detection path. Three decisions taken while planning: (a)
+  `smelt explain` stays **offline** — probe SQL is built and rendered, never executed, so the
+  cost line is a static "+1 query per consuming run" statement, not a measurement; (b) the
+  explain-side probe list is a new `smelt-runtime::probe_plan` that **calls the dispatch owners**
+  (`model_probes::declared_model_probes` with a symbolic scope select, `source_probes`'s
+  eligibility predicate) rather than re-deriving which declaration yields which probe — dual
+  ownership of that mapping is what the probe-obligation registry exists to prevent; (c) the
+  cumulative-arm `ModelRunRecord` stays `probes: Vec::new()` with a comment, since no probe
+  dispatches on that arm today — an empty array there is accurate, not a gap.
+
+- 2026-08-10: Phase 8 done (the outcome's last row; outcome marked done). `ModelRunRecord.probes`
+  is populated at all three live dispatch sites; the new `smelt_runtime::probe_plan` module builds
+  the offline probe-set descriptor `smelt explain` renders (text `Probes (N):` section and `--json`
+  `probes` array — fact, diagnostic, licensed cell, cadence, static cost line), reusing
+  `model_probes`/`source_probes` for the four registry-`built` probes and reading
+  `PlanCell::skeleton_source_closure`/`KeyLocality::slice` directly for the two plan-driven rows.
+  Fixed phase 7's recorded finding (`monotonicity_probe_fires_named_diagnostic` passed for the
+  wrong reason). `docs/specs/cli.md` and three docs-site reference pages
+  (`smelt-yml.md`/`smelt-explain.md`/`state.md`) document the new surface. See
+  `phases/08-summary.md`.
+
+## Blocked
+
+<!-- Dated entries: phase, reason, candidate options. -->

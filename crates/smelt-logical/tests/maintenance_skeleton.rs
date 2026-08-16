@@ -7,8 +7,7 @@ use smelt_logical::maintenance::skeleton::{skeleton_columns, skeleton_roles, Ske
 /// `GROUP BY` keys and `SELECT DISTINCT` dedup keys occupy a
 /// row-membership position — they must classify as skeleton (not
 /// `Payload`), because a field added there is a grain change, never a
-/// column backfill (`incremental_models.md` §"The definition-change
-/// trigger").
+/// column backfill (`definition_deltas.md` §"The verdict per column group").
 #[test]
 fn group_by_and_dedup_columns_are_skeleton() {
     let sql = "SELECT pay_date, SUM(amount) AS revenue, COUNT(*) AS order_count \
@@ -76,4 +75,35 @@ fn order_by_columns_are_skeleton() {
         .map(|(_, r)| *r)
         .expect("rank present");
     assert_eq!(rank_role, SkeletonRole::Ordering);
+}
+
+/// `ORDER BY 2` (an ordinal reference) resolves against the select list's
+/// own projections — the second projected column, `rank`, must classify as
+/// `Ordering` the same way the named-column form does.
+#[test]
+fn order_by_ordinal_resolves_to_the_matching_select_item() {
+    let sql = "SELECT user_id, rank FROM smelt.sources.leaderboard ORDER BY 2";
+    let roles = skeleton_roles(sql, &["user_id".to_string()], None).expect("classifies");
+    let rank_role = roles
+        .iter()
+        .find(|(c, _)| c == "rank")
+        .map(|(_, r)| *r)
+        .expect("rank present");
+    assert_eq!(rank_role, SkeletonRole::Ordering);
+}
+
+/// `ORDER BY 1` — the boundary ordinal — must resolve to the first select
+/// item even when it is a plain payload column (not a declared key,
+/// partition column, or GROUP BY/DISTINCT member): pins the `ordinal >= 1`
+/// (not `> 1`) boundary check.
+#[test]
+fn order_by_ordinal_one_resolves_to_the_first_select_item() {
+    let sql = "SELECT score, user_id FROM smelt.sources.leaderboard ORDER BY 1";
+    let roles = skeleton_roles(sql, &["user_id".to_string()], None).expect("classifies");
+    let score_role = roles
+        .iter()
+        .find(|(c, _)| c == "score")
+        .map(|(_, r)| *r)
+        .expect("score present");
+    assert_eq!(score_role, SkeletonRole::Ordering);
 }

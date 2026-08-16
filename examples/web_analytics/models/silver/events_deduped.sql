@@ -9,7 +9,7 @@ timeseries:
 ---
 -- Event-grain dedupe under the **composed shape** — key-addressed (one row
 -- per `event_id`) *and* time-partitioned (`first_seen_date`)
--- (`docs/specs/incremental_models.md` §"Key temporal locality (the
+-- (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 -- time-partitioned output)"). This is the flagship demonstration of "the two
 -- axes are orthogonal": identity (`event_id`) and time (`first_seen_date`)
 -- are declared independently, and their combination is what makes this

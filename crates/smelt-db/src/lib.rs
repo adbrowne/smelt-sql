@@ -123,6 +123,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // path — they are never returned by extract_file_metadata itself:
         MetadataError::TimeseriesRequiredForPartitionGrain => None,
         MetadataError::MalformedTimeseries { .. } => None,
+        MetadataError::PlausibleContractOnSkeletonColumn { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
         MetadataError::PartitionGrainRequiresRefreshIncremental => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
@@ -145,6 +146,31 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // pure mapper does not have.
         MetadataError::UnknownColumnTestKind { .. } => None,
         MetadataError::ColumnTestOnUnknownColumn { .. } => None,
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation
+        // (a pure format check, no Salsa data needed) — handled here like
+        // `YamlParseError`, sharing its `ContractFrozenHorizonInvalid`
+        // diagnostic code with the distinct grain-admissibility check made by
+        // `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`
+        // (a dedicated arm further down in `check_file_diagnostics`, since
+        // that check needs the parsed `ModelMetadata.grain`).
+        MetadataError::ContractFrozenHorizonInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+            data: None,
+        }),
+        // Raised by `extract_single_model`'s strict `contract:` pre-validation,
+        // the same site and pattern as `ContractFrozenHorizonInvalid` above —
+        // disambiguated by `smelt_core::metadata`'s own field-level check
+        // rather than by this mapper.
+        MetadataError::ContractDeferralInvalid { .. } => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::ContractDeferralInvalid),
+            data: None,
+        }),
     }
 }
 
@@ -1117,8 +1143,13 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::KeyedForbidsWindowFunctions => DiagnosticCode::KeyedForbidsWindowFunctions,
         R::KeyedForbidsNondeterministic => DiagnosticCode::KeyedForbidsNondeterministic,
         R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
+        R::KeyedSnapshotSourceUnsupportedColumn => {
+            DiagnosticCode::KeyedSnapshotSourceUnsupportedColumn
+        }
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
+        R::KeyedOnceWriteUnproven => DiagnosticCode::KeyedOnceWriteUnproven,
+        R::KeyedStateColumnCollision => DiagnosticCode::KeyedStateColumnCollision,
         R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
@@ -1235,7 +1266,7 @@ fn ref_source_info(
 
 /// Resolve `ref_str` to a locality-admitted composed model's own output as
 /// a [`smelt_logical::maintenance::SourceFacts`] candidate driving source
-/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)" — "The output as a clocked source": "a downstream keyed model
 /// may take it as its clocked driving source"). `None` when the ref does
 /// not resolve to a maintained `grain: key` model whose own `timeseries:`
@@ -1319,10 +1350,175 @@ fn ref_model_source_facts(
 /// reads. `clock_col` is the upstream's own validated
 /// `timeseries.partition_column`, or `None` when it declares none — the
 /// derivation records that as a `MaintenanceReachNotDerivable` refusal.
+/// Extract the addressed section's own SQL body (frontmatter stripped) and
+/// [`smelt_core::metadata::ModelMetadata`] from a model file's full `text`,
+/// for either a single-model file (`leaf` unused) or a multi-model file
+/// (matched by declared `name:`). `None` for a generator file — its
+/// maintenance metadata lives on the emitted model, not the generator
+/// file's own frontmatter (not exercised by any current maintained-upstream
+/// fixture; resolving it is deferred), or a file with no frontmatter.
+fn resolved_model_sql_and_meta(
+    text: &str,
+    leaf: &str,
+) -> Option<(String, smelt_core::metadata::ModelMetadata)> {
+    match extract_file_metadata(text) {
+        Ok(FileMetadata::Single {
+            metadata,
+            sql_offset,
+        }) => Some((text[sql_offset..].to_string(), *metadata)),
+        Ok(FileMetadata::Multi { models }) => {
+            let section = models
+                .into_iter()
+                .find(|s| s.metadata.name.as_deref() == Some(leaf))?;
+            Some((
+                text[section.sql_range.clone()].to_string(),
+                section.metadata,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// This model's own `smelt.sources.*` refs as [`output_delta::SourceFacts`]
+/// — the per-model input the output-delta walk reads. Mirrors
+/// `smelt-runtime::propagation::model_output_delta_sources`'s declared-source
+/// collection over a `ModelFile`'s own `refs`, rebuilt here from `sql` text
+/// via [`smelt_logical::collect_path_refs`] since the Salsa side has no
+/// eagerly-loaded `ModelFile::refs` at this call site.
+fn model_own_source_facts(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    sql: &str,
+) -> Vec<smelt_logical::analysis::output_delta::SourceFacts> {
+    let mut sources = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for r in smelt_logical::collect_path_refs(sql) {
+        let Some(stripped) = r.strip_prefix("smelt.") else {
+            continue;
+        };
+        let Some(bare) = stripped.strip_prefix("sources.") else {
+            continue;
+        };
+        if !seen.insert(bare.to_string()) {
+            continue;
+        }
+        if let Some(info) = ref_source_info(db, workspace, project, &r) {
+            sources.push(
+                smelt_logical::analysis::output_delta::SourceFacts::from_source_info(bare, &info),
+            );
+        }
+    }
+    sources
+}
+
+/// Assemble the per-model [`smelt_logical::analysis::output_delta::
+/// ModelDeltaInput`] records for the cross-model output-delta fold
+/// (`derive_workspace_output_deltas`), scoped to every model transitively
+/// reachable from `file`'s own refs — mirrors `smelt-runtime::propagation::
+/// workspace_output_delta_verdicts`'s per-model input shape, but built by
+/// walking refs rather than over an eagerly-loaded `&[ModelFile]` (`smelt-db`
+/// has no such list at this call site). `address` is the ref's own
+/// `smelt.`-stripped path, lowercased — the SAME key
+/// [`smelt_logical::analysis::output_delta::derive_workspace_output_deltas`]
+/// inserts into its verdict map, so a model-reference leaf inside any
+/// reached model's own SQL resolves against it. Deduplicated by that address
+/// (not by `SourceFile`), which is what makes a cyclic model-ref graph
+/// terminate: each distinct address is queued at most once, so the walk is
+/// bounded by the number of distinct reachable addresses regardless of how
+/// many cycles connect them — never a per-model-reference recursive Salsa
+/// query (`CLAUDE.md` §"Salsa purity rule"), which could not terminate over
+/// a cycle.
+fn model_delta_inputs(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<smelt_logical::analysis::output_delta::ModelDeltaInput> {
+    let mut inputs = Vec::new();
+    let mut visited: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut frontier: Vec<SourceFile> = vec![file];
+    while let Some(f) = frontier.pop() {
+        let text = f.text(db);
+        for r in smelt_logical::collect_path_refs(text) {
+            let Some(stripped) = r.strip_prefix("smelt.") else {
+                continue;
+            };
+            let address = stripped.to_ascii_lowercase();
+            if !visited.insert(address.clone()) {
+                continue;
+            }
+            let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+            let Some(leaf) = segments.last().cloned() else {
+                continue;
+            };
+            let Some(resolved) = resolve_ref_path(db, workspace, segments) else {
+                continue;
+            };
+            if resolved.kind != RefKind::Model {
+                continue;
+            }
+            let Some(model_file) = resolved.source_file else {
+                continue;
+            };
+            let model_text = model_file.text(db);
+            let Some((sql, _meta)) = resolved_model_sql_and_meta(model_text, &leaf) else {
+                continue;
+            };
+            let project = find_project(db, workspace, model_file.project_root(db));
+            let sources = model_own_source_facts(db, workspace, project, &sql);
+            inputs.push(smelt_logical::analysis::output_delta::ModelDeltaInput {
+                address,
+                sql,
+                ctx: smelt_logical::analysis::join_shape::JoinContext::new(),
+                sources,
+            });
+            frontier.push(model_file);
+        }
+    }
+    inputs
+}
+
+/// Every upstream maintained-model edge for `file` (`incremental_models.md`
+/// §"Upstream model edges"): the model refs `file`'s own SQL makes that
+/// resolve to another maintained model in this project, each carrying that
+/// upstream's own validated clock and derived output-delta shape
+/// (`ModelEdge::output_shape`). Its own entry point (not only inlined within
+/// [`maintenance_plan_report`]) so `smelt explain`'s plan report and a
+/// direct caller — a test pinning the Salsa-side derivation itself — read
+/// the SAME edges rather than two independently-assembled lists. `file`
+/// with no frontmatter or no `Single`-model metadata contributes no edges.
+pub fn model_edges_for(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single { sql_offset, .. }) = extract_file_metadata(text) else {
+        return Vec::new();
+    };
+    let sql_body = &text[sql_offset..];
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    // The cross-model output-delta verdict map is folded ONCE per call (not
+    // once per ref) over every model transitively reachable from `file`'s
+    // own refs, then threaded into every `ref_model_edge` call so a
+    // model-reference leaf inside any upstream's own SQL resolves against
+    // it (`docs/outcomes/20260809-output-delta-typing/outcome.md` phase 9).
+    let model_verdicts = smelt_logical::analysis::output_delta::derive_workspace_output_deltas(
+        &model_delta_inputs(db, workspace, file),
+    );
+    refs.iter()
+        .filter_map(|r| ref_model_edge(db, workspace, r, &model_verdicts))
+        .collect()
+}
+
 fn ref_model_edge(
     db: &dyn salsa::Database,
     workspace: Workspace,
     ref_str: &str,
+    model_verdicts: &std::collections::BTreeMap<
+        String,
+        smelt_logical::analysis::output_delta::OutputDeltaFacts,
+    >,
 ) -> Option<smelt_logical::maintenance::derive::ModelEdge> {
     let stripped = ref_str.strip_prefix("smelt.")?;
     let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
@@ -1333,20 +1529,9 @@ fn ref_model_edge(
     }
     let file = resolved.source_file?;
     let text = file.text(db);
-    // Extract the addressed model's own `refresh:`/`timeseries:`.
-    let meta = match extract_file_metadata(text) {
-        Ok(FileMetadata::Single { metadata, .. }) => *metadata,
-        Ok(FileMetadata::Multi { models }) => {
-            models
-                .into_iter()
-                .find(|s| s.metadata.name.as_deref() == Some(leaf.as_str()))?
-                .metadata
-        }
-        // Generator-emitted upstreams: their maintenance metadata lives on the
-        // emitted model, not the generator file's frontmatter. Not exercised
-        // by any current maintained-upstream fixture; resolving it is deferred.
-        _ => return None,
-    };
+    // Extract the addressed model's own `refresh:`/`timeseries:` plus its
+    // own SQL body — the latter feeds `output_shape` below.
+    let (sql, meta) = resolved_model_sql_and_meta(text, &leaf)?;
     // Only a maintained (`refresh: incremental`) upstream delivers an
     // incremental delta to receive; a `full`-mode or view upstream is
     // excluded (no creation cell, no refusal).
@@ -1354,16 +1539,52 @@ fn ref_model_edge(
         return None;
     }
     let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    // Sibling spellings of `clock_col` within the upstream's own SQL
+    // (`ModelEdge::clock_col_aliases`'s doc comment) — derived from the same
+    // `text` the metadata above was extracted from.
+    let clock_col_aliases = clock_col
+        .as_deref()
+        .map(|c| smelt_logical::analysis::source_bounds::defining_expr_siblings(text, c))
+        .unwrap_or_default();
     // The upstream's own declared top-level `unique_key:` (`models.md`
     // §"The Relation Contract"), threaded through so a downstream's P1
     // skeleton-source-closure proof over this edge can prove the join
     // one-to-one (T3, `docs/plans/20260715-composed-axes-conditional-
     // maintenance.md` Phase E3) — `ModelEdge::unique_key`'s doc comment.
     let unique_key = meta.unique_key.clone().unwrap_or_default();
+    // The upstream's own derived output-delta shape (`ModelEdge::
+    // output_shape`'s doc comment): the meet across whatever per-column-group
+    // verdicts this upstream's own SQL derives — the SAME per-workspace fold
+    // `smelt-runtime::propagation::upstream_output_delta_groups` computes,
+    // never re-implemented differently here. `None` when the upstream
+    // contributes no groups at all (e.g. an unclassifiable `SELECT *`
+    // projection) rather than an optimistic guess.
+    let project = find_project(db, workspace, file.project_root(db));
+    let sources = model_own_source_facts(db, workspace, project, &sql);
+    let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
+    let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+        &sql,
+        &declared_unique_key,
+        partition_col.as_deref(),
+    );
+    let output_shape =
+        smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
+            &sql,
+            &smelt_logical::analysis::join_shape::JoinContext::new(),
+            &sources,
+            &skeleton,
+            model_verdicts,
+        )
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
+        clock_col_aliases,
         unique_key,
+        output_shape,
     })
 }
 
@@ -1390,8 +1611,9 @@ pub fn maintenance_plan(
     else {
         return Arc::new(Default::default());
     };
+    let resolved_grain = metadata.resolved_grain();
     if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || metadata.grain.is_none()
+        || resolved_grain.is_none()
     {
         return Arc::new(Default::default());
     }
@@ -1438,7 +1660,7 @@ pub fn maintenance_plan(
     let extra_model_sources: Vec<(
         smelt_logical::maintenance::SourceFacts,
         smelt_core::config::Granularity,
-    )> = if metadata.grain == Some(smelt_core::config::Grain::Key) {
+    )> = if resolved_grain == Some(smelt_core::config::Grain::Key) {
         refs.iter()
             .filter_map(|r| ref_model_source_facts(db, workspace, r))
             .collect()
@@ -1482,7 +1704,7 @@ pub fn maintenance_plan(
 /// inputs from Salsa accessors and calls pure derivation code — it never
 /// re-implements admission, locality, or ledger logic. Returns `None` for a
 /// model with no maintenance plan (not `refresh: incremental`, or no
-/// `grain:` declared).
+/// shape-defining fact declared and no `grain:` to resolve).
 pub fn maintenance_plan_report(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -1496,8 +1718,9 @@ pub fn maintenance_plan_report(
     else {
         return None;
     };
+    let resolved_grain = metadata.resolved_grain();
     if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
-        || metadata.grain.is_none()
+        || resolved_grain.is_none()
     {
         return None;
     }
@@ -1519,11 +1742,9 @@ pub fn maintenance_plan_report(
 
     // Upstream maintained-model edges (`incremental_models.md` §"Upstream model
     // edges"): the model refs that resolve to another maintained model in
-    // this project, each carrying that upstream's own validated clock.
-    let model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = refs
-        .iter()
-        .filter_map(|r| ref_model_edge(db, workspace, r))
-        .collect();
+    // this project, each carrying that upstream's own validated clock and
+    // derived output-delta shape.
+    let model_edges = model_edges_for(db, workspace, file);
 
     let project_scan_bounds = project
         .and_then(|p| (*crate::queries::project::project_maintenance_config(db, p)).clone())
@@ -1550,13 +1771,13 @@ pub fn maintenance_plan_report(
     // below via `derive_model_maintenance_plan`) is already agnostic to
     // provenance, so publish every referenced upstream model that clears
     // the locality gate into the same `SourceFacts` candidate list a
-    // declared source populates (`incremental_models.md` §"Key temporal
+    // declared source populates (`incremental_shapes.md` §"Key temporal
     // locality (the time-partitioned output)" — "The output as a clocked
     // source"). Scoped to `grain: key` models only — a `grain: partition`
     // downstream's pushdown against a composed upstream is already derived
     // through `smelt-logical`'s own model-graph registry, not this path.
     let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
-    if metadata.grain == Some(smelt_core::config::Grain::Key) {
+    if resolved_grain == Some(smelt_core::config::Grain::Key) {
         for r in &refs {
             if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
                 if !sources.iter().any(|s| s.name == facts.name) {
@@ -1595,7 +1816,9 @@ pub fn maintenance_plan_report(
     clocked_granularities.extend(model_source_granularities);
     let driving_source_granularity =
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
-    crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
+    let source_referential_integrity =
+        crate::queries::maintenance::build_source_referential_integrity(&source_refs);
+    let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
         &metadata,
@@ -1604,7 +1827,40 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-    )
+        // `smelt explain`'s report path has no I/O access to the
+        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
+        // own call site for the same rationale.
+        &[],
+        &source_referential_integrity,
+    )?;
+
+    // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
+    // row 9): only a `grain: key` model can carry state-bearing columns
+    // (`rules::cumulative::classify_cumulative` is the keyed classifier),
+    // and only when it actually admits — an unadmitted model contributes an
+    // empty summary rather than a guess. `classify_cumulative` is the single
+    // owner of which spellings are state-bearing; this call derives nothing
+    // beyond assembling its inputs from the resolved `SourceInfo`s already
+    // gathered above, per the Salsa purity rule.
+    if metadata.is_keyed() {
+        let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
+        for r in &refs {
+            if let Some(ts) = ref_timeseries_config(db, workspace, project, r) {
+                source_timeseries.insert(r.clone(), ts);
+            }
+        }
+        if let Ok(classification) = smelt_logical::classify_cumulative(
+            sql_body,
+            &refs,
+            &source_timeseries,
+            metadata.timeseries.is_some(),
+            &metadata.functional_dependencies,
+        ) {
+            result.state_columns = smelt_logical::state_column_summary(&classification);
+        }
+    }
+
+    Some(result)
 }
 
 #[salsa::tracked]
@@ -1903,6 +2159,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
+                smelt_core::metadata::MetadataError::PlausibleContractOnSkeletonColumn {
+                    ..
+                } => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::PlausibleContractOnSkeletonColumn,
+                )),
                 // `validate_timeseries` no longer raises this — whether
                 // keyed+timeseries: is admitted is decided by the locality
                 // gate in plan derivation
@@ -1986,6 +2248,95 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 data: None,
             })
             .accumulate(db);
+        }
+
+        // Contract-lattice `frozen_horizon` grain-admissibility check
+        // (`docs/specs/incremental_models.md` §"Contract relaxations
+        // (`contract:`)"). Format validity was already checked at
+        // frontmatter-parse time (`MetadataError::ContractFrozenHorizonInvalid`,
+        // handled above); this pure `smelt-logical` validator only checks that
+        // the declaration sits on a partition-grain model, sharing the same
+        // diagnostic code (single-owner rule: the oracle/validator, not this
+        // Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.frozen_horizon.is_some() {
+                let grain = metadata.grain.unwrap_or(smelt_core::config::Grain::Key);
+                if let Err(why) = smelt_logical::validate_frozen_horizon(grain) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractFrozenHorizonInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractFrozenHorizonInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+
+        // Contract-lattice `deferral` clock-admissibility check
+        // (`docs/specs/incremental_models.md` §"Contract relaxations
+        // (`contract:`)"). Format validity was already checked at
+        // frontmatter-parse time (`MetadataError::ContractDeferralInvalid`,
+        // handled above); this check resolves whether the declaration has an
+        // interval-representable clock to measure lag against — the model's
+        // own `timeseries:` clock for a model-level `deferral`, or the
+        // resolved source behind a `cells[].on` trigger for a cell-level
+        // one — and shares the same diagnostic code (single-owner rule: the
+        // oracle/validator, not this Salsa wrapper, decides admissibility).
+        if let Some(contract) = &metadata.contract {
+            if contract.deferral.is_some() {
+                let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+                if let Err(why) = smelt_logical::validate_deferral(
+                    metadata.timeseries.is_some(),
+                    &format!("model '{model_name}'"),
+                ) {
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!("ContractDeferralInvalid: {why}"),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::ContractDeferralInvalid),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+            if contract.cells.iter().any(|c| c.deferral.is_some()) {
+                let refs = smelt_logical::collect_path_refs(sql_body);
+                for cell in contract.cells.iter().filter(|c| c.deferral.is_some()) {
+                    let has_clock = cell.on != "backfill"
+                        && refs
+                            .iter()
+                            .filter_map(|r| {
+                                let stripped = r.strip_prefix("smelt.")?;
+                                let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+                                if bare != cell.on {
+                                    return None;
+                                }
+                                ref_source_info(db, workspace, project, r)
+                            })
+                            .next()
+                            .is_some_and(|info| {
+                                info.timeseries.is_some()
+                                    && info.mutation_profile.as_ref().is_some_and(|m| {
+                                        m.kind == smelt_core::sources::MutationProfile::AppendOnly
+                                    })
+                            });
+                    if let Err(why) = smelt_logical::validate_deferral(
+                        has_clock,
+                        &format!("cell on '{}'", cell.on),
+                    ) {
+                        DiagnosticAcc(Diagnostic {
+                            severity: DiagnosticSeverity::Error,
+                            message: format!("ContractDeferralInvalid: {why}"),
+                            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                            code: Some(DiagnosticCode::ContractDeferralInvalid),
+                            data: None,
+                        })
+                        .accumulate(db);
+                    }
+                }
+            }
         }
 
         // Declarative column test validation (`docs/specs/data_tests.md`
@@ -2111,6 +2462,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // `batched:` block — default to an empty config when the block is
             // absent so a bare `refresh: batched` model still reaches the rule.
             let default_batched_config = smelt_core::config::PartitionGrainConfig::default();
+            let plausible_columns: std::collections::BTreeSet<String> = metadata
+                .columns
+                .iter()
+                .filter(|(_, c)| c.contract == Some(smelt_core::metadata::Contract::Plausible))
+                .map(|(name, _)| name.clone())
+                .collect();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
@@ -2123,6 +2480,8 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 } else {
                     None
                 },
+                declared_functional_dependencies: &metadata.functional_dependencies,
+                plausible_columns: &plausible_columns,
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
             for rd in smelt_logical::detect_builtin_rules(&ctx) {
@@ -2164,6 +2523,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
+                    (
+                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
+                        format!(
+                            "column '{column}' occupies a row-membership/identity (skeleton) \
+                         position — a grain change, never a column backfill (EX-39, \
+                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                        ),
+                    )
+                }
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
                     grain,
                     tracking_plan,

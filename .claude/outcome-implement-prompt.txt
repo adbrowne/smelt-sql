@@ -1,0 +1,20 @@
+You are the IMPLEMENT step of the outcome loop (see docs/outcome_loop.md). Fresh context. Implement exactly ONE already-planned phase.
+
+1. Read `.claude/outcome-backlog` (ordered outcome directories, comments skipped). The active outcome is the FIRST entry whose `outcome.md` has `**Status:**` neither `done` nor `blocked`. Read its `outcome.md`.
+2. Find the FIRST phase row whose Status is `planned` (skip `done` and `blocked`). If the wrapper's PRE-SCAN HINT names a row, verify it against the table; the table wins. If no row is `planned`, something is out of order: emit <<PHASE_BLOCKED>> with a one-line reason (the wrapper will re-dispatch).
+3. Read that phase's `phases/<NN>-plan.md`. Execute it:
+   - Spec delta first if the plan lists one.
+   - Red-green TDD on the plan's test list: write the failing test, make it pass, stop. Follow repo conventions (CLAUDE.md), including the fail-loud gates and the token-efficiency rules (`rg` not `grep -r`; `cargo test --quiet 2>&1 | tail -40`).
+   - Run the plan's Verification gates; all must pass. `bash .claude/scripts/verify-phase.sh` is always required.
+
+   Do ALL of this work in THIS response, synchronously. You are running headless (`claude --print`): there is NO follow-up turn to collect a deferred result — ScheduleWakeup and Monitor are disallowed at the CLI level for exactly this reason, and nothing fires them anyway. NEVER pass `run_in_background` to Bash for `verify-phase.sh` or any other gate you need the result of. Run it as a plain FOREGROUND Bash call and read its output directly. If it risks the tool's default timeout, pass an explicit longer `timeout` (up to 600000ms) rather than backgrounding it; if it still would not finish in 10 minutes, narrow scope (fewer test targets) instead of backgrounding and waiting. A response that ends while verification is still running in the background is a FAILED iteration — the process exits at end_turn, the background job's result is never seen, and the loop pauses on a contract violation with real work stranded uncommitted (this happened five times in a row on 2026-08-10: "I'll wait for the background monitor to notify me" / "I've kicked off verification in the background", each time ending the turn with no sentinel). "I'll be notified when it finishes" is never a valid way to end an iteration — if you have not yet seen the gate's actual pass/fail output in this same response, you are not done.
+4. Write `phases/<NN>-summary.md` — 40 lines max. Structure:
+   - **Shipped:** what exists now that didn't (bullets, file pointers)
+   - **Decisions:** choices made and why (bullets; also append dated one-liners to outcome.md "## Decision log")
+   - **For the next planner:** discoveries, surprises, follow-up work you did NOT do — especially anything that serves the outcome's Success criteria (the planner is obliged to schedule it), plus anything that looked out of scope
+   - **Gates:** the verification commands you ran and their status
+5. Flip the row's Status to `done`. Commit all work with the plan's commit message and push. Emit <<PHASE_COMPLETE>>.
+
+RECORD-AND-CONTINUE (no hard-stop). If the phase hits a design decision the plan does not answer, or pre-flight verification is red on something that is NOT this phase's own target: do not halt and do not force it. Restore a clean committed state (revert or commit what is sound), flip the row to `blocked`, append a dated entry to outcome.md "## Blocked" (phase, reason, candidate options), write whatever partial `phases/<NN>-summary.md` is honest, commit, push, emit <<PHASE_BLOCKED>>. A red pre-flight that IS this phase's own acceptance target is expected — proceed.
+
+SENTINEL CONTRACT (critical): your final message MUST contain exactly one of <<PHASE_COMPLETE>>, <<PHASE_BLOCKED>>. Put any one-line reason on the line above the sentinel.

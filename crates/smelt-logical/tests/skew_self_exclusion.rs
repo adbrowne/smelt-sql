@@ -1,5 +1,5 @@
 //! Per-scope self-edge exclusion in the partition-skew fold
-//! (`docs/specs/incremental_models.md` §"Window independence and self-referential
+//! (`docs/specs/incremental_shapes.md` §"Window independence and self-referential
 //! models": the self-edge is never a skew anchor; `docs/specs/architecture.md`
 //! §"Property composition walk rule": the exclusion is resolved by the shared
 //! walk's per-scope alias map, never by a whole-text scan).

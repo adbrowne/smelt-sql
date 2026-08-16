@@ -21,6 +21,19 @@ The items below are the current priority queue, top to bottom. See completed ite
 
 The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation, the feature-sweep bug ledger, and the silent-failures hardening that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
 
+**Spec re-architecture (2026-08-12):** the incremental-models spec was rewritten from scratch
+per [`docs/research/20260811-delta-signatures-and-definition-deltas.md`](research/20260811-delta-signatures-and-definition-deltas.md)
+and split into three files: [`incremental_models.md`](specs/incremental_models.md) (delta
+signatures as the front door, the equivalence invariant, contract lattice, plan, frontier,
+graph layer), [`incremental_shapes.md`](specs/incremental_shapes.md) (the partition/key shape
+profiles — the demoted "four corners"), and [`definition_deltas.md`](specs/definition_deltas.md)
+(definition changes as deltas; plan-and-approve `smelt migrate`; the previously-unrecorded
+unwired-backbuild gap now recorded). Verified claim-preserving via the claim-inventory method
+(486 claims graded) plus adversarial IVM-expert and data-engineer reviews; both contract-lattice
+oracles were restated (the deferral oracle was vacuous as previously written; frozen horizon is
+now stated per output partition). Next steps are the research doc's §6 sequencing — scheduler
+consumes delta signatures; wire backbuild behind `smelt migrate`; lattice v2; proofs-as-product.
+
 **Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
 
 ### 1. Type-System Axes — Collation
@@ -40,7 +53,42 @@ Each axis is delivered end-to-end before the next begins: spec contract → soun
 
 As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
-### 3. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
+### 3. Safety-Overrides Review — Partition-Grain Admission Checks
+
+The partition-grain recompute-a-region quadrant admits SQL only past a set of per-cell safety
+checks (window functions, `HAVING`, `DISTINCT`, `LIMIT`, FROM/JOIN subqueries, non-deterministic
+functions), each individually bypassable via `safety_overrides.allow_<check>: true`
+(`incremental_shapes.md` §"Safety checks (per-cell admission for recompute-a-region)",
+`models.md` §Surface `safety_overrides`). The overrides were added as a uniform escape hatch when
+each check landed; they haven't been revisited as a set since, and at least some no longer look
+like the right shape for the underlying problem:
+
+- **Subqueries** (FROM/JOIN) are rejected wholesale unless overridden, but a `WITH` CTE already
+  flows through bound derivation via the body-structure classifier and isn't gated at all. The
+  gap looks like missing coverage rather than a genuine hazard — extending the same
+  body-structure classifier to FROM/JOIN subqueries would very likely let this check go away
+  as an override entirely rather than stay a bypass users reach for.
+- **Window functions** currently gate on a syntactic shape (`PARTITION BY <keys> ⊇
+  partition_column`, or a bounded `RANGE BETWEEN INTERVAL … PRECEDING` frame) and the override
+  just turns the check off, trusting the user to have gotten the frame right unchecked. A better
+  shape is likely an LSP code action: detect an inadmissible window spec and offer to rewrite it
+  into the minimal admissible form (add the missing `PARTITION BY` key, bound an unbounded
+  frame) — the user gets SQL that *is* provably safe rather than SQL the checker has stopped
+  looking at. Worth asking whether other checks (`HAVING`, `DISTINCT`) admit the same treatment.
+- **Non-deterministic functions**: the spec already flags `allow_nondeterministic` as dropping
+  the guardrail wholesale and calls it out as discouraged — this one is probably closest to
+  correctly shaped today (opt-in, recorded, but genuinely a "you are choosing to accept risk"
+  situation rather than a coverage gap).
+- **`LIMIT`** is correctly never overridable (survival depends on which other rows are present,
+  which differs run vs full refresh) and should stay that way.
+
+Next step: an audit pass per check — classify each as (a) a coverage gap the walk/classifier
+should just close (subqueries), (b) a candidate for an LSP quick-fix that emits the provably-safe
+rewrite instead of a bypass (window functions, possibly `HAVING`/`DISTINCT`), or (c) a genuine
+opt-in risk acceptance that should stay a recorded override (non-deterministic functions) — then
+a spec diff to `incremental_shapes.md` §"Safety checks" for whichever checks change shape.
+
+### 4. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
 
 SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script. The same machinery powers **backbuild change-detection** — deciding precisely which models a change forces to rebuild versus spares.
 
@@ -55,14 +103,15 @@ SQLMesh-style opt-in virtual data environments: cheap isolated environments that
 4. **Fold tracked type-system axes into the output fingerprint.** Precondition: `docs/specs/types.md` §11 sound-upper-bound contract (satisfied by ROADMAP item 4, nullability axis ✅). The fold must hash the structured `TypedColumn` (type + nullability — and, as later axes land, decimal precision/scale, timezone-awareness, collation) rather than a rendered display string, so display conventions can evolve without invalidating fingerprints. Verification gate: `cargo test -p smelt-db --test nullability_property_tests` must stay green after the fold, and the fingerprint soundness oracle (`fingerprint-equal ⇒ DuckDB relations identical`) must hold for schemas that differ only in nullability. Each subsequent axis (decimal, timezone, collation) extends this fold when it lands.
 5. **Backbuild change-detection** — the cross-model column-lineage analyser computing the full "eclipse" (downstream models spared by an output-preserving upstream change); the gating new analysis, and the substrate item #6 builds on.
 6. Polish: typed data-diff, GC/retention, forward-only.
+7. **Probe-gated G2 admission for backbuild synthesis.** Join-multiplicity changes (INNER→LEFT, LEFT→INNER, edited join conditions) refuse unconditionally in the backbuild-synthesis module today (`crates/smelt-logical/src/backbuild/`, research §4 G2). The future rung: admit the no-op subset data-dependently via a runtime count-preservation probe (`emit_count_preservation_probe` already exists) — e.g. INNER→LEFT is a no-op iff no row actually lacked a match. A data-dependent verdict is a different contract from the pure definition-diff module, so this lands with backbuild wiring, not before. See [`docs/research/20260802-backbuild-synthesis.md`](research/20260802-backbuild-synthesis.md) §4 G2.
 
 Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #2 and unlock fingerprint precision as they land.
 
-### 4. General Schema Migration on the VE Substrate
+### 5. General Schema Migration on the VE Substrate
 
 Generalise schema change management on top of the fingerprint + column-lineage machinery from #3. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
 
-### 5. Spark — Production Hardening
+### 6. Spark — Production Hardening
 
 The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow, Spark Connect / Databricks Connect). Remaining gaps to production-grade:
 
@@ -70,27 +119,40 @@ The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow
 - **JSON incompatibility rewrites** — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY`; emit compile-time warnings where no faithful rewrite exists.
 - **Authentication docs** — tokens, OAuth, and instance profiles for Databricks Connect / EMR / Dataproc.
 
-### 6. `smelt check` — LLM-Optimised Diagnostic CLI
+### 7. `smelt check` — LLM-Optimised Diagnostic CLI
 
 Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-### 7. Orchestrator Integration
+### 8. Orchestrator Integration
 
 Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
-### 8. PostgreSQL Backend
+### 9. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
-### 9. Databricks Support + Metrics-View Compatibility (low priority)
+### 10. Databricks Support + Metrics-View Compatibility (low priority)
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
 ---
 
 ## Recently Completed
+
+### ~~Keyed Frontier — column-family union + snapshot-reconcile executor~~ ✅ (August 9, 2026)
+
+5-phase plan ([plan](plans/20260809-keyed-frontier.md)) widening the keyed classifier past the direct-monoid families and building the second keyed run shape. Every family arrived with its admission-matrix conformance recipes including the refusal directions.
+
+- **Order-monotone overwrite** (`MAX_BY`/`MIN_BY`) classified and rendered with incumbent-wins ties, admitted window-forward, refused under snapshot-reconcile. Requires an explicit companion `MAX(<ord>)`/`MIN(<ord>)` projection, with `MAX_BY(x, x)` admitted as the degenerate self-companion.
+- **`KeyedReprocessedWindow`** — the ledger's reprocessing refusal is now a named diagnostic carrying the window bounds and the full-refresh remedy, not an unnamed `bail!`.
+- **Snapshot-reconcile run shape** — a keyed model over zero clocked sources derives the shape instead of refusing: plain-overwrite columns admit (incoming row wins), fold families refuse per the matrix, retained-departed-keys is the default, and event-time flags are rejected loudly.
+- **Once-write** (`COALESCE`) with an FD-backed provenance proof, the first production consumer of the functional-dependency declaration. The admitted surface is deliberately narrow: `COALESCE(MAX(col))` under a declared FD naming the *source* column, and `COALESCE(<unique_key col>, …)` key-derived. Fallback-bearing (`COALESCE(MAX(col), -1)`) and multi-candidate (`COALESCE(MAX(a), MAX(b))`) spellings refuse — each diverges from full refresh, and admitting them needs decomposed state. Fan-out joins and set-op barriers are structural disproofs no declaration can widen past.
+
+`BIT_XOR` was found to be graded idempotent, so a redelivered window cancelled its own contribution instead of refusing — fixed to ledger-keeping. The generative conformance pool could not have caught it (`KeyedCombiner` renders additive as `SUM` only), so it is guarded by a pinned hazard case; widening the pool is recorded as deferred work.
+
+Residues are itemized in `docs/specs/incremental_models.md` §Known Divergences — notably that a window-forward keyed run with missing or half-supplied event-time flags full-refreshes where the spec mandates refusal, `KeyedRetractableContribution` is unimplemented, and the ledger fold is transactional on DuckDB only. Ladder rungs 2–4 and the `smelt.latest`/`once`/`current` pattern functions need a spec pass first.
 
 ### ~~`smelt bakeoff` CLI~~ ✅ (July 20, 2026)
 
@@ -389,7 +451,7 @@ Proved the core thesis of opt-in virtual data environments — *reuse a physical
 - **Determinism detector**: structural deny-list (non-deterministic built-ins, parenless temporal specials, order-sensitive aggregates) + row-slice-without-total-order check, surfaced as `deterministic` on the result. Gated so anything flagged deterministic reproduces across two independent DuckDB builds. Closes §5.5's value axes; window-function non-determinism is the noted residual.
 - **Specs authored**: [`output_fingerprint.md`](specs/output_fingerprint.md) (normative), [`virtual_environments.md`](specs/virtual_environments.md) (staged orchestration design), [`run_state.md`](specs/run_state.md) (`.smelt/` layout); touched `architecture.md`, `incremental_models.md`, `schema_evolution.md`.
 
-Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #3](#3-virtual-environments--backbuild-change-detection-specs-authored-prototype-proven).
+Research: [`docs/research/20260601-virtual-environments.md`](research/20260601-virtual-environments.md). Next: the implementation queue under [What's Next #4](#4-virtual-environments--backbuild-change-detection-specs-authored-prototype-proven).
 
 ### ~~Typed Meta-Language — Phase E2: Multi-Model Production~~ ✅ (May 16, 2026)
 

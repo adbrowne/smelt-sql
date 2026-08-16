@@ -14,8 +14,9 @@ timeseries:
 # still the correct row identity for MP11's horizon-clamped column-scoped
 # `MERGE` (`PartitionLocal::Yes` corner) when a `raw.user_status` mutation
 # drives the `{status}` cell — the retired `batched.unique_key: [event_id]`
-# spelling this model used to carry here never fed row-identity derivation
-# for a partition-grain output either (`derive::ModelInputs::declared_unique_key`
+# sub-block spelling (now `merge_key:` in smelt.yml) this model used to
+# carry here never fed row-identity derivation for a partition-grain output
+# either (`derive::ModelInputs::declared_unique_key`
 # is empty for every `Grain::Partition`), so dropping it changes nothing.
 ---
 -- Fact (events) enriched with a CLOCKED, mutable dimension
@@ -27,7 +28,7 @@ timeseries:
 -- `raw.users`). `raw.user_status` is clocked (`timeseries.partition_column:
 -- changed_at`) and this join carries an explicit, derivable window
 -- predicate on that column relative to the fact's own `event_timestamp` —
--- `link_source` (`smelt-logical::maintenance::derive`) links it to the
+-- `project_source_link` (`smelt-logical::maintenance::derive`) links it to the
 -- output partition axis via a genuine `ScanClamp` instead of falling back
 -- to the accepted-full-scan corner.
 SELECT

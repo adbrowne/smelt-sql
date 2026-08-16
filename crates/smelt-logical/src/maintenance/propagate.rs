@@ -35,6 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use super::edge_type::{Addressing, EdgeComponent};
 use super::{locality, ScanClamp};
 use crate::analysis::source_bounds::Seconds;
 
@@ -79,6 +80,31 @@ impl DayInterval {
 
     fn is_empty(&self) -> bool {
         self.start >= self.end
+    }
+}
+
+#[cfg(test)]
+mod day_interval_tests {
+    use super::*;
+
+    /// `is_whole` requires BOTH bounds to have widened past the `WHOLE`
+    /// sentinel — an interval that widened only one side (start clamped to
+    /// `WHOLE.start` but `end` still finite, or vice versa) is not the whole
+    /// table. Pins the `&&` (not `||`) in `is_whole`'s definition.
+    #[test]
+    fn is_whole_requires_both_bounds_to_have_widened() {
+        assert!(
+            !DayInterval::new(DayInterval::WHOLE.start, 0).is_whole(),
+            "a widened start with a finite end must not read as whole"
+        );
+        assert!(
+            !DayInterval::new(0, DayInterval::WHOLE.end).is_whole(),
+            "a widened end with a finite start must not read as whole"
+        );
+        assert!(
+            DayInterval::WHOLE.is_whole(),
+            "an interval widened on both sides must read as whole"
+        );
     }
 }
 
@@ -171,8 +197,13 @@ impl PartitionGrain {
                 }
             }
             PartitionGrain::Unclocked => DayInterval::WHOLE,
-            // Unreachable in practice: keyed nodes are refused before any
-            // interval math runs (`refuse_keyed_nodes`).
+            // A keyed-grain node has no partition axis to align outward to —
+            // an admitted keyed origin's seeded interval is never itself
+            // interpreted spatially (`classify_keyed_edges` routes every
+            // outbound edge of a keyed-grain node through the keyed
+            // dirt-set channel, never `reflect`/`require`); this identity
+            // pass-through only keeps the node's own `dirty` entry
+            // non-empty so the propagation loop visits it.
             PartitionGrain::Keyed => *iv,
         }
     }
@@ -180,7 +211,7 @@ impl PartitionGrain {
 
 /// Route-aware day-margin projection for a locality-admitted composed
 /// node's own inbound (driving-source → composed-output) edge
-/// (`incremental_models.md` §"What the composed shape uniquely enables"):
+/// (`incremental_shapes.md` §"What the composed shape uniquely enables"):
 /// routes 1–2 project **exactly** — [`locality::LocalitySlice::DeltaValues`]
 /// (route 2, key-determined) carries no margin at all, and
 /// [`locality::LocalitySlice::Window`] (route 1 key-embedded, or route 3
@@ -296,9 +327,53 @@ pub fn project_observed_delta(
     normalize(intervals)
 }
 
-/// Ratified P7: a **bare** keyed-grain node — no admitted time axis — has
-/// no partition axis, so interval dirt through it would be wrong-and-quiet
-/// — refuse fail-loud until keyed dirt-sets exist (S12). A **locality-
+/// One keyed dirt-set record on the keyed channel (`incremental_models.md`
+/// §"The graph layer" → "Keyed dirt-sets and the narrowed refusal"): a
+/// **symbolic** key-addressed delta — the upstream's admitted
+/// [`Addressing::Keyed`] key columns and the upstream node's own name — not
+/// a materialised key-value set. Value-level affected-key discovery stays
+/// with the run-time mechanism (§"Affected-key discovery"); this is only
+/// the graph-layer marker that an edge's dirt is key-addressed rather than
+/// interval-addressed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedDirt {
+    pub keys: Vec<String>,
+    pub from: String,
+}
+
+/// Per-edge classification against [`PartitionGrain::Keyed`] endpoints
+/// (`classify_keyed_edges`'s return shape): an edge touching neither
+/// endpoint as keyed-grain routes through ordinary interval math
+/// unchanged; a keyed-grain edge whose component vector carries an
+/// admitted [`Addressing::Keyed`] routes through the keyed dirt-set
+/// channel instead of being refused.
+enum KeyedAdmission {
+    NotKeyed,
+    Admitted(Vec<String>),
+}
+
+/// The keyed-grain endpoint of `e`, if either side is
+/// [`PartitionGrain::Keyed`] — upstream checked first (a node absent any
+/// inbound edge in the graph, the only way a bare keyed node's own edges
+/// are ever assembled per `smelt-runtime::propagation::build_forward_graph`,
+/// only ever appears as an edge's `upstream`).
+fn keyed_endpoint(e: &Edge) -> Option<(&str, PartitionGrain)> {
+    if e.upstream_grain == PartitionGrain::Keyed {
+        Some((&e.upstream, e.upstream_grain))
+    } else if e.downstream_grain == PartitionGrain::Keyed {
+        Some((&e.downstream, e.downstream_grain))
+    } else {
+        None
+    }
+}
+
+/// Classify one edge: admit iff some component carries an
+/// [`Addressing::Keyed`] (`incremental_models.md` §"The graph layer" →
+/// "Keyed dirt-sets and the narrowed refusal"). Otherwise refuse fail-loud
+/// — naming the degrading operator when a [`Addressing::WholeModel`]
+/// component names one, or the original bare-keyed wording (ratified P7)
+/// verbatim when the component vector is empty (fail-closed: no derived
+/// shape at all is not evidence of an addressable one). A **locality-
 /// admitted** keyed node (the composed shape, `incremental_models.md`
 /// §"Key temporal locality (the time-partitioned output)") never reaches
 /// this check as [`PartitionGrain::Keyed`] at all — the caller
@@ -307,16 +382,20 @@ pub fn project_observed_delta(
 /// graph like any other clocked node (`incremental_models.md` §"The graph
 /// layer": "A locality-admitted time-partitioned keyed output is not
 /// refused").
-fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
-    for e in edges {
-        let (name, grain) = if e.upstream_grain == PartitionGrain::Keyed {
-            (&e.upstream, e.upstream_grain)
-        } else if e.downstream_grain == PartitionGrain::Keyed {
-            (&e.downstream, e.downstream_grain)
-        } else {
-            continue;
-        };
-        debug_assert_eq!(grain, PartitionGrain::Keyed);
+fn classify_keyed_edge(e: &Edge) -> Result<KeyedAdmission, String> {
+    let Some((name, grain)) = keyed_endpoint(e) else {
+        return Ok(KeyedAdmission::NotKeyed);
+    };
+    debug_assert_eq!(grain, PartitionGrain::Keyed);
+
+    if let Some(keys) = e.components.iter().find_map(|c| match &c.addressing {
+        Addressing::Keyed { keys } => Some(keys.clone()),
+        _ => None,
+    }) {
+        return Ok(KeyedAdmission::Admitted(keys));
+    }
+
+    if e.components.is_empty() {
         return Err(format!(
             "'{name}' is keyed-grain without an admitted time axis: it has no partition axis \
              for interval dirt to propagate over. Declare a timeseries: block and establish \
@@ -326,7 +405,31 @@ fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
              are not yet supported (S12)"
         ));
     }
-    Ok(())
+
+    let degraded_by = e
+        .components
+        .iter()
+        .find_map(|c| match &c.addressing {
+            Addressing::WholeModel { degraded_by } => Some(degraded_by.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "no component carries an admitted addressing".to_string());
+    Err(format!(
+        "'{name}' is keyed-grain and its derived shape degraded to general ({degraded_by}): \
+         there is no partition axis or keyed dirt-set for interval dirt to propagate over. \
+         Address the degrading operator named above, or declare a timeseries: block and \
+         establish key temporal locality (docs/specs/incremental_models.md §\"Keyed dirt-sets \
+         and the narrowed refusal\"), to admit propagation"
+    ))
+}
+
+/// Classify every edge in `edges` against [`PartitionGrain::Keyed`]
+/// endpoints, up front — mirrors the pre-phase-5 `refuse_keyed_nodes`'s own
+/// eager whole-graph scan: a graph containing even one unaddressed keyed
+/// edge fails closed before any propagation/resolution runs, regardless of
+/// whether that edge is reached by the current call's dirt.
+fn classify_keyed_edges(edges: &[Edge]) -> Result<Vec<KeyedAdmission>, String> {
+    edges.iter().map(classify_keyed_edge).collect()
 }
 
 /// One dependency edge: `downstream` reads `upstream` under a derived scan
@@ -342,12 +445,25 @@ pub struct Edge {
     pub after_days: i64,
     pub upstream_grain: PartitionGrain,
     pub downstream_grain: PartitionGrain,
+    /// The typed component vector for this edge (`incremental_models.md`
+    /// §"The graph layer" → "Typed edges"), derived by
+    /// [`super::edge_type::type_edge`]. Advisory for a non-keyed edge —
+    /// `propagate`/`required_inputs` still route those on interval math
+    /// alone, unchanged since phase 3. **Acted on** for an edge touching a
+    /// [`PartitionGrain::Keyed`] endpoint (phase 5,
+    /// `docs/outcomes/20260809-output-delta-typing/outcome.md`): an
+    /// admitted [`super::edge_type::Addressing::Keyed`] component routes
+    /// the edge through the keyed dirt-set channel instead of a fail-loud
+    /// refusal. Empty on [`Edge::from_clamp`] (today's untyped-edge
+    /// behaviour); populate via [`Edge::with_components`].
+    pub components: Vec<EdgeComponent>,
 }
 
 impl Edge {
     /// Build the edge from a cell's derived [`ScanClamp`] — the same number
     /// that sizes the maintenance SQL sizes the propagation. Day grain on
-    /// both axes; override the grain fields for coarser tables.
+    /// both axes; override the grain fields for coarser tables. Carries no
+    /// typed components — today's untyped-edge behaviour.
     pub fn from_clamp(downstream: &str, clamp: &ScanClamp) -> Self {
         Edge {
             upstream: clamp.source.clone(),
@@ -356,7 +472,15 @@ impl Edge {
             after_days: clamp_days(clamp.after),
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
         }
+    }
+
+    /// Attach a typed component vector (`super::edge_type::type_edge`) to an
+    /// already-built edge.
+    pub fn with_components(mut self, components: Vec<EdgeComponent>) -> Self {
+        self.components = components;
+        self
     }
 
     /// The downstream partitions an upstream delta of `[a, b)` dirties:
@@ -390,6 +514,14 @@ pub struct Propagation {
     /// `model` → merged dirty intervals across all inbound edges — what the
     /// model's own consumers see as *their* upstream delta.
     pub dirty: BTreeMap<String, Vec<DayInterval>>,
+    /// `(model, upstream)` → the keyed dirt-set records that edge produced
+    /// (`incremental_models.md` §"The graph layer" → "Keyed dirt-sets and
+    /// the narrowed refusal") — the keyed-channel counterpart to `per_edge`,
+    /// additive alongside it, never replacing it.
+    pub per_edge_keys: BTreeMap<(String, String), Vec<KeyedDirt>>,
+    /// `model` → merged keyed dirt-set records across all admitted inbound
+    /// keyed edges — the keyed-channel counterpart to `dirty`.
+    pub keyed_dirty: BTreeMap<String, Vec<KeyedDirt>>,
 }
 
 /// The grain of `node`'s partition axis, read off any edge that touches it
@@ -463,13 +595,16 @@ pub fn propagate(
     edges: &[Edge],
     source_deltas: &BTreeMap<String, Vec<DayInterval>>,
 ) -> Result<Propagation, String> {
-    refuse_keyed_nodes(edges)?;
+    let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
 
     let mut result = Propagation::default();
     // Seed: the source deltas are the sources' own "dirty" intervals,
     // aligned outward to each source's grain (a coarse-grained source's
-    // delta is whole partitions by definition).
+    // delta is whole partitions by definition). A keyed-grain source's
+    // interval is never interpreted spatially — it only marks the node
+    // non-empty so the loop below visits its outbound (keyed-admitted)
+    // edges.
     for (source, intervals) in source_deltas {
         let grain = node_grain(edges, source);
         result.dirty.insert(
@@ -483,17 +618,57 @@ pub fn propagate(
         if node_dirty.is_empty() {
             continue;
         }
-        for e in edges.iter().filter(|e| e.upstream == node) {
-            let reflected: Vec<DayInterval> = node_dirty.iter().map(|iv| e.reflect(iv)).collect();
-            let per_edge = result
-                .per_edge
-                .entry((e.downstream.clone(), e.upstream.clone()))
-                .or_default();
-            per_edge.extend(reflected.iter().copied());
-            *per_edge = normalize(per_edge.clone());
-            let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
-            model_dirty.extend(reflected);
-            *model_dirty = normalize(model_dirty.clone());
+        for (idx, e) in edges.iter().enumerate() {
+            if e.upstream != node {
+                continue;
+            }
+            match &keyed_admission[idx] {
+                KeyedAdmission::Admitted(keys) => {
+                    let kd = KeyedDirt {
+                        keys: keys.clone(),
+                        from: e.upstream.clone(),
+                    };
+                    result
+                        .per_edge_keys
+                        .entry((e.downstream.clone(), e.upstream.clone()))
+                        .or_default()
+                        .push(kd.clone());
+                    result
+                        .keyed_dirty
+                        .entry(e.downstream.clone())
+                        .or_default()
+                        .push(kd);
+                    // A downstream that is itself keyed-grain stays on the
+                    // keyed channel alone; a clocked (or unclocked) consumer
+                    // of a keyed node gets whole-table interval dirt so it
+                    // still runs (`incremental_models.md` §"The graph
+                    // layer": widen-never-narrow — never nothing).
+                    if e.downstream_grain != PartitionGrain::Keyed {
+                        let per_edge = result
+                            .per_edge
+                            .entry((e.downstream.clone(), e.upstream.clone()))
+                            .or_default();
+                        per_edge.push(DayInterval::WHOLE);
+                        *per_edge = normalize(per_edge.clone());
+                        let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
+                        model_dirty.push(DayInterval::WHOLE);
+                        *model_dirty = normalize(model_dirty.clone());
+                    }
+                }
+                KeyedAdmission::NotKeyed => {
+                    let reflected: Vec<DayInterval> =
+                        node_dirty.iter().map(|iv| e.reflect(iv)).collect();
+                    let per_edge = result
+                        .per_edge
+                        .entry((e.downstream.clone(), e.upstream.clone()))
+                        .or_default();
+                    per_edge.extend(reflected.iter().copied());
+                    *per_edge = normalize(per_edge.clone());
+                    let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
+                    model_dirty.extend(reflected);
+                    *model_dirty = normalize(model_dirty.clone());
+                }
+            }
         }
     }
     // Drop models that ended up with no dirt (reachable but untouched).
@@ -537,7 +712,7 @@ pub fn required_inputs(
     if period.is_empty() {
         return Ok(RequiredSlices::default());
     }
-    refuse_keyed_nodes(edges)?;
+    let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, [target])?;
 
     let mut required: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
@@ -555,8 +730,17 @@ pub fn required_inputs(
         let Some(node_required) = required.get(*node).cloned() else {
             continue;
         };
-        for e in edges.iter().filter(|e| e.downstream == *node) {
-            let widened: Vec<DayInterval> = node_required.iter().map(|iv| e.require(iv)).collect();
+        for (idx, e) in edges.iter().enumerate() {
+            if e.downstream != *node {
+                continue;
+            }
+            // An admitted keyed edge has no partition axis to clamp
+            // against — the upstream (keyed) ancestor requires the whole
+            // table, never clamp arithmetic on a nonexistent axis.
+            let widened: Vec<DayInterval> = match &keyed_admission[idx] {
+                KeyedAdmission::Admitted(_) => vec![DayInterval::WHOLE],
+                KeyedAdmission::NotKeyed => node_required.iter().map(|iv| e.require(iv)).collect(),
+            };
             let upstream_required = required.entry(e.upstream.clone()).or_default();
             upstream_required.extend(widened);
             *upstream_required = normalize(upstream_required.clone());
@@ -605,6 +789,7 @@ mod locality_margin_tests {
             after_days,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
         }
     }
 
@@ -824,6 +1009,29 @@ mod project_observed_delta_tests {
         );
     }
 
+    /// Route 3's forward half: a `RecurrenceBounded` slice with a nonzero
+    /// `margin_after` must widen the projected interval forward too, not
+    /// just backward — pins the `day + 1 + after` half of the projection
+    /// formula (only the backward `day - before` half was previously
+    /// exercised by a nonzero fixture).
+    #[test]
+    fn route_3_recurrence_bounded_widens_forward_by_margin_after() {
+        let slice = locality::LocalitySlice::RecurrenceBounded {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(5),
+            margin_after: Seconds::days(2),
+            r: Seconds::days(4),
+        };
+        let partitions = vec!["2026-01-10".to_string()];
+        let projected = project_observed_delta(&slice, &partitions);
+        let day = day_ordinal(2026, 1, 10);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(day - 5, day + 3)],
+            "a nonzero margin_after must widen the projected interval forward beyond day + 1"
+        );
+    }
+
     #[test]
     fn empty_partitions_project_to_nothing() {
         assert_eq!(project_observed_delta(&window_slice(), &[]), Vec::new());
@@ -875,5 +1083,148 @@ mod project_observed_delta_tests {
                 );
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 (`docs/outcomes/20260809-output-delta-typing/outcome.md`): typed
+// `Edge::components` are advisory this phase — `propagate`/`required_inputs`
+// read only `before_days`/`after_days`/the grain fields, unchanged by
+// whether a component vector is attached. These tests pin that an edge's
+// interval-math behaviour is byte-identical with or without components, for
+// both a window-addressed component and a degraded `WholeModel` one.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod typed_edge_advisory_tests {
+    use super::*;
+    use crate::analysis::output_delta::OutputDelta;
+    use crate::maintenance::edge_type::{Addressing, EdgeComponent};
+
+    fn window_component() -> EdgeComponent {
+        EdgeComponent {
+            group: "{amount}".to_string(),
+            shape: OutputDelta::AppendOnlyWindow {
+                axis: "event_date".to_string(),
+            },
+            addressing: Addressing::Window {
+                axis: "event_date".to_string(),
+            },
+            columns: vec!["amount".to_string()],
+        }
+    }
+
+    fn whole_model_component() -> EdgeComponent {
+        EdgeComponent {
+            group: "{weight}".to_string(),
+            shape: OutputDelta::General {
+                reason: "'dims' is a mutable snapshot".to_string(),
+            },
+            addressing: Addressing::WholeModel {
+                degraded_by: "'dims' is a mutable snapshot".to_string(),
+            },
+            columns: vec!["weight".to_string()],
+        }
+    }
+
+    fn base_edge(before_days: i64, after_days: i64) -> Edge {
+        Edge {
+            upstream: "source".to_string(),
+            downstream: "downstream".to_string(),
+            before_days,
+            after_days,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: Vec::new(),
+        }
+    }
+
+    fn source_deltas(source: &str, iv: DayInterval) -> BTreeMap<String, Vec<DayInterval>> {
+        let mut m = BTreeMap::new();
+        m.insert(source.to_string(), vec![iv]);
+        m
+    }
+
+    #[test]
+    fn typed_edge_forward_matches_untyped_for_window_components() {
+        let untyped = base_edge(1, 2);
+        let typed = base_edge(1, 2).with_components(vec![window_component()]);
+        let delta = source_deltas("source", DayInterval::new(10, 12));
+
+        let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
+        let typed_result = propagate(&[typed], &delta).expect("typed propagates");
+
+        assert_eq!(
+            untyped_result.dirty, typed_result.dirty,
+            "attaching window components must not change forward propagation"
+        );
+        assert_eq!(untyped_result.per_edge, typed_result.per_edge);
+    }
+
+    #[test]
+    fn adjoint_holds_with_typed_components() {
+        // A small fixed DAG: source -> mid -> target, edges carrying window
+        // components throughout.
+        let e1 = Edge {
+            upstream: "source".to_string(),
+            downstream: "mid".to_string(),
+            before_days: 1,
+            after_days: 0,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: vec![window_component()],
+        };
+        let e2 = Edge {
+            upstream: "mid".to_string(),
+            downstream: "target".to_string(),
+            before_days: 0,
+            after_days: 1,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components: vec![window_component()],
+        };
+        let edges = vec![e1, e2];
+
+        let period = DayInterval::new(20, 21);
+        let required = required_inputs(&edges, "target", period).expect("resolve");
+        let source_required = required.required.get("source").cloned().unwrap_or_default();
+
+        let deltas = source_deltas("source", source_required[0]);
+        let forward = propagate(&edges, &deltas).expect("propagate");
+        let target_dirty = forward.dirty.get("target").cloned().unwrap_or_default();
+
+        assert!(
+            target_dirty
+                .iter()
+                .any(|iv| iv.start <= period.start && period.end <= iv.end),
+            "forward(backward(P)) must contain P: target dirty {target_dirty:?} must cover \
+             {period:?}"
+        );
+    }
+
+    #[test]
+    fn whole_model_component_does_not_narrow_dirt() {
+        let untyped = base_edge(1, 2);
+        let typed = base_edge(1, 2).with_components(vec![whole_model_component()]);
+        let delta = source_deltas("source", DayInterval::new(10, 12));
+
+        let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
+        let typed_result = propagate(&[typed], &delta).expect("typed propagates");
+
+        let untyped_dirty = untyped_result
+            .dirty
+            .get("downstream")
+            .cloned()
+            .unwrap_or_default();
+        let typed_dirty = typed_result
+            .dirty
+            .get("downstream")
+            .cloned()
+            .unwrap_or_default();
+
+        assert_eq!(
+            untyped_dirty, typed_dirty,
+            "a WholeModel-degraded component must not narrow interval dirt below the untyped \
+             edge's own result this phase (components are advisory, not yet acted on)"
+        );
     }
 }

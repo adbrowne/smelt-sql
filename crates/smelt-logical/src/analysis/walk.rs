@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use smelt_parser::{ColumnRef, SelectStmt};
 
 use super::{item_alias, item_expr, resolve_scope_group_by, select_stmt_items, SelectItemKind};
@@ -155,6 +156,24 @@ pub struct ColumnLineage {
     /// rename-chain of simple column references; `None` for computed
     /// expressions, wildcards, and unresolvable references.
     pub leaf: Option<LeafColumn>,
+    /// Whether this column's resolution passes through a self-join — a
+    /// scope whose FROM tree reaches the same base relation under more than
+    /// one alias, at this scope or *any* scope the reference was chased
+    /// through (a CTE body, a derived table) — substrate-unification Phase
+    /// 5 review finding 2. `orders o1 JOIN orders o2 ON …` makes `o1.id` and
+    /// `o2.id` chase to the identical [`LeafColumn`] even though they are
+    /// different rows on different join legs; `leaf` may still be populated
+    /// here (it is the best-effort chase result, kept for diagnostics) but
+    /// a consumer matching on stored-column *identity*
+    /// (`backbuild::resolve_representative`'s lineage fallback, via
+    /// [`resolve_reference_leaf`]) must never trust it when this is `true`.
+    /// This is a property of the lineage entry itself, decided once where
+    /// the entry is built ([`select_lineage`]) and propagated unchanged
+    /// through every further CTE/derived-table hop — never re-derived
+    /// per call site by counting aliases in whichever scope happens to be
+    /// current there (that was the bypassable, scope-local version of this
+    /// guard).
+    pub ambiguous: bool,
 }
 
 /// Per-node context handed to every transfer function.
@@ -541,20 +560,32 @@ fn walk_ctes<T: Transfer>(
     verdicts
 }
 
-fn walk_select<T: Transfer>(
-    sn: &SelectNode,
+/// Build one scope's FROM-tree alias table and derived-table lineages — the
+/// `InputItem` → `RelationSource` mapping [`walk_select`] and
+/// [`resolve_reference_leaf`] both need (substrate-unification Phase 5
+/// review: factored out so this mapping exists once rather than forked
+/// between a full property walk and the standalone lineage-only resolver).
+/// Each input's own transfer verdict (a leaf verdict, a cloned CTE-body
+/// verdict, a derived-table subtree's verdict, or an `Unsupported` verdict)
+/// is pushed onto `children` in source order, exactly as
+/// [`walk_select`] needs them interleaved after the CTE verdicts already
+/// there; [`resolve_reference_leaf`]'s `Discard` transfer populates
+/// `children` too but never reads it back.
+fn build_scope_aliases<T: Transfer>(
+    inputs: &[InputItem],
     transfer: &T,
     path: &[PathSeg],
     env: &WalkEnv<T::Verdict>,
-) -> (T::Verdict, Vec<ColumnLineage>) {
-    let mut env = env.clone();
-    let mut children = walk_ctes(&sn.ctes, transfer, path, &mut env);
-
+    children: &mut Vec<T::Verdict>,
+) -> (
+    BTreeMap<String, RelationSource>,
+    BTreeMap<String, Vec<ColumnLineage>>,
+) {
     let mut aliases = BTreeMap::new();
     // Derived-table lineages, keyed like `aliases`, for column resolution.
     let mut derived_lineage: BTreeMap<String, Vec<ColumnLineage>> = BTreeMap::new();
 
-    for input in &sn.inputs {
+    for input in inputs {
         match input {
             InputItem::Table { name, alias } => {
                 let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
@@ -596,7 +627,7 @@ fn walk_select<T: Transfer>(
                 let alias_text = alias.clone().unwrap_or_default();
                 let mut child_path = path.to_vec();
                 child_path.push(PathSeg::DerivedTable(alias_text.clone()));
-                let (verdict, lineage) = walk_node(body, transfer, &child_path, &env);
+                let (verdict, lineage) = walk_node(body, transfer, &child_path, env);
                 if let Some(alias) = alias {
                     let key = alias.to_ascii_lowercase();
                     aliases.insert(key.clone(), RelationSource::DerivedTable(alias.clone()));
@@ -614,6 +645,21 @@ fn walk_select<T: Transfer>(
             }
         }
     }
+
+    (aliases, derived_lineage)
+}
+
+fn walk_select<T: Transfer>(
+    sn: &SelectNode,
+    transfer: &T,
+    path: &[PathSeg],
+    env: &WalkEnv<T::Verdict>,
+) -> (T::Verdict, Vec<ColumnLineage>) {
+    let mut env = env.clone();
+    let mut children = walk_ctes(&sn.ctes, transfer, path, &mut env);
+
+    let (aliases, derived_lineage) =
+        build_scope_aliases(&sn.inputs, transfer, path, &env, &mut children);
 
     let columns = select_lineage(&sn.select, &aliases, &env, &derived_lineage);
     let cx = NodeCx {
@@ -656,10 +702,36 @@ fn walk_setop<T: Transfer>(
     (verdict, cx.columns)
 }
 
+/// Whether `source` is a base-relation reference (`RelationSource::Table`)
+/// whose own table is reachable through more than one alias in `aliases` —
+/// a self-join at this scope (substrate-unification Phase 5 review finding
+/// 2). `false` for a `Cte`/`DerivedTable` source: their own ambiguity, if
+/// any, is already carried on the resolved [`ColumnLineage::ambiguous`]
+/// flag from whichever inner scope built it — this only ever decides the
+/// *local*, direct-Table leg of the ambiguity, at the exact point a lineage
+/// entry is built ([`select_lineage`]) or a standalone reference is resolved
+/// ([`resolve_reference_leaf`]) — the two call sites that ever need it, so
+/// the duplicate-alias count is computed in exactly one place.
+fn table_is_self_joined(
+    source: &RelationSource,
+    aliases: &BTreeMap<String, RelationSource>,
+) -> bool {
+    let RelationSource::Table(name) = source else {
+        return false;
+    };
+    aliases
+        .values()
+        .filter(|r| matches!(r, RelationSource::Table(n) if n == name))
+        .count()
+        > 1
+}
+
 /// Projected-column lineage of one SELECT scope: each output column, and —
 /// when its expression is a simple (possibly qualified) column reference —
 /// the base-relation column it resolves to, chased through CTE and
-/// derived-table projections.
+/// derived-table projections. Each entry's [`ColumnLineage::ambiguous`] flag
+/// is decided right here, the lineage's single build site, and never
+/// recomputed downstream.
 fn select_lineage<V: Clone>(
     select: &SelectStmt,
     aliases: &BTreeMap<String, RelationSource>,
@@ -675,6 +747,7 @@ fn select_lineage<V: Clone>(
             columns.push(ColumnLineage {
                 output: "*".to_string(),
                 leaf: None,
+                ambiguous: false,
             });
             continue;
         }
@@ -684,46 +757,266 @@ fn select_lineage<V: Clone>(
         let output = item
             .column_name()
             .unwrap_or_else(|| expr.text().trim().to_string());
-        let leaf = ColumnRef::from_expr(&expr).and_then(|col_ref| {
+        let resolved = ColumnRef::from_expr(&expr).and_then(|col_ref| {
             let source = match col_ref.qualifier() {
                 Some(q) => aliases.get(&q.to_ascii_lowercase()),
                 // Unqualified: unambiguous only with a single input.
                 None if aliases.len() == 1 => aliases.values().next().map(Some).unwrap_or(None),
                 None => None,
             }?;
-            resolve_leaf(source, col_ref.name(), env, derived_lineage)
+            let mut lineage = resolve_leaf(source, col_ref.name(), env, derived_lineage)?;
+            // Monotonic: only ever set `ambiguous` to `true` here, never
+            // clear it — a `Cte`/`DerivedTable` source may already have
+            // propagated `true` from a self-join several hops down.
+            if table_is_self_joined(source, aliases) {
+                lineage.ambiguous = true;
+            }
+            Some(lineage)
         });
-        columns.push(ColumnLineage { output, leaf });
+        let (leaf, ambiguous) = match resolved {
+            Some(lineage) => (lineage.leaf, lineage.ambiguous),
+            None => (None, false),
+        };
+        columns.push(ColumnLineage {
+            output,
+            leaf,
+            ambiguous,
+        });
     }
     columns
 }
 
+/// Resolve `column` against `source`, returning the matched lineage entry
+/// (leaf + its own `ambiguous` flag, propagated unchanged from whichever
+/// scope originally built it for a `Cte`/`DerivedTable` source — never
+/// recomputed here). Callers combine this with their own scope's
+/// [`table_is_self_joined`] check for the direct-`Table` leg.
 fn resolve_leaf<V: Clone>(
     source: &RelationSource,
     column: &str,
     env: &WalkEnv<V>,
     derived_lineage: &BTreeMap<String, Vec<ColumnLineage>>,
-) -> Option<LeafColumn> {
+) -> Option<ColumnLineage> {
     match source {
-        RelationSource::Table(table) => Some(LeafColumn {
-            relation: table.clone(),
-            column: column.to_string(),
+        RelationSource::Table(table) => Some(ColumnLineage {
+            output: column.to_string(),
+            leaf: Some(LeafColumn {
+                relation: table.clone(),
+                column: column.to_string(),
+            }),
+            ambiguous: false,
         }),
         RelationSource::Cte(name) => {
             let (_, lineage) = env.ctes.get(&name.to_ascii_lowercase())?;
             lineage
                 .iter()
-                .find(|c| c.output.eq_ignore_ascii_case(column))?
-                .leaf
-                .clone()
+                .find(|c| c.output.eq_ignore_ascii_case(column))
+                .cloned()
         }
         RelationSource::DerivedTable(alias) => {
             let lineage = derived_lineage.get(&alias.to_ascii_lowercase())?;
             lineage
                 .iter()
-                .find(|c| c.output.eq_ignore_ascii_case(column))?
-                .leaf
-                .clone()
+                .find(|c| c.output.eq_ignore_ascii_case(column))
+                .cloned()
+        }
+    }
+}
+
+/// Resolve a single column reference — `(qualifier, raw_name)`, read
+/// straight off some expression in `tree`'s own top-level scope — against
+/// that scope's own lineage, chasing CTE / derived-table renames to the
+/// reference's base-relation leaf. This generalizes [`select_lineage`]'s
+/// per-projected-column resolution to an arbitrary reference (e.g. a
+/// dependency inside an expression that is not itself a SELECT-list item —
+/// `backbuild::resolve_representative`'s consumer, substrate-unification
+/// Phase 5) — the same alias/CTE-lineage machinery [`walk_select`] builds,
+/// run with a [`Transfer`] whose verdict is discarded, since only the
+/// lineage side-channel is wanted here.
+///
+/// `None` when the top-level node is not a single `SELECT` scope (a set
+/// operation or an unrecognised construct — fail-closed, no lineage to
+/// chase), the qualifier does not resolve to a FROM-tree alias in this
+/// scope, an unqualified reference is ambiguous (more than one FROM input),
+/// the resolved source has no lineage entry for `raw_name` at all, or the
+/// resolved [`ColumnLineage::ambiguous`] flag is set — a self-join
+/// anywhere along the chase, at this scope or nested arbitrarily deep
+/// through CTE bodies (substrate-unification Phase 5 review finding 2: a
+/// self-join — `FROM orders o1 JOIN orders o2` — chases `o1.id` and `o2.id`
+/// to the identical `LeafColumn{relation: "orders", column: "id"}`, which
+/// would otherwise let a caller conflate two different join legs' columns
+/// as "the same stored data" purely because they share a base table name —
+/// the exact C2 self-read hazard `backbuild::resolve_representative`'s flat
+/// qualifier-match rule was written to prevent). The ambiguity check itself
+/// lives once, in [`select_lineage`]/[`table_is_self_joined`] — this
+/// function only ever *reads* the flag [`resolve_leaf`] returns, it never
+/// recomputes an alias count of its own (a prior version did, scoped to
+/// only the top-level call site, which a self-join hidden inside a
+/// referenced CTE body bypassed entirely).
+pub fn resolve_reference_leaf(
+    tree: &QueryTree,
+    qualifier: Option<&str>,
+    raw_name: &str,
+) -> Option<LeafColumn> {
+    let QueryNode::Select(sn) = &tree.root else {
+        return None;
+    };
+
+    struct Discard;
+    impl Transfer for Discard {
+        type Verdict = ();
+        fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) {}
+        fn operator(&self, _op: &OpNode<'_>, _children: &[()], _cx: &NodeCx) {}
+    }
+
+    let mut env = WalkEnv::<()>::default();
+    walk_ctes(&sn.ctes, &Discard, &[], &mut env);
+
+    let mut discarded_children = Vec::new();
+    let (aliases, derived_lineage) =
+        build_scope_aliases(&sn.inputs, &Discard, &[], &env, &mut discarded_children);
+
+    let source = match qualifier {
+        Some(q) => aliases.get(&q.to_ascii_lowercase())?,
+        None if aliases.len() == 1 => aliases.values().next()?,
+        None => return None,
+    };
+
+    let mut lineage = resolve_leaf(source, raw_name, &env, &derived_lineage)?;
+    if table_is_self_joined(source, &aliases) {
+        lineage.ambiguous = true;
+    }
+
+    if lineage.ambiguous {
+        return None;
+    }
+    lineage.leaf
+}
+
+/// Per-scope resolution context, built once for every [`SelectNode`] scope
+/// [`enumerate_select_scopes`] finds — the top scope, every CTE body, every
+/// derived-table body, and every set-operation branch, each at its own
+/// definition site. Resolves a bare `(qualifier, name)` reference collected
+/// from *that scope's own* clauses to its base-relation leaf, chasing
+/// through that scope's own CTE/derived-table aliases exactly as
+/// [`resolve_reference_leaf`] does for the top scope alone — the
+/// generalization `maintenance::grouping`'s membership pass needs to scan
+/// every scope the walk enumerates rather than only the outermost one
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 3).
+pub struct ScopeResolver {
+    aliases: BTreeMap<String, RelationSource>,
+    env: WalkEnv<()>,
+    derived_lineage: BTreeMap<String, Vec<ColumnLineage>>,
+}
+
+impl ScopeResolver {
+    /// Resolve one reference against this scope's own alias table. `None`
+    /// on the same fail-closed conditions [`resolve_reference_leaf`]
+    /// documents (unresolved qualifier, ambiguous unqualified reference, a
+    /// self-join anywhere along the chase, or a chase shape the walk cannot
+    /// normalize) — scoped to this scope's own alias table rather than the
+    /// tree's top scope.
+    pub fn resolve(&self, qualifier: Option<&str>, name: &str) -> Option<LeafColumn> {
+        let source = match qualifier {
+            Some(q) => self.aliases.get(&q.to_ascii_lowercase())?,
+            None if self.aliases.len() == 1 => self.aliases.values().next()?,
+            None => return None,
+        };
+        let mut lineage = resolve_leaf(source, name, &self.env, &self.derived_lineage)?;
+        if table_is_self_joined(source, &self.aliases) {
+            lineage.ambiguous = true;
+        }
+        if lineage.ambiguous {
+            return None;
+        }
+        lineage.leaf
+    }
+}
+
+/// Every [`SelectNode`] scope the walk enumerates, each paired with its own
+/// [`ScopeResolver`]: the top scope, every CTE body, every derived-table
+/// body, and every set-operation branch — each visited exactly once, at its
+/// own definition site (a `CteRef` input's target is not revisited per
+/// reference site, matching the value-pass fold's "each CTE body evaluated
+/// once at its definition site" convention: [`walk_ctes`]). Consumer:
+/// `maintenance::grouping`'s membership-sensitivity pass, which scans each
+/// returned scope's own `JOIN`-`ON`/`WHERE`/`HAVING` conjuncts
+/// (`docs/plans/20260809-sensitivity-precision.md` Phase 3) — this function
+/// is the same recursion shape [`walk_node`]/[`walk_select`] use for the
+/// generic [`Transfer`] fold, specialized to collect resolvers instead of
+/// running a transfer function.
+pub fn enumerate_select_scopes(tree: &QueryTree) -> Vec<(&SelectNode, ScopeResolver)> {
+    let mut out = Vec::new();
+    collect_select_scopes(&tree.root, &WalkEnv::default(), &mut out);
+    out
+}
+
+fn collect_select_scopes<'a>(
+    node: &'a QueryNode,
+    env: &WalkEnv<()>,
+    out: &mut Vec<(&'a SelectNode, ScopeResolver)>,
+) -> Vec<ColumnLineage> {
+    match node {
+        QueryNode::Unsupported { .. } => Vec::new(),
+        QueryNode::Select(sn) => {
+            let mut env = env.clone();
+            for cte in &sn.ctes {
+                let lineage = collect_select_scopes(&cte.body, &env, out);
+                env.ctes
+                    .insert(cte.name.to_ascii_lowercase(), ((), lineage));
+            }
+
+            let mut aliases = BTreeMap::new();
+            let mut derived_lineage: BTreeMap<String, Vec<ColumnLineage>> = BTreeMap::new();
+            for input in &sn.inputs {
+                match input {
+                    InputItem::Table { name, alias } => {
+                        let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                        aliases.insert(key, RelationSource::Table(name.clone()));
+                    }
+                    InputItem::CteRef { name, alias } => {
+                        let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                        aliases.insert(key, RelationSource::Cte(name.clone()));
+                    }
+                    InputItem::Derived { alias, body } => {
+                        let lineage = collect_select_scopes(body, &env, out);
+                        if let Some(alias) = alias {
+                            let key = alias.to_ascii_lowercase();
+                            aliases
+                                .insert(key.clone(), RelationSource::DerivedTable(alias.clone()));
+                            derived_lineage.insert(key, lineage);
+                        }
+                    }
+                    InputItem::Unsupported { .. } => {}
+                }
+            }
+
+            let columns = select_lineage(&sn.select, &aliases, &env, &derived_lineage);
+            out.push((
+                sn,
+                ScopeResolver {
+                    aliases,
+                    env,
+                    derived_lineage,
+                },
+            ));
+            columns
+        }
+        QueryNode::SetOp(so) => {
+            let mut env = env.clone();
+            for cte in &so.ctes {
+                let lineage = collect_select_scopes(&cte.body, &env, out);
+                env.ctes
+                    .insert(cte.name.to_ascii_lowercase(), ((), lineage));
+            }
+            let mut first_branch_lineage = None;
+            for branch in &so.branches {
+                let lineage = collect_select_scopes(branch, &env, out);
+                if first_branch_lineage.is_none() {
+                    first_branch_lineage = Some(lineage);
+                }
+            }
+            first_branch_lineage.unwrap_or_default()
         }
     }
 }
@@ -1233,7 +1526,7 @@ use crate::analysis::source_bounds::{derive_partition_skew, Skew};
 ///
 /// `exclude_source` names the model's own source path (dotted, as it appears
 /// in a `smelt.<path>` self-reference) for a self-referential model
-/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_shapes.md` §"Window independence and self-referential
 /// models": the self-edge is never a skew anchor). When set, each scope's
 /// region text is filtered by [`own_region_text_excluding_self_relations`]
 /// before the leaf classifier runs: the scope's own alias→source map
@@ -1310,7 +1603,7 @@ fn scope_self_qualifiers(cx: &NodeCx, self_name: &str) -> Vec<String> {
 /// `qual.`-qualified column of the self source, per this scope's own alias
 /// resolution) is omitted from the returned text, so the skew leaf classifier
 /// never reads the self-edge's bound as a partition-column skew anchor
-/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_shapes.md` §"Window independence and self-referential
 /// models"). Conditions that do not reference a self qualifier — including a
 /// genuine Form B relation sharing the same `WHERE` clause — survive
 /// verbatim. A condition containing an `OR` anywhere within it is never
@@ -1331,13 +1624,13 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
     let mut excluded: Vec<TextRange> = Vec::new();
     if let Some(where_clause) = select.where_clause() {
         if let Some(expr) = where_clause.expression() {
-            collect_self_conjunct_ranges(expr.syntax(), self_quals, &mut excluded);
+            collect_self_conjunct_ranges(&expr, self_quals, &mut excluded);
         }
     }
     if let Some(from_clause) = select.from_clause() {
         for join in from_clause.joins() {
             if let Some(on_expr) = join.condition().and_then(|c| c.on_expression()) {
-                collect_self_conjunct_ranges(on_expr.syntax(), self_quals, &mut excluded);
+                collect_self_conjunct_ranges(&on_expr, self_quals, &mut excluded);
             }
         }
     }
@@ -1370,11 +1663,17 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
     out
 }
 
-/// Split `node` (a `WHERE`/`ON` expression) into its top-level
-/// `AND`-separated conditions — structurally, by descending `BINARY_EXPR`
-/// nodes whose own operator token is `AND` (a `BETWEEN`'s `AND` lives inside
-/// its own `BETWEEN_EXPR` node and is never split) — and record the range of
-/// each condition that references one of `self_quals`.
+/// Split `expr` (a `WHERE`/`ON` expression) into its top-level `AND`-joined
+/// conjuncts via the shared [`super::expr_util::split_top_level_conjuncts`]
+/// splitter, then record the range of each conjunct that references one of
+/// `self_quals`.
+///
+/// This function's own output is text *ranges* for region carving
+/// (`own_region_text_excluding_self_relations` blanks the excluded ranges
+/// out of the scope's own SQL text), not split expressions — genuinely a
+/// different shape from the two `Vec<Expr>`-returning splitters unified in
+/// `expr_util`, so it consumes the shared splitter internally rather than
+/// being folded into its signature.
 ///
 /// A condition containing an `OR` anywhere in its subtree is **never**
 /// recorded, even when it references a self qualifier: an `OR` may
@@ -1382,34 +1681,17 @@ fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[S
 /// the whole disjunction would silently under-widen the derived output
 /// window. Keeping it can only over-widen — the fail-safe direction.
 fn collect_self_conjunct_ranges(
-    node: &smelt_parser::syntax_kind::SyntaxNode,
+    expr: &smelt_parser::Expr,
     self_quals: &[String],
     out: &mut Vec<smelt_parser::TextRange>,
 ) {
-    use smelt_parser::SyntaxKind::{AND_KW, BINARY_EXPR, EXPRESSION};
-
-    // Unwrap EXPRESSION wrappers.
-    if node.kind() == EXPRESSION {
-        let children: Vec<_> = node.children().collect();
-        if children.len() == 1 {
-            return collect_self_conjunct_ranges(&children[0], self_quals, out);
+    let mut conjuncts = Vec::new();
+    super::expr_util::split_top_level_conjuncts(expr, &mut conjuncts);
+    for conjunct in &conjuncts {
+        let node = conjunct.syntax();
+        if !conjunct_contains_or(node) && conjunct_references_qualifier(node, self_quals) {
+            out.push(node.text_range());
         }
-    }
-
-    let is_and = node.kind() == BINARY_EXPR
-        && node
-            .children_with_tokens()
-            .filter_map(|e| e.into_token())
-            .any(|t| t.kind() == AND_KW);
-    if is_and {
-        for child in node.children() {
-            collect_self_conjunct_ranges(&child, self_quals, out);
-        }
-        return;
-    }
-
-    if !conjunct_contains_or(node) && conjunct_references_qualifier(node, self_quals) {
-        out.push(node.text_range());
     }
 }
 
@@ -1467,7 +1749,7 @@ pub fn model_partition_skew(sql: &str, partition_column: &str) -> Skew {
 /// [`model_partition_skew`] with an optional self-source exclusion for
 /// self-referential models: relations arising from a reference to
 /// `self_name` (the model's own dotted path) never contribute skew anchors
-/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_shapes.md` §"Window independence and self-referential
 /// models" — the self-edge is never a skew anchor). Exclusion is resolved
 /// per scope by the shared walk (see [`SkewTransfer`]), so an unrelated
 /// scope reusing the self-edge's alias text for a different source keeps its
@@ -1509,7 +1791,7 @@ pub type KeySet = Vec<String>;
 /// query structure (a `GROUP BY` factory key, a `DISTINCT` whole-row key, a
 /// discriminated-union key). Empty ⇒ no key proven ⇒ `OneToMany` (fail-closed;
 /// grain is never optimistically assumed, `model_properties.md` §Constraints).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Grain {
     /// Column sets each of which uniquely identifies an output row.
     pub keys: Vec<KeySet>,
@@ -1534,7 +1816,7 @@ impl Grain {
 /// A functional dependency derived by the walk from query structure:
 /// `key → determines` (output-column names in the node's own scope). An empty
 /// `key` is the constant-column FD (`∅ → c` for a literal column).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DerivedFd {
     pub key: KeySet,
     pub determines: String,
@@ -1544,7 +1826,7 @@ pub struct DerivedFd {
 /// (`model_properties.md` §"Determinism (run vs row) and the nondeterminism
 /// predicate"). A columnar union takes the per-position lub (`clean ∪ clean =
 /// clean`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Determinism {
     /// Deterministic every run (a plain column, a deterministic expression).
     Clean,
@@ -1555,7 +1837,7 @@ pub enum Determinism {
 }
 
 /// Per-column determinism fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnDeterminism {
     pub output: String,
     pub level: Determinism,
@@ -1569,7 +1851,7 @@ pub struct ColumnDeterminism {
 /// columnar union takes the per-position lub, same shape as
 /// [`Determinism`]'s. `Incomparable` is the fail-closed default — an
 /// unrecognised construct never defaults to `Comparable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Comparability {
     /// A pure function of processed inputs — safe to diff against a prior
     /// run's stored value.
@@ -1588,7 +1870,7 @@ impl Default for Comparability {
 }
 
 /// Per-column change-comparability fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnComparability {
     pub output: String,
     pub comparability: Comparability,
@@ -1596,7 +1878,7 @@ pub struct ColumnComparability {
 
 /// Per-column algebraic discriminants of an aggregate output column (the
 /// combiner classifier applied at the aggregate's defining scope).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnDiscriminant {
     pub output: String,
     pub discriminants: Discriminants,
@@ -1607,7 +1889,7 @@ pub struct ColumnDiscriminant {
 /// functional dependencies, per-column discriminants, and the determinism
 /// predicate are folded bottom-up by [`PropertyTransfer`]; the fields are the
 /// four fact families, all fail-closed by default.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PropertyVector {
     /// Output columns of this node, in projection order.
     pub columns: Vec<String>,
@@ -1986,8 +2268,10 @@ impl Transfer for PropertyTransfer<'_> {
 }
 
 /// Resolve `qualifier` (or the sole input when unqualified) to its lowercased
-/// alias key in `cx.aliases`.
-fn resolve_alias_source(cx: &NodeCx, qualifier: Option<&str>) -> Option<String> {
+/// alias key in `cx.aliases`. `pub(crate)`: reused by [`super::output_delta`]
+/// to resolve a select-item's embedded column references the same way
+/// [`PropertyTransfer`]'s own determinism/comparability reduction does.
+pub(crate) fn resolve_alias_source(cx: &NodeCx, qualifier: Option<&str>) -> Option<String> {
     match qualifier {
         Some(q) => {
             let key = q.to_ascii_lowercase();
@@ -2185,9 +2469,14 @@ fn expr_comparability(expr: &smelt_parser::Expr) -> Comparability {
     result
 }
 
-/// Whether `expr` is a constant literal — a string/number literal with no
-/// column reference or function call (a discriminator/tag candidate).
-fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
+/// Whether `expr` is a constant literal — a string/number literal (bare, or
+/// a typed literal such as `DATE '2026-01-01'`/`INTERVAL '1' DAY`) with no
+/// column reference or function call. The shared constant-literal
+/// recognizer (`docs/specs/architecture.md` §"Property composition walk
+/// rule") — a discriminator/tag candidate for [`union_discriminated_grain`]
+/// and, via [`constant_literal_tag`], for backbuild's F2 branch-removal
+/// discriminator proof.
+pub(crate) fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
     if smelt_parser::ColumnRef::from_expr(expr).is_some() {
         return false;
     }
@@ -2214,6 +2503,37 @@ fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
         }
     }
     saw_literal
+}
+
+/// `expr`'s discriminator identity — `(kind, raw source text)` — if it is
+/// [`is_constant_literal`], else `None`. `kind` is the literal's coercion
+/// family: `"NUMBER"`/`"STRING"` for a bare literal, or the uppercase type
+/// keyword (`"DATE"`, `"TIME"`, `"TIMESTAMP"`, `"INTERVAL"`) for a typed
+/// one. Two literals of different kinds are not safely comparable by value
+/// after a `UNION ALL`'s column-type coercion, even when their raw text
+/// differs — callers building a coercion-safe discriminator (backbuild's F2
+/// branch-removal proof) compare `kind` before comparing `text`. The
+/// per-branch counterpart of [`union_discriminated_grain`]: that function
+/// works over already-walked `PropertyVector`s; this one works directly
+/// over one branch's own already-bounded SELECT-item expression, the shape
+/// backbuild's per-`SelectStmt` diffing needs without building a full
+/// [`QueryTree`].
+pub(crate) fn constant_literal_tag(expr: &smelt_parser::Expr) -> Option<(String, String)> {
+    if !is_constant_literal(expr) {
+        return None;
+    }
+    let kind = expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| !t.kind().is_trivia())
+        .map(|t| match t.kind() {
+            smelt_parser::SyntaxKind::NUMBER => "NUMBER".to_string(),
+            smelt_parser::SyntaxKind::STRING => "STRING".to_string(),
+            _ => t.text().to_ascii_uppercase(),
+        })
+        .unwrap_or_default();
+    Some((kind, expr.text().trim().to_string()))
 }
 
 /// The whole-model property vector — the single walk-derived derivation of

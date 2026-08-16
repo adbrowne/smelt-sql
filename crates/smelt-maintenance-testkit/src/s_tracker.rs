@@ -24,8 +24,9 @@
 
 use std::collections::HashSet;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 use smelt_backend::Backend;
+use smelt_logical::contract::ContractPoint;
 
 use crate::oracle_modes::OracleMode;
 use crate::recipe::{ModelEdit, ModelRecipe, SourceRecipe};
@@ -112,11 +113,34 @@ impl STracker {
     /// own window (i.e. appended but never covered by a re-run) never enters
     /// this set — the horizon semantics fall out with no special-casing.
     pub fn s_at(&self, k: usize) -> Vec<GenRow> {
+        self.s_at_for_point(k, &ContractPoint::Default)
+    }
+
+    /// `S_k` generalised over a contract-lattice `point`
+    /// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`):
+    /// identical to [`Self::s_at`] except each recorded run's own
+    /// `[start, end)` window is first narrowed through
+    /// `smelt_logical::contract::restrict_run_window` before the per-window
+    /// row filter — the SAME transform the real write-eligibility clamp
+    /// calls, so the oracle and the write clamp can never drift apart. The
+    /// identity for [`ContractPoint::Default`] and [`ContractPoint::Deferral`]
+    /// (deferral restricts by settled cutoff, not by per-run window — see
+    /// [`Self::s_at_settled`]) reproduces [`Self::s_at`] exactly.
+    pub fn s_at_for_point(&self, k: usize, point: &ContractPoint) -> Vec<GenRow> {
         let mut seen: HashSet<GenRow> = HashSet::new();
         for run in self.runs.iter().take(k + 1) {
+            let start_days = run.start.num_days_from_ce() as i64;
+            let end_days = run.end.num_days_from_ce() as i64;
+            let (restricted_start_days, restricted_end_days) =
+                smelt_logical::contract::restrict_run_window(point, start_days, end_days);
+            let restricted_start =
+                NaiveDate::from_num_days_from_ce_opt(restricted_start_days as i32)
+                    .unwrap_or(run.start);
+            let restricted_end =
+                NaiveDate::from_num_days_from_ce_opt(restricted_end_days as i32).unwrap_or(run.end);
             for row in &run.snapshot {
                 let t = row.event_time();
-                if t >= run.start && t < run.end {
+                if t >= restricted_start && t < restricted_end {
                     seen.insert(row.clone());
                 }
             }
@@ -124,6 +148,31 @@ impl STracker {
         let mut rows: Vec<GenRow> = seen.into_iter().collect();
         rows.sort_by_key(|a| (a.d, a.id));
         rows
+    }
+
+    /// [`Self::s_at_for_point`] further restricted to rows strictly before
+    /// `point`'s settled cutoff (`smelt_logical::contract::settled_cutoff`) —
+    /// the deferral bracket's lower leg: `full_refresh(S_settled)`. Returns
+    /// `s_at_for_point(k, point)` unchanged when `point` has no settled
+    /// cutoff (every non-`Deferral` point).
+    pub fn s_at_settled(
+        &self,
+        k: usize,
+        point: &ContractPoint,
+        input_frontier: i64,
+    ) -> Vec<GenRow> {
+        let rows = self.s_at_for_point(k, point);
+        match smelt_logical::contract::settled_cutoff(point, input_frontier) {
+            Some(cutoff_days) => {
+                let Some(cutoff) = NaiveDate::from_num_days_from_ce_opt(cutoff_days as i32) else {
+                    return rows;
+                };
+                rows.into_iter()
+                    .filter(|r| r.event_time() < cutoff)
+                    .collect()
+            }
+            None => rows,
+        }
     }
 
     /// The most recently recorded run's index, or `None` before any run has
@@ -147,6 +196,47 @@ impl STracker {
     /// scoped to the connection that created them, so a fresh connection per
     /// call would make the table invisible to the follow-up oracle query).
     pub async fn materialize_s(&self, backend: &dyn Backend, k: usize) -> anyhow::Result<()> {
+        self.materialize_rows(backend, self.s_at(k)).await
+    }
+
+    /// [`Self::materialize_s`] generalised over a contract-lattice `point`
+    /// (`docs/outcomes/20260809-contract-lattice-v1/phases/06-plan.md`):
+    /// materializes `s_at_for_point(k, point)` rather than the unrestricted
+    /// `s_at(k)`. Reproduces [`Self::materialize_s`] exactly for
+    /// [`ContractPoint::Default`].
+    pub async fn materialize_s_for_point(
+        &self,
+        backend: &dyn Backend,
+        k: usize,
+        point: &ContractPoint,
+    ) -> anyhow::Result<()> {
+        self.materialize_rows(backend, self.s_at_for_point(k, point))
+            .await
+    }
+
+    /// [`Self::materialize_s_for_point`]'s settled counterpart — materializes
+    /// [`Self::s_at_settled`] (the deferral bracket's `S_settled` leg) into
+    /// the SAME temp table name [`Self::materialize_s`] uses, so
+    /// [`Self::s_restricted_oracle_sql`] renders unchanged against whichever
+    /// leg was materialized most recently.
+    pub async fn materialize_s_settled(
+        &self,
+        backend: &dyn Backend,
+        k: usize,
+        point: &ContractPoint,
+        input_frontier: i64,
+    ) -> anyhow::Result<()> {
+        self.materialize_rows(backend, self.s_at_settled(k, point, input_frontier))
+            .await
+    }
+
+    /// The DROP/CREATE/INSERT sequence every `materialize_s*` variant shares
+    /// — only WHICH rows differs.
+    async fn materialize_rows(
+        &self,
+        backend: &dyn Backend,
+        rows: Vec<GenRow>,
+    ) -> anyhow::Result<()> {
         let table = self.oracle_table_name();
         backend
             .execute_sql(&format!("DROP TABLE IF EXISTS {table}"))
@@ -161,7 +251,7 @@ impl STracker {
             ))
             .await
             .map_err(|e| anyhow::anyhow!("create oracle temp table {table}: {e}"))?;
-        for row in self.s_at(k) {
+        for row in rows {
             backend
                 .execute_sql(&format!(
                     "INSERT INTO {table} VALUES (DATE '{}', {}, {})",
@@ -287,6 +377,59 @@ mod tests {
     fn sorted(mut rows: Vec<GenRow>) -> Vec<GenRow> {
         rows.sort_by_key(|a| (a.d, a.id));
         rows
+    }
+
+    /// `s_at_under_frozen_horizon_drops_the_late_frozen_row` (phase 6 TDD
+    /// list, test 5): a row landing in an already-frozen partition is in
+    /// `s_at` (the default point) but absent from
+    /// `s_at_for_point(FrozenHorizon)` — the per-run window narrowing
+    /// excludes a run whose own window nominally covers the frozen
+    /// partition, once that run's own `end - h` floor has passed it.
+    #[test]
+    fn s_at_under_frozen_horizon_drops_the_late_frozen_row() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+
+        let a = GenRow {
+            d: date(2024, 1, 1),
+            id: 1,
+            val: 10,
+        };
+        let late = GenRow {
+            d: date(2024, 1, 1),
+            id: 2,
+            val: 999,
+        };
+
+        // A wide rerun of window [2024-01-01, 2024-01-11) whose snapshot now
+        // contains the late row landed back in the already-old partition
+        // 2024-01-01.
+        let k = tracker.record_run(
+            date(2024, 1, 1),
+            date(2024, 1, 11),
+            vec![a.clone(), late.clone()],
+        );
+
+        // Default point: the run's own window covers 2024-01-01, and the
+        // snapshot contains both rows — both are in S.
+        assert_eq!(
+            sorted(tracker.s_at(k)),
+            sorted(vec![a.clone(), late.clone()]),
+            "the default point's S must include everything the run's own \
+             window+snapshot covers"
+        );
+
+        // Frozen horizon H = 2 days: this run's frozen floor is
+        // end - h = 2024-01-11 - 2 = 2024-01-09, well past 2024-01-01 — the
+        // run's write-eligible start narrows to 2024-01-09, so 2024-01-01
+        // never enters S under this point.
+        let point = smelt_logical::contract::ContractPoint::FrozenHorizon { h: 2 };
+        let restricted = tracker.s_at_for_point(k, &point);
+        assert!(
+            !restricted.contains(&a) && !restricted.contains(&late),
+            "a frozen partition's rows must be dropped by \
+             s_at_for_point(FrozenHorizon), got {restricted:?}"
+        );
     }
 
     /// `s_matches_hand_computed_set_on_fixed_schedule` (plan Phase 3 TDD

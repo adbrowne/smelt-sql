@@ -27,11 +27,15 @@ use chrono::Datelike;
 use smelt_core::config::{Grain as ConfigGrain, Granularity, RefreshStrategy};
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelFile;
+use smelt_logical::analysis::join_shape::JoinContext;
+use smelt_logical::analysis::output_delta::{self, OutputDelta, OutputDeltaFacts};
+use smelt_logical::maintenance::edge_type::type_edge;
 use smelt_logical::maintenance::propagate::{
     day_ordinal, ordinal_to_iso, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
 };
+use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
+    ColumnGroup, MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
 };
 
 /// One caller-declared per-source delta: the partitions that landed on
@@ -44,11 +48,15 @@ pub struct SourceDelta {
 }
 
 /// Bare name matching `smelt-db::queries::maintenance::source_facts`'s own
-/// convention: strip a leading `sources.` breadcrumb only, never collapse a
-/// multi-segment address to its last leaf.
-fn bare_name(segs: &[String]) -> String {
+/// convention: strip a leading `sources.` or `models.` namespace breadcrumb
+/// only, never collapse a multi-segment address to its last leaf. A
+/// `smelt.models.<addr>` ref's own segments carry the `models` keyword
+/// literally (`SmeltRef::to_path`'s doc comment), which is never part of
+/// `ModelFile::canonical_path()` — stripping it here is what lets a
+/// model-reference address resolve against `model_by_addr`.
+pub(crate) fn bare_name(segs: &[String]) -> String {
     match segs.split_first() {
-        Some((first, rest)) if first == "sources" => rest.join("."),
+        Some((first, rest)) if first == "sources" || first == "models" => rest.join("."),
         _ => segs.join("."),
     }
 }
@@ -148,14 +156,14 @@ fn source_grain(info: &SourceInfo) -> Result<PartitionGrain> {
 /// [`build_forward_graph`] from the SAME derivation `smelt explain` reads —
 /// never re-derived here) for every `grain: key` model in the workspace.
 /// A `grain: key` model whose locality gate admitted (the composed shape,
-/// `incremental_models.md` §"Key temporal locality (the time-partitioned
+/// `incremental_shapes.md` §"Key temporal locality (the time-partitioned
 /// output)") is a clocked node at its declared `timeseries.granularity`
 /// like any other node (§"The graph layer": "A locality-admitted
 /// time-partitioned keyed output is not refused"); a **bare** keyed model —
 /// no `timeseries:` declared, or one declared but not admitted — stays
-/// [`PartitionGrain::Keyed`] for [`crate::propagate::refuse_keyed_nodes`]-
-/// equivalent (`smelt_logical::maintenance::propagate::refuse_keyed_nodes`)
-/// to refuse. Admission keys off the locality **verdict**, never off the
+/// [`PartitionGrain::Keyed`] for
+/// [`smelt_logical::maintenance::propagate::classify_keyed_edges`] to
+/// classify (admit through the keyed dirt-set channel, or refuse). Admission keys off the locality **verdict**, never off the
 /// mere presence of a `timeseries:` block.
 fn model_grain(
     model: &ModelFile,
@@ -189,6 +197,124 @@ fn model_grain(
     }
 }
 
+/// This model's declared `sources.*` refs as [`output_delta::SourceFacts`],
+/// the per-model input the output-delta walk reads — mirrors
+/// [`derive_clamp_and_locality_pass`]'s own declared-source collection, but
+/// only the fail-closed leaf-seeding facts the output-delta proof needs
+/// (`analysis::output_delta::SourceFacts::from_source_info`), not the
+/// maintenance-plan `SourceFacts` shape.
+pub(crate) fn model_output_delta_sources(
+    model: &ModelFile,
+    source_infos: &[SourceInfo],
+) -> Vec<output_delta::SourceFacts> {
+    let mut sources = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for r in &model.refs {
+        let segs = r.smelt_ref.to_path();
+        if segs.first().map(|s| s.as_str()) != Some("sources") {
+            continue;
+        }
+        let bare = bare_name(&segs);
+        if !seen.insert(bare.clone()) {
+            continue;
+        }
+        if let Some(info) = source_infos.iter().find(|s| s.address_segments == segs) {
+            sources.push(output_delta::SourceFacts::from_source_info(&bare, info));
+        }
+    }
+    sources
+}
+
+/// This model's skeleton columns (`maintenance::skeleton::skeleton_columns`)
+/// from its own declared `unique_key`/`timeseries.partition_column` — the
+/// SAME two facts `smelt-db`'s own maintenance-plan derivation reads to seed
+/// the identical call, never re-derived differently here.
+pub(crate) fn model_skeleton_columns(model: &ModelFile, sql: &str) -> BTreeSet<String> {
+    let metadata = model.metadata.as_deref();
+    let declared_unique_key = metadata
+        .and_then(|m| m.unique_key.clone())
+        .unwrap_or_default();
+    let partition_col = metadata
+        .and_then(|m| m.timeseries.as_ref())
+        .map(|ts| ts.partition_column.clone());
+    skeleton_columns(sql, &declared_unique_key, partition_col.as_deref())
+}
+
+/// Build the per-model [`output_delta::ModelDeltaInput`] records for the
+/// cross-model output-delta fold (`output_delta::derive_workspace_output_deltas`),
+/// over EVERY model in the workspace — a downstream model-reference leaf may
+/// name any model, not only the `refresh: incremental` ones
+/// `derive_clamp_and_locality_pass` restricts itself to.
+pub(crate) fn workspace_output_delta_verdicts(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+) -> BTreeMap<String, OutputDeltaFacts> {
+    let inputs: Vec<output_delta::ModelDeltaInput> = models
+        .iter()
+        .map(|model| {
+            let sql = smelt_parser::strip_frontmatter(&model.content);
+            output_delta::ModelDeltaInput {
+                address: model.canonical_path(),
+                sql,
+                ctx: JoinContext::new(),
+                sources: model_output_delta_sources(model, source_infos),
+            }
+        })
+        .collect();
+    output_delta::derive_workspace_output_deltas(&inputs)
+}
+
+/// The upstream's own output-delta verdict per [`ColumnGroup`]
+/// (`incremental_models.md` §"The graph layer" → "Typed edges") — a model
+/// upstream folds `workspace_verdicts` (cross-model references resolve to
+/// the upstream's own upstream's derived shape); a raw source upstream
+/// seeds directly from its declared mutation profile
+/// (`output_delta::source_output_delta`). Neither (an upstream this
+/// workspace cannot locate) contributes no groups — `type_edge` then
+/// derives no component for it, never a fabricated one.
+pub(crate) fn upstream_output_delta_groups(
+    upstream: &str,
+    model_by_addr: &BTreeMap<String, &ModelFile>,
+    source_infos: &[SourceInfo],
+    workspace_verdicts: &BTreeMap<String, OutputDeltaFacts>,
+) -> Vec<(ColumnGroup, OutputDelta)> {
+    if let Some(model) = model_by_addr.get(upstream) {
+        let sql = smelt_parser::strip_frontmatter(&model.content);
+        let sources = model_output_delta_sources(model, source_infos);
+        let skeleton = model_skeleton_columns(model, &sql);
+        return output_delta::derive_output_delta_with_model_verdicts(
+            &sql,
+            &JoinContext::new(),
+            &sources,
+            &skeleton,
+            workspace_verdicts,
+        );
+    }
+    if let Some(info) = source_infos
+        .iter()
+        .find(|s| bare_name(&s.address_segments) == upstream)
+    {
+        let facts = output_delta::SourceFacts::from_source_info(upstream, info);
+        return output_delta::source_output_delta(&facts, info);
+    }
+    Vec::new()
+}
+
+/// The downstream consumer's own read columns + derived column groups
+/// (`incremental_models.md` §"The graph layer" → "Typed edges") — the two
+/// facts [`type_edge`] projects an upstream's shape through.
+fn consumer_output_delta_facts(
+    model: &ModelFile,
+    source_infos: &[SourceInfo],
+) -> (BTreeSet<String>, Vec<ColumnGroup>) {
+    let sql = smelt_parser::strip_frontmatter(&model.content);
+    let sources = model_output_delta_sources(model, source_infos);
+    let skeleton = model_skeleton_columns(model, &sql);
+    let read_columns = output_delta::referenced_column_names(&sql);
+    let groups = output_delta::derive_consumer_column_groups(&sql, &sources, &skeleton);
+    (read_columns, groups)
+}
+
 /// Build the real per-workspace propagation graph: one [`Edge`] per
 /// `(upstream, downstream)` pair a model's derived `MaintenancePlan` admits
 /// a `ScanClamp` for, widened to the maximum clamp margin across every cell
@@ -209,9 +335,9 @@ fn model_grain(
 /// self-referential model (a ref to its own address) before any interval
 /// math runs. A keyed-grain node is left in the graph for
 /// [`smelt_logical::maintenance::propagate::propagate`]'s own
-/// `refuse_keyed_nodes` to catch (so both `propagate` and `required_inputs`
-/// share exactly one refusal implementation, per that module's own
-/// composition law).
+/// `classify_keyed_edges` to classify (so both `propagate` and
+/// `required_inputs` share exactly one admission/refusal implementation,
+/// per that module's own composition law).
 pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) -> Result<Vec<Edge>> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
@@ -221,6 +347,12 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         locality_admitted,
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
+
+    let workspace_verdicts = workspace_output_delta_verdicts(models, source_infos);
+    let mut upstream_group_cache: BTreeMap<String, Vec<(ColumnGroup, OutputDelta)>> =
+        BTreeMap::new();
+    let mut consumer_facts_cache: BTreeMap<String, (BTreeSet<String>, Vec<ColumnGroup>)> =
+        BTreeMap::new();
 
     let mut edges = Vec::with_capacity(clamp_days.len());
     for ((upstream, downstream), (before_days, after_days)) in clamp_days {
@@ -238,6 +370,29 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             format!("internal: '{downstream}' not found among discovered models")
         })?;
         let downstream_grain = model_grain(downstream_model, &locality_admitted)?;
+
+        let upstream_verdicts = upstream_group_cache
+            .entry(upstream.clone())
+            .or_insert_with(|| {
+                upstream_output_delta_groups(
+                    &upstream,
+                    &model_by_addr,
+                    source_infos,
+                    &workspace_verdicts,
+                )
+            })
+            .clone();
+        let (consumer_read_columns, consumer_groups) = consumer_facts_cache
+            .entry(downstream.clone())
+            .or_insert_with(|| consumer_output_delta_facts(downstream_model, source_infos))
+            .clone();
+        let components = type_edge(
+            &upstream,
+            &upstream_verdicts,
+            &consumer_read_columns,
+            &consumer_groups,
+        );
+
         edges.push(Edge {
             upstream,
             downstream,
@@ -245,6 +400,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             after_days,
             upstream_grain,
             downstream_grain,
+            components,
         });
     }
     Ok(edges)
@@ -314,13 +470,23 @@ fn derive_clamp_and_locality(
     // than hang, per root `CLAUDE.md` §"Fail-loud discipline".
     let max_passes = models.len() + 1;
     let mut composed_sources: BTreeMap<String, (SourceFacts, Granularity)> = BTreeMap::new();
+    // The workspace's output-delta verdicts, derived once — the SAME map
+    // `build_forward_graph`'s own `type_edge` call reads
+    // (`workspace_output_delta_verdicts`), so a model edge's `output_shape`
+    // (below) is never a second, independent derivation of the same fact.
+    let workspace_verdicts = workspace_output_delta_verdicts(models, source_infos);
 
     for _pass in 0..max_passes {
         let ClampAndLocality {
             clamp_days,
             locality_admitted,
             key_locality_slice,
-        } = derive_clamp_and_locality_pass(models, source_infos, &composed_sources)?;
+        } = derive_clamp_and_locality_pass(
+            models,
+            source_infos,
+            &composed_sources,
+            &workspace_verdicts,
+        )?;
 
         let mut next_composed_sources: BTreeMap<String, (SourceFacts, Granularity)> =
             BTreeMap::new();
@@ -392,6 +558,7 @@ fn derive_clamp_and_locality_pass(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
     composed_sources: &BTreeMap<String, (SourceFacts, Granularity)>,
+    workspace_verdicts: &BTreeMap<String, OutputDeltaFacts>,
 ) -> Result<ClampAndLocality> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
@@ -436,8 +603,9 @@ fn derive_clamp_and_locality_pass(
         // unconditionally, so a route-3 declared-sub-route composed node —
         // `examples/web_analytics`'s own flagship `silver.events_deduped` —
         // never established locality in the graph layer and its own bare
-        // `PartitionGrain::Keyed` classification made `refuse_keyed_nodes`
-        // fail-loud refuse ANY graph containing it, origin or not).
+        // `PartitionGrain::Keyed` classification made
+        // `classify_keyed_edges` fail-loud refuse ANY graph containing it,
+        // origin or not).
         let mut source_refs: Vec<(String, Option<SourceInfo>)> = Vec::new();
         for r in &model.refs {
             let segs = r.smelt_ref.to_path();
@@ -463,7 +631,7 @@ fn derive_clamp_and_locality_pass(
                 }
                 continue;
             }
-            let addr = segs.join(".");
+            let addr = bare.clone();
             if addr == table {
                 bail!(
                     "MaintenanceGraphUnsupportedNode: '{table}' is self-referential — the \
@@ -490,13 +658,44 @@ fn derive_clamp_and_locality_pass(
                     let clock_col = up_meta
                         .and_then(|m| m.timeseries.as_ref())
                         .map(|ts| ts.partition_column.clone());
+                    // Sibling spellings of `clock_col` within the upstream's
+                    // own SQL (`ModelEdge::clock_col_aliases`'s doc comment).
+                    let clock_col_aliases = clock_col
+                        .as_deref()
+                        .map(|c| {
+                            smelt_logical::analysis::source_bounds::defining_expr_siblings(
+                                &upstream_model.content,
+                                c,
+                            )
+                        })
+                        .unwrap_or_default();
                     let unique_key = up_meta
                         .and_then(|m| m.unique_key.clone())
                         .unwrap_or_default();
+                    // The upstream's own derived output-delta shape
+                    // (`ModelEdge::output_shape`'s doc comment): the meet
+                    // across whatever per-column-group verdicts
+                    // `upstream_output_delta_groups` derives for it — the
+                    // SAME per-workspace fold `build_forward_graph`'s own
+                    // `type_edge` call reads, never re-derived differently.
+                    // `None` when the upstream contributes no groups at all
+                    // (unresolvable upstream) rather than an optimistic
+                    // guess.
+                    let output_shape = upstream_output_delta_groups(
+                        &bare,
+                        &model_by_addr,
+                        source_infos,
+                        workspace_verdicts,
+                    )
+                    .into_iter()
+                    .map(|(_, shape)| shape)
+                    .reduce(OutputDelta::meet);
                     model_edges.push(smelt_logical::maintenance::derive::ModelEdge {
                         name: bare.clone(),
                         clock_col,
+                        clock_col_aliases,
                         unique_key,
+                        output_shape,
                     });
                 } else {
                     // A `full`-mode or view upstream delivers no incremental
@@ -587,7 +786,7 @@ fn derive_clamp_and_locality_pass(
             &model_edges,
             driving_source_granularity,
             // Route 3's declared `key_recurrence` fallback (B3,
-            // `incremental_models.md` §"Key temporal locality" route 3): the
+            // `incremental_shapes.md` §"Key temporal locality" route 3): the
             // SAME `(bare name, key_recurrence)` list `smelt-db`'s own
             // `derive_model_maintenance_plan_with_edges` call site builds
             // via `build_key_recurrences` over the declared `sources.*`
@@ -595,6 +794,17 @@ fn derive_clamp_and_locality_pass(
             // composed node admits identically here as it does for `smelt
             // explain` — never a separately re-derived admission.
             &smelt_db::queries::maintenance::build_key_recurrences(&source_refs),
+            // The propagation graph walk only reads model-edge `NewData`
+            // creation cells — a `ColumnAdded` trigger never affects them,
+            // so no deployed-schema snapshot is needed here.
+            &[],
+            // Same rationale as `build_key_recurrences` above: the SAME
+            // declared `referential_integrity` facts `smelt-db`'s own
+            // `smelt explain` derivation reaches
+            // (`build_source_referential_integrity`), so a declared-route
+            // `UpstreamMutation` cell's closure is real here too, never a
+            // separately re-derived admission.
+            &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
         ) else {
             continue;
         };
@@ -645,7 +855,7 @@ fn derive_clamp_and_locality_pass(
             // key-addressed, not partition-addressed: it structurally never
             // carries a `ScanClamp` (`partition_local: PartitionLocal::Yes,
             // scans: vec![]` unconditionally — there is no partition axis
-            // for `link_source` to bound against). This edge's real
+            // for `project_source_link` to bound against). This edge's real
             // key→partition inbound margin (B2, "Key→partition dirt
             // projection through composed nodes") is derived from the SAME
             // admitted `KeyLocality` verdict `locality_admitted` above was
@@ -690,25 +900,30 @@ fn derive_clamp_and_locality_pass(
 }
 
 /// Refuse fail-loud when a `--source`/`--landed` delta origin names a
-/// **bare** keyed model (`grain: key`, no `timeseries:` declared, or one
-/// declared but locality not established) — even when the origin has no
-/// edge in the assembled graph at all. A bare keyed model whose only
-/// downstream reader can't derive a clock for it contributes no walkable
-/// edge (`build_forward_graph`'s own "underivable upstream clock is a
-/// recorded refusal" behaviour), so without this check an origin naming
-/// such a model would otherwise be a **silent no-op** — the delta seeds a
-/// dirty entry `propagate` never reflects through any edge, and
-/// `plan_since_upstream` prints "nothing to run" and exits 0. That is wrong
-/// for the same reason [`smelt_logical::maintenance::propagate`]'s own
-/// `refuse_keyed_nodes` fail-loud refuses a bare keyed node reached through
-/// an edge (`incremental_models.md` §"The graph layer" — a keyed node
-/// without an admitted time axis has no partition axis for interval dirt to
-/// propagate over) — the origin case just isn't reachable by that edge-only
-/// check, since an edge-less origin is never visited by it. Consults the
-/// SAME `locality_admitted` verdict [`build_forward_graph`] derives (never
-/// re-implementing admission); a **locality-admitted** composed origin
-/// (B1–B3, `incremental_models.md` §"Key temporal locality") passes through
-/// untouched — this refusal only ever fires on the bare case.
+/// **bare** keyed model (`grain: key`, no `timeseries:` declared or one
+/// declared but locality not established) whose own derived output-delta
+/// shape is `General` or absent — even when the origin has no edge in the
+/// assembled graph at all. A bare keyed model whose only downstream reader
+/// can't derive a clock for it contributes no walkable edge
+/// (`build_forward_graph`'s own "underivable upstream clock is a recorded
+/// refusal" behaviour), so without this check an origin naming such a
+/// model would otherwise be a **silent no-op** — the delta seeds a dirty
+/// entry `propagate` never reflects through any edge, and
+/// `plan_since_upstream` prints "nothing to run" and exits 0.
+///
+/// Narrowed (phase 5, `docs/outcomes/20260809-output-delta-typing/outcome.md`):
+/// mirrors [`smelt_logical::maintenance::propagate::classify_keyed_edges`]'s
+/// own admission rule — a bare keyed origin whose derived output-delta
+/// shape carries at least one non-`General` column group (i.e. an
+/// admitted `Addressing::Keyed` component, `type_edge` would derive for
+/// its own outbound edges) passes through untouched; the origin case just
+/// isn't reachable by `classify_keyed_edges`'s edge-only check, since an
+/// edge-less origin is never visited by it. Consults the SAME
+/// `locality_admitted` verdict [`build_forward_graph`] derives and the SAME
+/// `workspace_output_delta_verdicts` fold, never re-implementing either. A
+/// **locality-admitted** composed origin (B1–B3, `incremental_models.md`
+/// §"Key temporal locality") passes through untouched regardless — this
+/// refusal only ever fires on the bare, `General`-or-absent-shape case.
 fn refuse_bare_keyed_origins(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
@@ -719,6 +934,7 @@ fn refuse_bare_keyed_origins(
     let ClampAndLocality {
         locality_admitted, ..
     } = derive_clamp_and_locality(models, source_infos)?;
+    let workspace_verdicts = workspace_output_delta_verdicts(models, source_infos);
 
     for delta in deltas {
         let Some(model) = model_by_addr.get(&delta.source) else {
@@ -734,18 +950,31 @@ fn refuse_bare_keyed_origins(
             .get(&delta.source)
             .copied()
             .unwrap_or(false);
-        if !admitted {
-            bail!(
-                "MaintenanceGraphUnsupportedNode: '{}' is keyed-grain without an admitted time \
-                 axis: it has no partition axis for interval dirt to propagate over. Declare a \
-                 timeseries: block and establish key temporal locality \
-                 (docs/specs/incremental_models.md §\"Key temporal locality\") to admit it as a \
-                 locality-admitted composed node that participates in propagation like any other \
-                 clocked node — keyed dirt-sets over a bare keyed node are not yet supported \
-                 (S12)",
-                delta.source
-            );
+        if admitted {
+            continue;
         }
+        let has_addressable_shape = workspace_verdicts
+            .get(&delta.source.to_ascii_lowercase())
+            .is_some_and(|facts| {
+                facts
+                    .columns
+                    .iter()
+                    .any(|(_, shape)| !matches!(shape, OutputDelta::General { .. }))
+            });
+        if has_addressable_shape {
+            continue;
+        }
+        bail!(
+            "MaintenanceGraphUnsupportedNode: '{}' is keyed-grain without an admitted time \
+             axis: it has no partition axis for interval dirt to propagate over. Declare a \
+             timeseries: block and establish key temporal locality \
+             (docs/specs/incremental_models.md §\"Key temporal locality\") to admit it as a \
+             locality-admitted composed node that participates in propagation like any other \
+             clocked node, or ensure its own derived output-delta shape is addressable (keyed \
+             dirt-sets propagate for an admitted KeyedUpsert shape — \
+             docs/specs/incremental_models.md §\"Keyed dirt-sets and the narrowed refusal\")",
+            delta.source
+        );
     }
     Ok(())
 }
@@ -825,7 +1054,7 @@ pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckd
 
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
-/// (`docs/specs/incremental_models.md` §"What the composed shape uniquely
+/// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely
 /// enables" — exact `--landed` for model edges, Phase D3). For such an
 /// origin:
 /// - **absent** from `observed` (no entry for `(model, window_start,

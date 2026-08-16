@@ -28,11 +28,21 @@ parsing scripts simple.
 
 # <Feature Title>
 
-> **What this is.** *(Required scope callout — keep this blockquote between the H1 and the first `## Surface` heading on every spec.)* A one-paragraph statement of what this spec covers and what it does not — naming the adjacent specs that own neighbouring concerns. Readers skim this first; if they're in the wrong file, the callout sends them to the right one. Example shape: "A normative spec for `<feature>`: <one-sentence summary of in-scope surface>. Out of scope: <bullet of adjacent concern> (see `<other_spec>.md`); <another adjacent concern> (see `<another_spec>.md`)."
+> **What this is.** *(Required scope callout — keep this blockquote between the H1 and the first `##` section heading on every spec.)* A one-paragraph statement of what this spec covers and what it does not — naming the adjacent specs that own neighbouring concerns. Readers skim this first; if they're in the wrong file, the callout sends them to the right one. Example shape: "A normative spec for `<feature>`: <one-sentence summary of in-scope surface>. Out of scope: <bullet of adjacent concern> (see `<other_spec>.md`); <another adjacent concern> (see `<another_spec>.md`)."
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
 > **Timeless-oracle rule.** This spec describes the feature as if it has always existed. No plan-phase headings (`### Phase A — …`), no inline phase labels (`Meta list (Phase A)`), no plan-vocabulary status callouts (`[deferred to Phase E1]`) in §Surface, §Semantics, §Design, or §Constraints. Implementation status that needs naming goes in §Known Divergences (describe behaviour, link the plan; phase numbers tolerated only when paired with a plan link) or §References → Plans (history) (link plan files; do not describe their phase structure). See the Timeless-oracle rule in `CLAUDE.md` for the full rule and good/bad examples.
+
+## Overview
+
+*(Optional — recommended for large specs.)* A **non-normative** mental-model primer, placed
+before `## Surface`. Its job is concept ordering: state the feature's central guarantee first,
+then the declared surface in outline, then how the machinery relates — introducing every term
+the spec depends on *before* the normative sections use it. Worked examples and a short reading
+guide ("which section answers which kind of question") belong here. Nothing in this section may
+be the sole home of a rule: every normative statement it previews must also appear, in full, in
+§Surface/§Semantics/§Constraints — on conflict, the normative sections win.
 
 ## Surface
 
@@ -74,6 +84,15 @@ What must always hold. What is explicitly not supported and why. These are the t
 - Invariants the implementation must preserve (e.g., "`type_inference.rs` is pure")
 - Properties that must hold across all inputs (proptest-style)
 - Things explicitly out of scope (and the reason — keeps future plans honest)
+
+## Limitations
+
+*(Optional.)* Deliberate scope boundaries: things the feature does not do **by design** at the
+spec's current cut. Distinct from both neighbours — §Known Divergences tracks implementation
+lagging decided intent (a gap a plan closes), and §Future Extensions holds undecided ideas;
+an entry here is decided *against* for now and changes only via its own spec diff. Each entry
+states the boundary, the reason, and the sanctioned alternative. Short pointers to boundaries
+stated normatively elsewhere in the spec are welcome for discoverability; don't restate the rule.
 
 ## Known Divergences / Open Questions
 

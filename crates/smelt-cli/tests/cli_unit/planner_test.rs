@@ -111,6 +111,7 @@ async fn test_cube_split_matches_naive() {
         refs: vec![],
         timeseries_config: None,
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
 
     let mut graph = ModelGraph::new();
@@ -209,6 +210,7 @@ async fn test_cube_split_with_ref_calls() {
         refs: vec!["events".to_string()],
         timeseries_config: None,
         incremental_config: None,
+        plausible_columns: Default::default(),
     };
 
     let mut graph = ModelGraph::new();
@@ -304,6 +306,7 @@ GROUP BY 1, 2"#;
         sql: model_sql.to_string(),
         refs: vec![],
         incremental_config: frontmatter.batched_config(),
+        plausible_columns: Default::default(),
         timeseries_config: frontmatter.timeseries,
     };
 
@@ -439,6 +442,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
         sql: model_sql.to_string(),
         refs: vec![],
         incremental_config: frontmatter.batched_config(),
+        plausible_columns: Default::default(),
         timeseries_config: frontmatter.timeseries,
     };
 
@@ -583,6 +587,7 @@ SELECT date_trunc('day', event_time) as event_date, COUNT(*) as cnt FROM events 
         sql: model_sql.to_string(),
         refs: vec![],
         incremental_config: frontmatter.batched_config(),
+        plausible_columns: Default::default(),
         timeseries_config: frontmatter.timeseries,
     };
 

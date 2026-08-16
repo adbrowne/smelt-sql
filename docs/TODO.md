@@ -1,5 +1,185 @@
 # TODO
 
+## Follow-ups from the 2026-08-12 incremental spec re-architecture
+
+The spec set (`incremental_models.md` + `incremental_shapes.md` + `definition_deltas.md`) is
+committed; these are the loose ends the redraft deliberately left for follow-up work:
+
+- **docs-site sync**: user docs still describe the four-corners framing and `smelt backbuild`;
+  a docs-site pass should follow the new front door (delta signatures) and the verb renames
+  once a wiring plan exists. `docs-site` was deliberately untouched by the spec redraft.
+- **`/smelt:validate` run** over the three new specs to baseline drift.
+- **`smelt migrate` / `smelt rebuild` wiring plan** (research §6 step 2): wire the backbuild
+  layer behind plan-and-approve; extend the conformance harness with a definition-edit step
+  kind; rename the CLI verb; build the approval (plan-hash) store.
+- **Sidecar per-consuming-edge audit** (`sources.md` §Known Divergences, new entry): verify
+  the built fingerprint sidecar upholds the per-consumer comparandum requirement under a
+  shared projection-identity partition.
+- **Frozen-horizon append-only gate**: the spec now refuses `frozen_horizon` on a
+  non-append-only driving source (`ContractFrozenHorizonInvalid`); the implementation does not
+  yet check this leg.
+- **Deferral oracle restatement**: the conformance gate's oracle transform should be checked
+  against the restated landed-vs-processed form (`incremental_models.md` §"The contract
+  lattice") — the previous spec text was vacuous and a comparator built from it checks
+  nothing.
+- **Stale citations flagged by the sweep** (could not be confidently re-pointed; each names a
+  heading that no longer exists anywhere): `materialized_view.md` §"The composition contract"
+  (×2), `run_state.md` §"Failure mode", `timeseries.md` §"Granularity values", `models.md` +
+  `rules/incremental.rs:708` + one e2e test §"Non-determinism and the payload rule",
+  `maintenance_conformance/gate.rs` §"Per-slice…" (×2), `propagate.rs` §"Row movement",
+  `propagation.rs` §"The clamp both directions", `refresh_axis.rs` §"The declared shape axis".
+  These pre-date the redraft; fix opportunistically.
+
+
+## `ColumnScopedMerge` reachability gap on membership-sensitive `grain: partition` cells — RESOLVED (2026-08-09)
+
+Resolved by `docs/plans/20260809-sensitivity-precision.md` (Phases 2–5): membership sensitivity is
+now walk-composed across every scope (Phase 3) and pruned by the skeleton-source closure proof
+over a provably outer join (Phase 4) — a `LEFT JOIN` enrichment against a dimension that declares
+its own `unique_key` derives `Closed` and stops contributing membership sensitivity through its
+own `ON`-equality read, leaving only value sensitivity for the columns it actually feeds.
+`ValueEnrichedRecipe` (`crates/smelt-maintenance-testkit/src/recipe.rs`) stages exactly that shape
+and `crates/smelt-cli/tests/maintenance_conformance/gate.rs::value_enriched_recipe_executes_column_scoped_merge`
+proves it end to end: the derived cell carries `Technique::ColumnScopedMerge`, the executed
+statement is the column-scoped MERGE family (statement-parity seam), and end state matches the
+full-refresh oracle across dimension value mutation, dimension row deletion, and re-run schedules
+— including through `smelt bakeoff`'s measured/`--pin` code path, which item #1 below found had
+zero reachable coverage while `ColumnScopedMerge` was unreachable.
+
+One coverage gap this closure did **not** resolve survives, already tracked under "Mutation-campaign
+residue" below: the `choice.rs:235` liveness arm (`backend_supports_column_scoped_merge=false` on a
+`ColumnScopedMerge`-admitted cell) still has no test driving it, so the backend-capability fallback
+itself remains unpinned even though the technique's normal admission path is now proven.
+
+The bare inner-join fixture `examples/timeseries/models/daily_events_enriched.sql` (this item's
+original repro) is unaffected by the fix — it derives `Technique::DeleteInsert` for its
+`{user_name}` cell today, same as before, because its join is an inner `JOIN` with no dimension
+`unique_key` proving closure; that fixture was never the shape the fix targets. Its own doc
+comment (predating this resolution) still claims a live column-scoped `MERGE` for that cell — a
+pre-existing inaccuracy in the fixture's comments, not touched by this docs-only pass since
+`examples/` is out of scope for a docs sweep; worth a follow-up correction.
+
+### Original entry (2026-08-08, corrected same day)
+
+`docs/plans/20260808-membership-sensitivity.md` Phase 3 surfaced (confirmed empirically while
+rewriting `crates/smelt-cli/tests/{bakeoff,bakeoff_seam,maintenance_pins,explain_model,
+explain_show_sql}.rs`) two things about Phase 1's membership-sensitivity derivation — only the
+first of which is a genuine, still-open gap; the second was a real bug in this repo's OWN pin-
+resolution code, found by review and fixed the same day (see item #2's correction below):
+
+1. **`Technique::ColumnScopedMerge` is unreachable from any currently-shipped SQL shape.** Any
+   `JOIN`'s `ON` predicate (inner or left) reading a `MutableSnapshot` source makes EVERY column
+   group of that `SELECT` membership-sensitive (`Technique::DeleteInsert`), not only the columns
+   the dimension itself contributes — membership sensitivity is row-scoped, not per-column
+   (`membership_sensitivity_sources`, `crates/smelt-logical/src/maintenance/grouping.rs`). There is
+   no currently-shipped shape where a mutable, row-admission-joined dimension is ALSO read in a
+   select item with *only* value sensitivity toward the same source (Phase 2's own note). Knock-on
+   effect: `smelt bakeoff`'s measured/`--pin` code path (`run_bakeoff`'s branch past the
+   `candidates.is_empty()` early return, `crates/smelt-cli/src/bakeoff.rs`) has **zero reachable
+   test coverage** anywhere in the crate — `admitted_family` maps `Technique::DeleteInsert` to
+   `None`.
+2. **A `grain: partition` model's `DeleteInsert` membership cell has no live runtime DISPATCH at
+   all** (`resolve_live_membership_recompute_cell`'s own doc comment,
+   `crates/smelt-runtime/src/maintenance_driver.rs`: left to the plain unconditional region
+   `DELETE`+`INSERT` batch loop). This is still true and is NOT a bug — it is the documented,
+   correct posture for this shape (no key-addressable staged-candidate write exists for a
+   `WholeRow`-identity output). **It is not, however, why a pin/override was ever silently
+   ignored** — an earlier pass of this entry conflated the two. A `cells[].technique`/`prefer`
+   pin and a request-scope `technique_overrides` entry are validated by `resolve_live_column_
+   scoped_cell`'s OWN pin-consulting loop (called unconditionally by the `grain: partition` batch
+   loop while looking for a live `ColumnScopedMerge` opportunity, entirely independent of whether
+   `resolve_live_membership_recompute_cell`'s dispatch is reachable) — an inadmissible pin refuses
+   loudly there via `?`, before the "not ColumnScopedMerge, discard" branch is ever reached. The
+   REAL bug (found by review, fixed same day): `Trigger::UpstreamMutation(users)` derives TWO
+   sibling cells (`{user_name}` and `{event_id, event_type, user_id}` — membership sensitivity is
+   row-scoped, so a shared join admits a cell per column group, not one cell per trigger), and
+   `MaintenancePlan::cell_for`'s first-match lookup meant the pin-consulting loop only ever
+   evaluated an override against whichever sibling happened to be derived first — a pin scoped to
+   the OTHER sibling's columns was silently never matched. Fixed via `MaintenancePlan::cells_for`
+   (`crates/smelt-logical/src/maintenance/mod.rs`) — every sibling cell sharing a trigger is now
+   offered the override, matched against its own columns
+   (`crates/smelt-runtime/src/maintenance_driver.rs`); a hard `technique:` pin naming columns that
+   address NONE of a trigger's sibling groups now refuses loudly too
+   (`smelt_logical::maintenance::choice::unaddressed_technique_pin`) rather than silently vanishing.
+   Loud refusal is restored for both `maintenance_pins.rs::inadmissible_pin_fails_loud` and
+   `bakeoff_seam.rs::request_override_subject_to_admission`/
+   `request_override_forces_each_admissible_technique`.
+
+Item #1 is a deliberate-shape consequence of Phase 1's derivation swap, not a bug — nothing in
+Phases 1-3's critical-file scope was positioned to change the reachability of `ColumnScopedMerge`
+itself (that needs a genuinely new SQL shape or a relaxed derivation rule — arguably the "Outer-join
+membership semantics"/"Monotone-join admission relaxation" deferred items in that plan's Scope
+section). Tracked here rather than silently accepted. Candidate follow-up: extend
+`docs/plans/20260808-membership-sensitivity.md`'s successor work (or a new plan) to reassess whether
+`ColumnScopedMerge`'s bakeoff/pin machinery should be retired as dead code now that its only
+reachable shape is gone, rather than kept around with zero test coverage.
+
+**NULL-keyed row caveat (advisory, found in Phase 3 review).** `emit_staged_candidate_conditional_
+recompute`'s departed-key `DELETE` (`crates/smelt-logical/src/maintenance/emit.rs`) joins stored
+rows to staged-candidate rows on plain `=` key equality — SQL's `NULL = NULL` is never true, so a
+row whose key is (or contains) `NULL` is treated as absent from the staged candidate on EVERY run,
+even when it is still genuinely present: it is deleted and immediately reinserted every run rather
+than left alone. End-state equivalence with the full-refresh oracle still holds (the row's values
+are correct either way), but the change-suppression contract ("nothing changed → nothing written")
+silently does not hold for that one row. A NULL-safe key join (mirroring `key_expr_for_columns`'s
+`COALESCE`-based pattern, `crates/smelt-logical/src/maintenance/emit.rs` lines ~1093-1135) would
+close this; not fixed here — `RowIdentity::Key` is not documented anywhere as excluding a nullable
+column, so this is a real, if narrow, gap worth a follow-up.
+
+## `maintenance::grouping`'s column-ref collector — RESOLVED (2026-08-08)
+
+Resolved by `docs/plans/20260808-membership-sensitivity.md` (all phases): `grouping.rs` now uses
+the gated `collect_column_refs`; `collect_column_refs_ungated` is deleted; membership
+sensitivity is derived as its own kind (join-`ON` + `WHERE`/`HAVING` admission reads of mutable
+sources; subqueries fail closed); membership cells take suppressed delete+insert recompute with
+a departed-key `DELETE`; the conformance gate now exercises genuine dimension mutations
+(add/change/delete) against the full-refresh oracle; pin/override resolution consults every
+sibling cell per trigger (dangling hard pins refuse loudly).
+
+## Mutation-campaign residue (2026-08-08)
+
+From `docs/research/20260808-mutation-testing-maintenance-gates.md` (472-mutant campaign over
+`smelt-logical/src/maintenance/`; 13 final survivors, all classified). The genuine untested-logic
+residue:
+
+- [ ] **`choice.rs:235` liveness arm** — nothing drives `resolve_cell_choice` with
+  `backend_supports_column_scoped_merge=false` on a ColumnScopedMerge-admitted cell; deleting the
+  liveness-filter arm survives every gate. Add a pure test asserting the fallback when the backend
+  lacks MERGE.
+- [ ] **`derive.rs:182`** — `||`→`&&` in `source_contributes_to_fold` survives; find the input
+  class that distinguishes the disjunction and pin it.
+- [ ] **`derive.rs:1279` `group_columns`** — returning an empty/garbage set survives; no test
+  observes the grouped-column set directly.
+- [ ] **`granularity.rs:68`** — the `alias == partition_column` match guard forced to `true`
+  survives `check_declared_granularity`'s tests.
+- [ ] **`derive.rs:240`** — provably equivalent match guard (`aliases.len() == 1`); delete the
+  guard (cleanup, needs no test) so it stops registering as a survivor.
+- [ ] **Label/refusal text** — `trigger_label`, `resolvable_set_label`, `LocalityRefusal::fmt`
+  are unpinned. Decide: golden-pin refusal text (fail-loud culture) or accept as advisory.
+- [ ] **Re-run after F3** — `model_fingerprint_projections` mutants become killable once
+  fingerprint sidecars consume the projection; re-run the campaign then
+  (`cargo mutants --iterate` makes this incremental).
+- [ ] **Conformance-generator extensions** suggested by the campaign's blind spots: recipes with
+  `cells[].write` pins, ColumnAdded triggers with `allow_full_scan: true`, December/era-boundary
+  date pools, backends without column-scoped MERGE.
+- [x] **walk.rs campaign residue, triaged (2026-08-08)** — the second `analysis/walk.rs`
+  campaign's 40-survivor list (see `docs/research/20260808-mutation-testing-maintenance-gates.md`
+  §"Bonus campaign addendum") is fully triaged. 21 killed by
+  `crates/smelt-logical/tests/walk_hardening.rs` (the `has_unsupported` fail-closed spine,
+  `INTERSECT`/`EXCEPT` recognition, `is_constant_literal`, the union discriminator, ambiguous-alias
+  guards in `select_lineage`/`resolve_alias_source`, `path_display`, `has_subset_key`, and the
+  operator-level property/admission folds). 5 are provably equivalent (every `Transfer::leaf`
+  impl + `Grain::unkeyed` literally return their type's `Default`; no test can distinguish the
+  mutant). New kill rate: 146/163 viable (89.6%), up from 76.7%.
+- [ ] **walk.rs `own_region_text*` collector-guard residue (14 mutants, deferred)** — the
+  `own_region_text`/`own_region_text_excluding_self_relations` `node==root`/`TABLE_REF` guards
+  (13 mutants) and `scope_self_qualifiers`'s `last != key` guard (1 mutant) survived the Phase 1
+  triage session; see the research doc addendum's "Deferred, with reason" section for why a
+  discriminating test needs a scenario where duplicated/omitted region text changes which
+  `derive_partition_skew` text-heuristic pattern matches (not just how many times the same
+  pattern matches — `Skew::union`'s max-fold makes the naive construction an equivalent mutant
+  in practice), plus a precisely-shaped unaliased-dotted self-reference for the qualifier guard.
+
 ## Cross-Model Type Inference
 
 - [x] **Salsa cycle recovery for circular refs** — `salsa::cycle` recovery attributes added to `resolved_model_schema`, `typed_model_schema`, and `type_context` queries. Recovery functions return empty/default schemas and produce diagnostics. Tests cover A→B→C→A cycles and mutual dependencies.
@@ -39,8 +219,8 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 - [x] **Interval type** — Added `BaseType::Interval` with `CAST('1 day' AS INTERVAL)`, Arrow mapping already handles `Duration`/`Interval`.
 - [x] **Time type** — Added `BaseType::Time` with `CAST('12:00:00' AS TIME)`, Arrow mapping already handles `Time32`/`Time64`.
-- [ ] **Array types** — Add ARRAY literals, ARRAY_AGG, array subscript, array slice
-- [ ] **Row/Struct types** — Add ROW(...) and STRUCT(...) constructors
+- [x] **Array types** — Added `ExprKind::ArrayLiteral` (`ARRAY[1, 2, 3]` / `[1, 2, 3]`), `ArraySubscript` (`arr[1]`), `ArraySlice` (`arr[1:2]`), and `ARRAY_AGG(col)` (wraps the aggregate's argument type in `Array<T>`). Arrow's `List`/`LargeList` already mapped recursively to `Array<T>` in `arrow_mapping.rs`, including nested `List<List<T>>`. One divergence registered: DuckDB returns `Array(Varchar)` from `ARRAY_AGG(str_col)` where smelt infers `Array(Text)` — folded into the existing string-family (`Text`/`Varchar`) leniency in `type_comparison.rs` by unwrapping one level of `Array` before the compatibility check, rather than adding separate Array-of-X registry entries.
+- [x] **Row/Struct types** — Added `ExprKind::RowConstructor` (`ROW(<lit1>, <lit2>)` with two distinct field base types) and `BraceStructLiteral` (`{'a': <lit1>, 'b': <lit2>}`) with field-exact struct comparison. `STRUCT(1 AS a, ...)` literal syntax omitted from generation: smelt parses it but real DuckDB does not (verified against DuckDB — `struct_pack`'s named-arg form is its actual equivalent).
 
 ### Syntax Variants
 
@@ -105,7 +285,16 @@ Found during `docs/plans/20260711-clock-vs-root-anchored-sessions.md`; both pred
 
 - [ ] **`extract_interval_days_from_combined` mis-parses sub-day intervals as days.** `crates/smelt-logical/src/analysis/temporal.rs` has no MINUTE/SECOND branch, so `INTERVAL '5 minutes'` parses as 5 days. Impact is limited to the advisory `analyze_batch_safety` JSON label (e.g. `context=5d`); actual runtime chunk sizing uses `batch_safety_from_bounds` and is unaffected. Fix: add sub-day unit branches (round up to 1 day, or carry finer granularity) plus a regression test pinning `INTERVAL '5 minutes'`.
 
-- [ ] **Rare parallel-execution flake in DuckDB-backed integration suites.** Observed twice during the plan run: `smelt-datagen/tests/example_web_analytics.rs::test_identity_backward_fill_materializes` and one `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` test failed under a full parallel `cargo test`, then passed in isolation and on re-run of the full suite — same failure family both times (parallel load), reproduced on an unmodified tree. Worth capturing the exact failure output next time it fires and checking for a shared-resource collision (e.g. temp DB paths, memory pressure) before it erodes trust in the gates.
+- [ ] **Rare parallel-execution flake in DuckDB-backed integration suites.** Third sighting
+  2026-08-08 (captured output, as this item requested): `smelt-runtime/tests/fingerprint_sidecar.rs`
+  `a_hand_corrupted_stamp_is_detected_treated_as_absent_and_logged_loudly` failed under a full
+  parallel `cargo test -p smelt-logical -p smelt-runtime` with
+  `a corrupted/mismatched stamp must be logged loudly (tracing::warn!) ...; captured WARN messages: []`
+  (`fingerprint_sidecar.rs:1008`), then passed 4/4 in isolation. This one is a **tracing-capture
+  race**, not DuckDB load: the assertion depends on capturing `tracing::warn!` while other test
+  binaries/threads contend for the global subscriber. Fix direction: use a scoped
+  `tracing::subscriber::with_default` (or `set_default` guard) around the assertion instead of a
+  global subscriber. Earlier sightings observed twice during the plan run: `smelt-datagen/tests/example_web_analytics.rs::test_identity_backward_fill_materializes` and one `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` test failed under a full parallel `cargo test`, then passed in isolation and on re-run of the full suite — same failure family both times (parallel load), reproduced on an unmodified tree. Worth capturing the exact failure output next time it fires and checking for a shared-resource collision (e.g. temp DB paths, memory pressure) before it erodes trust in the gates.
 
 ## Refresh-as-maintenance-plan: ratification queue (2026-07-06) — CLOSED 2026-07-07
 
@@ -254,3 +443,49 @@ categories in the table above, which together with `roundtrip_mismatch` account 
 - `ast.rs` `strip_ident_quotes` handles `"…"`/`'…'` but not `$$…$$` dollar-quoted STRING
   tokens (e.g. `CollateExpr::collation_name`) — delimiters silently kept if one ever reaches
   such a call site.
+
+## Incremental-models spec redraft (2026-07-22)
+
+- PR #166 (branch `spec-redraft-incremental-models`): phases 0–5 done. Remaining: Phase 6 follow-up PR — run `/smelt:validate incremental_models`, sweep §-name references in code comments + sibling specs per the plan Appendix A heading map (docs/plans/ and docs/research/ stay untouched), delete the claims scaffolding file. See `docs/plans/20260722-incremental-models-spec-redraft.md`.
+
+## Backbuild property-test hardening (from 2026-08-03 mutation audit)
+
+Full findings: `docs/handoffs/2026-08-03-backbuild-property-test-review.md`.
+
+- [x] **Rerun-safety leg** (2026-08-07) — composed scripts now apply twice in `generated_options_match_full_rebuild_oracle` when all chosen options are `rerun_safe: true`; `e2_idempotent_with_identity` + `f1_idempotent_with_identity` added as E2/F1 siblings of `e4_idempotent_with_identity`. M4b re-injected and caught by both the property leg (at default N=24) and the new conformance tests.
+- [x] **Generator additions** (2026-08-07) — `EditRecipe::TightenFilterStatusOpen` (`o.status = 'open'`, E1 3VL; guaranteed slot), WHERE conjuncts on `Shape::Grouped` + `AmountPositive` on the `AddAggregate` guaranteed slot (B5 WHERE-carry), and the guaranteed `LoosenFilter` slot swapped to `StatusOpen` (E2/E4 3VL). M2, M7, M3 all re-injected and caught at default N=24.
+- [x] **Optional** (2026-08-07) — documented conformance-only coverage of H drop-ordering in the property harness module doc (generatively unobservable: drop+reader combos are correctly refused at admission).
+
+## Planner metamorphic gate follow-ups (2026-08-08)
+
+New gate: `cargo test -p smelt-cli --test planner_metamorphic` — generative
+metamorphic equivalence for the `cube_split` rewrite (recipes → in-memory
+DuckDB → two-way `EXCEPT ALL` vs the naive query; unsupported clauses must be
+refused, never silently dropped). Candidate extensions found while mapping the
+planner surface:
+
+- [ ] **Logical-plan rewrite rules are unprovable end-to-end** — the
+  `smelt_planner::logical_plan_rules` family (`EliminateUnusedLeftJoin`,
+  `PushFilterIntoTransparentFunction`, `ExpandTransparentFunctionCalls`,
+  `ElideEmptySelectItemsSplices`) is display-only: no Plan→SQL printer
+  exists, so their correctness cannot be executed against a backend. Notably
+  `EliminateUnusedLeftJoin` carries a documented soundness caveat (§20E:
+  trusts declared cardinality) with no executable check. Either build a
+  Plan→SQL printer (which would also let `--show-plan` output be verified) or
+  keep the rules display-only and say so in a doc comment.
+- [x] **Window-clamp metamorphic relation** (2026-08-08) — `cargo test -p
+  smelt-cli --test transformer_metamorphic`: for generated partition-aligned
+  models, data, window partitions, and pushdown margins, asserts (A) the
+  full-domain clamp drops exactly the NULL-event-time rows, (B) union of
+  per-window clamps == full clamp, (C) union of pushdown+clamp windows ==
+  full clamp in the production compose order. Soaked at 500 cases.
+- [ ] **Cube-split rewrite is dead in the runtime** — `Transformation::ReplaceWithPlan`
+  is never executed by `smelt-runtime` (only `smelt explain` and tests read
+  it). The new gate proves the rewrite correct when it does fire; decide
+  whether to wire it into execution or retire it.
+- [ ] **docs-site RI claim overstates delta restriction** — the incremental-models
+  guide says declaring a source's `referential_integrity` "narrows the
+  enrichment MERGE's recompute", but `resolve_recompute_restriction` is
+  model-edge-only; source-level enrichment joins get no delta restriction.
+  Fix the guide or wire the source-level route (flagged 2026-08-09 during the
+  sensitivity-precision docs sweep).

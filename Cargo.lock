@@ -4272,6 +4272,7 @@ name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
  "duckdb",
+ "proptest",
  "serde",
  "serde_yaml",
  "smelt-core",
@@ -4308,6 +4309,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "chrono",
  "duckdb",
  "proptest",
@@ -4385,10 +4387,12 @@ dependencies = [
  "smelt-backend",
  "smelt-backend-duckdb",
  "smelt-backends",
+ "smelt-cli",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
  "smelt-logical",
+ "smelt-maintenance-testkit",
  "smelt-parser",
  "smelt-planner",
  "smelt-state",
@@ -4449,6 +4453,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
+ "smelt-logical",
  "smelt-parser",
  "smelt-planner",
  "smelt-runtime",

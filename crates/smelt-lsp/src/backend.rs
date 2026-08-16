@@ -405,6 +405,9 @@ impl Backend {
                 // Timeseries frontmatter validation diagnostic codes.
                 DbCode::TimeseriesRequiredForPartitionGrain => "timeseries-required-for-batched",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
+                DbCode::PlausibleContractOnSkeletonColumn => {
+                    "plausible-contract-on-skeleton-column"
+                }
                 DbCode::MalformedFunctionalDependency => "malformed-functional-dependency",
                 DbCode::MalformedBoundedDomain => "malformed-bounded-domain",
                 // VALUES / CTE alias-column-list diagnostic codes.
@@ -421,8 +424,13 @@ impl Backend {
                 DbCode::KeyedForbidsWindowFunctions => "keyed-forbids-window-functions",
                 DbCode::KeyedForbidsNondeterministic => "keyed-forbids-nondeterministic",
                 DbCode::KeyedSnapshotPostureUnsupported => "keyed-snapshot-posture-unsupported",
+                DbCode::KeyedSnapshotSourceUnsupportedColumn => {
+                    "keyed-snapshot-source-unsupported-column"
+                }
                 DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
                 DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
+                DbCode::KeyedOnceWriteUnproven => "keyed-once-write-unproven",
+                DbCode::KeyedStateColumnCollision => "keyed-state-column-collision",
                 DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
                 DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
                 DbCode::MaterializedViewForbidsPartitionGrain => {
@@ -455,6 +463,7 @@ impl Backend {
                 DbCode::GrainAssertionMismatch => "grain-assertion-mismatch",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
+                DbCode::MaintenanceSkeletonColumnAdded => "maintenance-skeleton-column-added",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
                 DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
                 DbCode::MaintenanceWritePatternUnavailable => {
@@ -463,6 +472,8 @@ impl Backend {
                 DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
                 DbCode::UnknownColumnTestKind => "unknown-column-test-kind",
                 DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
+                DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
+                DbCode::ContractDeferralInvalid => "contract-deferral-invalid",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -984,6 +995,7 @@ impl Backend {
                     target: None,
                     state: Default::default(),
                     maintenance: None,
+                    probes: Default::default(),
                 });
             build_python_context(&all_files, &config, &project_root)
         };

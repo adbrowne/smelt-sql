@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::types::PartitionGrainConfig;
 pub use smelt_core::config::TimeseriesConfig;
 
 /// Information about a single model for the optimizer.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ModelInfo {
     pub name: String,
     /// Raw SQL content (including any frontmatter).
@@ -15,6 +15,12 @@ pub struct ModelInfo {
     pub timeseries_config: Option<TimeseriesConfig>,
     /// Incremental configuration parsed from frontmatter, if any.
     pub incremental_config: Option<PartitionGrainConfig>,
+    /// Columns declared `columns.<c>.contract: plausible` in the model's
+    /// `.sql` frontmatter (`docs/specs/models.md` §"`columns:` — column
+    /// metadata") — the sole surviving surface for the non-determinism
+    /// payload opt-in the retired `batched.nondeterministic_columns` list
+    /// form used to carry. Consumed by `check_nondeterminism`.
+    pub plausible_columns: BTreeSet<String>,
 }
 
 /// A collection of models the optimizer can analyze.

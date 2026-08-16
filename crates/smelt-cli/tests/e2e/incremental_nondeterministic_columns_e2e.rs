@@ -1,11 +1,11 @@
 #![cfg(feature = "duckdb")]
-//! Real-fixture coverage for `batched.nondeterministic_columns`
+//! Real-fixture coverage for `columns.<c>.contract: plausible`
 //! (docs/specs/incremental_models.md §"Non-determinism and the payload
 //! rule"; §"Partition-grain constraints" #12).
 //!
 //! Exercises `examples/incremental_nondeterministic_columns` — an incremental
 //! model that stamps every row with `NOW()` into an `inserted_at` column
-//! listed in `batched.nondeterministic_columns` — end-to-end through
+//! declared `columns.inserted_at.contract: plausible` — end-to-end through
 //! `smelt run`. Asserts:
 //!
 //!   1. The build succeeds — `detect()` (the `smelt-logical` non-determinism
@@ -296,9 +296,9 @@ fn nondeterministic_columns_build_and_match_full_refresh_on_deterministic_column
 
     // ── The build itself succeeded (smelt run above would have panicked
     //    otherwise) — the non-determinism flow/taint check admitted the
-    //    model because `inserted_at` is listed in
-    //    `batched.nondeterministic_columns`. Confirm the payload column
-    //    actually got populated on both pipelines.
+    //    model because `inserted_at` declares
+    //    `columns.inserted_at.contract: plausible`. Confirm the payload
+    //    column actually got populated on both pipelines.
     assert_eq!(
         count_non_null_inserted_at(&db_a),
         6,

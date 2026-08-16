@@ -1,10 +1,8 @@
-//! Per-partition execution loop for `refresh: keyed` table models.
+//! Execution loops for `refresh: keyed` table models, one per derived run
+//! shape (`docs/specs/incremental_shapes.md` §"The two run shapes").
 //!
-//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
-//! the mode's built seed: it only drives the direct-monoid (additive +
-//! extremal/lattice) column families.
-//!
-//! For a run window `[run_start, run_end)`:
+//! **Window-forward** (`execute_cumulative_aggregate`), for a run window
+//! `[run_start, run_end)`:
 //!
 //! 1. Classify the model's SQL (`smelt_planner::classify_cumulative`).
 //! 2. Step over the driving source's partitions in temporal order.
@@ -12,6 +10,10 @@
 //!    `<driving_source>.<partition_col> ∈ [D, D + granularity)` and the
 //!    rule either creates the target table from the delta SELECT (first
 //!    run) or emits a combiner-aware `MERGE INTO`.
+//!
+//! **Snapshot-reconcile** (`execute_snapshot_reconcile`, Phase 3,
+//! `docs/plans/20260809-keyed-frontier.md`): no window — the whole source
+//! is re-scanned every run; see that function's own doc comment.
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
 use crate::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance, WindowedKeyedRule};
@@ -31,12 +33,33 @@ use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
 };
 use smelt_planner::{
-    classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
-    CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
+    classify_cumulative, combiner_for, CrossPartitionCombiner, CumulativeClassification,
+    KeyedDiagnostic, SourceTimeseriesMap,
 };
 use smelt_state::reconciliation::Grade;
 use std::collections::HashMap;
 use tracing::info;
+
+/// The state-column combiner allowlist `WindowedKeyedRule::refuse`'s
+/// defense-in-depth pass verifies a decomposed-state column's own state
+/// columns against — every combiner shape a state column can carry today
+/// (`analysis::decomposed_state::decompose_to_state`/`decompose_once_write`,
+/// `docs/outcomes/20260809-rung2-state-shapes`).
+fn is_recognised_state_combiner(combiner: &CrossPartitionCombiner) -> bool {
+    matches!(
+        combiner,
+        CrossPartitionCombiner::Sum
+            | CrossPartitionCombiner::Min
+            | CrossPartitionCombiner::Max
+            | CrossPartitionCombiner::BoolAnd
+            | CrossPartitionCombiner::BoolOr
+            | CrossPartitionCombiner::BitAnd
+            | CrossPartitionCombiner::BitOr
+            | CrossPartitionCombiner::BitXor
+            | CrossPartitionCombiner::OrderMonotone { .. }
+            | CrossPartitionCombiner::OnceWrite
+    )
+}
 
 /// `keyed`'s [`WindowedKeyedRule`] impl: its classification already
 /// gated every aggregator column through `combiner_for` (the monoid-only
@@ -47,11 +70,81 @@ use tracing::info;
 impl WindowedKeyedRule for CumulativeClassification {
     fn refuse(&self) -> Option<String> {
         for col in &self.aggregator_columns {
-            if combiner_for(&col.per_partition_agg).is_none() {
-                return Some(format!(
-                    "aggregator `{}` on column `{}` is not a monoid combiner",
-                    col.per_partition_agg, col.output_name
-                ));
+            // A state-bearing column's presented value has no monoid fold of
+            // its own — `MAX_BY`/`MIN_BY`'s `OrderMonotone`, once-write's
+            // fallback/multi-candidate state, and the decomposed-fold
+            // family's `Recomputed` all fold through their hidden state
+            // columns instead of `per_partition_agg`
+            // (`docs/outcomes/20260809-rung2-state-shapes` row 7). Check
+            // `col.state` first and re-verify each state column's own
+            // combiner against the same allowlist below, rather than
+            // consulting `combiner_for(per_partition_agg)` (`AVG`/
+            // `STDDEV_*`/`VAR_*` never appear in that allowlist — it is a
+            // fold over the *presented* value, which a state-bearing column
+            // never has).
+            if let Some(state) = &col.state {
+                for state_col in &state.state_columns {
+                    if !is_recognised_state_combiner(&state_col.combiner) {
+                        return Some(format!(
+                            "internal error: state column `{}` backing `{}` carries an \
+                             unrecognised combiner — the classifier only derives already- \
+                             recognised combiners into decomposed state",
+                            state_col.name, col.output_name
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            match &col.cross_partition_combiner {
+                // The order-monotone overwrite family (`MAX_BY`/`MIN_BY`) is
+                // not a monoid — `combiner_for`'s allowlist deliberately
+                // doesn't cover it (`analysis::discriminants::Monotone::Order`
+                // is a semilattice fold, not a commutative monoid). It is
+                // already verified at classify time
+                // (`rules::cumulative::classify_order_monotone_column`), so
+                // this defense-in-depth pass has nothing further to check.
+                CrossPartitionCombiner::OrderMonotone { .. } => {}
+                // The plain-overwrite family (`ANY_VALUE`) is the
+                // snapshot-reconcile run shape's own family — it never
+                // reaches this window-forward driver (the classifier
+                // refuses it window-forward), but is matched explicitly
+                // rather than falling into the `combiner_for` allowlist
+                // check below, which would spuriously refuse it.
+                CrossPartitionCombiner::PlainOverwrite => {}
+                // The once-write family (`COALESCE`) is likewise not a
+                // monoid `combiner_for` allowlists — its admission proof
+                // (key-derived, or a declared functional dependency over
+                // the coalesced value's source column, not structurally
+                // disproven by a fan-out join or a set-operation barrier)
+                // is already verified at
+                // classify time (`rules::cumulative::classify_once_write`),
+                // so this defense-in-depth pass has nothing further to
+                // check (`docs/plans/20260809-keyed-frontier.md` Phase 4).
+                CrossPartitionCombiner::OnceWrite => {}
+                // Unreachable in a well-formed classification: every
+                // `Recomputed` column the classifier produces
+                // (`rules::cumulative::classify_decomposed_fold_column`)
+                // always carries `state: Some(..)`, caught by the branch
+                // above. Reaching this arm means a `Recomputed` column with
+                // no state slipped through classification — an internal
+                // invariant violation, not a model error.
+                CrossPartitionCombiner::Recomputed => {
+                    return Some(format!(
+                        "internal error: aggregator `{}` on column `{}` is `Recomputed` but \
+                         carries no decomposed state — a `Recomputed` presented column must \
+                         always be state-bearing",
+                        col.per_partition_agg, col.output_name
+                    ));
+                }
+                _ => {
+                    if combiner_for(&col.per_partition_agg).is_none() {
+                        return Some(format!(
+                            "aggregator `{}` on column `{}` is not a monoid combiner",
+                            col.per_partition_agg, col.output_name
+                        ));
+                    }
+                }
             }
         }
         None
@@ -69,19 +162,52 @@ impl WindowedKeyedRule for CumulativeClassification {
     }
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
-    /// combiner is `Sum` — an additive fold double-counts on a repeat merge
-    /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
-    /// "Storage is graded by algebra"). The remaining catalogued combiners
-    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`) are the
-    /// extremal/lattice family and grade `Idempotent`. Mixing an additive
+    /// combiner belongs to the **additive fold** family — `Sum` or `BitXor`
+    /// (`docs/specs/incremental_shapes.md` §"The column-family catalogue")
+    /// — since re-merging an already-reflected delta does not converge for
+    /// either (`docs/specs/incremental_models.md` §"The reconciliation
+    /// ledger" — "Storage is graded by algebra"). `Sum` double-counts
+    /// (`x + d + d`); `BitXor` is self-inverse and *cancels* the window's
+    /// contribution (`x XOR d XOR d == x`) — a different corruption, the
+    /// same non-idempotence, so both must keep a ledger and refuse a
+    /// reprocessed window rather than silently write wrong state.
+    ///
+    /// The remaining catalogued combiners (`Min`/`Max`/`BoolAnd`/`BoolOr`/
+    /// `BitAnd`/`BitOr`, the order-monotone overwrite family
+    /// `OrderMonotone`, and the once-write family `OnceWrite`) grade
+    /// `Idempotent`: re-merging the SAME already-reflected delta twice
+    /// leaves the state unchanged — the lattice combiners are idempotent
+    /// (`GREATEST(x, d) == GREATEST(GREATEST(x, d), d)`), the incumbent-wins
+    /// comparison is false the second time (after the first merge
+    /// `target.ord == delta.ord`), and `COALESCE(target.c, delta.c)` is a
+    /// no-op once `target.c` is set — a re-run converges. Mixing an additive
     /// column with idempotent ones in the same cell still grades the whole
     /// cell `Additive` — conservative (never unsafe), per
     /// `WindowedKeyedRule::ledger_grade`'s doc comment.
     fn ledger_grade(&self) -> Grade {
-        let any_additive = self
-            .aggregator_columns
-            .iter()
-            .any(|col| matches!(col.cross_partition_combiner, CrossPartitionCombiner::Sum));
+        let any_additive = self.aggregator_columns.iter().any(|col| {
+            // A state-bearing column's own `cross_partition_combiner`
+            // (`OrderMonotone`/`OnceWrite`/`Recomputed`) says nothing about
+            // whether its *state* folds additively — grade off each state
+            // column's own combiner instead. `AVG`/the variance family's
+            // state is entirely `Sum` (the first additive state this
+            // mechanism admits, `docs/outcomes/20260809-rung2-state-shapes`
+            // row 7); `MAX_BY`/`MIN_BY`'s `(v, o)` and once-write's
+            // `(value, written)` states are not, and stay `Idempotent`.
+            if let Some(state) = &col.state {
+                state.state_columns.iter().any(|s| {
+                    matches!(
+                        s.combiner,
+                        CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+                    )
+                })
+            } else {
+                matches!(
+                    col.cross_partition_combiner,
+                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+                )
+            }
+        });
         if any_additive {
             Grade::Additive
         } else {
@@ -141,6 +267,7 @@ pub async fn execute_cumulative_aggregate(
     source_key_recurrence: &HashMap<String, smelt_core::sources::KeyRecurrence>,
     verbose: bool,
     retry: &crate::execute::RetryPolicy<'_>,
+    probe_policy: &crate::probes::ProbePolicy,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let _ = (target, compiler); // reserved for future per-target compiler dispatch
@@ -152,13 +279,39 @@ pub async fn execute_cumulative_aggregate(
         .metadata
         .as_ref()
         .is_some_and(|m| m.timeseries.is_some());
+    let declared_fds: &[smelt_core::config::FunctionalDependency] = model
+        .metadata
+        .as_ref()
+        .map(|m| m.functional_dependencies.as_slice())
+        .unwrap_or(&[]);
 
-    let classification =
-        classify_cumulative(&clean_sql, &refs, source_timeseries, model_has_timeseries)
-            .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
+    let classification = classify_cumulative(
+        &clean_sql,
+        &refs,
+        source_timeseries,
+        model_has_timeseries,
+        declared_fds,
+    )
+    .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
 
     let driving_source_name = classification.driving_source.name.clone();
-    let driving_ts = classification.driving_source.timeseries.clone();
+    // This function is only reachable via the window-forward run shape —
+    // the caller (`execute.rs`'s keyed dispatch) refuses a windowed run for
+    // a snapshot-reconcile model before ever reaching here
+    // (`docs/specs/incremental_shapes.md` §"The two run shapes"). A `None`
+    // here would be an internal invariant violation, not a model error —
+    // fail loud rather than silently treating it as anything else.
+    let driving_ts = classification
+        .driving_source
+        .timeseries
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "internal error: model '{}' derived the snapshot-reconcile run shape but reached \
+             the window-forward executor",
+                model_name
+            )
+        })?;
 
     info!(
         "Running model: {} (keyed, driving source = {})",
@@ -166,7 +319,7 @@ pub async fn execute_cumulative_aggregate(
     );
 
     // 1b. When the model declares its own `timeseries:` block, key temporal
-    //     locality (`docs/specs/incremental_models.md` §"Key temporal
+    //     locality (`docs/specs/incremental_shapes.md` §"Key temporal
     //     locality") must be established before any merge is emitted — the
     //     single seam (`smelt_logical::maintenance::locality::establish_
     //     locality`) is a pure function, so calling it here (in addition to
@@ -222,13 +375,14 @@ pub async fn execute_cumulative_aggregate(
     // 2. Refuse reprocessing (MP12): the windowed-keyed-maintenance driver
     //    (step 3 below) grades this classification's cell via
     //    `WindowedKeyedRule::ledger_grade` above. For an `Additive`-graded
-    //    cell — at least one `SUM`-family aggregator column — every step's
+    //    cell — at least one additive-fold aggregator column (`SUM`/`COUNT`
+    //    or the self-inverse `BIT_XOR`) — every step's
     //    create-or-merge action is folded through the warehouse-resident
     //    reconciliation ledger (`docs/specs/incremental_models.md` §"The
     //    reconciliation ledger"), transactionally with the write
     //    (`Backend::fold_ledger_delta`); a step whose delta identity (its
     //    own partition value) is already reflected refuses the run instead
-    //    of double-counting (`docs/specs/incremental_models.md` §"Reprocessing" —
+    //    of double-counting (`docs/specs/incremental_shapes.md` §"Reprocessing" —
     //    `KeyedReprocessedWindow`). An `Idempotent`-graded cell (no
     //    additive column) needs no ledger — re-merging a window is
     //    harmless — and no warehouse ledger table is ever created for it.
@@ -261,6 +415,13 @@ pub async fn execute_cumulative_aggregate(
     // conditional-maintenance.md` Phase C6) — never re-derived per step.
     let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
 
+    // The hidden decomposed-state columns every state-bearing aggregator
+    // column carries (`docs/specs/incremental_shapes.md` §"Decomposed state
+    // (rung 2) in keyed models") — derived once, like `suppression` above.
+    // Empty for every column family admitted before this mechanism existed,
+    // in which case `state_augmented_projection` below is a no-op.
+    let state_columns = classification.state_columns();
+
     run_windowed_keyed_maintenance(
         backend,
         model_name,
@@ -285,6 +446,26 @@ pub async fn execute_cumulative_aggregate(
             );
             let pushed = inject_source_filters(&clean_sql, &bound_map, &step.range);
 
+            // State augmentation happens on this RAW, pre-compile SQL, not
+            // the compiled/cast-wrapped output: the state columns' own
+            // `per_partition_expr`s (e.g. `ARG_MAX(val, d)`) reference the
+            // model's own source columns, which are only in scope at this
+            // select level — the compiler's `_smelt_typed` cast wrapper
+            // exposes only the model's already-declared presented columns,
+            // not the raw columns a state expression needs
+            // (`docs/outcomes/20260809-rung2-state-shapes` row 5).
+            let pushed = smelt_logical::maintenance::emit::state_augmented_projection(
+                &pushed,
+                &state_columns,
+            )
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to append decomposed-state columns to model '{}': its SELECT could \
+                     not be parsed",
+                    model_name
+                )
+            })?;
+
             let compiled = compiler
                 .get(target)
                 .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
@@ -302,8 +483,101 @@ pub async fn execute_cumulative_aggregate(
             Ok(compiled.sql)
         },
         retry,
+        probe_policy,
     )
     .await
+}
+
+/// Execute a single keyed model under the snapshot-reconcile run shape
+/// (`docs/specs/incremental_shapes.md` §"The two run shapes"): no
+/// `[run_start, run_end)` window — the whole source is re-scanned every
+/// run. First run (target does not yet exist) creates the table from the
+/// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
+/// scan into the existing target via [`build_cumulative_merge_sql`]
+/// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
+/// target but absent from the incoming scan is retained unchanged — the
+/// documented carve-out, `incremental_shapes.md` §"End-state equivalence").
+/// No reconciliation ledger: `classification`'s plain-overwrite columns are
+/// idempotent by construction (re-running an unchanged snapshot converges),
+/// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
+/// this executor never touches one.
+///
+/// `classification` must have already derived the snapshot-reconcile run
+/// shape (`classification.is_snapshot_reconcile()`); the caller
+/// (`execute.rs`'s keyed dispatch) is the single admission gate that
+/// resolves this before ever reaching here.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_snapshot_reconcile(
+    backend: &dyn Backend,
+    model: &ModelFile,
+    compiler: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    target: &str,
+    schema: &str,
+    db_table_name: &str,
+    classification: &CumulativeClassification,
+) -> Result<ExecutionResult> {
+    let model_name = &model.address_segments.join(".");
+    let start = std::time::Instant::now();
+
+    let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+
+    // State augmentation happens on this RAW, pre-compile SQL — see the
+    // matching comment in `execute_windowed_keyed` for why (the state
+    // expressions need the model's own source columns, only in scope
+    // before the compiler's `_smelt_typed` cast wrapper).
+    let state_columns = classification.state_columns();
+    let augmented_sql =
+        smelt_logical::maintenance::emit::state_augmented_projection(&clean_sql, &state_columns)
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Failed to append decomposed-state columns to model '{}': its SELECT could \
+                     not be parsed",
+                    model_name
+                )
+            })?;
+
+    let compiled = compiler
+        .get(target)
+        .compile_with_sql_and_ephemerals(model, schema, &augmented_sql, resolver)
+        .with_context(|| format!("Failed to compile model: {}", model_name))?;
+
+    let table_exists = backend
+        .table_exists(schema, db_table_name)
+        .await
+        .unwrap_or(false);
+
+    if !table_exists {
+        backend
+            .create_table_as(schema, db_table_name, &compiled.sql)
+            .await
+            .with_context(|| format!("Failed to create keyed model {}", model_name))?;
+    } else {
+        let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
+        let merge_sql = build_cumulative_merge_sql(
+            schema,
+            db_table_name,
+            &compiled.sql,
+            classification,
+            None,
+            &suppression,
+        );
+        backend
+            .execute_sql(&merge_sql)
+            .await
+            .with_context(|| format!("Failed to reconcile keyed model {}", model_name))?;
+    }
+
+    let row_count = backend
+        .get_row_count(schema, db_table_name)
+        .await
+        .unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: model_name.clone(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
 }
 
 /// Build a `MERGE INTO` statement that combines target and delta values
@@ -355,12 +629,7 @@ pub fn build_cumulative_merge_sql(
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
         .iter()
-        .map(|col: &AggregatorColumn| {
-            let target_col = format!("target.{}", col.output_name);
-            let delta_col = format!("delta.{}", col.output_name);
-            let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
-            (col.output_name.clone(), expr)
-        })
+        .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
         .collect();
 
     let schema_table = format!("{schema}.{table}");
@@ -431,7 +700,7 @@ fn collect_refs_from_sql(sql: &str) -> Vec<String> {
 /// This is the single entry point both run-pipeline paths use to enforce the
 /// classifier — including the **no-window full-refresh** path. A classifier
 /// rejection must refuse the model rather than silently materialise forbidden
-/// SQL (`incremental_models.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
+/// SQL (`incremental_shapes.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
 /// classifier is fail-closed").
 ///
 /// `model_has_timeseries` is whether the model's own frontmatter declares a
@@ -444,10 +713,17 @@ pub fn classify_cumulative_sql(
     clean_sql: &str,
     source_timeseries: &SourceTimeseriesMap,
     model_has_timeseries: bool,
+    declared_functional_dependencies: &[smelt_core::config::FunctionalDependency],
 ) -> Result<CumulativeClassification> {
     let refs = collect_refs_from_sql(clean_sql);
-    classify_cumulative(clean_sql, &refs, source_timeseries, model_has_timeseries)
-        .map_err(|diags| format_classifier_error(model_name, &diags))
+    classify_cumulative(
+        clean_sql,
+        &refs,
+        source_timeseries,
+        model_has_timeseries,
+        declared_functional_dependencies,
+    )
+    .map_err(|diags| format_classifier_error(model_name, &diags))
 }
 
 /// Format classifier diagnostics into a single error message for the CLI.
@@ -501,21 +777,24 @@ mod tests {
                     output_name: "event_count".to_string(),
                     per_partition_agg: "COUNT".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Sum,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "first_seen".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "last_seen".to_string(),
                     per_partition_agg: "MAX".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
                 },
             ],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2";
@@ -563,7 +842,7 @@ mod tests {
     }
 
     /// A locality-admitted model's `MERGE` carries a target-side partition
-    /// predicate over the slice (`docs/specs/incremental_models.md` §"Key
+    /// predicate over the slice (`docs/specs/incremental_shapes.md` §"Key
     /// temporal locality") — a non-time-partitioned keyed model's SQL (the
     /// `None` case above) stays byte-unchanged; passing `Some` only adds the
     /// extra `AND` clause, nothing else in the statement shifts.
@@ -575,10 +854,11 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, event_date, COUNT(*) AS event_count FROM events \
@@ -620,7 +900,7 @@ mod tests {
     }
 
     /// Route 2 (key-determined) locality carries a `DeltaValues` slice
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// (`docs/specs/incremental_shapes.md` §"Key temporal locality", route
     /// 2) — the target scan is pruned to exactly the partition-column
     /// values the step's own delta relation carries, read off that same
     /// relation rather than a caller-precomputed range.
@@ -632,10 +912,11 @@ mod tests {
                 output_name: "max_amount".to_string(),
                 per_partition_agg: "MAX".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Max,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.transactions".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT transaction_id, MIN(transaction_timestamp) AS first_seen_at, \
@@ -680,10 +961,11 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
@@ -735,10 +1017,11 @@ mod tests {
                 output_name: "max_amount".to_string(),
                 per_partition_agg: "MAX".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Max,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let delta_sql = "SELECT device_id, event_date, MAX(amount) AS max_amount FROM events \
@@ -820,16 +1103,18 @@ mod tests {
                     output_name: "device_id".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
                 AggregatorColumn {
                     output_name: "first_seen_date".to_string(),
                     per_partition_agg: "MIN".to_string(),
                     cross_partition_combiner: CrossPartitionCombiner::Min,
+                    state: None,
                 },
             ],
             driving_source: DrivingSource {
                 name: "smelt.sources.raw.events".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let sql = "SELECT event_id, MIN(device_id) AS device_id, \
@@ -846,6 +1131,64 @@ mod tests {
         );
     }
 
+    /// `BIT_XOR` is an **additive fold** (`docs/specs/incremental_models.md`
+    /// §"The column-family catalogue") — a commutative *group*, not an
+    /// idempotent lattice. Re-merging an already-reflected delta computes
+    /// `x XOR d XOR d == x`, which CANCELS that window's contribution rather
+    /// than converging, so the cell must keep a ledger (`Grade::Additive`)
+    /// and refuse the reprocessed window rather than silently corrupting
+    /// state (§"The transactional merge ledger").
+    #[test]
+    fn bit_xor_only_model_is_ledger_graded_additive() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "xor_bits".to_string(),
+                per_partition_agg: "BIT_XOR".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::BitXor,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(
+            classification.ledger_grade(),
+            Grade::Additive,
+            "BIT_XOR is self-inverse: re-merging an already-reflected delta cancels it, so the \
+             cell must keep a reconciliation ledger"
+        );
+    }
+
+    /// The genuinely idempotent lattice combiners still skip the ledger —
+    /// the fix above must not widen ledger keeping to every keyed model.
+    #[test]
+    fn lattice_only_model_stays_ledger_free() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "max_val".to_string(),
+                    per_partition_agg: "MAX".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Max,
+                    state: None,
+                },
+                AggregatorColumn {
+                    output_name: "and_bits".to_string(),
+                    per_partition_agg: "BIT_AND".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::BitAnd,
+                    state: None,
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(classification.ledger_grade(), Grade::Idempotent);
+    }
+
     /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner
     /// independently of the classifier that produced it — defense in depth
     /// against ever merging one approximately (`model_transforms.md`
@@ -858,10 +1201,11 @@ mod tests {
                 output_name: "median_latency".to_string(),
                 per_partition_agg: "MEDIAN".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         let reason = classification.refuse();
@@ -877,13 +1221,194 @@ mod tests {
                 output_name: "event_count".to_string(),
                 per_partition_agg: "COUNT".to_string(),
                 cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
             }],
             driving_source: DrivingSource {
                 name: "smelt.silver.events_parsed".to_string(),
-                timeseries: dummy_ts(),
+                timeseries: Some(dummy_ts()),
             },
         };
         assert!(classification.refuse().is_none());
+    }
+
+    /// An `AVG` column's presented `Recomputed` combiner carries `state:
+    /// Some(..)` whose state columns are both `Sum` — `ledger_grade` must
+    /// grade the cell `Additive` (`docs/outcomes/20260809-rung2-state-shapes`
+    /// row 7): the hidden state folds additively even though the presented
+    /// column's own combiner (`Recomputed`) says nothing about algebra.
+    #[test]
+    fn avg_model_is_ledger_graded_additive() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(
+            classification.ledger_grade(),
+            Grade::Additive,
+            "AVG's hidden (sum, count) state folds additively — the cell must keep a \
+             reconciliation ledger"
+        );
+    }
+
+    /// Regression: `MAX_BY`'s `(v, o)` state and once-write's `(value,
+    /// written)` state are NOT additive — neither combiner is `Sum`/`BitXor`
+    /// — so both must stay `Idempotent`, exactly as before state-awareness
+    /// was added to `ledger_grade`.
+    #[test]
+    fn max_by_and_once_write_state_stay_idempotent() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let max_by_classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "status".to_string(),
+                per_partition_agg: "MAX_BY".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OrderMonotone {
+                    ordering_column: "status__o".to_string(),
+                    prefer_greater: true,
+                },
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "status__v".to_string(),
+                            per_partition_expr: "ARG_MAX(status, updated_at)".to_string(),
+                            combiner: CrossPartitionCombiner::OrderMonotone {
+                                ordering_column: "status__o".to_string(),
+                                prefer_greater: true,
+                            },
+                        },
+                        StateColumn {
+                            name: "status__o".to_string(),
+                            per_partition_expr: "MAX(updated_at)".to_string(),
+                            combiner: CrossPartitionCombiner::Max,
+                        },
+                    ],
+                    presentation_expr: "status__v".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(max_by_classification.ledger_grade(), Grade::Idempotent);
+
+        let once_write_classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "first_referrer".to_string(),
+                per_partition_agg: "COALESCE".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::OnceWrite,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "first_referrer__value".to_string(),
+                            per_partition_expr: "MAX(signup_referrer)".to_string(),
+                            combiner: CrossPartitionCombiner::OnceWrite,
+                        },
+                        StateColumn {
+                            name: "first_referrer__written".to_string(),
+                            per_partition_expr: "(MAX(signup_referrer)) IS NOT NULL".to_string(),
+                            combiner: CrossPartitionCombiner::BoolOr,
+                        },
+                    ],
+                    presentation_expr: "first_referrer__value".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert_eq!(once_write_classification.ledger_grade(), Grade::Idempotent);
+    }
+
+    /// The defense-in-depth `refuse()` pass admits a state-bearing `AVG`
+    /// column (its state columns are recognised `Sum` combiners), and
+    /// separately catches the internal-invariant violation of a
+    /// `Recomputed` column carrying no state at all — a `Recomputed`
+    /// column must always be state-bearing by construction
+    /// (`docs/outcomes/20260809-rung2-state-shapes` row 7).
+    #[test]
+    fn refuse_accepts_state_bearing_avg_column() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let admitted = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        assert!(
+            admitted.refuse().is_none(),
+            "a state-bearing AVG column with recognised Sum state combiners must be admitted"
+        );
+
+        let internal_invariant_violation = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Recomputed,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let reason = internal_invariant_violation.refuse();
+        assert!(
+            reason.is_some(),
+            "a Recomputed column with no state must be refused"
+        );
+        assert!(reason.unwrap().contains("internal error"));
     }
 
     #[test]
@@ -898,5 +1423,123 @@ mod tests {
         let sql = "SELECT smelt.functions.foo(x) FROM smelt.silver.events";
         let refs = collect_refs_from_sql(sql);
         assert_eq!(refs, vec!["smelt.silver.events".to_string()]);
+    }
+
+    /// A state-bearing classification's `MERGE` folds each hidden state
+    /// column by its own combiner and recomputes the presented column from
+    /// the merged state — byte-identical to a direct `emit_keyed_fold` call
+    /// over the state-expanded fold set (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models").
+    #[test]
+    fn build_cumulative_merge_sql_folds_state_columns() {
+        use smelt_logical::analysis::decomposed_state::{DecomposedState, StateColumn};
+
+        let classification = CumulativeClassification {
+            unique_key: vec!["customer_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "avg_amount".to_string(),
+                per_partition_agg: "AVG".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+                state: Some(DecomposedState {
+                    state_columns: vec![
+                        StateColumn {
+                            name: "avg_amount__sum".to_string(),
+                            per_partition_expr: "SUM(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                        StateColumn {
+                            name: "avg_amount__count".to_string(),
+                            per_partition_expr: "COUNT(amount)".to_string(),
+                            combiner: CrossPartitionCombiner::Sum,
+                        },
+                    ],
+                    presentation_expr: "avg_amount__sum / avg_amount__count".to_string(),
+                }),
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT customer_id, SUM(amount) AS avg_amount__sum, COUNT(amount) AS \
+                          avg_amount__count FROM events GROUP BY 1";
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "customer_stats",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+        );
+
+        let expected = emit_keyed_fold(
+            "main.customer_stats",
+            &classification.unique_key,
+            &[
+                (
+                    "avg_amount__sum".to_string(),
+                    "target.avg_amount__sum + delta.avg_amount__sum".to_string(),
+                ),
+                (
+                    "avg_amount__count".to_string(),
+                    "target.avg_amount__count + delta.avg_amount__count".to_string(),
+                ),
+                (
+                    "avg_amount".to_string(),
+                    "(target.avg_amount__sum + delta.avg_amount__sum) / \
+                     (target.avg_amount__count + delta.avg_amount__count)"
+                        .to_string(),
+                ),
+            ],
+            delta_sql,
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            sql, expected.statements[0].sql,
+            "state-bearing merge must be byte-identical to a direct emitter call over the \
+             state-expanded fold set"
+        );
+    }
+
+    /// A classification with no state-bearing column (every family admitted
+    /// today) folds exactly as before this mechanism existed — the
+    /// no-admission-widening guard, mirrored at the runtime layer.
+    #[test]
+    fn stateless_merge_sql_is_unchanged() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+        );
+        let expected = emit_keyed_fold(
+            "main.device_daily",
+            &classification.unique_key,
+            &[(
+                "event_count".to_string(),
+                "target.event_count + delta.event_count".to_string(),
+            )],
+            delta_sql,
+            None,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(sql, expected.statements[0].sql);
     }
 }

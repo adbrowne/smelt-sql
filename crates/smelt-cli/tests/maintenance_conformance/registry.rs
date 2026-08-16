@@ -16,18 +16,22 @@
 //!   `verdict.rs::adversarial_leaves_refuse_or_collapse_conservatively`
 //!   already asserts holds for every case, restated here as a per-id
 //!   staleness ledger.
-//! - **`KnownBug` structural entries** — the two production gaps this plan
-//!   discovered and deliberately did not fix (this plan's own "Deferred
-//!   during implementation" section): the `maintenance.cells[].technique`
-//!   pin is parsed but never wired into a real call site, and the
-//!   incremental (windowed) execute path never persists a deployed-schema
-//!   snapshot. Neither is reachable through a generated case today (the
-//!   pin has no call site to observe; the schema-evolution gap is
-//!   deliberately routed around by every Phase 9 case), so each is verified
-//!   by a structural check against the exact call site named in the plan —
-//!   the moment either gap closes, the check stops matching and this test
-//!   reports it as stale, the signal to delete the entry and file the fix
-//!   as its own change.
+//! - **`KnownBug` structural entries** — a production gap this suite
+//!   discovered and deliberately did not fix yet, verified by a structural
+//!   check against the exact call site named in the entry — the moment the
+//!   gap closes, the check stops matching and this test reports it as
+//!   stale, the signal to delete the entry and file the fix as its own
+//!   change. No entry currently holds this status: the family's two prior
+//!   members were both closed this way —
+//!   `known_bug_technique_pin_inert` once `resolve_cell_choice`/
+//!   `effective_override` wired the frontmatter pin ladder into the live
+//!   call site (`crates/smelt-runtime/src/maintenance_driver.rs`), and
+//!   `known_bug_incremental_path_skips_schema_snapshot` once the
+//!   deployed-schema snapshot the definition-change trigger reads became
+//!   current on the incremental path too
+//!   (`docs/plans/20260809-sensitivity-precision.md` Phase 6,
+//!   `crates/smelt-runtime/src/execute.rs`'s pre-schema-evolution-gate
+//!   snapshot capture).
 //!
 //! A registry entry that never fired over the deterministic sample is
 //! reported (`eprintln!`), never a test failure — warn-level by design, so
@@ -49,7 +53,18 @@ enum DivergenceStatus {
     /// (`model_properties.md`/`incremental_models.md` §Known Divergences).
     Documented,
     /// A confirmed production gap, deliberately not fixed by this plan
-    /// (this plan's "Deferred during implementation" section).
+    /// (this plan's "Deferred during implementation" section). Four prior
+    /// members of this status were closed this way (see this module's own
+    /// doc comment) — most recently
+    /// `known_bug_repair_candidate_select_ignores_decomposed_state`, closed
+    /// by widening the repair candidate/insert with the fold's own hidden
+    /// state columns (`docs/outcomes/20260809-repair-family/phases/
+    /// 10-plan.md`). Currently holds one member —
+    /// `known_bug_keyed_upstream_partition_downstream_no_live_dispatch`
+    /// (`docs/outcomes/20260809-output-delta-typing/phases/08-plan.md`) —
+    /// kept alive as the governance machinery (`known_bug_still_reproduces`,
+    /// the staleness-report match arm) for that and whichever production
+    /// gap this suite discovers next.
     KnownBug,
 }
 
@@ -97,19 +112,12 @@ fn registry() -> Vec<DivergenceEntry> {
             status: DivergenceStatus::Documented,
         },
         DivergenceEntry {
-            id: "known_bug_technique_pin_inert",
-            description: "maintenance.cells[].technique (CellTechnique) is parsed and its \
-                resolvers are unit-tested, but resolve_live_column_scoped_cell's one production \
-                call site hardcodes pin: None — a pin set in frontmatter has zero effect on which \
-                technique executes. See this plan's 'Deferred during implementation' section.",
-            status: DivergenceStatus::KnownBug,
-        },
-        DivergenceEntry {
-            id: "known_bug_incremental_path_skips_schema_snapshot",
-            description: "save_deployed_schema is called only from execute.rs's full-refresh \
-                branch, never the incremental (windowed DELETE+INSERT) branch, so \
-                schema_evolution::check_and_migrate never fires for a plain windowed re-run after \
-                a column-add rewrite. See this plan's 'Deferred during implementation' section.",
+            id: "known_bug_keyed_upstream_partition_downstream_no_live_dispatch",
+            description: "a KeyedUpsert upstream feeding a grain: partition downstream has no \
+                live key-addressed dispatch — the run loop's resolution/execution of that cell \
+                is wired only inside the grain: key branch of smelt-runtime/src/execute.rs, so a \
+                grain: partition downstream never reaches it (incremental_models.md §Known \
+                Divergences).",
             status: DivergenceStatus::KnownBug,
         },
     ]
@@ -157,29 +165,30 @@ fn fired_adversarial_ids() -> BTreeSet<&'static str> {
     fired
 }
 
-/// Structurally verify the two `KnownBug` entries still reproduce — grep
+/// Structurally verify each `KnownBug` entry still reproduces — grep
 /// the exact call site each entry names for the literal text that makes the
-/// gap true today. When either gap closes, the matching text disappears and
+/// gap true today. When a gap closes, the matching text disappears and
 /// this returns `false`, which `divergence_registry_staleness_report`
 /// reports (never fails) as a stale entry to prune.
 fn known_bug_still_reproduces(id: &str) -> bool {
     match id {
-        "known_bug_technique_pin_inert" => {
-            // `resolve_live_column_scoped_cell`'s one production call site
-            // (`crates/smelt-runtime/src/maintenance_driver.rs`) passes a
-            // literal `None` pin to `resolve_cell_technique` — never a
-            // frontmatter-derived value.
-            let src = include_str!("../../../smelt-runtime/src/maintenance_driver.rs");
-            src.contains(
-                "let resolved = resolve_cell_technique(\n            &result.plan,\n            &trigger,\n            None,",
-            )
-        }
         "known_bug_incremental_path_skips_schema_snapshot" => {
             // `save_deployed_schema` is called from exactly one place in
             // `execute.rs` (the full-refresh branch) — never a second call
             // site in the incremental branch.
             let src = include_str!("../../../smelt-runtime/src/execute.rs");
             src.matches("save_deployed_schema").count() == 1
+        }
+        "known_bug_keyed_upstream_partition_downstream_no_live_dispatch" => {
+            // `resolve_live_key_addressed_model_edge_cell` is consulted
+            // from exactly one call site in `execute.rs`, inside the
+            // `grain: key` (`plan_is_keyed`) branch — the moment a second
+            // call site wires it into the `grain: partition` branch too,
+            // this count changes and the entry goes stale.
+            let src = include_str!("../../../smelt-runtime/src/execute.rs");
+            src.matches("resolve_live_key_addressed_model_edge_cell")
+                .count()
+                == 1
         }
         other => panic!("known_bug_still_reproduces: unhandled id {other:?}"),
     }

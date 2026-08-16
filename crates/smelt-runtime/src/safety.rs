@@ -40,12 +40,24 @@ pub fn build_model_graph(
                 .iter()
                 .map(|r| r.smelt_ref.to_path().join("."))
                 .collect();
+            let plausible_columns = metadata
+                .map(|m| {
+                    m.columns
+                        .iter()
+                        .filter(|(_, c)| {
+                            c.contract == Some(smelt_core::metadata::Contract::Plausible)
+                        })
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
             model_graph.add_model(smelt_planner::ModelInfo {
                 name: model.name.clone(),
                 sql: model.content.clone(),
                 refs,
                 timeseries_config,
                 incremental_config,
+                plausible_columns,
             });
         }
     }

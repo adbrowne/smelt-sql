@@ -142,7 +142,7 @@ smelt.as_struct(<table-alias> [EXCEPT <col1>, <col2>, …])
 ### Pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`)
 
 Three aggregate-position functions name the intent behind a key-grain column
-family (`incremental_models.md` §"The column-family catalogue") without adding any privileged
+family (`incremental_shapes.md` §"The column-family catalogue") without adding any privileged
 treatment — each is an ordinary transparent function, defined with the same
 `smelt.define` machinery as a user-authored one, whose expansion is admitted on exactly
 the terms a hand-written call would be:

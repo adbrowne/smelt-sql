@@ -248,7 +248,7 @@ async fn insert_row(project: &LinkCProject, source_name: &str, row: &GenRow) -> 
 ///
 /// Applies only to [`CaseRecipe::Partition`] cases with an admitted `NewData`
 /// scan clamp on the driving source — `grain: key` has no write-eligibility
-/// clamp at all (`incremental_models.md` §"No write-eligibility clamp").
+/// clamp at all (`incremental_shapes.md` §"No write-eligibility clamp").
 pub async fn compiled_sql_matches_derived_clamp(ctx: &CaseContext) -> ProbeOutcome {
     let CaseRecipe::Partition(recipe) = &ctx.recipe else {
         return ProbeOutcome::Skipped(

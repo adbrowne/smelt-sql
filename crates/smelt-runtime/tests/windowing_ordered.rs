@@ -1,4 +1,4 @@
-//! Runtime-seam coverage for `docs/specs/incremental_models.md` §"Window
+//! Runtime-seam coverage for `docs/specs/incremental_shapes.md` §"Window
 //! independence and self-referential models": an `Ordered` (convergent
 //! self-edge) model composes with the derived output window exactly like a
 //! `WindowIndependent` one, EXCEPT that the self-edge's own bounding relation
@@ -39,7 +39,7 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
 fn make_inc() -> PartitionGrainConfig {
     PartitionGrainConfig {
         unique_key: vec![],
-        nondeterministic_columns: vec![],
+        nondeterministic_columns_retired: (),
         safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }

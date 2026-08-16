@@ -145,6 +145,7 @@ fn base_group() -> ColumnGroup {
     ColumnGroup {
         columns: strings(&["user_id", "event_ts", "arrival_ts", "page"]),
         mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
     }
 }
 
@@ -167,7 +168,7 @@ fn v1_without_lateness_clamp_is_not_partition_local() {
         sources: vec![bronze()],
         column_groups: vec![base_group()],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -198,7 +199,7 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         sources: vec![bronze()],
         column_groups: vec![base_group()],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -235,7 +236,7 @@ fn v3_dedup_keeps_the_v2_plan_shape() {
         sources: vec![bronze()],
         column_groups: vec![base_group()],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -268,10 +269,11 @@ fn v4_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 
@@ -319,6 +321,60 @@ fn v4_without_the_explicit_partition_predicate_refuses_scan_unbounded() {
     );
 }
 
+/// A `sessions` source declared `allow_full_scan: true` licenses the SAME
+/// unpredicated join `v4_without_the_explicit_partition_predicate_refuses_
+/// scan_unbounded` refuses: the guard on the `Unclocked | Unlinked` refusal
+/// arm (`!facts.allow_full_scan`) must actually gate on the source's own
+/// declaration, not always refuse regardless of it. Pins the guard-deleted
+/// mutant at `derive.rs`'s field-add scan-link loop.
+#[test]
+fn v4_without_the_explicit_partition_predicate_but_declared_full_scan_admits() {
+    let sql = v4_sql(V4_JOIN_NO_PARTITION_PREDICATE);
+    let mut sessions = sessions_src();
+    sessions.allow_full_scan = true;
+    let inputs = ModelInputs {
+        sql: &sql,
+        output: output(),
+        sources: vec![bronze(), sessions],
+        column_groups: vec![
+            base_group(),
+            ColumnGroup {
+                columns: strings(&["session_id"]),
+                mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
+            },
+        ],
+        fold: None,
+        old_columns: Vec::new(),
+    };
+    let plan = derive_maintenance_plan(
+        &inputs,
+        &[Trigger::ColumnAdded {
+            columns: strings(&["session_id"]),
+        }],
+    );
+    assert!(
+        plan.refusals.is_empty(),
+        "a declared full scan must license the unpredicated join: refusals: {:?}",
+        plan.refusals
+    );
+    let cell = plan
+        .cells
+        .iter()
+        .find(|c| c.group == "{session_id}")
+        .expect("the session_id ColumnAdded cell must exist");
+    match &cell.partition_local {
+        PartitionLocal::No { why, .. } => assert!(
+            why.contains("declared full scan"),
+            "why must name the declared-full-scan reason: {why}"
+        ),
+        other => panic!(
+            "a declared full scan over an unlinked source must render PartitionLocal::No, got \
+             {other:?}"
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // v5 — + conversion_score: forward 14d clamp on the field-add backfill, and
 // an ongoing mutation cell whose footprint is the clamp reflected.
@@ -334,14 +390,16 @@ fn v5_inputs(sql: &str) -> ModelInputs<'_> {
             ColumnGroup {
                 columns: strings(&["session_id"]),
                 mutation_sensitivity: set(&["sessions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
             ColumnGroup {
                 columns: strings(&["conversion_score"]),
                 mutation_sensitivity: set(&["conversions"]),
+                membership_sensitivity: BTreeSet::new(),
             },
         ],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     }
 }
 

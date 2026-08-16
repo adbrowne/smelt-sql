@@ -29,7 +29,8 @@ use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, Mode
 use smelt_logical::maintenance::granularity::check_declared_granularity;
 use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::{
-    ColumnGroup, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Technique, Trigger,
+    ColumnGroup, Corner, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Technique,
+    Trigger,
 };
 use smelt_types::SqlFunction;
 
@@ -48,20 +49,17 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 // Catalogue framing: "merged column group → recompute-region only
 // (factoring degenerates)" — a *definitional* fact about column-group
 // provenance, not a runtime behaviour to falsify (probe-status:
-// not-probe-worthy). What IS falsifiable, and what this test pins, is the
-// concrete divergence recorded in `incremental_models.md` §Known Divergences
-// ("A group merged across two mutable inputs has no group-merge-provenance
-// policy"): today's shipped code does NOT force a whole-row `DeleteInsert`
-// recompute for this merged group — it treats it exactly like a
-// single-input mutable enrichment, admitting `ColumnScopedMerge`
-// independently per triggering source. "Degenerates" here names the
-// *grouping* fact (both `orders` and `fx_rates` collapse onto the SAME
-// undifferentiated column group, `grouping.rs`'s own vocabulary for a
-// merged/shared provenance set) — not literally "technique = recompute".
-// A stricter policy that forces `DeleteInsert` whenever a group's
-// provenance spans more than one mutation-sensitive input is undecided and
-// unbuilt (tracked in the same Known Divergences entry); this test is what
-// would need to change if that policy ever lands.
+// not-probe-worthy). What IS falsifiable, and what this test pins is that
+// the merged group's cell is a whole-row `DeleteInsert` recompute, never a
+// `ColumnScopedMerge` — both `orders` and `fx_rates` are `MutableSnapshot`
+// and both are read in the `JOIN`'s `ON` predicate, so both are
+// membership-sensitive (`docs/specs/model_properties.md` §"Per-column
+// mutation-sensitivity / column provenance", membership paragraph): either
+// source's churn can retroactively add or remove a matched row, which only
+// the recompute family can repair (`docs/specs/incremental_models.md`
+// §"The plan matrix"). "Degenerates" here names the *grouping* fact (both
+// sources collapse onto the SAME undifferentiated column group, `grouping.
+// rs`'s own vocabulary for a merged/shared provenance set).
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -102,6 +100,11 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         set(&["orders", "fx_rates"]),
         "the group's provenance is the UNION of both mutable inputs — no per-input isolation"
     );
+    assert_eq!(
+        merged.membership_sensitivity,
+        set(&["orders", "fx_rates"]),
+        "both sources are read in the JOIN's ON predicate — both are membership-sensitive"
+    );
 
     let inputs = ModelInputs {
         sql,
@@ -115,12 +118,14 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         sources,
         column_groups: grouping.groups,
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     // Both triggering sources land on the SAME merged group with the SAME
     // technique — no per-source targeted isolation exists for a merged
-    // group today.
+    // group today. Membership sensitivity forces the recompute family for
+    // both: a `ColumnScopedMerge` could rewrite `amount_usd` in place but
+    // cannot create or delete the row a churned join match would.
     for source in ["orders", "fx_rates"] {
         let plan = derive_maintenance_plan(
             &inputs,
@@ -135,7 +140,8 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         );
         assert_eq!(plan.cells.len(), 1);
         assert_eq!(plan.cells[0].group, "{amount_usd}");
-        assert_eq!(plan.cells[0].technique, Technique::ColumnScopedMerge);
+        assert_eq!(plan.cells[0].corner, Corner::RecomputeRegion);
+        assert_eq!(plan.cells[0].technique, Technique::DeleteInsert);
     }
 }
 
@@ -182,11 +188,12 @@ fn ex14_change_feed_sum_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["lifetime_spend"]),
             mutation_sensitivity: set(&["ledger_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -200,11 +207,21 @@ fn ex14_change_feed_sum_recompute_only() {
         "no fold cell should be admitted over a change-feed (retracting) source: {:?}",
         fold_plan.cells
     );
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
+    // The repair narrowing also attempts a per-group recompute over the
+    // posture failure; `ledger_cdc` declares no `unique_key`, so affected-key
+    // discovery fails closed too, pushing an additive `RepairKeysNotDiscoverable`
+    // refusal alongside the pre-existing one (`incremental_models.md`
+    // §"The repair family" — fail-closed refusal is additive, never a
+    // replacement).
+    assert_eq!(fold_plan.refusals.len(), 2, "{:?}", fold_plan.refusals);
+    assert!(fold_plan.refusals.iter().any(|r| matches!(
+        r,
         Refusal::NoAdmissibleTechnique { why, .. } if why.contains("faithful-fold source-posture")
-    ));
+    )));
+    assert!(fold_plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 
     // The recompute family (Backfill) is unaffected — a keyed-grain backfill
     // is a whole-table rebuild, always admissible.
@@ -290,6 +307,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["status"]),
             mutation_sensitivity: set(&["status_cdc"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         // MAX is order-monotone in principle, but the source-posture
         // condition is checked FIRST and independently (obligation 2) —
@@ -298,7 +316,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         fold: Some(FoldSpec {
             add_columns: vec![("status".to_string(), SqlFunction::Max)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -308,11 +326,18 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         }],
     );
     assert!(fold_plan.cells.is_empty());
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
+    // Additive repair refusal, same rationale as EX-14 above: `status_cdc`
+    // declares no `unique_key`, so the repair narrowing's own affected-key
+    // discovery fails closed too.
+    assert_eq!(fold_plan.refusals.len(), 2, "{:?}", fold_plan.refusals);
+    assert!(fold_plan.refusals.iter().any(|r| matches!(
+        r,
         Refusal::NoAdmissibleTechnique { why, .. } if why.contains("faithful-fold source-posture")
-    ));
+    )));
+    assert!(fold_plan
+        .refusals
+        .iter()
+        .any(|r| matches!(r, Refusal::RepairKeysNotDiscoverable { .. })));
 
     let backfill_plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     assert!(backfill_plan.refusals.is_empty());
@@ -357,11 +382,12 @@ fn ex27_row_number_dedup_refuses_today() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["event_id", "event_ts"]),
             mutation_sensitivity: set(&["events_redelivered"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         // No windowed-merge/locality-pruned dedup fold exists — nothing
         // honest to supply.
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let plan = derive_maintenance_plan(
@@ -381,20 +407,22 @@ fn ex27_row_number_dedup_refuses_today() {
 // ---------------------------------------------------------------------------
 // EX-35 — correlated MIN_BY first-value pick (`07-example-catalogue.md`
 // EX-35; candidate probe cell, the EX-01/EX-11 three-way ledger-grade
-// contrast). Catalogue hypothesis: "UNSUPPORTED-TODAY; recompute arm HOLDS
-// (EX-01 analogue, order-sensitive combiner)".
+// contrast). Original catalogue hypothesis (pre-`docs/plans/
+// 20260809-keyed-frontier.md` Phase 1): "UNSUPPORTED-TODAY; recompute arm
+// HOLDS (EX-01 analogue, order-sensitive combiner)".
 //
-// `ArgMax`/`ArgMin` (the `MIN_BY`/`MAX_BY`/first-value family) is classified
-// `is_monoid: false, monotone: Monotone::Order`
-// (`analysis/discriminants.rs`) — an order-sensitive combiner the v0
-// tracer's obligation 3 refuses regardless of source posture (the source
-// here IS append-only, so obligation 2 passes cleanly — this isolates the
-// combiner-algebra refusal specifically, the EX-01/EX-11 three-way
-// contrast the catalogue calls out). Only the recompute family remains.
+// Phase 1 lands the order-monotone overwrite family (`MAX_BY`/`MIN_BY` —
+// `ArgMax`/`ArgMin`, `Monotone::Order`, `analysis/discriminants.rs`):
+// `faithful_fold`'s obligation-3 combiner-algebra condition now admits it
+// alongside `is_monoid` monoids — a semilattice fold is well-defined under
+// the same sequential-application discipline the window-forward driver
+// already enforces (`incremental_shapes.md` §"The two run shapes"). The
+// catalogue verdict updates: EX-35 now HOLDS (fold cell admitted), not
+// recompute-only.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ex35_correlated_first_value_recompute_only() {
+fn ex35_correlated_first_value_fold_admitted() {
     let sql = "SELECT user_id, ARG_MAX(event_ts, event_ts) AS first_seen \
                FROM smelt.sources.events GROUP BY user_id";
     let inputs = ModelInputs {
@@ -416,11 +444,12 @@ fn ex35_correlated_first_value_recompute_only() {
         column_groups: vec![ColumnGroup {
             columns: strings(&["first_seen"]),
             mutation_sensitivity: set(&["events"]),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: Some(FoldSpec {
             add_columns: vec![("first_seen".to_string(), SqlFunction::ArgMax)],
         }),
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -429,13 +458,12 @@ fn ex35_correlated_first_value_recompute_only() {
             source: "events".to_string(),
         }],
     );
-    assert!(fold_plan.cells.is_empty());
-    assert_eq!(fold_plan.refusals.len(), 1);
-    assert!(matches!(
-        &fold_plan.refusals[0],
-        Refusal::NoAdmissibleTechnique { why, .. }
-            if why.contains("holistic or unrecognised (not a monoid)")
-    ));
+    assert!(
+        fold_plan.refusals.is_empty(),
+        "expected the order-monotone combiner to admit: {:?}",
+        fold_plan.refusals
+    );
+    assert_eq!(fold_plan.cells[0].technique, Technique::KeyedFold);
 
     let backfill_plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     assert!(backfill_plan.refusals.is_empty());

@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
-use chrono::{NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, Utc};
 use futures::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{info, warn};
 
 use smelt_backend::{
     Backend, BackendError, Materialization, MaterializationStrategy, PartitionRange,
@@ -41,6 +41,7 @@ use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
 use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
+    SchemaEvolutionResult,
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{
@@ -707,6 +708,10 @@ pub async fn execute_project(
             } {
                 compilers_dry.set_upstream_schemas_all(Arc::new(upstream));
             }
+            compilers_dry.set_state_bearing_models_all(build_state_bearing_models(
+                &all_models_dry,
+                &source_timeseries,
+            ));
             if !fn_bodies.is_empty() {
                 compilers_dry.set_function_bodies_all(fn_bodies);
             }
@@ -833,7 +838,8 @@ pub async fn execute_project(
                 // call (`build_delete_insert_group_dispatched`) the live
                 // executor uses, never a hand-picked `emit_delete_insert`
                 // call, so the two paths cannot structurally diverge.
-                let model_edges_dry = model_edges_for(model_file, &model_by_addr_dry);
+                let model_edges_dry =
+                    model_edges_for(model_file, &model_by_addr_dry, &source_infos);
                 let delta_facts_dry = if model_edges_dry.is_empty() {
                     None
                 } else {
@@ -983,6 +989,8 @@ pub async fn execute_project(
     // schema `apply_type_casts` already uses for every other model.
     let upstream_schemas_for_bootstrap = Arc::clone(&upstream_schemas);
     compilers.set_upstream_schemas_all(upstream_schemas);
+    compilers
+        .set_state_bearing_models_all(build_state_bearing_models(&all_models, &source_timeseries));
     if !fn_bodies.is_empty() {
         compilers.set_function_bodies_all(fn_bodies);
     }
@@ -1075,31 +1083,51 @@ pub async fn execute_project(
         HashMap::new()
     };
 
+    let file_store = FileStore::new(project_dir, &request.target);
+
+    // Models declaring `contract.deferral` at model granularity
+    // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
+    // below to widen the `upstream_map` build condition, since a deferral
+    // skip must also propagate to dependents.
+    let deferral_declared: HashSet<String> = model_plans
+        .iter()
+        .filter(|p| {
+            p.model_file
+                .metadata
+                .as_deref()
+                .and_then(|m| m.contract.as_ref())
+                .and_then(|c| c.deferral.as_ref())
+                .is_some()
+        })
+        .map(|p| p.name.clone())
+        .collect();
+
     // Build model → all_upstream map for the selected set (needed for
     // downstream closure computation — both the check-skip downstream
-    // closure and, when `request.resume` is set, the `--resume` downstream
-    // closure below). Captured here to avoid holding the graph lock across
-    // awaits in the model loop.
-    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks || request.resume {
-        // graph_lock was already dropped above; we need to re-lock briefly to
-        // read all_upstream for each selected model.
-        // Actually, graph was dropped before backends were created.
-        // We need to rebuild from the model graph. Since we dropped graph_lock,
-        // we captured needed data already. But we need all_upstream.
-        // Use the already-built model_plans to reconstruct deps from model_file refs.
-        // Actually, model_file.refs captures the smelt refs, not the canonical names.
-        // The cleanest: re-lock the graph briefly just to capture upstream maps.
-        // This is safe because graph is only mutated before the lock is dropped.
-        let graph_lock2 = graph.lock().await;
-        let map: HashMap<String, HashSet<String>> = selected
-            .iter()
-            .map(|name| (name.clone(), graph_lock2.all_upstream(name)))
-            .collect();
-        drop(graph_lock2);
-        map
-    } else {
-        HashMap::new()
-    };
+    // closure, the `--resume` downstream closure, and the deferral-skip
+    // downstream closure below). Captured here to avoid holding the graph
+    // lock across awaits in the model loop.
+    let upstream_map: HashMap<String, HashSet<String>> =
+        if request.run_checks || request.resume || !deferral_declared.is_empty() {
+            // graph_lock was already dropped above; we need to re-lock briefly to
+            // read all_upstream for each selected model.
+            // Actually, graph was dropped before backends were created.
+            // We need to rebuild from the model graph. Since we dropped graph_lock,
+            // we captured needed data already. But we need all_upstream.
+            // Use the already-built model_plans to reconstruct deps from model_file refs.
+            // Actually, model_file.refs captures the smelt refs, not the canonical names.
+            // The cleanest: re-lock the graph briefly just to capture upstream maps.
+            // This is safe because graph is only mutated before the lock is dropped.
+            let graph_lock2 = graph.lock().await;
+            let map: HashMap<String, HashSet<String>> = selected
+                .iter()
+                .map(|name| (name.clone(), graph_lock2.all_upstream(name)))
+                .collect();
+            drop(graph_lock2);
+            map
+        } else {
+            HashMap::new()
+        };
 
     let mut skip_set: HashSet<String> = HashSet::new();
     let mut check_results: Vec<CheckOutcome> = Vec::new();
@@ -1113,8 +1141,6 @@ pub async fn execute_project(
             .collect::<Vec<_>>(),
         total_batches,
     );
-
-    let file_store = FileStore::new(project_dir, &request.target);
 
     // ── `--resume`: locate the run to resume from, fail loud if there is
     // none ────────────────────────────────────────────────────────────────
@@ -1202,6 +1228,77 @@ pub async fn execute_project(
         HashSet::new()
     };
 
+    // ── `contract.deferral`: the run-skip license and pending window for
+    // every model declaring it, computed once before the wavefront
+    // scheduler runs (`docs/outcomes/20260809-contract-lattice-v1/phases/
+    // 05-plan.md`) — both ledger frontiers this reads are untouched until
+    // this run's own writes touch them, so one upfront snapshot is correct
+    // for every model's decision. `deferral_own_skip` is the set licensed
+    // to skip on its own declaration; `deferral_pending` is every declaring
+    // model's pending window (`None` when nothing is pending), consulted
+    // later to prove work subsumption on a covering run.
+    let (deferral_own_skip, deferral_pending): (
+        HashSet<String>,
+        HashMap<String, smelt_logical::contract::deferral::PendingWindow>,
+    ) = if deferral_declared.is_empty() {
+        (HashSet::new(), HashMap::new())
+    } else {
+        let interval_store = file_store.load_intervals().unwrap_or_default();
+        let landed_deltas = file_store.load_landed_deltas().unwrap_or_default();
+        let mut own_skip = HashSet::new();
+        let mut pending = HashMap::new();
+        for plan in model_plans.iter() {
+            if !deferral_declared.contains(&plan.name) {
+                continue;
+            }
+            let (source_facts, _) = build_maint_source_facts(&plan.model_file, &source_infos);
+            let clocked_source_addresses: Vec<String> = source_facts
+                .iter()
+                .filter(|sf| {
+                    sf.partition_col.is_some()
+                        && sf.mutation == smelt_logical::maintenance::MutationProfile::AppendOnly
+                })
+                .map(|sf| sf.name.clone())
+                .collect();
+            if let Some(decision) = crate::contract_probes::deferral_decision(
+                &plan.name,
+                plan.model_file.metadata.as_deref(),
+                &clocked_source_addresses,
+                &interval_store,
+                &landed_deltas,
+            ) {
+                if let smelt_logical::contract::deferral::RunLicense::Skip { lag, d } =
+                    decision.license
+                {
+                    tracing::info!(
+                        "Deferring model '{}' — measured lag ({} day(s)) is within the \
+                         declared deferral window (D={} day(s))",
+                        plan.name,
+                        lag,
+                        d
+                    );
+                    own_skip.insert(plan.name.clone());
+                }
+                if let Some(window) = decision.pending {
+                    pending.insert(plan.name.clone(), window);
+                }
+            }
+        }
+        (own_skip, pending)
+    };
+
+    // A deferral skip propagates to dependents (`docs/outcomes/
+    // 20260809-contract-lattice-v1/outcome.md` phase 5 decision log) — see
+    // `contract_probes::propagate_deferral_skip`'s doc comment.
+    let deferral_skip_set: HashSet<String> = crate::contract_probes::propagate_deferral_skip(
+        &deferral_own_skip,
+        &upstream_map,
+        &model_plans
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>(),
+    );
+
     // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
     // this run — every state write below (manifest, intervals,
     // reconciliation ledger, landed deltas, schema snapshots) happens while
@@ -1233,6 +1330,12 @@ pub async fn execute_project(
     // model's work.
     let state_io_lock = tokio::sync::Mutex::new(());
 
+    // Prior-run history for this target, loaded once per run and shared by
+    // every model's `ProbePolicy` (`docs/specs/model_properties.md`
+    // §"Probe cadence"): a model's run ordinal — 0 for its first run — is
+    // its prior-run count via `HistoryQuery::for_model`.
+    let prior_runs = file_store.load_runs(None).unwrap_or_default();
+
     // Every non-`Copy` piece of context the per-model execution unit below
     // needs is rebound here as a reference so the `move` closure — called
     // once per model, potentially many times concurrently in flight — can
@@ -1249,6 +1352,7 @@ pub async fn execute_project(
     let selected = &selected;
     let file_store = &file_store;
     let config = &config;
+    let prior_runs = &prior_runs;
     let target_assignments = &target_assignments;
     let backends = &backends;
     let compilers = &compilers;
@@ -1262,6 +1366,9 @@ pub async fn execute_project(
     let state_io_lock = &state_io_lock;
     let model_plans = &model_plans;
     let resume_skip_set = &resume_skip_set;
+    let deferral_own_skip = &deferral_own_skip;
+    let deferral_skip_set = &deferral_skip_set;
+    let deferral_pending = &deferral_pending;
 
     // ── Per-model execution unit ──────────────────────────────────────────
     // Runs one model to completion (or cancellation, or failure) and returns
@@ -1328,6 +1435,56 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
+                },
+            );
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: 0,
+            }));
+        }
+
+        // ── `contract.deferral`: skip a model whose measured lag is a
+        // licensed relaxation, or a dependent of one that was
+        // (`docs/specs/incremental_models.md` §"The contract lattice") ────
+        // No compilation, no backend call, no interval/reconciliation/
+        // landed-delta write — recorded, never silently dropped, so a later
+        // covering run can prove work subsumption from this very record.
+        if deferral_skip_set.contains(&plan.name) {
+            let own = deferral_own_skip.contains(&plan.name);
+            let strategy = if own {
+                "skipped_deferral"
+            } else {
+                "skipped_deferral_upstream"
+            };
+            tracing::info!(
+                "Skipping model '{}' — {}",
+                plan.name,
+                if own {
+                    "measured lag is within the declared deferral window"
+                } else {
+                    "downstream of a deferral-skipped model"
+                }
+            );
+            manifest_entries.insert(
+                plan.name.clone(),
+                smelt_state::ModelRunRecord {
+                    strategy: strategy.to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1358,6 +1515,8 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1378,12 +1537,63 @@ pub async fn execute_project(
         let backend = backends[model_target].as_ref();
         let schema = &config.targets[model_target].schema;
 
+        // The deployed-schema snapshot's column names, captured BEFORE the
+        // schema-evolution gate below runs `check_and_migrate` (which, on
+        // an `AlterTable` migration, updates the stored schema forward to
+        // already include the new column) — this is the "old" snapshot the
+        // definition-change trigger (`Trigger::ColumnAdded`) diffs the
+        // model's current SQL against, read once here so the later
+        // `resolve_live_in_place_update_cell` call sees the schema as it
+        // was BEFORE this run's own ALTER, not after
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). Empty
+        // when no deployed schema exists yet (first run) — fail-closed, no
+        // trigger derived, same as `smelt-db`'s own diagnostic path.
+        let deployed_column_names: Vec<String> = file_store
+            .load_schema(&plan.model_file.db_name_owned())
+            .ok()
+            .flatten()
+            .map(|s| s.columns.into_iter().map(|c| c.name).collect())
+            .unwrap_or_default();
+
+        // The `Trigger::ColumnAdded` → `Technique::InPlaceUpdate` cell,
+        // resolved ONCE here — before the schema-evolution gate runs its
+        // `ALTER TABLE` — so its backfill assignments can be folded into
+        // the SAME `StatementGroup` as the `ADD COLUMN` below
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6 review
+        // finding: a crash between the migration's `save_schema` and a
+        // standalone backfill dispatch left the column permanently NULL
+        // with no repair path, since the next run's snapshot already
+        // contains the column and the trigger never re-derives). Reused,
+        // never re-derived, by both the migration gate below and the
+        // fallback standalone dispatch after it.
+        let clean_sql_for_definition_change = smelt_parser::strip_frontmatter(&plan.sql);
+        let in_place_update_cell = if plan.incremental.is_some() && !deployed_column_names.is_empty()
+        {
+            let (in_place_sources, _) = build_maint_source_facts(&plan.model_file, source_infos);
+            plan.model_file.metadata.as_deref().and_then(|metadata| {
+                crate::maintenance_driver::resolve_live_in_place_update_cell(
+                    &clean_sql_for_definition_change,
+                    &plan.model_file.db_name_owned(),
+                    metadata,
+                    &in_place_sources,
+                    &deployed_column_names,
+                )
+            })
+        } else {
+            None
+        };
+
         // ── Schema evolution gate (incremental models only) ──────────────
         // For incremental models that have a deployed schema, check whether
         // the inferred columns have changed and apply (or block) the required
         // migration. `force_full_refresh` overrides the planned incremental
         // strategy to a full-table rebuild when evolution requires it.
         let mut force_full_refresh = false;
+        // Columns whose `InPlaceUpdate` backfill was already folded into
+        // and executed as part of the migration's own `StatementGroup`
+        // below — the standalone dispatch after this gate must skip these
+        // (idempotency: never re-run the same backfill twice).
+        let mut migration_backfilled_columns: Vec<String> = Vec::new();
         if plan.incremental.is_some() {
             let evolution_strategy = plan
                 .model_file
@@ -1407,8 +1617,31 @@ pub async fn execute_project(
                     };
                     if !inferred_columns.is_empty() {
                         let db_table_name = plan.model_file.db_name_owned();
-                        let (column_defaults, backfill_exprs) =
+                        let (column_defaults, mut backfill_exprs) =
                             extract_evolution_maps(plan.model_file.metadata.as_deref());
+                        // Fold the derived `InPlaceUpdate` cell's own
+                        // backfill assignments into the SAME map the
+                        // declared `backfill:` directive mechanism already
+                        // uses — `check_and_migrate`/`plan_migration_for_
+                        // backend` (`schema_tracking.rs`) emits the
+                        // `ADD COLUMN` and its `UPDATE ... SET` into ONE
+                        // `StatementGroup`, so routing the derived
+                        // assignment through this map makes it atomic with
+                        // the migration for free, reusing the existing
+                        // atomic mechanism rather than re-authoring it.
+                        // A user's explicit `default:`/`backfill:`
+                        // directive always wins (checked first) — the
+                        // derived assignment only fills a gap the user
+                        // left undeclared.
+                        if let Some((_cell, assignments)) = &in_place_update_cell {
+                            for (col, expr) in assignments {
+                                if !column_defaults.contains_key(col)
+                                    && !backfill_exprs.contains_key(col)
+                                {
+                                    backfill_exprs.insert(col.clone(), expr.clone());
+                                }
+                            }
+                        }
                         let target_config = config
                             .targets
                             .get(model_target)
@@ -1440,6 +1673,13 @@ pub async fn execute_project(
                         .await
                         {
                             Ok(result) => {
+                                if let SchemaEvolutionResult::Migrated {
+                                    backfilled_columns,
+                                    ..
+                                } = &result
+                                {
+                                    migration_backfilled_columns = backfilled_columns.clone();
+                                }
                                 match crate::safety::should_force_full_refresh(
                                     &result,
                                     &plan.name,
@@ -1461,6 +1701,51 @@ pub async fn execute_project(
                         }
                     }
                 }
+            }
+        }
+
+        // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
+        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
+        // Runs once per incremental model per run, common to both the keyed
+        // and non-keyed branches below — a one-time migration-style
+        // backfill over the model's existing rows, orthogonal to whichever
+        // window/creation/mutation technique the rest of this run
+        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
+        // above, before the migration gate ran — reused here, never
+        // re-derived. Any column the migration gate already folded into
+        // its own `StatementGroup` (`migration_backfilled_columns`) is
+        // skipped — dispatching it again here would be a redundant,
+        // non-atomic re-run of a backfill that already committed
+        // atomically with its `ADD COLUMN`
+        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
+        // standalone path remains the ONLY route when the migration gate
+        // did not run at all this run (e.g. `schema_evolution: strategy:
+        // full_refresh` on the model, or the target table not yet
+        // existing) — see `docs/specs/incremental_models.md` §"Known
+        // Divergences" for that residual non-atomicity.
+        let mut used_in_place_update = false;
+        if let Some((_cell, assignments)) = &in_place_update_cell {
+            let remaining: Vec<(String, String)> = assignments
+                .iter()
+                .filter(|(col, _)| !migration_backfilled_columns.iter().any(|c| c == col))
+                .cloned()
+                .collect();
+            if remaining.len() != assignments.len() {
+                used_in_place_update = true; // some/all columns already backfilled atomically above
+            }
+            if !remaining.is_empty() {
+                let retry_policy =
+                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                crate::maintenance_driver::execute_in_place_update(
+                    backend,
+                    schema,
+                    &plan.model_file.db_name_owned(),
+                    &remaining,
+                    &retry_policy,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                used_in_place_update = true;
             }
         }
 
@@ -1511,16 +1796,445 @@ pub async fn execute_project(
                 )?,
                 None => None,
             };
+            // Membership-sensitive counterpart of `column_scoped_cell` above
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 2): a
+            // live `Technique::DeleteInsert` cell over a proven keyed row
+            // identity, dispatched through the staged-candidate conditional
+            // recompute instead of a column-scoped `MERGE`. Mutually
+            // exclusive with `column_scoped_cell` by construction — the two
+            // resolvers filter on disjoint `Technique`s of the SAME derived
+            // plan, so at most one of them is ever `Some` for a given
+            // `explicitly_mutable` source set.
+            let membership_recompute_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => {
+                    crate::maintenance_driver::resolve_live_membership_recompute_cell(
+                        &clean_sql_for_merge,
+                        &db_table_name,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &request.technique_overrides,
+                    )?
+                }
+                None => None,
+            };
+            // The repair family's counterpart of the two resolvers above
+            // (`docs/specs/incremental_models.md` §"The repair family").
+            // Unlike them it serves the model's OWN driving/fold trigger:
+            // `derive_new_data`'s key-grain branch narrows a faithful-fold
+            // source-posture refusal into a `Technique::PerGroupRecompute`
+            // cell on that same `Trigger::NewData { source }`, so the repair
+            // cell is an ALTERNATIVE to the `KeyedFold` cell rather than a
+            // technique dispatched alongside the fold. That is why it is
+            // routed inside the window-forward branch below — *instead of*
+            // `execute_cumulative_aggregate` — rather than at the
+            // post-fold dispatch sites the column-scoped-merge and
+            // membership-recompute cells use: folding a retracted
+            // contribution first and repairing after would already have
+            // corrupted stored state. It is still ordered after those two
+            // in the ladder in the sense that matters — a source they
+            // already claim carries an `UpstreamMutation` cell, never a
+            // repair cell (repair is only derived for a CLOCKED mutable
+            // source, and `derive_model_maintenance_plan` derives an
+            // `UpstreamMutation` trigger only for an UNCLOCKED one), so the
+            // three can never contend for the same source.
+            let per_group_recompute_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => {
+                    crate::maintenance_driver::resolve_live_per_group_recompute_cell(
+                        &clean_sql_for_merge,
+                        &db_table_name,
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &request.technique_overrides,
+                        backend.dialect(),
+                    )?
+                }
+                None => None,
+            };
+            // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
+            // §"Upstream model edges"): an upstream maintained model whose own
+            // derived output-delta shape is `KeyedUpsert` folds via the repair
+            // family's own `Technique::PerGroupRecompute`, restricted to the
+            // upstream's affected key set rather than a source's `ScanClamp` —
+            // the sibling of `per_group_recompute_cell` above for this
+            // model's upstream MODEL edges rather than its declared sources.
+            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+            let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
+                None
+            } else {
+                match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
+                            &clean_sql_for_merge,
+                            &db_table_name,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            backend.dialect(),
+                        )?
+                    }
+                    None => None,
+                }
+            };
 
-            let exec_result = match (start_date, end_date) {
+            // Classify up front, regardless of window presence, so the
+            // derived run shape (`docs/specs/incremental_shapes.md` §"The
+            // two run shapes") can gate which branch below is even
+            // reachable — a classifier rejection must REFUSE the model
+            // (§"Key-grain constraints" #4 — "The catalogue is closed and
+            // the classifier is fail-closed"), never silently fall back to
+            // a full refresh.
+            let clean_sql_for_classify = smelt_parser::strip_frontmatter(&plan.sql);
+            let model_has_timeseries = plan
+                .model_file
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let declared_fds: &[smelt_core::config::FunctionalDependency] = plan
+                .model_file
+                .metadata
+                .as_ref()
+                .map(|m| m.functional_dependencies.as_slice())
+                .unwrap_or(&[]);
+            let classification = crate::cumulative::classify_cumulative_sql(
+                &plan.name,
+                &clean_sql_for_classify,
+                source_timeseries,
+                model_has_timeseries,
+                declared_fds,
+            )?;
+
+            let mut used_per_group_recompute = false;
+            let mut used_diff_patch = false;
+            // A key-addressed model-edge cell has no run-window axis at all
+            // (its bounded read is the upstream's own affected key set, not
+            // an interval) — checked BEFORE the `(start_date, end_date)`
+            // dispatch below rather than nested inside its window-forward
+            // arm, so it fires regardless of which run shape this model's
+            // OWN driving trigger classifies as (a clockless upstream
+            // typically drives the downstream into the snapshot-reconcile
+            // shape, which has no run window to match on at all). It is
+            // derived for a DIFFERENT trigger source (the upstream model's
+            // own bare name) than any declared-source repair cell, so the
+            // two can never contend for the same trigger. Never on the
+            // creation run — there is nothing to repair yet, and the fold's
+            // own create path is what materializes the table
+            // (`table_exists_before_run` was captured before any of this
+            // model's writes).
+            let exec_result = match key_addressed_edge_cell
+                .as_ref()
+                .filter(|_| table_exists_before_run)
+            {
+                Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) => {
+                    used_per_group_recompute = matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                    );
+                    used_diff_patch = matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                    );
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "keyed run path: model '{}' resolved a live key-addressed model-edge \
+                             cell on upstream '{edge_name}', but that upstream has no resolved \
+                             ModelFile — internal inconsistency",
+                            plan.name
+                        )
+                    })?;
+                    let upstream_target = config.get_target(
+                        edge_name,
+                        upstream_model.metadata.as_deref(),
+                        &request.target,
+                    );
+                    let upstream_schema = &config.targets[&upstream_target].schema;
+                    let upstream_table =
+                        format!("{upstream_schema}.{}", upstream_model.db_name_owned());
+                    let upstream_source_address = format!("smelt.models.{edge_name}");
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql_for_merge,
+                        resolver,
+                    )?;
+                    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+                        backend,
+                        schema,
+                        &db_table_name,
+                        &upstream_source_address,
+                        &upstream_table,
+                        upstream_keys,
+                        digest_columns,
+                        &key_scope.keys,
+                        &clean_sql_for_merge,
+                        &compiled.sql,
+                        write,
+                        &retry_policy,
+                    )
+                    .await
+                    {
+                        Ok(Some(result)) => Ok(result),
+                        Ok(None) => {
+                            let row_count = backend
+                                .get_row_count(schema, &db_table_name)
+                                .await
+                                .unwrap_or(0);
+                            Ok(smelt_backend::ExecutionResult {
+                                model_name: db_table_name.clone(),
+                                duration: StdDuration::default(),
+                                row_count,
+                                preview: None,
+                            })
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                None => match (start_date, end_date) {
                 (Some(s), Some(e)) => {
+                    if classification.is_snapshot_reconcile() {
+                        anyhow::bail!(
+                            "Model '{}' derives the snapshot-reconcile run shape (no clocked \
+                             driving source, `docs/specs/incremental_models.md` §\"The two run \
+                             shapes\") — --event-time-start/--event-time-end are not accepted; \
+                             run without an event-time window instead.",
+                            plan.name
+                        );
+                    }
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
                     };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    crate::cumulative::execute_cumulative_aggregate(
+                    // The repair family displaces the fold for this
+                    // trigger, never runs after it: an admitted
+                    // `Technique::PerGroupRecompute` cell exists precisely
+                    // because the faithful-fold source-posture obligation
+                    // FAILED for this source, so folding the delta in would
+                    // be the unsound write the repair exists to avoid. Never
+                    // on the creation run — there is nothing to repair yet,
+                    // and the fold's own create path is what materializes
+                    // the table (`table_exists_before_run` was captured
+                    // before any of this model's writes).
+                    match per_group_recompute_cell
+                        .as_ref()
+                        .filter(|_| table_exists_before_run)
+                    {
+                        Some((source, _cell, key, slice, write, discovery)) => {
+                            // A cell that resolved live but whose emitter
+                            // inputs cannot be built errors by name — never
+                            // a silent fall-through to the fold.
+                            let source_info = source_infos
+                                .iter()
+                                .find(|info| {
+                                    let segs = &info.address_segments;
+                                    let bare = match segs.split_first() {
+                                        Some((first, rest)) if first == "sources" => rest.join("."),
+                                        _ => segs.join("."),
+                                    };
+                                    &bare == source
+                                })
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!(
+                                        "keyed run path: model '{}' resolved a live per-group \
+                                         recompute cell on source '{source}', but that source \
+                                         has no resolved physical table — the affected-key read \
+                                         cannot be built",
+                                        plan.name
+                                    )
+                                })?;
+                            let source_table =
+                                source_info.db_name_for_target(model_target, schema);
+                            // Declared here (not inside the `discovery`
+                            // match arm below) purely so it outlives the
+                            // `RepairSidecarRefresh` borrow the SidecarDiff
+                            // leg constructs — the format is only ever
+                            // consumed on that leg.
+                            let source_address = format!("smelt.sources.{source}");
+                            // P9 (`docs/specs/incremental_models.md` §"The
+                            // repair family" — "Obligation 7 over a
+                            // `mutable_snapshot` source"): a
+                            // `RepairDiscovery::SidecarDiff` cell reads the
+                            // group-grain sidecar diff instead of the
+                            // clamped current-source scan — unbounded by
+                            // `slice`, per that section's own rationale —
+                            // and its result is turned into the SAME
+                            // one-column `delta_key` relation shape every
+                            // downstream repair builder expects.
+                            let (affected_keys_select, sidecar_refresh) = match discovery {
+                                crate::maintenance_driver::RepairDiscovery::ClampedScan => {
+                                    // Typed literals, unlike the bare quoted
+                                    // strings every other `Region`
+                                    // construction in this file uses: the
+                                    // repair's affected-key read is the one
+                                    // place a region endpoint is an
+                                    // *operand* (`widened_scan_predicate`
+                                    // subtracts the clamp's margin from
+                                    // it), and a bare string literal minus
+                                    // an INTERVAL is ambiguous to the
+                                    // binder rather than implicitly a
+                                    // timestamp.
+                                    let region = smelt_logical::maintenance::emit::Region {
+                                        start: format!("TIMESTAMP '{}'", s.format("%Y-%m-%d")),
+                                        end: format!("TIMESTAMP '{}'", e.format("%Y-%m-%d")),
+                                    };
+                                    let select =
+                                        crate::maintenance_driver::repair_affected_keys_select(
+                                            &source_table,
+                                            key,
+                                            Some(slice),
+                                            &region,
+                                        );
+                                    (select, None)
+                                }
+                                crate::maintenance_driver::RepairDiscovery::SidecarDiff {
+                                    digest_columns,
+                                } => {
+                                    let output_table = format!("{schema}.{db_table_name}");
+                                    let keys =
+                                        crate::maintenance_driver::diff_repair_group_sidecar_changed_keys(
+                                            backend,
+                                            schema,
+                                            &source_address,
+                                            &source_table,
+                                            &output_table,
+                                            key,
+                                            digest_columns,
+                                            &clean_sql_for_merge,
+                                        )
+                                        .await?;
+                                    let select = crate::maintenance_driver::repair_keys_literal_select(&keys);
+                                    let refresh = crate::maintenance_driver::RepairSidecarRefresh {
+                                        schema,
+                                        source_address: &source_address,
+                                        source_table: &source_table,
+                                        group_key: key,
+                                        digest_columns,
+                                        model_sql: &clean_sql_for_merge,
+                                    };
+                                    (select, Some(refresh))
+                                }
+                            };
+                            // The model's own FULL, unwindowed recompute —
+                            // the same `clean_sql_for_merge` the
+                            // membership-recompute dispatch below compiles,
+                            // for the same reason: a repaired group must
+                            // equal a full refresh of that group.
+                            //
+                            // Widened with `classification`'s own hidden
+                            // decomposed-state columns (P10,
+                            // `docs/outcomes/20260809-repair-family/phases/
+                            // 10-plan.md`) BEFORE compiling — a decomposed
+                            // combiner's create/merge path already carries
+                            // those `__`-marked columns in the physical
+                            // table, so the repair's candidate/insert must
+                            // supply them too, or the `INSERT`'s implicit
+                            // column list mismatches the table. Raw,
+                            // pre-compile SQL, same ordering rationale as
+                            // `execute_snapshot_reconcile`. A no-op for
+                            // every stateless column family.
+                            let state_columns = classification.state_columns();
+                            let augmented_sql = crate::maintenance_driver::repair_augmented_model_sql(
+                                &clean_sql_for_merge,
+                                &state_columns,
+                            )?;
+                            let compiled = compiler.compile_with_sql_and_ephemerals(
+                                &plan.model_file,
+                                schema,
+                                &augmented_sql,
+                                resolver,
+                            )?;
+                            let candidate_select =
+                                crate::maintenance_driver::repair_candidate_select(
+                                    &compiled.sql,
+                                    key,
+                                    &affected_keys_select,
+                                );
+                            match write {
+                                crate::maintenance_driver::RepairWrite::TargetedDeleteInsert => {
+                                    used_per_group_recompute = true;
+                                    crate::maintenance_driver::execute_per_group_recompute(
+                                        backend,
+                                        schema,
+                                        &db_table_name,
+                                        key,
+                                        &affected_keys_select,
+                                        &candidate_select,
+                                        &retry_policy,
+                                        sidecar_refresh.as_ref(),
+                                    )
+                                    .await
+                                }
+                                crate::maintenance_driver::RepairWrite::DiffPatch {
+                                    compared_columns,
+                                    delete_leg,
+                                } => {
+                                    let slice_predicate =
+                                        crate::maintenance_driver::repair_slice_predicate(
+                                            &db_table_name,
+                                            key,
+                                            &affected_keys_select,
+                                        );
+                                    // A group whose PRESENTED value is
+                                    // unchanged but whose hidden state moved
+                                    // must still be rewritten — comparing
+                                    // only the presented columns would
+                                    // suppress the write and leave stale
+                                    // state behind a correct-looking value
+                                    // (strictly less suppression than
+                                    // presented-only, sound by
+                                    // construction).
+                                    let mut compared_columns = compared_columns.clone();
+                                    compared_columns
+                                        .extend(state_columns.iter().map(|sc| sc.name.clone()));
+                                    used_diff_patch = true;
+                                    crate::maintenance_driver::execute_diff_patch(
+                                        backend,
+                                        schema,
+                                        &db_table_name,
+                                        key,
+                                        &candidate_select,
+                                        &compared_columns,
+                                        &slice_predicate,
+                                        delete_leg,
+                                        &retry_policy,
+                                        sidecar_refresh.as_ref(),
+                                    )
+                                    .await
+                                }
+                            }
+                        }
+                        None => {
+                            crate::cumulative::execute_cumulative_aggregate(
+                                backend,
+                                &plan.model_file,
+                                compilers,
+                                resolver,
+                                model_target,
+                                schema,
+                                &db_table_name,
+                                &time_range,
+                                source_timeseries,
+                                source_key_recurrence,
+                                false,
+                                &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                            )
+                            .await
+                        }
+                    }
+                }
+                _ if classification.is_snapshot_reconcile() => {
+                    // No run window, snapshot-reconcile run shape: whole-
+                    // source keyed MERGE (create-if-missing, retained-
+                    // departed-keys reconcile otherwise) — never the
+                    // unconditional drop+create the window-forward branch
+                    // below uses, which would silently drop departed keys.
+                    crate::cumulative::execute_snapshot_reconcile(
                         backend,
                         &plan.model_file,
                         compilers,
@@ -1528,38 +2242,16 @@ pub async fn execute_project(
                         model_target,
                         schema,
                         &db_table_name,
-                        &time_range,
-                        source_timeseries,
-                        source_key_recurrence,
-                        false,
-                        &retry_policy,
+                        &classification,
                     )
                     .await
                 }
                 _ => {
-                    // No run window: single-shot full refresh of the
-                    // keyed SELECT. Matches CLI's behaviour for
-                    // `smelt build` / `smelt run` without an event-time
-                    // window.
+                    // No run window, window-forward run shape: single-shot
+                    // full refresh of the keyed SELECT. Matches CLI's
+                    // behaviour for `smelt build` / `smelt run` without an
+                    // event-time window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    // Classify even on the no-window full-refresh path: a
-                    // classifier rejection must REFUSE the model
-                    // (incremental_models.md §"Key-grain constraints" #4 — "The catalogue is
-                    // closed and the classifier is fail-closed"). Without
-                    // this, forbidden keyed SQL (e.g. a non-allowlisted
-                    // aggregator) would be silently materialised as a plain
-                    // full refresh whenever no event-time window is supplied.
-                    let model_has_timeseries = plan
-                        .model_file
-                        .metadata
-                        .as_ref()
-                        .is_some_and(|m| m.timeseries.is_some());
-                    crate::cumulative::classify_cumulative_sql(
-                        &plan.name,
-                        &clean_sql,
-                        source_timeseries,
-                        model_has_timeseries,
-                    )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
                         &plan.model_file,
                         schema,
@@ -1589,7 +2281,9 @@ pub async fn execute_project(
                         preview: None,
                     })
                 }
-            };
+                }
+                }
+            ;
 
             let exec_result = match exec_result {
                 Ok(r) => r,
@@ -1597,6 +2291,55 @@ pub async fn execute_project(
                     return Err(e);
                 }
             };
+
+            // P9 task 6 (`docs/outcomes/20260809-repair-family/phases/
+            // 09-plan.md`): seed the group-grain fingerprint sidecar's
+            // initial comparandum on THIS run's own creation
+            // (`!table_exists_before_run` — the fold above just
+            // materialized the table). Without this, the first live repair
+            // after creation would find no partition at all and take the
+            // absent-comparandum degradation (task 7) on every run rather
+            // than just the very first one. `write_group` is an empty,
+            // non-transactional group — there is no consuming write to ride
+            // alongside here, only a baseline populate.
+            if !table_exists_before_run {
+                if let Some((
+                    source,
+                    _cell,
+                    group_key,
+                    _slice,
+                    _write,
+                    crate::maintenance_driver::RepairDiscovery::SidecarDiff { digest_columns },
+                )) = per_group_recompute_cell.as_ref()
+                {
+                    if let Some(source_info) = source_infos.iter().find(|info| {
+                        let segs = &info.address_segments;
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        &bare == source
+                    }) {
+                        let source_table = source_info.db_name_for_target(model_target, schema);
+                        let source_address = format!("smelt.sources.{source}");
+                        let empty_group = smelt_logical::maintenance::emit::StatementGroup {
+                            statements: vec![],
+                            transactional: false,
+                        };
+                        crate::maintenance_driver::refresh_repair_group_sidecar(
+                            backend,
+                            schema,
+                            &source_address,
+                            &source_table,
+                            group_key,
+                            digest_columns,
+                            &clean_sql_for_merge,
+                            &empty_group,
+                        )
+                        .await?;
+                    }
+                }
+            }
 
             // W10 Phase 4: dispatch the live `UpstreamMutation` cell
             // resolved above, alongside the cumulative fold that just ran —
@@ -1698,7 +2441,7 @@ pub async fn execute_project(
                                 // axis — only a composed clock-and-identity
                                 // output that ALSO declares its own
                                 // `timeseries:` establishes one
-                                // (`incremental_models.md` §"Key temporal
+                                // (`incremental_shapes.md` §"Key temporal
                                 // locality"). No derivable keyed cell
                                 // reaches `PartitionLocal::Yes` today (the
                                 // non-keyed branch's own comment on this
@@ -1719,12 +2462,82 @@ pub async fn execute_project(
                     }
                 }
             }
-            if !used_column_scoped_merge {
+            // The membership-sensitive counterpart of the block above
+            // (`docs/plans/20260808-membership-sensitivity.md` Phase 2):
+            // a live `Technique::DeleteInsert` cell dispatches the
+            // staged-candidate conditional recompute over the model's own
+            // FULL (unwindowed) recompiled SQL — the entire current
+            // admitted+enriched state, not this run's time-windowed slice —
+            // so a key whose row admission changed (new or changed, per
+            // `resolve_live_membership_recompute_cell`'s own doc comment on
+            // the departed-row limitation it inherits from the emitter) is
+            // repaired. `column_scoped_cell` and `membership_recompute_cell`
+            // are mutually exclusive (disjoint `Technique` filters over the
+            // SAME derived plan), so this never double-dispatches a source
+            // `column_scoped_cell` already handled.
+            let mut used_membership_recompute = false;
+            if let Some((_source, cell, suppression)) = membership_recompute_cell.as_ref() {
+                if table_exists_before_run && !used_column_scoped_merge {
+                    let smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
+                        compared_columns,
+                    } = suppression
+                    else {
+                        unreachable!(
+                            "resolve_live_membership_recompute_cell only ever returns \
+                             WriteSuppression::Suppressed"
+                        );
+                    };
+                    let smelt_logical::maintenance::RowIdentity::Key(key) =
+                        &cell.row_identity.identity
+                    else {
+                        unreachable!(
+                            "resolve_live_membership_recompute_cell only ever returns a cell \
+                             with a proven RowIdentity::Key"
+                        );
+                    };
+                    // The model's own FULL, unwindowed recompute — same
+                    // `clean_sql_for_merge` source text `column_scoped_cell`'s
+                    // dispatch above compiles for its own `compiled.sql`,
+                    // recompiled here independently since the two branches
+                    // are mutually exclusive per-run (never both compiled).
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        &plan.model_file,
+                        schema,
+                        &clean_sql_for_merge,
+                        resolver,
+                    )?;
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    let recompute_result =
+                        crate::maintenance_driver::execute_staged_membership_recompute(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            key,
+                            &compiled.sql,
+                            compared_columns,
+                            &retry_policy,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    used_membership_recompute = true;
+                    total_rows = recompute_result.row_count;
+                }
+            }
+            if !used_column_scoped_merge && !used_membership_recompute {
                 total_rows = exec_result.row_count;
             }
             total_rows_overall += total_rows;
-            let keyed_strategy_label = if used_column_scoped_merge {
+            let keyed_strategy_label = if used_in_place_update {
+                "in_place_update".to_string()
+            } else if used_diff_patch {
+                "diff_patch".to_string()
+            } else if used_per_group_recompute {
+                "per_group_recompute".to_string()
+            } else if used_column_scoped_merge {
                 "column_scoped_merge".to_string()
+            } else if used_membership_recompute {
+                "delete_insert_suppressed".to_string()
             } else {
                 "cumulative_aggregate".to_string()
             };
@@ -1747,6 +2560,12 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: sink.retry_count(),
+                    // The cumulative arm dispatches no declared-fact probes
+                    // today — an empty array here is accurate, not a gap
+                    // (`docs/outcomes/20260809-probe-backed-facts/phases/
+                    // 08-plan.md`).
+                    probes: Vec::new(),
+                    subsumed: None,
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -1901,7 +2720,7 @@ pub async fn execute_project(
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
                 // scan, unchanged from before this phase.
-                let model_edges = model_edges_for(&plan.model_file, model_by_addr);
+                let model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
@@ -2069,7 +2888,7 @@ pub async fn execute_project(
                     };
 
                 // First-run bootstrap for a self-referential model
-                // (`docs/specs/incremental_models.md` §"First-run and backfill"
+                // (`docs/specs/incremental_shapes.md` §"First-run and backfill"
                 // — "First-run bootstrap for a self-referential model"):
                 // when the target doesn't exist yet, `CREATE TABLE … AS
                 // SELECT …` over the first batch cannot resolve the
@@ -2099,6 +2918,13 @@ pub async fn execute_project(
                         .await?;
                     }
                 }
+
+                // Accumulates every probe's held/skipped outcome across this
+                // model's batches, for `ModelRunRecord.probes`
+                // (`docs/specs/run_state.md` §"Run manifest"). The batch
+                // loop is sequential, so a plain `mut` Vec is sound — no
+                // concurrent writer.
+                let mut model_probe_records: Vec<smelt_state::ProbeRecord> = Vec::new();
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
@@ -2172,6 +2998,197 @@ pub async fn execute_project(
                         resolver,
                     )?;
                     reporter.model_compiled(run_id, &plan.name, &compiled.sql);
+
+                    // Live dispatch of the declared model-scoped probes
+                    // before this batch's write — same obligation as the
+                    // full-refresh site above, scoped to this batch's own
+                    // compiled (filtered) SQL
+                    // (`docs/specs/model_properties.md` §"Probe obligation").
+                    let declared_probes = crate::model_probes::declared_model_probes(
+                        &plan.name,
+                        &format!(
+                            "{}.{} batch [{}, {})",
+                            schema,
+                            plan.model_file.db_name_owned(),
+                            batch.partition_start.format("%Y-%m-%d"),
+                            batch.partition_end.format("%Y-%m-%d"),
+                        ),
+                        plan.model_file.metadata.as_deref(),
+                        Some(&inc_plan.timeseries),
+                        &compiled.sql,
+                        smelt_backend::maintenance_dialect(backend.dialect()),
+                    );
+                    model_probe_records.extend(
+                        crate::model_probes::dispatch_declared_model_probes(
+                            backend,
+                            &probe_policy_for_model(config, prior_runs, &plan.name),
+                            &declared_probes,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?,
+                    );
+
+                    // Live dispatch of the source append-only posture probe
+                    // (`docs/specs/model_properties.md` §"Probe obligation",
+                    // row `mutation_profile.kind: append_only`) before this
+                    // batch's write — same pre-write obligation as the
+                    // model-scoped probes above, but scoped to the model's
+                    // consumed sources' recorded per-partition baselines
+                    // rather than this run's own compiled SQL. A held probe
+                    // refreshes the recorded baseline; a violation fails the
+                    // run before the write.
+                    {
+                        let _io_guard = state_io_lock.lock().await;
+                        let source_postures = file_store
+                            .load_source_postures()
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let source_probes = crate::source_probes::append_only_posture_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            &plan.model_file,
+                            source_infos,
+                            &source_postures,
+                            model_target,
+                            schema,
+                            smelt_backend::maintenance_dialect(backend.dialect()),
+                        );
+                        if !source_probes.is_empty() {
+                            let (refreshed, records) =
+                                crate::source_probes::dispatch_and_record_append_only_postures(
+                                    backend,
+                                    &probe_policy_for_model(config, prior_runs, &plan.name),
+                                    &source_probes,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            model_probe_records.extend(records);
+                            if !refreshed.is_empty() {
+                                let mut source_postures = source_postures;
+                                for r in refreshed {
+                                    source_postures.record(&r.source_address, r.partitions);
+                                }
+                                let _ = file_store.save_source_postures(&source_postures);
+                            }
+                        }
+                    }
+
+                    // Live dispatch of the contract-lattice `frozen_horizon`
+                    // late-arrival probe (`docs/specs/incremental_models.md`
+                    // §"The contract lattice") before this batch's write —
+                    // opt-in only (empty probe set absent a `contract.
+                    // frozen_horizon` declaration), scoped to the model's
+                    // clocked sources' recorded frozen-band baselines. The
+                    // baseline is refreshed whether the probe held OR fired,
+                    // so a genuine late arrival is reported once, not every
+                    // subsequent run
+                    // (`docs/outcomes/20260809-contract-lattice-v1/phases/
+                    // 03-plan.md`).
+                    if let Some(end_date) = end_date {
+                        let _io_guard = state_io_lock.lock().await;
+                        let frozen_band_baselines = file_store
+                            .load_frozen_band_baselines()
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let contract_probes = crate::contract_probes::frozen_horizon_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            &plan.model_file,
+                            plan.model_file.metadata.as_deref(),
+                            source_infos,
+                            end_date,
+                            model_target,
+                            schema,
+                            smelt_backend::maintenance_dialect(backend.dialect()),
+                        );
+                        if !contract_probes.is_empty() {
+                            let result =
+                                crate::contract_probes::dispatch_and_record_frozen_horizon_probes(
+                                    backend,
+                                    &probe_policy_for_model(config, prior_runs, &plan.name),
+                                    &contract_probes,
+                                    &frozen_band_baselines,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            model_probe_records.extend(result.records);
+                            if !result.refreshed.is_empty() {
+                                let mut frozen_band_baselines = frozen_band_baselines;
+                                for r in result.refreshed {
+                                    frozen_band_baselines.record(&r.source_address, r.partitions);
+                                }
+                                let _ =
+                                    file_store.save_frozen_band_baselines(&frozen_band_baselines);
+                            }
+                            if let Some(violation) = result.violations.first() {
+                                return Err(anyhow::anyhow!("{}", violation.message));
+                            }
+                        }
+                    }
+
+                    // Live dispatch of the contract-lattice `deferral` probe
+                    // (`docs/specs/incremental_models.md` §"The contract
+                    // lattice") before this batch's write — opt-in only
+                    // (empty probe set absent a `contract.deferral`
+                    // declaration). Unlike `frozen_horizon`'s probe, this
+                    // one emits no SQL: both frontiers it compares are
+                    // already-recorded ledger state
+                    // (`IntervalStore`/`LandedDeltaStore`), so it only reads
+                    // state the run already writes elsewhere, under the same
+                    // `state_io_lock` critical section.
+                    {
+                        let clocked_source_addresses: Vec<String> = maint_source_facts
+                            .iter()
+                            .filter(|sf| {
+                                sf.partition_col.is_some()
+                                    && sf.mutation
+                                        == smelt_logical::maintenance::MutationProfile::AppendOnly
+                            })
+                            .map(|sf| sf.name.clone())
+                            .collect();
+                        let deferral_probes = crate::contract_probes::deferral_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start.format("%Y-%m-%d"),
+                                batch.partition_end.format("%Y-%m-%d"),
+                            ),
+                            plan.model_file.metadata.as_deref(),
+                        );
+                        if !deferral_probes.is_empty() {
+                            let _io_guard = state_io_lock.lock().await;
+                            let interval_store = file_store
+                                .load_intervals()
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            let landed_deltas = file_store
+                                .load_landed_deltas()
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            let (records, violations) = crate::contract_probes::evaluate_deferral(
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &deferral_probes,
+                                &plan.name,
+                                &clocked_source_addresses,
+                                &interval_store,
+                                &landed_deltas,
+                            );
+                            model_probe_records.extend(records);
+                            if let Some(violation) = violations.first() {
+                                return Err(anyhow::anyhow!("{}", violation.message));
+                            }
+                        }
+                    }
 
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
@@ -2336,6 +3353,7 @@ pub async fn execute_project(
                                 &partition.end,
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -2451,11 +3469,44 @@ pub async fn execute_project(
                     ),
                     _ => (String::new(), String::new()),
                 };
-                let strategy_label = if used_column_scoped_merge {
+                let strategy_label = if used_in_place_update {
+                    "in_place_update".to_string()
+                } else if used_column_scoped_merge {
                     "column_scoped_merge".to_string()
                 } else {
                     format!("{:?}", resolved_strategy).to_lowercase()
                 };
+
+                // `contract.deferral`: prove ledger-proven work subsumption
+                // on the run that catches a previously-deferred window up —
+                // both legs are ledger facts, never inferred
+                // (`docs/outcomes/20260809-contract-lattice-v1/outcome.md`
+                // phase 5 decision log): a prior run manifest actually
+                // recorded `skipped_deferral` for this model, AND this
+                // run's own write range covers the pending window computed
+                // from the SAME pre-run frontier snapshot the skip decision
+                // used.
+                let subsumed = match (start_date, end_date) {
+                    (Some(s), Some(e)) => {
+                        // The nearest prior manifest that actually recorded
+                        // an entry for THIS model (`prior_runs` is
+                        // newest-first) — a run that never selected this
+                        // model at all must not count as "no prior skip"
+                        // and mask an older recorded one.
+                        let prior_recorded_skip = prior_runs
+                            .iter()
+                            .find_map(|m| m.models.get(&plan.name))
+                            .is_some_and(|rec| rec.strategy == "skipped_deferral");
+                        crate::contract_probes::subsumed_window(
+                            deferral_pending.get(&plan.name).copied(),
+                            prior_recorded_skip,
+                            s,
+                            e,
+                        )
+                    }
+                    _ => None,
+                };
+
                 manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
@@ -2472,6 +3523,8 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
+                        probes: model_probe_records,
+                        subsumed,
                     },
                 );
 
@@ -2593,6 +3646,77 @@ pub async fn execute_project(
                 )?;
                 reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
+                // Accumulates every probe's held/skipped outcome for this
+                // full-refresh write, for `ModelRunRecord.probes`
+                // (`docs/specs/run_state.md` §"Run manifest").
+                let mut model_probe_records: Vec<smelt_state::ProbeRecord> = Vec::new();
+
+                // Live dispatch of the declared model-scoped probes
+                // (`timeseries.assert_monotonic`, `functional_dependencies:`,
+                // `bounded_domain:`) before the materialization write —
+                // a firing probe fails the run before anything is written
+                // (`docs/specs/model_properties.md` §"Probe obligation").
+                let declared_probes = crate::model_probes::declared_model_probes(
+                    &plan.name,
+                    &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                    plan.model_file.metadata.as_deref(),
+                    plan.model_file
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.timeseries.as_ref()),
+                    &compiled.sql,
+                    smelt_backend::maintenance_dialect(backend.dialect()),
+                );
+                model_probe_records.extend(
+                    crate::model_probes::dispatch_declared_model_probes(
+                        backend,
+                        &probe_policy_for_model(config, prior_runs, &plan.name),
+                        &declared_probes,
+                    )
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?,
+                );
+
+                // Live dispatch of the source append-only posture probe
+                // (`docs/specs/model_properties.md` §"Probe obligation", row
+                // `mutation_profile.kind: append_only`) before the
+                // full-refresh write — same pre-write obligation as the
+                // incremental-batch site above.
+                {
+                    let _io_guard = state_io_lock.lock().await;
+                    let source_postures = file_store
+                        .load_source_postures()
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let source_probes = crate::source_probes::append_only_posture_probes(
+                        &plan.name,
+                        &format!("{}.{} full refresh", schema, plan.model_file.db_name_owned()),
+                        &plan.model_file,
+                        source_infos,
+                        &source_postures,
+                        model_target,
+                        schema,
+                        smelt_backend::maintenance_dialect(backend.dialect()),
+                    );
+                    if !source_probes.is_empty() {
+                        let (refreshed, records) =
+                            crate::source_probes::dispatch_and_record_append_only_postures(
+                                backend,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                                &source_probes,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        model_probe_records.extend(records);
+                        if !refreshed.is_empty() {
+                            let mut source_postures = source_postures;
+                            for r in refreshed {
+                                source_postures.record(&r.source_address, r.partitions);
+                            }
+                            let _ = file_store.save_source_postures(&source_postures);
+                        }
+                    }
+                }
+
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
                     smelt_core::config::Materialization::View => Materialization::View,
@@ -2608,7 +3732,7 @@ pub async fn execute_project(
                 // the very prior state the SELECT reads before the SELECT
                 // ever runs. This arm is the unwindowed sibling of the
                 // incremental path's own first-run bootstrap
-                // (`docs/specs/incremental_models.md` §"First-run and
+                // (`docs/specs/incremental_shapes.md` §"First-run and
                 // backfill" — "First-run bootstrap for a self-referential
                 // model"): drop, bootstrap an EMPTY target from the
                 // resolved output schema, then `INSERT` the compiled
@@ -2718,6 +3842,8 @@ pub async fn execute_project(
                         definition_hash: compute_model_hash(&plan.sql),
                         error: None,
                         retry_count: sink.retry_count(),
+                        probes: model_probe_records,
+                        subsumed: None,
                     },
                 );
 
@@ -2944,6 +4070,8 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -2994,6 +4122,8 @@ pub async fn execute_project(
                     definition_hash,
                     error: Some(error.to_string()),
                     retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 }
             });
         }
@@ -3012,6 +4142,8 @@ pub async fn execute_project(
                     definition_hash: compute_model_hash(&plan.sql),
                     error: None,
                     retry_count: 0,
+                    probes: Vec::new(),
+                    subsumed: None,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -3136,8 +4268,38 @@ fn build_model_plans(
                     .map(|l| l.to_days())
                     .unwrap_or(0);
 
+                // Contract-lattice `frozen_horizon` write-eligibility clamp
+                // (`docs/specs/incremental_models.md` §"Contract relaxations
+                // (`contract:`)"): narrows the requested range's start to
+                // `end - H`, never widens. The pure transform is single-owned
+                // in `smelt-logical`; this call site only converts dates to
+                // the day-count unit it operates on.
+                let clamped_start_date = metadata
+                    .and_then(|m| m.contract.as_ref())
+                    .and_then(|c| c.frozen_horizon.as_ref())
+                    .and_then(|fh| {
+                        let h_days = fh.to_days() as i64;
+                        let start_days = start_date.num_days_from_ce() as i64;
+                        let end_days = end_date.num_days_from_ce() as i64;
+                        let clamped_days = smelt_logical::clamp_frozen_horizon_write_range(
+                            start_days, end_days, h_days,
+                        );
+                        if clamped_days > start_days {
+                            info!(
+                                "model '{model_name}': frozen_horizon ({} days) narrows the \
+                                 requested write range start to {}",
+                                h_days,
+                                NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                                    .map(|d| d.format("%Y-%m-%d").to_string())
+                                    .unwrap_or_default()
+                            );
+                        }
+                        NaiveDate::from_num_days_from_ce_opt(clamped_days as i32)
+                    })
+                    .unwrap_or(start_date);
+
                 let full_range = TimeRange {
-                    start: start_date.format("%Y-%m-%d").to_string(),
+                    start: clamped_start_date.format("%Y-%m-%d").to_string(),
                     end: end_date.format("%Y-%m-%d").to_string(),
                 };
 
@@ -3189,7 +4351,7 @@ fn build_model_plans(
                     request.per_partition,
                 )
                 .map_err(|diag| {
-                    // Fail-closed last line of defense (`incremental_models.md` §"Partition-grain constraints" #10):
+                    // Fail-closed last line of defense (`incremental_shapes.md` §"Partition-grain constraints" #10):
                     // even under `--allow-downgrade` (which only warns at the earlier
                     // `check_bound_derivation` gate), the batch-safety roll-up here must
                     // still refuse rather than silently approximate a chunk shape —
@@ -3260,7 +4422,7 @@ fn build_model_plans(
 }
 
 /// Create the EMPTY target table for a **self-referential** model's first
-/// run (`docs/specs/incremental_models.md` §"First-run and backfill" —
+/// run (`docs/specs/incremental_shapes.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"). Shared by both
 /// dispatch arms in `execute_project` — the windowed incremental batch loop
 /// (bootstrap-then-DELETE+INSERT) and the unwindowed full-refresh arm
@@ -3394,9 +4556,22 @@ fn maintenance_dialect_for_target(
 fn model_edges_for(
     model_file: &smelt_core::ModelFile,
     model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+    source_infos: &[smelt_core::sources::SourceInfo],
 ) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
     let mut edges = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
+    // The SAME per-workspace output-delta fold `crate::propagation::
+    // build_forward_graph`'s own `type_edge` call reads — never a second,
+    // independent derivation (`docs/outcomes/20260809-output-delta-typing/
+    // phases/06-summary.md` "For the next planner"). Recomputed per call
+    // (this driver-facing resolver has no cross-model cache to lean on, and
+    // is only ever called once per live model per run); the workspace-wide
+    // fixed-point fold itself is O(models) per model reference resolved.
+    let model_by_addr_ref: std::collections::BTreeMap<String, &smelt_core::ModelFile> =
+        model_by_addr.iter().map(|(k, v)| (k.clone(), v)).collect();
+    let models: Vec<smelt_core::ModelFile> = model_by_addr.values().cloned().collect();
+    let workspace_verdicts =
+        crate::propagation::workspace_output_delta_verdicts(&models, source_infos);
     for r in &model_file.refs {
         let segs = r.smelt_ref.to_path();
         if segs.first().map(|s| s.as_str()) == Some("sources") {
@@ -3419,13 +4594,36 @@ fn model_edges_for(
         let clock_col = up_meta
             .and_then(|m| m.timeseries.as_ref())
             .map(|ts| ts.partition_column.clone());
+        // Sibling spellings of `clock_col` within the upstream's own SQL
+        // (`ModelEdge::clock_col_aliases`'s doc comment).
+        let clock_col_aliases = clock_col
+            .as_deref()
+            .map(|c| {
+                smelt_logical::analysis::source_bounds::defining_expr_siblings(&upstream.content, c)
+            })
+            .unwrap_or_default();
         let unique_key = up_meta
             .and_then(|m| m.unique_key.clone())
             .unwrap_or_default();
+        // The upstream's own derived output-delta shape — the meet across
+        // whatever per-column-group verdicts `upstream_output_delta_groups`
+        // derives for it, mirroring `propagation.rs`'s own `ModelEdge`
+        // construction exactly.
+        let output_shape = crate::propagation::upstream_output_delta_groups(
+            &addr,
+            &model_by_addr_ref,
+            source_infos,
+            &workspace_verdicts,
+        )
+        .into_iter()
+        .map(|(_, shape)| shape)
+        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
         edges.push(smelt_logical::maintenance::derive::ModelEdge {
             name: addr,
             clock_col,
+            clock_col_aliases,
             unique_key,
+            output_shape,
         });
     }
     edges
@@ -3567,6 +4765,20 @@ pub fn derive_batch_filtered_sql(
 /// meaningful partial summary for `--resume`/tooling to read.
 fn write_run_report(file_store: &FileStore, manifest: &RunManifest) -> Result<()> {
     file_store.save_report(&RunReport::from_manifest(manifest))
+}
+
+/// Build a model's `ProbePolicy` from the project's `probes:` cadence and
+/// its prior-run count in `prior_runs` (`docs/specs/model_properties.md`
+/// §"Probe cadence"): the run ordinal is 0 for a model's first run.
+fn probe_policy_for_model(
+    config: &Config,
+    prior_runs: &[RunManifest],
+    model_name: &str,
+) -> crate::probes::ProbePolicy {
+    let run_ordinal = smelt_state::history::HistoryQuery::new(prior_runs)
+        .for_model(model_name)
+        .len() as u64;
+    crate::probes::ProbePolicy::new(config.probes.cadence, run_ordinal)
 }
 
 fn build_outcome(
@@ -3757,13 +4969,65 @@ pub fn build_source_timeseries_map(
     map
 }
 
+/// Classify every `refresh: keyed` model in `models` and collect which of
+/// them carry at least one aggregator column with decomposed state
+/// (`AggregatorColumn.state.is_some()`) — the set `SqlCompiler::
+/// set_state_bearing_models_all` needs so a downstream `SELECT *` never
+/// surfaces `__part` state columns (`docs/specs/incremental_models.md`
+/// §"Decomposed state (rung 2) in keyed models" → "Presentation
+/// projection"). A model that fails classification is simply excluded
+/// (its own classifier error surfaces separately, on the path that
+/// actually maintains it — this map only feeds *consumers'* wildcard
+/// rewrites, so a producer-side rejection here must not derail an
+/// unrelated compile).
+///
+/// Non-empty for the order-monotone overwrite family (`MAX_BY`/`MIN_BY`),
+/// the once-write family's fallback/multi-candidate spellings, and the
+/// decomposed-fold family (`AVG`/`STDDEV_*`/`VAR_*`) — every family
+/// `docs/outcomes/20260809-rung2-state-shapes` has widened admission onto
+/// the decomposed-state mechanism for.
+fn build_state_bearing_models(
+    models: &[smelt_core::ModelFile],
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    for model in models {
+        let metadata = model.metadata.as_deref();
+        if !metadata.is_some_and(|m| m.is_keyed()) {
+            continue;
+        }
+        let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+        let model_has_timeseries = metadata.is_some_and(|m| m.timeseries.is_some());
+        let declared_fds: &[smelt_core::config::FunctionalDependency] = metadata
+            .map(|m| m.functional_dependencies.as_slice())
+            .unwrap_or(&[]);
+        let Ok(classification) = crate::cumulative::classify_cumulative_sql(
+            &model.name,
+            &clean_sql,
+            source_timeseries,
+            model_has_timeseries,
+            declared_fds,
+        ) else {
+            continue;
+        };
+        let is_state_bearing = classification
+            .aggregator_columns
+            .iter()
+            .any(|col| col.state.is_some());
+        if is_state_bearing {
+            out.insert(model.name.clone());
+        }
+    }
+    out
+}
+
 /// Build the project-wide `smelt.<path> → key_recurrence` lookup map —
 /// the sibling of [`build_source_timeseries_map`] over the same
 /// `source_infos`, keyed by the same `smelt.<path>` convention (matching
 /// `crate::cumulative::CumulativeClassification::driving_source.name`'s own
 /// full-address form, not `SourceFacts::name`'s bare form). Consumed only
 /// by key temporal locality's route 3 (recurrence-bounded) as the declared
-/// fallback (`docs/specs/incremental_models.md` §"Key temporal locality") —
+/// fallback (`docs/specs/incremental_shapes.md` §"Key temporal locality") —
 /// `crate::cumulative::execute_cumulative_aggregate` looks up its own
 /// driving source's entry here.
 pub fn build_source_key_recurrence_map(

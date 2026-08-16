@@ -1122,10 +1122,11 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
-| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given, except in combination with `--show-sql` (below). |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption). With `MODEL_NAME`, emits the per-model maintenance-plan report as JSON — with or without `--show-sql`, same schema either way. |
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
 | `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
+| `--technique` | | string | | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute` (`recompute` and `delete_insert` both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect `--json`, whose `technique_previews` array always carries every technique regardless of this flag. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
@@ -1136,6 +1137,10 @@ derived per-source scan clamps, each source's partition-locality verdict, any ad
 the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
+
+Each cell also prints a `contract:` row — its effective [contract relaxation](../guide/incremental-models.md#contract-relaxations)
+(`default`, or `frozen_horizon`/`deferral` with their declared intervals); `--json` carries the
+same information per cell as a `contract_point` object.
 
 A `ColumnScopedMerge` cell's block additionally prints an `observed-delta recording:` line —
 the only technique family recording is wired for today (`KeyedFold` and the staged-candidate
@@ -1171,6 +1176,20 @@ both render through the identical `clock:` / `identity:` / `derived grain:` rows
 that provider declares neither fact — a source with no `timeseries:` and no `unique_key:` is
 legal and simply has nothing to summarize, never an error.
 
+Each edge additionally prints a `delta type:` row — the shape of change that edge's own upstream
+emits: `append-only within window` (every change lands as new rows within a bounded window,
+never revising an already-emitted row), `keyed upsert` (a change instead revises the row
+identified by a key set), or `general` (neither addressing holds, naming the construct or
+world-fact that degraded it — an unregistered operator such as a window function, a
+row-multiplying join, or a source declaring no `mutation_profile`). A source edge is typed by its
+own declared mutation profile; a model edge is typed by the upstream model's own derived verdict.
+An edge with no derivable verdict (e.g. the upstream isn't itself `refresh: incremental`) prints
+no `delta type:` row at all, rather than a fabricated one. A per-group recompute cell reading a
+`keyed upsert` upstream model edge (key-addressed, no partition clamp of its own) prints the
+group-grain fingerprint-sidecar diff **over the upstream's own output table** as its
+affected-key discovery mechanism, alongside the clamped current-source scan and the
+`mutable_snapshot` source sidecar diff.
+
 Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
 compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
@@ -1200,6 +1219,20 @@ wired to the same suppression check yet. The cell's `region key:` row (`WholeRow
 still a reliable signal for one half of the admission rule: a `WholeRow` region key means that cell
 never suppresses, regardless of what `--show-sql` prints.
 
+Add `--technique <name>` (alongside `--show-sql`) to inspect a technique smelt *didn't* pick — every
+technique smelt knows an emitter for, previewed against each cell's own contract/identity/column data,
+labelled with whether that technique is actually sound here. This renders the requested technique's
+own statements in place of the admitted one's, per cell, together with the cell's admissibility verdict
+for it: `Admitted` (this is the technique the plan actually resolved), `InterchangeableAlternative`
+(proven sound for this cell, but not the one the plan resolved — region recompute is always this when
+it isn't itself admitted), or `NotApplicable` with a reason (the technique's structural preconditions
+aren't met for this cell — printed, never silently skipped). `--technique` always uses the symbolic
+`{{window_start}}`/`{{window_end}}` placeholders — it's a display-only illustration of a cell's shape,
+not a `--period`-bound dry run. `--json` (with or without `--technique`) always carries the full
+`technique_previews` array per cell — one entry per known technique, not just the admitted one — plus
+a top-level `properties` object with the model's derived property set (columns, grain, functional
+dependencies, per-column determinism/comparability/discriminants, row identity, source bounds).
+
 **Examples:**
 
 ```bash
@@ -1226,6 +1259,10 @@ smelt explain daily_events --show-sql --period 2024-01-01..2024-01-08
 
 # Machine-readable statements array per cell
 smelt explain daily_events --show-sql --json
+
+# See what the keyed-fold technique would look like on a model that doesn't admit it,
+# and why it's not applicable there
+smelt explain daily_events --show-sql --technique keyed_fold
 ```
 
 ```text
@@ -1258,6 +1295,7 @@ Inbound edges: sources.raw.events
       clock:    (none)
       identity: event_id
       derived grain: key
+      delta type: general (degraded by: source 'raw.events' is append_only but declares no clock/axis column)
 ```
 
 ---

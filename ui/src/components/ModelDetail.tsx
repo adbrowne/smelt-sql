@@ -1,8 +1,56 @@
-import type { ModelDetailResponse, BatchSafetyInfo } from '../types'
+import type { ModelDetailResponse, BatchSafetyInfo, ColumnInfo } from '../types'
 
 interface ModelDetailProps {
   model: ModelDetailResponse
   onClose: () => void
+  onOpenDiagnostics?: (name: string) => void
+}
+
+/**
+ * The columns table shared by `ModelDetail`'s side panel and the
+ * `ModelDiagnostics` full-screen page's overview section (`docs/specs/
+ * ui_model_diagnostics.md` §Surface "UI page": the page's overview is "a
+ * superset of the existing side panel's fields").
+ */
+export function ColumnsTable({ columns }: { columns: ColumnInfo[] }) {
+  return (
+    <div className="border border-gray-200 rounded overflow-hidden">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="bg-gray-50 border-b border-gray-200">
+            <th className="text-left px-2 py-1 font-medium text-gray-600">Name</th>
+            <th className="text-left px-2 py-1 font-medium text-gray-600">Type</th>
+            <th className="text-center px-1 py-1 font-medium text-gray-600" title="Nullable">?</th>
+            <th className="text-left px-2 py-1 font-medium text-gray-600">Source</th>
+          </tr>
+        </thead>
+        <tbody>
+          {columns.map((col) => (
+            <tr key={col.name} className="border-b border-gray-100 last:border-0">
+              <td className="px-2 py-1 font-mono text-gray-900">{col.name}</td>
+              <td className="px-2 py-1 text-gray-600">
+                {col.data_type ?? <span className="text-gray-400">?</span>}
+              </td>
+              <td className="px-1 py-1 text-center text-gray-400">
+                {col.nullable === true && <span title="nullable">∅</span>}
+                {col.nullable === false && <span className="text-gray-600" title="not null">!</span>}
+              </td>
+              <td className="px-2 py-1 text-gray-500">
+                {col.source.type === 'from_model' && (
+                  <span title={`${col.source.model}.${col.source.column}`}>
+                    {col.source.model}
+                  </span>
+                )}
+                {col.source.type === 'computed' && 'computed'}
+                {col.source.type === 'external_table' && col.source.table}
+                {col.source.type === 'unknown' && '-'}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
 }
 
 function BatchSafetyBadge({ safety }: { safety: BatchSafetyInfo }) {
@@ -26,7 +74,7 @@ function BatchSafetyBadge({ safety }: { safety: BatchSafetyInfo }) {
   )
 }
 
-export function ModelDetail({ model, onClose }: ModelDetailProps) {
+export function ModelDetail({ model, onClose, onOpenDiagnostics }: ModelDetailProps) {
   const diagnostics = model.diagnostics ?? []
   const errors = diagnostics.filter(d => d.severity === 'error')
   const warnings = diagnostics.filter(d => d.severity === 'warning')
@@ -45,6 +93,15 @@ export function ModelDetail({ model, onClose }: ModelDetailProps) {
         </div>
 
         <p className="text-xs text-gray-500 mb-3 font-mono">{model.path}</p>
+
+        {onOpenDiagnostics && (
+          <button
+            onClick={() => onOpenDiagnostics(model.name)}
+            className="text-xs bg-gray-900 text-white px-2 py-1 rounded font-medium hover:bg-gray-700 mb-3"
+          >
+            Open Diagnostics
+          </button>
+        )}
 
         {model.description && (
           <p className="text-sm text-gray-700 mb-3">{model.description}</p>
@@ -140,42 +197,7 @@ export function ModelDetail({ model, onClose }: ModelDetailProps) {
             <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
               Columns ({model.columns.length})
             </h3>
-            <div className="border border-gray-200 rounded overflow-hidden">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-gray-50 border-b border-gray-200">
-                    <th className="text-left px-2 py-1 font-medium text-gray-600">Name</th>
-                    <th className="text-left px-2 py-1 font-medium text-gray-600">Type</th>
-                    <th className="text-center px-1 py-1 font-medium text-gray-600" title="Nullable">?</th>
-                    <th className="text-left px-2 py-1 font-medium text-gray-600">Source</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {model.columns.map((col) => (
-                    <tr key={col.name} className="border-b border-gray-100 last:border-0">
-                      <td className="px-2 py-1 font-mono text-gray-900">{col.name}</td>
-                      <td className="px-2 py-1 text-gray-600">
-                        {col.data_type ?? <span className="text-gray-400">?</span>}
-                      </td>
-                      <td className="px-1 py-1 text-center text-gray-400">
-                        {col.nullable === true && <span title="nullable">∅</span>}
-                        {col.nullable === false && <span className="text-gray-600" title="not null">!</span>}
-                      </td>
-                      <td className="px-2 py-1 text-gray-500">
-                        {col.source.type === 'from_model' && (
-                          <span title={`${col.source.model}.${col.source.column}`}>
-                            {col.source.model}
-                          </span>
-                        )}
-                        {col.source.type === 'computed' && 'computed'}
-                        {col.source.type === 'external_table' && col.source.table}
-                        {col.source.type === 'unknown' && '-'}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <ColumnsTable columns={model.columns} />
           </div>
         )}
 

@@ -3,7 +3,7 @@ name: raw.events
 # At-least-once delivery, redelivery-prone (`datagen.yaml`'s `redelivery:`
 # block on this source — ~2% of events arrive twice, byte-identical except
 # `arrival_time`). `key_recurrence` declares the delivery-contract recurrence
-# bound `silver.events_deduped` (`docs/specs/incremental_models.md` §"Key
+# bound `silver.events_deduped` (`docs/specs/incremental_shapes.md` §"Key
 # temporal locality (the time-partitioned output)") consumes for its route 3
 # (recurrence-bounded) admission: every pair of rows sharing `event_id` lies
 # within `window` of each other on the event-time axis. A redelivered

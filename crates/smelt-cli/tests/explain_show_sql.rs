@@ -441,9 +441,28 @@ fn show_sql_wires_real_ephemeral_resolver_and_upstream_schemas() {
 /// The observed-delta recording/projection report rows
 /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D4)
 /// are additions to the report section only — `--show-sql`'s statement
-/// section for a `Technique::ColumnScopedMerge` cell must render unchanged
-/// alongside them (`daily_events_enriched` in `examples/timeseries` is the
-/// real fixture with one such cell).
+/// section must render unchanged alongside them, whether or not a
+/// recording-status row is present for a given cell.
+///
+/// **Post-`docs/plans/20260808-membership-sensitivity.md` Phase 3 note:**
+/// this test originally exercised `daily_events_enriched`'s
+/// `Technique::ColumnScopedMerge` cell specifically. That cell no longer
+/// exists — `raw.users` is read in the model's `JOIN`'s own `ON`
+/// predicate, a row-admission read, making every column group's cell for
+/// that trigger membership-sensitive (`Technique::DeleteInsert`) instead,
+/// and per Phase 2's own reachability verdict no fixture in this workspace
+/// derives `ColumnScopedMerge` anymore. Since `smelt explain --show-sql`
+/// drives the real binary against a real project directory (not something
+/// this test can fake with a synthetic in-process `MaintenancePlan`, unlike
+/// `explain_model.rs`'s report-only tests), the `ColumnScopedMerge`-specific
+/// half of this test's original coverage has ZERO reachable fixture
+/// anywhere in this crate — a genuine, newly-created gap, tracked as a
+/// follow-up in `docs/TODO.md` rather than silently accepted. What remains
+/// testable and IS tested here: the report-section additions (or their
+/// absence — `daily_events_enriched`'s `UpstreamMutation(raw.users)` cells
+/// print no recording line at all now, since that reporting family is
+/// wired only for `ColumnScopedMerge`) do not corrupt or omit the statement
+/// section for the model's live `DeleteInsert` cell.
 #[test]
 fn show_sql_statements_unaffected_by_observed_delta_report_rows() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -467,23 +486,19 @@ fn show_sql_statements_unaffected_by_observed_delta_report_rows() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // `daily_events_enriched`'s `ColumnScopedMerge` cell has `WholeRow` row
-    // identity (`batched.unique_key:` does not feed P2 row-identity
-    // derivation for a `Grain::Partition` model — see
-    // `explain_model.rs::explain_prints_observed_delta_recording_status_for_a_conditional_cell`),
-    // so it must print the negative recording row, never "yes". This test
-    // only cares that the report-section row exists alongside an unchanged
-    // statement section, not which verdict it names.
     assert!(
-        stdout.contains("observed-delta recording: no"),
-        "expected the recording-status row in the report section: {stdout}"
+        !stdout.contains("observed-delta recording"),
+        "no cell of this model is ColumnScopedMerge anymore — the recording-status reporting \
+         family (wired only for that technique) must print no line at all: {stdout}"
     );
     assert!(
-        stdout.contains("technique: ColumnScopedMerge"),
-        "expected the ColumnScopedMerge cell still reported: {stdout}"
+        stdout.contains("technique: DeleteInsert"),
+        "expected the model's membership-sensitive UpstreamMutation(raw.users) cell reported \
+         as DeleteInsert: {stdout}"
     );
     assert!(
-        stdout.contains("UPDATE") || stdout.contains("MERGE INTO"),
-        "expected the column-scoped write's own statement still emitted after the report: {stdout}"
+        stdout.contains("DELETE FROM") && stdout.contains("INSERT INTO"),
+        "expected the DeleteInsert cell's own staged-write statements still emitted after the \
+         (empty) report-row section: {stdout}"
     );
 }

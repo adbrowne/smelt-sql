@@ -50,6 +50,7 @@ Click any model in the graph to see:
 - **Incremental configuration** (granularity, partition column, etc.)
 - **Batch safety** indicators (green/yellow/red badges)
 - **Diagnostics** -- parse errors, type errors, and undeclared column warnings
+- An **Open Diagnostics** button that opens the full-screen [model diagnostics page](model-diagnostics.md), with the model's derived properties, relation contract, and per-cell technique previews
 
 ### Run planner
 
@@ -78,5 +79,6 @@ The UI watches your project files for changes. When you save a model or configur
 ## Further reading
 
 - [Model Selection](model-selection.md) for filtering which models appear in the graph
+- [Model Diagnostics](model-diagnostics.md) for the full-screen per-model diagnostics page
 - [Incremental Models](incremental-models.md) for monitoring incremental processing status via the CLI
 - [CLI Commands](../reference/cli.md#smelt-ui) for all `smelt ui` flags

@@ -8,10 +8,11 @@
 //! ladder and the maintainable/delegated cutoff live in `incremental_models.md`
 //! and are **not** decided here.
 
+use serde::Serialize;
 use smelt_types::SqlFunction;
 
 /// Whether a combiner's presented value moves monotonically, and how.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Monotone {
     /// The presented value itself only ever moves one way (`MIN`/`MAX`).
     Value,
@@ -25,7 +26,7 @@ pub enum Monotone {
 /// The raw algebraic facts of a combiner. Not the maintenance ladder — see
 /// `incremental_models.md` §"The algebraic maintenance ladder" for how these
 /// facts order into maintainable/delegated tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Discriminants {
     /// The combiner is a commutative monoid (closed, associative, has an
     /// identity) — a fold of contributions is well-defined without replay.
@@ -56,6 +57,18 @@ impl Discriminants {
             monotone: Monotone::None,
         }
     }
+
+    /// Whether these are exactly the fail-closed holistic-or-unknown facts:
+    /// no monoid, not decomposable, no monotonicity claimed. Used by
+    /// `decomposed_state::decompose_to_state` as its entry gate — narrower
+    /// than `!decomposable` alone, so an order-monotone combiner
+    /// (`ArgMax`/`ArgMin`, `decomposable == false` but `monotone ==
+    /// Monotone::Order`) still reaches the state-shape match
+    /// (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2) in
+    /// keyed models").
+    pub fn is_holistic_or_unknown(&self) -> bool {
+        *self == Self::holistic_or_unknown()
+    }
 }
 
 /// Classify the algebraic discriminants of an aggregate combiner.
@@ -85,8 +98,14 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
 
     match function {
         // Commutative monoids that are also groups (invertible: a
-        // contribution can be un-seen via an inverse combine).
-        Sum | Count => Discriminants {
+        // contribution can be un-seen via an inverse combine). `BIT_XOR`
+        // belongs here, not with the idempotent bit/bool lattice combiners
+        // below: XOR is its own inverse (`x XOR d XOR d == x`), which makes
+        // it a group and — critically — NOT idempotent. It is the additive
+        // fold family (`docs/specs/incremental_shapes.md` §"The
+        // column-family catalogue"), and every consumer that grades
+        // re-foldability off these facts must treat it as such.
+        Sum | Count | BitXor => Discriminants {
             is_monoid: true,
             needs_inverse: false,
             decomposable: false,
@@ -101,7 +120,7 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
             decomposable: false,
             monotone: Monotone::Value,
         },
-        BoolAnd | BoolOr | BitAnd | BitOr | BitXor => Discriminants {
+        BoolAnd | BoolOr | BitAnd | BitOr => Discriminants {
             is_monoid: true,
             needs_inverse: true,
             decomposable: false,
@@ -119,8 +138,10 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
         },
 
         // Order-monotone: the presented value may switch, but only in step
-        // with a monotone ordering key (a semilattice fold).
-        ArgMax => Discriminants {
+        // with a monotone ordering key (a semilattice fold) — the
+        // order-monotone overwrite family (`MAX_BY`/`MIN_BY`,
+        // `incremental_shapes.md` §"The column-family catalogue").
+        ArgMax | ArgMin => Discriminants {
             is_monoid: false,
             needs_inverse: false,
             decomposable: false,
@@ -137,9 +158,13 @@ pub fn combiner_discriminants(function: SqlFunction, distinct: bool) -> Discrimi
 mod tests {
     use super::*;
 
+    /// `BIT_XOR` is a group (self-inverse), so it is graded with `SUM`/
+    /// `COUNT`, never with the idempotent bit/bool lattice combiners — the
+    /// additive fold family (`docs/specs/incremental_shapes.md` §"The
+    /// column-family catalogue").
     #[test]
-    fn sum_and_count_are_invertible_monoids() {
-        for f in [SqlFunction::Sum, SqlFunction::Count] {
+    fn sum_count_and_bit_xor_are_invertible_monoids() {
+        for f in [SqlFunction::Sum, SqlFunction::Count, SqlFunction::BitXor] {
             let d = combiner_discriminants(f, false);
             assert!(d.is_monoid, "{f:?} should be a monoid");
             assert!(!d.needs_inverse, "{f:?} should be invertible (a group)");
@@ -183,6 +208,14 @@ mod tests {
     fn arg_max_is_order_monotone() {
         assert_eq!(
             combiner_discriminants(SqlFunction::ArgMax, false).monotone,
+            Monotone::Order
+        );
+    }
+
+    #[test]
+    fn arg_min_is_order_monotone() {
+        assert_eq!(
+            combiner_discriminants(SqlFunction::ArgMin, false).monotone,
             Monotone::Order
         );
     }

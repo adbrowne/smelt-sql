@@ -14,6 +14,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `models` | map | no | `{}` | Per-model configuration overrides (see [Model Configuration](#model-configuration)) |
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
 | `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
+| `probes` | object | no | `{cadence: per_run}` | Project-wide dispatch cadence for declared-fact probes (see [Probes Configuration](#probes-configuration)) |
 
 ---
 
@@ -150,13 +151,12 @@ models:
     target: <target_name>
     refresh: incremental
     unique_key: [<column>, ...]
+    merge_key: [<column>, ...]  # MERGE-dedup-only write key — see the callout below
     safety_overrides:
       # safety-override fields...
-    batched:
-      unique_key: [<column>, ...]  # MERGE-dedup-only key — see the callout below
 ```
 
-`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
+`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive. `key_per_partition` is a third derived label (a clock plus an identity whose `partition_column` is a member) with no writable spelling — declaring `grain: key_per_partition` is a hard error.
 
 ### Model Fields
 
@@ -167,10 +167,10 @@ models:
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
 | `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
-| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from `batched.unique_key` below (a partition-grain MERGE-dedup key, never identity). |
-| `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
-| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and a non-default `batched.safety_overrides` on the same `smelt.yml` model entry is an error — declare it once. |
-| `batched` | object | no | | `smelt.yml`-only preference block carrying `unique_key` — a MERGE-dedup key for a partition-shaped output, distinct from the identity-conferring top-level `unique_key:` above (see the callout in [Incremental Configuration](#incremental-configuration)) |
+| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from `merge_key` below (a MERGE-dedup write key, never identity). |
+| `grain` | string | no | | Optional check-only assertion — `partition` or `key` — validated against the label `timeseries:`/`unique_key:` derive; never a driver. `key_per_partition` is derived-only; declaring it is a hard error. |
+| `merge_key` | string \| string[] | no | | The **write/dedup key** a column-scoped MERGE technique writes on — never identity-conferring, never a driver of grain. A single string is sugar for a one-element list. Admitted on any `refresh: incremental` output; frontmatter wins over this `smelt.yml` override when both set it (see the callout in [Incremental Configuration](#incremental-configuration)). |
+| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -181,7 +181,7 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. A `grain: key` model *may also* declare `timeseries:` to time-partition its keyed output — the key and clock axes are independent, not alternatives — but only when key temporal locality is established (a proof, or a checked declaration, that every duplicate delivery of one key stays within a bounded window of itself on the event axis; see the [composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A `grain: key` model whose `timeseries:` block satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route). The `timeseries:` and `batched:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. A `grain: key` model *may also* declare `timeseries:` to time-partition its keyed output — the key and clock axes are independent, not alternatives — but only when key temporal locality is established (a proof, or a checked declaration, that every duplicate delivery of one key stays within a bounded window of itself on the event axis; see the [composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A `grain: key` model whose `timeseries:` block satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route). The `timeseries:` and `merge_key:` keys are siblings, not nested.
 
 ```yaml
 models:
@@ -193,9 +193,8 @@ models:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
       granularity: day
-    batched:
-      unique_key:
-        - transaction_id
+    merge_key:
+      - transaction_id
 ```
 
 #### Timeseries Fields
@@ -224,7 +223,7 @@ models:
 
 ### Incremental Configuration
 
-`refresh: incremental` + `grain: partition` processes only new or changed data instead of rebuilding the entire table. This implies a stored `table`. A `timeseries:` block must also be present (see above); the `batched:` block itself is optional.
+`refresh: incremental` + `grain: partition` processes only new or changed data instead of rebuilding the entire table. This implies a stored `table`. A `timeseries:` block must also be present (see above); `merge_key:` itself is optional.
 
 ```yaml
 models:
@@ -238,22 +237,20 @@ models:
       granularity: day
     safety_overrides:
       allow_window_functions: false
-    batched:
-      unique_key:
-        - transaction_id
+    merge_key:
+      - transaction_id
 ```
 
-!!! note "`batched:` is `smelt.yml`-only"
-    The `.sql` frontmatter `batched:` sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). Declaring the *identity* fact this way makes the output key-shaped (see [Incremental models](../guide/incremental-models.md)), which a row-shaped model with no `GROUP BY` cannot become. `smelt.yml`'s `models.<name>.batched:` block above is a **separate, still-supported** mechanism carrying a MERGE-dedup-only `unique_key` (and `nondeterministic_columns`, since per-column `contract:` is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.
+!!! note "`batched:` is retired"
+    The `batched:` sub-block is retired outright on both surfaces — declaring it in a model file or a `smelt.yml` model entry is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `merge_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). `merge_key:` never confers identity or reshapes the output — it names only the row key a column-scoped MERGE technique writes on, for a partition-shaped model whose column-scoped MERGE needs a row key without becoming key-addressed (declaring the *identity* fact instead means `unique_key:`, which makes the output key-shaped and requires an aggregated `GROUP BY` body — see [Incremental models](../guide/incremental-models.md)). `merge_key:` is declarable in both `.sql` frontmatter and as a `smelt.yml` model override (frontmatter wins). `nondeterministic_columns` has no `merge_key:`-adjacent replacement: `columns.<c>.contract: plausible` is SQL-frontmatter-only, with no `smelt.yml` spelling.
 
 #### Incremental Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `unique_key` (under `batched:`) | string[] | no | `[]` | A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level `unique_key:` is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell. |
-| `nondeterministic_columns` (under `batched:`) | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
+| `merge_key` | string[] | no | `[]` | A MERGE-dedup write key for a partition-shaped output — never the identity-conferring fact `unique_key:` is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell. Declarable in `.sql` frontmatter and as a `smelt.yml` model override (frontmatter wins). |
 
-`safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of this `batched:` block.
+`safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of `merge_key:`.
 
 #### Safety Overrides
 
@@ -339,19 +336,51 @@ maintenance:
 
 ---
 
+## Probes Configuration
+
+A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,
+`mutation_profile: {kind: append_only}`, `referential_integrity:`, `key_recurrence`) is checked
+at run time by a cheap runtime probe before the maintenance write it licenses — "declared" means
+"checked", not "trusted forever". `probes:` controls how often those checks run project-wide:
+
+```yaml
+probes:
+  cadence: per_run       # default
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `cadence` | string or object | no | `per_run` | `per_run` — dispatch every probe on every consuming run. `off` — never dispatch; every declaration is trusted and recorded unverified on the run manifest. `{periodic: {every_n_runs: N}}` — dispatch once every `N` runs (a model's first run always dispatches). |
+
+```yaml
+# Dispatch every 10th run instead of every run
+probes:
+  cadence:
+    periodic:
+      every_n_runs: 10
+```
+
+A firing probe fails the run with a named diagnostic before any write — never a silent continue or
+a downgraded warning. `smelt explain <model>` lists the model's declared-fact probe set (the fact,
+the diagnostic it raises, the licensed maintenance cell, and its per-run cost) so you can see what
+a run will check before running it; see [`smelt explain`](smelt-explain.md#probes) and the run
+manifest's [`probes` field](state.md#run-manifest) for where a probe's outcome is recorded.
+
+---
+
 ## Validation Rules
 
 Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `smelt.yml` `batched:` block
+- Ephemeral models cannot declare `refresh: incremental` / `grain:` / `merge_key:` / `safety_overrides:`
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
 - View models with `refresh:` set (the refresh axis only applies to stored tables)
-- `refresh: materialized_view` models with a `smelt.yml` `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
+- `refresh: materialized_view` models declaring `merge_key:` / `safety_overrides:` (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
 
 ---
 

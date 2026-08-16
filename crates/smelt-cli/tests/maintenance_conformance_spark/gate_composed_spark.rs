@@ -190,10 +190,11 @@ fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeCla
             output_name: "last_seen".to_string(),
             per_partition_agg: "MAX".to_string(),
             cross_partition_combiner: CrossPartitionCombiner::Max,
+            state: None,
         }],
         driving_source: DrivingSource {
             name: format!("smelt.sources.{}", recipe.source.name),
-            timeseries: composed_driving_timeseries(),
+            timeseries: Some(composed_driving_timeseries()),
         },
     }
 }
@@ -343,6 +344,7 @@ async fn drive_composed_route3_and_assert_spark(
             &composed_route3_suppression(),
             compile_step,
             &no_retry_policy(),
+            &smelt_runtime::probes::ProbePolicy::per_run(),
         )
         .await
         .map_err(|e| {

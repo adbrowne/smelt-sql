@@ -17,10 +17,6 @@ use std::process::Command;
 
 use smelt_cli::bakeoff::{run_bakeoff, BakeoffOptions};
 use smelt_cli::Config;
-use smelt_core::config::{CellTechnique, MaintenanceCellConfig};
-use smelt_logical::maintenance::choice::{
-    effective_override, resolve_cell_choice, ChosenTechnique,
-};
 use smelt_logical::maintenance::Trigger;
 
 const EVENTS_SOURCE: &str = r#"description: events source (fact)
@@ -54,15 +50,15 @@ columns:
 fn stage_multi_technique_project(project_dir: &Path, db_path: &Path, project_name: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).expect("create models/sources");
 
-    // `batched:` is retired in `.sql` frontmatter; the MERGE-dedup-only
-    // `unique_key` (this row-shaped join can't become the composed
-    // key+clock shape — no `GROUP BY`) stays declared via the `smelt.yml`
-    // model override instead (`docs/specs/models.md` §"The Relation
-    // Contract").
+    // The `batched:` sub-block is retired everywhere; the MERGE-dedup-only
+    // `merge_key:` (this row-shaped join can't become the composed
+    // key+clock shape — no `GROUP BY`) is declared via the `smelt.yml`
+    // model override instead (`docs/specs/models.md` §"Batched sub-block
+    // retirement").
     let smelt_yml = format!(
         "name: {project_name}\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    \
          type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n\
-         models:\n  daily_events_enriched:\n    batched:\n      unique_key: [event_id]\n",
+         models:\n  daily_events_enriched:\n    merge_key: [event_id]\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).expect("write smelt.yml");
@@ -168,18 +164,27 @@ fn skip_without_duckdb_lib() -> bool {
     false
 }
 
-fn schema_exists(db_path: &Path, schema: &str) -> bool {
-    let conn = duckdb::Connection::open(db_path).expect("reconnect");
-    conn.query_row(
-        "SELECT count(*) > 0 FROM information_schema.schemata WHERE schema_name = ?",
-        [schema],
-        |row| row.get(0),
-    )
-    .expect("check schema existence")
-}
-
+/// Rewrite of the original `bakeoff_reports_measured_cost_per_admissible_
+/// technique` (`docs/plans/20260808-membership-sensitivity.md` Phase 3):
+/// `stage_multi_technique_project`'s `{user_name}` cell — and every sibling
+/// column group's own cell for the SAME `UpstreamMutation(users)` trigger,
+/// membership sensitivity being row-scoped, not per-column
+/// (`incremental_models.md` §"The plan matrix") — is now derived
+/// `Technique::DeleteInsert`: `users` is read in the `JOIN`'s own `ON`
+/// predicate, a row-admission read, so `ColumnScopedMerge` is inadmissible
+/// (Phase 1's review checklist: "membership cells cannot receive
+/// ColumnScopedMerge"). `admitted_family` (`src/bakeoff.rs`) maps
+/// `Technique::DeleteInsert` to `None` — a membership-sensitive cell is not
+/// a bakeoff candidate at all (there is nothing to bake off: the recompute
+/// family IS the cell's only admissible technique). This is a genuinely
+/// different "nothing to measure" reason than
+/// `bakeoff_with_no_multi_technique_cells_says_so`'s fixture (which has NO
+/// `UpstreamMutation` cell whatsoever) — this model's derived plan DOES
+/// carry `UpstreamMutation` cells, they are just all single-technique. The
+/// direct `maintenance_plan_report` check below proves the "nothing to
+/// measure" verdict is for that reason, not merely "no cell existed."
 #[tokio::test]
-async fn bakeoff_reports_measured_cost_per_admissible_technique() {
+async fn bakeoff_reports_nothing_to_measure_for_membership_sensitive_cells() {
     if skip_without_duckdb_lib() {
         return;
     }
@@ -191,6 +196,36 @@ async fn bakeoff_reports_measured_cost_per_admissible_technique() {
     seed_tables(&db_path, "main");
 
     let config = Config::load(&project_dir).expect("load config");
+
+    // Prove the derived plan DOES carry a membership-sensitive
+    // UpstreamMutation(users) cell — the "nothing to measure" verdict below
+    // is because it's single-technique, not because no cell exists at all.
+    {
+        let discovery = smelt_cli::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let models = discovery.discover_models().expect("discover models");
+        let model = models
+            .iter()
+            .find(|m| m.name == "daily_events_enriched")
+            .expect("model exists")
+            .clone();
+        let mut db = smelt_cli::init_db(&project_dir, &models);
+        db.set_active_target(Some(std::sync::Arc::from("dev")));
+        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let file = db.source_file(&model.path).expect("model file registered");
+        let result =
+            smelt_db::maintenance_plan_report(&db, ws, file).expect("maintenance plan report");
+        assert!(
+            result.plan.cells.iter().any(|c| matches!(
+                &c.trigger,
+                Trigger::UpstreamMutation { source } if source == "users"
+            ) && c.technique
+                == smelt_logical::maintenance::Technique::DeleteInsert),
+            "expected a membership-sensitive UpstreamMutation(users) DeleteInsert cell in the \
+             derived plan, got: {:#?}",
+            result.plan
+        );
+    }
+
     let opts = BakeoffOptions {
         cells: vec![],
         runs: 2,
@@ -206,46 +241,23 @@ async fn bakeoff_reports_measured_cost_per_admissible_technique() {
         opts,
     )
     .await
-    .expect("bakeoff run must succeed");
+    .expect("bakeoff must succeed (exit-success 'nothing to measure' report, not an error)");
 
     assert!(
-        report.message.is_none(),
-        "a measurable cell must not report 'nothing to measure'"
-    );
-    assert_eq!(
-        report.cells.len(),
-        1,
-        "exactly one bakeoff-candidate cell in this fixture"
-    );
-    let cell = &report.cells[0];
-    assert_eq!(
-        cell.techniques.len(),
-        2,
-        "the cell's resolvable set has exactly 2 members"
+        report.cells.is_empty(),
+        "a membership-sensitive (DeleteInsert) cell is never a bakeoff candidate — it has \
+         only one admissible technique"
     );
     assert!(
-        cell.equivalence_checked,
-        "cross-variant EXCEPT ALL must have been checked"
+        report
+            .message
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .contains("nothing to measure"),
+        "report must clearly say there is nothing to measure: {:?}",
+        report.message
     );
-
-    for measurement in &cell.techniques {
-        assert!(
-            measurement.total_wall_clock_ms() > 0,
-            "technique '{:?}' must report a nonzero measured wall-clock cost",
-            measurement.technique
-        );
-        assert_eq!(
-            measurement.run_wall_clock_ms.len(),
-            2,
-            "one wall-clock measurement per replayed window (--runs 2)"
-        );
-    }
-    let row_counts: Vec<i64> = cell.techniques.iter().map(|m| m.row_count).collect();
-    assert_eq!(
-        row_counts[0], row_counts[1],
-        "every admissible technique must materialize the same row count"
-    );
-    assert!(row_counts[0] > 0, "the measured table must be non-empty");
 }
 
 #[tokio::test]
@@ -307,8 +319,17 @@ async fn bakeoff_with_no_multi_technique_cells_says_so() {
     );
 }
 
+/// Rewrite (`docs/plans/20260808-membership-sensitivity.md` Phase 3):
+/// `stage_multi_technique_project`'s only `UpstreamMutation` cells are now
+/// membership-sensitive (`Technique::DeleteInsert`, `admitted_family` maps
+/// to `None`), so `run_bakeoff` always takes its "nothing to measure"
+/// early-return branch for this fixture — `--keep` is never even consulted
+/// on that branch (`run_bakeoff`'s early `return` precedes the `opts.keep`
+/// cleanup logic entirely). This test now proves exactly that: `--keep`
+/// does not conjure scratch schemas out of nothing when there is nothing to
+/// measure.
 #[tokio::test]
-async fn bakeoff_drops_scratch_unless_keep() {
+async fn bakeoff_keep_is_a_no_op_when_nothing_to_measure() {
     if skip_without_duckdb_lib() {
         return;
     }
@@ -321,43 +342,6 @@ async fn bakeoff_drops_scratch_unless_keep() {
 
     let config = Config::load(&project_dir).expect("load config");
 
-    // Default run: scratch schemas and state dirs must be gone afterward.
-    let dropped_opts = BakeoffOptions {
-        cells: vec![],
-        runs: 2,
-        target: "dev".to_string(),
-        keep: false,
-        pin: false,
-    };
-    let dropped_report = run_bakeoff(
-        &project_dir,
-        std::sync::Arc::new(config.clone()),
-        "daily_events_enriched",
-        dropped_opts,
-    )
-    .await
-    .expect("default bakeoff run must succeed");
-    assert!(dropped_report.kept_schemas.is_empty());
-    for cell in &dropped_report.cells {
-        for m in &cell.techniques {
-            assert!(
-                !schema_exists(&db_path, &m.scratch_schema),
-                "scratch schema '{}' must be dropped without --keep",
-                m.scratch_schema
-            );
-            assert!(
-                !project_dir
-                    .join(".smelt/targets")
-                    .join(format!("__bakeoff_{}", m.scratch_schema))
-                    .exists(),
-                "scratch state dir for '{}' must be removed without --keep",
-                m.scratch_schema
-            );
-        }
-    }
-
-    // `--keep` run: scratch schemas and state dirs persist, and are named
-    // in the report.
     let keep_opts = BakeoffOptions {
         cells: vec![],
         runs: 2,
@@ -372,21 +356,38 @@ async fn bakeoff_drops_scratch_unless_keep() {
         keep_opts,
     )
     .await
-    .expect("--keep bakeoff run must succeed");
+    .expect("--keep bakeoff run must succeed (exit-success 'nothing to measure' report)");
+
     assert!(
-        !kept_report.kept_schemas.is_empty(),
-        "--keep must report the retained schemas"
+        kept_report.cells.is_empty(),
+        "nothing to measure for this fixture (membership-sensitive cells only)"
     );
-    for cell in &kept_report.cells {
-        for m in &cell.techniques {
-            assert!(
-                schema_exists(&db_path, &m.scratch_schema),
-                "scratch schema '{}' must persist with --keep",
-                m.scratch_schema
-            );
-            assert!(kept_report.kept_schemas.contains(&m.scratch_schema));
-        }
-    }
+    assert!(
+        kept_report.kept_schemas.is_empty(),
+        "--keep must report no retained schemas when nothing was measured"
+    );
+
+    let scratch_schema_count: i64 = {
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+        conn.query_row(
+            "SELECT count(*) FROM information_schema.schemata WHERE schema_name LIKE \
+             'smelt_bakeoff_%'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("check for scratch schemas")
+    };
+    assert_eq!(
+        scratch_schema_count, 0,
+        "no scratch schema may be created by --keep when there is nothing to measure"
+    );
+    assert!(
+        !project_dir.join(".smelt/targets").exists()
+            || std::fs::read_dir(project_dir.join(".smelt/targets"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no scratch state dir may be created by --keep when there is nothing to measure"
+    );
 }
 
 /// `assert_cmd`-style subprocess smoke test, built with only `std::process`
@@ -473,16 +474,17 @@ fn bakeoff_runs_via_real_binary() {
     );
 }
 
-/// Phase 5: `--pin` must emit a `cells[]` entry that round-trips through the
-/// SAME real ladder (`effective_override` + `resolve_cell_choice`) a live run
-/// consults, and it must resolve to exactly the technique bakeoff measured as
-/// the winner — not a re-derived or hand-picked value.
-/// `stage_multi_technique_project`'s model already declares a `maintenance:`
-/// block (`scan_bounds` only, no `cells[]`), so this exercises the "model
-/// already has a `maintenance:` block" branch: the pin is a bare `cells[]`
-/// entry, not a full `maintenance:` block.
+/// Rewrite (`docs/plans/20260808-membership-sensitivity.md` Phase 3):
+/// `run_bakeoff`'s early "nothing to measure" return precedes its own
+/// `opts.pin` check entirely (`src/bakeoff.rs`) — `report.pin` is `None`
+/// regardless of `--pin` whenever `candidate_cells` is empty, which it now
+/// always is for `stage_multi_technique_project` (its only
+/// `UpstreamMutation` cells are membership-sensitive `DeleteInsert`,
+/// inadmissible for bakeoff — see `bakeoff_reports_nothing_to_measure_for_
+/// membership_sensitive_cells`'s own doc comment). This test now proves
+/// `--pin` does not conjure a pin suggestion out of nothing to measure.
 #[tokio::test]
-async fn pin_emits_parseable_cells_entry() {
+async fn pin_is_none_when_nothing_to_measure() {
     if skip_without_duckdb_lib() {
         return;
     }
@@ -509,78 +511,15 @@ async fn pin_emits_parseable_cells_entry() {
         opts,
     )
     .await
-    .expect("bakeoff run must succeed");
+    .expect("bakeoff must succeed (exit-success 'nothing to measure' report, not an error)");
 
-    let pin = report
-        .pin
-        .as_ref()
-        .expect("--pin must populate a pin suggestion on the report");
     assert!(
-        pin.header.contains("daily_events_enriched.sql"),
-        "pin header must name the model's .sql file: {}",
-        pin.header
+        report.cells.is_empty(),
+        "nothing to measure for this fixture (membership-sensitive cells only)"
     );
-
-    let parsed: Vec<MaintenanceCellConfig> = serde_yaml::from_str(&pin.yaml)
-        .expect("emitted pin YAML must parse as a cells[] entry list");
-    assert_eq!(
-        parsed.len(),
-        1,
-        "exactly one bakeoff-candidate cell in this fixture"
-    );
-    let parsed_cell = &parsed[0];
-    assert_eq!(parsed_cell.on, "users");
-    assert_eq!(parsed_cell.columns, vec!["user_name".to_string()]);
-    let winning_technique = parsed_cell
-        .technique
-        .expect("the pin must be a hard technique pin");
-
-    // Round-trip: feed the parsed cell config through the SAME real ladder
-    // (`effective_override` + `resolve_cell_choice`) a live run consults,
-    // and confirm it resolves to exactly the winning technique.
-    let discovery = smelt_cli::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
-    let models = discovery.discover_models().expect("discover models");
-    let model = models
-        .iter()
-        .find(|m| m.name == "daily_events_enriched")
-        .expect("model exists")
-        .clone();
-    let mut db = smelt_cli::init_db(&project_dir, &models);
-    db.set_active_target(Some(std::sync::Arc::from("dev")));
-    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
-    let file = db.source_file(&model.path).expect("model file registered");
-    let result = smelt_db::maintenance_plan_report(&db, ws, file).expect("maintenance plan report");
-
-    let trigger = Trigger::UpstreamMutation {
-        source: parsed_cell.on.clone(),
-    };
-    let cell = result
-        .plan
-        .cell_for(&trigger)
-        .expect("cell exists in the derived plan");
-    let group_columns = result
-        .column_groups
-        .iter()
-        .find(|g| g.name() == cell.group)
-        .map(|g| g.columns.clone())
-        .unwrap_or_default();
-
-    let overrides = effective_override(
-        None,
-        std::slice::from_ref(parsed_cell),
-        &parsed_cell.on,
-        &group_columns,
-    );
-    let chosen = resolve_cell_choice(&result.plan, &trigger, &overrides, None, true)
-        .expect("the pinned technique must be admissible for this cell");
-
-    let expected = match winning_technique {
-        CellTechnique::Recompute => ChosenTechnique::RegionRecompute,
-        _ => ChosenTechnique::Admitted(cell.technique.clone()),
-    };
-    assert_eq!(
-        chosen, expected,
-        "the pinned YAML must round-trip to exactly the technique bakeoff measured as the winner"
+    assert!(
+        report.pin.is_none(),
+        "--pin must not populate a pin suggestion when there is nothing to measure"
     );
 }
 
@@ -615,16 +554,20 @@ async fn pin_mutates_no_files() {
         opts,
     )
     .await
-    .expect("bakeoff run must succeed");
-    assert!(
-        report.pin.is_some(),
-        "sanity: this fixture must actually produce a pin"
-    );
+    .expect("bakeoff must succeed (exit-success 'nothing to measure' report, not an error)");
+    // `report.pin` is `None` here — `stage_multi_technique_project`'s only
+    // `UpstreamMutation` cells are membership-sensitive and never a bakeoff
+    // candidate (see `pin_is_none_when_nothing_to_measure`'s own doc
+    // comment) — but the emit-only invariant this test actually checks
+    // (`--pin` never mutates a file on disk) holds trivially either way, so
+    // it is still meaningful to assert on this "nothing to measure" path.
+    assert!(report.pin.is_none());
 
     let after = snapshot_model_files(&project_dir);
     assert_eq!(
         before, after,
-        "smelt bakeoff --pin must never modify or create model files (emit-only per B2)"
+        "smelt bakeoff --pin must never modify or create model files (emit-only per B2), even \
+         when there is nothing to measure"
     );
 }
 

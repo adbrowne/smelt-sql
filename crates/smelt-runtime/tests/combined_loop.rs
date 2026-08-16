@@ -62,6 +62,7 @@ fn minimal_config(_project_dir: &Path, paths: Vec<String>) -> Config {
         python: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     }
 }
 

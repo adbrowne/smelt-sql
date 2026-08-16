@@ -10,7 +10,7 @@
 //! and `validate_run_window_against_partition_grid` (`g_run >= g_part`, BL5),
 //! both called from [`compute_incremental_windows`] so every real
 //! `smelt run`/`smelt backfill`/UI run enforces them — see
-//! `docs/specs/incremental_models.md` §"Run window vs partition granularity".
+//! `docs/specs/incremental_shapes.md` §"Run window vs partition granularity".
 
 use std::collections::HashMap;
 
@@ -58,7 +58,7 @@ pub struct IncrementalWindows {
     /// assumed"), as [`model_partition_skew`] reads it off the (expanded)
     /// model SQL — always the value that actually widened `batches` below,
     /// `Skew::ZERO` for an identity model. For an `Ordered` self-referential
-    /// model (`docs/specs/incremental_models.md` §"Window independence and
+    /// model (`docs/specs/incremental_shapes.md` §"Window independence and
     /// self-referential models") this is the skew derived with the
     /// self-edge's own bounding relation excluded as a candidate anchor (see
     /// [`compute_incremental_windows_ordered`]) — never the self-edge's own
@@ -93,7 +93,7 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 /// metadata (`ColumnMetadata::data_latency` on the event-time column) or a
 /// sources configuration.
 ///
-/// Returns `Err` (fail-closed, `incremental_models.md` §"Partition-grain constraints" #10) when the
+/// Returns `Err` (fail-closed, `incremental_shapes.md` §"Partition-grain constraints" #10) when the
 /// batch-safety roll-up cannot classify the model (a `NotDerivable` source
 /// bound) — the caller must surface this as a hard refusal, never fall back
 /// to an approximate chunk shape.
@@ -143,7 +143,7 @@ pub fn compute_incremental_windows(
 /// [`model_partition_skew`] from `sql` directly — [`compute_incremental_windows_ordered`]'s
 /// `Ordered` branch supplies a skew derived with the self-edge's own
 /// bounding relation excluded as a candidate anchor (`docs/specs/
-/// incremental_models.md` §"Window independence and self-referential models": the
+/// incremental_shapes.md` §"Window independence and self-referential models": the
 /// self-edge is never a skew anchor). Every ordinary call
 /// ([`compute_incremental_windows`], and [`compute_incremental_windows_ordered`]'s
 /// `WindowIndependent` branch) passes `None`, deriving skew from `sql`
@@ -198,7 +198,7 @@ fn compute_incremental_windows_impl(
         });
     }
 
-    // Fail-closed run-window validation (`incremental_models.md` §"Run window vs
+    // Fail-closed run-window validation (`incremental_shapes.md` §"Run window vs
     // partition granularity"): alignment to `timeseries.granularity`, then
     // `g_run >= g_part` against the partition column's own derived grid unit.
     // Must run before any batching/widening below — a misaligned or
@@ -265,7 +265,7 @@ fn compute_incremental_windows_impl(
         // Determine batch chunk size from the F1 bound-based batch-safety
         // roll-up (replaces the legacy text-based `analyze_batch_safety`).
         // Fail-closed: propagate `Err` (a `NotDerivable` source) rather than
-        // approximating a chunk shape (`incremental_models.md` §"Partition-grain constraints" #10).
+        // approximating a chunk shape (`incremental_shapes.md` §"Partition-grain constraints" #10).
         let safety = batch_safety_for_model(&stripped, dep_timeseries)?;
         match &safety {
             BatchSafety::FullyBatchSafe => {
@@ -327,7 +327,7 @@ fn compute_incremental_windows_impl(
 }
 
 /// Compose F10's window-independence / ordered-execution verdict into the
-/// backfill chunker (BL7, `incremental_models.md` §"Window independence and
+/// backfill chunker (BL7, `incremental_shapes.md` §"Window independence and
 /// self-referential models").
 ///
 /// `model_name` and `refs` identify a self-edge exactly as
@@ -566,7 +566,7 @@ fn derive_partition_grid_unit(sql: &str, partition_column: &str) -> Option<Granu
 ///
 /// Ships hard-validation only: a sub-`g_part` run window is rejected with a
 /// message naming the minimum window, never silently coarsened to fit
-/// (`incremental_models.md` §"Run window vs partition granularity"; auto-coarsen
+/// (`incremental_shapes.md` §"Run window vs partition granularity"; auto-coarsen
 /// is a deferred enhancement, see Known Divergences there).
 ///
 /// Called from [`compute_incremental_windows`] — the single real driver both

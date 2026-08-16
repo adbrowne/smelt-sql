@@ -40,7 +40,6 @@
 
 use std::collections::BTreeSet;
 
-use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr};
 
 use super::walk::{LeafInput, NodeCx, OpNode, QueryNode, QueryTree, RelationSource, Transfer};
@@ -156,10 +155,22 @@ impl Transfer for FingerprintTransfer<'_> {
 }
 
 /// Whether `relation`'s [`super::walk`] source name resolves to `source_ref`
-/// — the same bare/`sources.`-prefixed comparison
-/// `skeleton_closure::find_enrichment_join` uses.
-fn relation_matches_source(relation: &str, source_ref: &str) -> bool {
-    let bare = relation.strip_prefix("sources.").unwrap_or(relation);
+/// — the same bare/`sources.`- or `models.`-prefixed comparison
+/// `skeleton_closure::find_enrichment_join` uses. Both breadcrumbs are
+/// stripped (never just `sources.`): a `smelt.models.<addr>` ref's own
+/// segments carry the `models` keyword literally
+/// (`smelt-runtime::propagation::bare_name`'s doc comment), and a caller
+/// resolving a model-edge's affected-key/fingerprint provenance
+/// (`analysis::affected_keys::derive_affected_keys`) hands `source_ref` the
+/// SAME breadcrumb-stripped bare address `ModelEdge::name` already carries —
+/// widening this match to strip `models.` too never narrows an existing
+/// `sources.`-prefixed match (a relation can only carry one leading
+/// breadcrumb), so every pre-existing call site is unaffected.
+pub(crate) fn relation_matches_source(relation: &str, source_ref: &str) -> bool {
+    let bare = relation
+        .strip_prefix("sources.")
+        .or_else(|| relation.strip_prefix("models."))
+        .unwrap_or(relation);
     bare.eq_ignore_ascii_case(source_ref) || relation.eq_ignore_ascii_case(source_ref)
 }
 
@@ -177,7 +188,7 @@ fn relation_source_matches(source: &RelationSource, source_ref: &str) -> bool {
 /// How one embedded column reference (inside a computed expression) relates
 /// to `source_ref`, resolved against this scope's own FROM-alias map only
 /// (no further CTE/derived-table chase — see module doc).
-enum RefClass {
+pub(crate) enum RefClass {
     /// Resolves to `source_ref`'s own column `String`.
     Source(String),
     /// Resolves to a different relation entirely.
@@ -187,7 +198,7 @@ enum RefClass {
     Unresolved,
 }
 
-fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
+pub(crate) fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
     let key = match cref.qualifier() {
         Some(q) => q.to_ascii_lowercase(),
         None => {
@@ -215,40 +226,11 @@ fn classify_ref(cref: &ColumnRef, cx: &NodeCx, source_ref: &str) -> RefClass {
     }
 }
 
-/// Recursively collect every simple (possibly qualified) column reference
-/// inside `expr` — mirrors `skeleton_closure`'s private helper of the same
-/// shape (kept local; that one is not `pub`).
-fn collect_column_refs(expr: &Expr) -> Vec<ColumnRef> {
-    let mut out = Vec::new();
-    collect_column_refs_rec(expr.syntax(), &mut out);
-    out
-}
-
-fn collect_column_refs_rec(node: &SyntaxNode, out: &mut Vec<ColumnRef>) {
-    // Only a genuine `EXPRESSION` wrapper node is a candidate bare/qualified
-    // column reference — `Expr::cast` also accepts a `FUNCTION_CALL` node
-    // directly (so its callable body can be inspected as an expression),
-    // and `ColumnRef::from_expr` would then misread the function's own
-    // single-IDENT name token as a bare column reference. Restricting the
-    // cast attempt to `EXPRESSION` nodes avoids that false match while
-    // still finding every legitimate reference, which is always wrapped in
-    // one at the point it appears as a select-item or argument expression.
-    if node.kind() == smelt_parser::SyntaxKind::EXPRESSION {
-        if let Some(e) = Expr::cast(node.clone()) {
-            if let Some(cref) = ColumnRef::from_expr(&e) {
-                out.push(cref);
-                return;
-            }
-        }
-    }
-    for child in node.children() {
-        collect_column_refs_rec(&child, out);
-    }
-}
+use crate::analysis::expr_util::collect_column_refs;
 
 /// The result of scanning one non-simple-rename projected expression for
 /// provenance touching `source_ref`.
-enum ExprTouch {
+pub(crate) enum ExprTouch {
     /// Nothing in the expression resolves to `source_ref`.
     None,
     /// Exactly the `source_ref` columns this expression's value depends on.
@@ -260,8 +242,11 @@ enum ExprTouch {
 /// Leaf classifier over one already-bounded projected expression's own AST
 /// (never a raw-text scan): every function call it contains is checked
 /// against the shared function registry for opaqueness, and every embedded
-/// column reference is classified against `source_ref`.
-fn scan_expr_for_source(expr: &Expr, cx: &NodeCx, source_ref: &str) -> ExprTouch {
+/// column reference is classified against `source_ref`. Shared with
+/// `analysis::affected_keys`, which parameterises this same leaf classifier
+/// with a target-output-column filter instead of writing a second copy
+/// (`model_properties.md` §"Affected-key discovery").
+pub(crate) fn scan_expr_for_source(expr: &Expr, cx: &NodeCx, source_ref: &str) -> ExprTouch {
     // An opaque (registry-unrecognised) function call applied over a column
     // of `source_ref` is fail-closed regardless of what else the expression
     // contains — smelt has no basis to claim a narrower dependency than the

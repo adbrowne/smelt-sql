@@ -1,6 +1,6 @@
 //! Real-fixture equivalence for the B4 group-aligned `HAVING`/`DISTINCT`
 //! admission (`docs/plans/20260704-model-updates-group-b.md` Phase B4,
-//! `docs/specs/incremental_models.md` §"Safety checks").
+//! `docs/specs/incremental_shapes.md` §"Safety checks").
 //!
 //! A `HAVING` (or `DISTINCT`) whose own scope's `GROUP BY` (or dedup key) is
 //! a superset of the model's `partition_column` is safe to batch: the
@@ -19,7 +19,7 @@ use super::*;
 /// Daily revenue, grouped by `(revenue_date, user_id)` — a superset of the
 /// model's `partition_column` (`revenue_date`) — with a `HAVING` clause that
 /// keeps only users whose daily revenue exceeds 100. Group-aligned per
-/// `incremental_models.md` §"Safety checks".
+/// `incremental_shapes.md` §"Safety checks".
 const DAILY_REVENUE_HAVING_SQL: &str = r#"
     SELECT
         transaction_timestamp::DATE as revenue_date,
@@ -49,7 +49,7 @@ fn daily_revenue_having_filtered(start: &str, end: &str) -> String {
 
 /// A group-aligned `HAVING` model, run day-by-day, matches a full refresh of
 /// the same model — the per-partition equivalence oracle every Group B phase
-/// is pinned to (`incremental_models.md` §"Per-partition equivalence").
+/// is pinned to (`incremental_shapes.md` §"Per-partition equivalence").
 #[tokio::test]
 async fn test_group_aligned_having_matches_full_refresh_per_partition() -> Result<()> {
     let (_dir, backend) = setup_backend().await?;

@@ -130,6 +130,27 @@ fn cte_composed_fold_body_conservatively_contributes() {
     );
 }
 
+/// A set-operation (`UNION ALL`) composing the fold body is outside this
+/// leaf classifier's single-scope resolution exactly like a CTE — the two
+/// guards (`with_clause().is_some()`, `has_set_operation()`) are independent
+/// escape hatches, either alone sufficient. `source` appears only in the
+/// second arm's FROM (invisible to the first arm's own alias map, which is
+/// all a single-scope resolution over the top-level `SelectStmt` would ever
+/// see) — a classifier that dropped this guard would wrongly resolve
+/// `source` as absent and answer `false`, the exact admission hole this
+/// leaf classifier exists to close.
+#[test]
+fn set_operation_composed_fold_body_conservatively_contributes() {
+    let sql = "SELECT id, SUM(amount) AS total FROM smelt.sources.fact \
+               UNION ALL \
+               SELECT id, SUM(amount) AS total FROM smelt.sources.fact2";
+    assert!(
+        source_contributes_to_fold(sql, "fact2"),
+        "a set-operation-composed fold body is outside single-scope resolution — must \
+         conservatively classify true even for a source visible only in a later arm"
+    );
+}
+
 /// A source that both feeds the fold AND is separately projected as a
 /// plain enrichment column — the both-fold-and-enrich overlap the spec
 /// says must stay refused. The predicate must still say `true` (it feeds

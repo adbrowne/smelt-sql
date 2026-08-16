@@ -28,7 +28,8 @@ use smelt_core::config::{
 
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
-use super::{MaintenancePlan, RowIdentity, RowIdentityVerdict, Technique, Trigger};
+use super::diff_patch;
+use super::{PlanCell, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 
 /// The technique the ladder resolves to for one cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +41,28 @@ pub enum ChosenTechnique {
     /// chosen either because it is the only resolvable member or because
     /// the ladder/cost-model preferred it.
     RegionRecompute,
+    /// The `diff_patch` write pattern (`incremental_models.md` §"The
+    /// write-pattern set is open"): `recompute` is the underlying
+    /// recompute-family technique the candidate is drawn from
+    /// (`Technique::DeleteInsert` or `Technique::PerGroupRecompute`, or
+    /// `DeleteInsert` as the region-recompute default when the trigger has
+    /// no admitted cell), and `delete_leg` is the delete-leg admission
+    /// verdict ([`diff_patch::DeleteLeg`]) — carried here rather than
+    /// re-resolved by every consumer, per `CLAUDE.md` §"Maintenance-plan
+    /// purity".
+    ///
+    /// **Known simplification (this phase's own scope boundary):**
+    /// `resolve_cell_choice` threads exactly one slice-completeness premise
+    /// through today — `Technique::PerGroupRecompute`'s own bounded-slice
+    /// admission (the repair family's key-temporal-locality proof) — so this
+    /// variant carries `delete_leg: DeleteLeg::Complete` only over that
+    /// recompute technique; every other recompute (region `DeleteInsert`)
+    /// still carries `DeleteLeg::Omitted { .. }` until that technique's own
+    /// completeness proof is threaded through here too.
+    DiffPatch {
+        recompute: Technique,
+        delete_leg: diff_patch::DeleteLeg,
+    },
 }
 
 /// Which kind of hard pin a [`ChoiceRefusal`] names: the `cells[].technique`
@@ -118,6 +141,51 @@ fn matching_cell<'a>(
     })
 }
 
+/// A HARD `cells[].technique` pin naming `on: trigger_address` whose
+/// `columns` intersect NONE of `sibling_group_columns` — every derived
+/// column group the trigger's own admitted cells actually carry
+/// (`MaintenancePlan::cells_for`, `docs/plans/20260808-membership-
+/// sensitivity.md` Phase 3). A trigger commonly derives MULTIPLE sibling
+/// cells, one per membership-sensitive column group a shared join admits;
+/// a pin whose `columns` name none of them at all is not "no override for
+/// this cell" (silent, fine) — it is a dangling/misconfigured pin that
+/// will never be consulted by anything, which fail-loud discipline
+/// (root `CLAUDE.md` §"Fail-loud discipline") says must surface, not
+/// vanish.
+///
+/// **Only a hard `technique:` pin is checked here.** A soft `cells[].prefer`
+/// naming the same unaddressed columns is not an error — `prefer` is
+/// documented to never refuse even when it names a technique outside the
+/// resolvable set (`resolve_cell_choice`'s own doc comment: "falling back
+/// silently to the deterministic default when the preferred family isn't
+/// resolvable"); the SAME silent-fallback contract extends naturally to a
+/// `prefer` that fails to address any sibling group at all — there is
+/// nothing new to refuse about that case that plain "prefer had no
+/// admissible target" didn't already cover. A `cells[].write` pin has its
+/// own, separately-checked matching rule
+/// (`smelt-db`'s `matching_write_pin`/`write_pin_diagnostics`, unaffected by
+/// this function) — not this function's concern.
+///
+/// A `columns: []` entry (the whole-row `{*}` trigger shape,
+/// `NewData`/`Backfill`) is never flagged — [`matching_cell`]'s own
+/// "any column member" rule never matches an empty `columns` list either,
+/// so an empty-`columns` pin addresses its trigger by `on:` alone and is
+/// out of this per-column-group check's scope.
+pub fn unaddressed_technique_pin<'a>(
+    cells: &'a [MaintenanceCellConfig],
+    trigger_address: &str,
+    sibling_group_columns: &[Vec<String>],
+) -> Option<&'a MaintenanceCellConfig> {
+    cells.iter().find(|c| {
+        c.on == trigger_address
+            && c.technique.is_some()
+            && !c.columns.is_empty()
+            && !sibling_group_columns
+                .iter()
+                .any(|group| c.columns.iter().any(|col| group.contains(col)))
+    })
+}
+
 /// Resolve the effective override for one cell, applying the narrower-wins
 /// ladder. `cells` is the model's `maintenance.cells[]` frontmatter (already
 /// scoped to this model — there is no project-level default for the
@@ -185,6 +253,10 @@ fn admits_write_selection(
             admitted == Some(&Technique::ColumnScopedMerge) && backend_supports_column_scoped_merge
         }
         super::WriteSelection::Technique(t) => admitted == Some(&t),
+        super::WriteSelection::DiffPatch => matches!(
+            admitted,
+            None | Some(Technique::DeleteInsert) | Some(Technique::PerGroupRecompute)
+        ),
     }
 }
 
@@ -222,14 +294,29 @@ fn admits_write_selection(
 /// but this particular trigger's cell happens to have admitted
 /// `ColumnScopedMerge`, not `KeyedFold`) still refuses, never silently
 /// substitutes a different technique than the one named.
+///
+/// **`cell` is the caller's responsibility to pick.** This function no
+/// longer looks a cell up from a whole [`MaintenancePlan`] by `trigger`
+/// alone — a trigger commonly derives MULTIPLE sibling cells, one per
+/// membership-sensitive column group a shared join admits
+/// (`docs/plans/20260808-membership-sensitivity.md` Phase 1), and picking
+/// "the" cell by trigger alone (`MaintenancePlan::cell_for`'s own
+/// first-match semantics) silently evaluated every override against only
+/// the FIRST sibling, regardless of which sibling's own `columns` an
+/// override actually named (Phase 3's fix). The caller must resolve the
+/// correct sibling itself — typically by iterating
+/// [`MaintenancePlan::cells_for`] and matching each candidate's own derived
+/// column group against the override, mirroring [`effective_override`]'s
+/// own per-group `matching_cell` logic — and pass that specific cell (or
+/// `None`, when the trigger has no admitted cell at all: an override still
+/// resolves against `{recompute}` alone, per the `None` arms below).
 pub fn resolve_cell_choice(
-    plan: &MaintenancePlan,
+    cell: Option<&PlanCell>,
     trigger: &Trigger,
     overrides: &EffectiveOverride,
     write_pin: Option<&'static super::WritePattern>,
     backend_supports_column_scoped_merge: bool,
 ) -> Result<ChosenTechnique, ChoiceRefusal> {
-    let cell = plan.cell_for(trigger);
     let admitted_technique = cell.map(|c| &c.technique);
     let live_technique = admitted_technique.filter(|t| match t {
         Technique::ColumnScopedMerge => backend_supports_column_scoped_merge,
@@ -245,14 +332,54 @@ pub fn resolve_cell_choice(
         ) {
             match selection {
                 super::WriteSelection::RegionRecompute => Ok(ChosenTechnique::RegionRecompute),
-                super::WriteSelection::Technique(_) => Ok(ChosenTechnique::Admitted(
-                    admitted_technique
-                        .expect(
-                            "admits_write_selection already proved `admitted_technique` is \
-                             Some for this pin",
-                        )
-                        .clone(),
-                )),
+                super::WriteSelection::Technique(_) => {
+                    Ok(ChosenTechnique::Admitted(*admitted_technique.expect(
+                        "admits_write_selection already proved `admitted_technique` is \
+                         Some for this pin",
+                    )))
+                }
+                // `diff_patch` selects the diff-then-patch pattern over
+                // whichever recompute-family technique the cell admitted
+                // (or the region-recompute default when the trigger has no
+                // admitted cell at all — `admits_write_selection`'s own
+                // `None` arm). See `ChosenTechnique::DiffPatch`'s doc
+                // comment for why `delete_leg` is always `Omitted` here:
+                // threading the real slice-completeness proof through this
+                // admission layer is routing/lowering's job (a later
+                // phase), not this one's.
+                super::WriteSelection::DiffPatch => {
+                    let recompute = admitted_technique
+                        .copied()
+                        .unwrap_or(Technique::DeleteInsert);
+                    // Slice-completeness premise (`incremental_models.md`
+                    // §"`diff_patch` — compute, diff, write only the
+                    // difference"): a `PerGroupRecompute` recompute already
+                    // discharged the repair family's own key-temporal-
+                    // locality premise at admission
+                    // (`repair::admit_per_group_recompute`'s bounded
+                    // per-group slice), which is exactly diff_patch's own
+                    // completeness argument for that slice — so the delete
+                    // leg is sound. Every other recompute (region
+                    // `DeleteInsert`) has no such premise threaded through
+                    // this admission layer yet, so its delete leg stays
+                    // omitted with a stated reason rather than silently
+                    // assumed complete.
+                    let delete_leg = if recompute == Technique::PerGroupRecompute {
+                        diff_patch::DeleteLeg::Complete
+                    } else {
+                        diff_patch::DeleteLeg::Omitted {
+                            why: "slice-completeness proof is not yet threaded through \
+                                  resolve_cell_choice for this recompute technique — only \
+                                  PerGroupRecompute's own key-temporal-locality premise \
+                                  (already proven at admission) discharges it here"
+                                .to_string(),
+                        }
+                    };
+                    Ok(ChosenTechnique::DiffPatch {
+                        recompute,
+                        delete_leg,
+                    })
+                }
             }
         } else {
             Err(ChoiceRefusal {
@@ -283,13 +410,9 @@ pub fn resolve_cell_choice(
             match pin {
                 CellTechnique::Recompute => Ok(ChosenTechnique::RegionRecompute),
                 CellTechnique::Fold | CellTechnique::RederiveColumns => {
-                    Ok(ChosenTechnique::Admitted(
-                        admitted_technique
-                            .expect(
-                                "admits() already proved `admitted_technique` is Some for this pin",
-                            )
-                            .clone(),
-                    ))
+                    Ok(ChosenTechnique::Admitted(*admitted_technique.expect(
+                        "admits() already proved `admitted_technique` is Some for this pin",
+                    )))
                 }
                 // The outer `if let` guard already narrowed `pin` to one of
                 // the three arms above — `Suppress`/`Unconditional` never
@@ -316,9 +439,37 @@ pub fn resolve_cell_choice(
     match overrides.prefer {
         Some(TechniquePreference::Recompute) => Ok(ChosenTechnique::RegionRecompute),
         _ => match live_technique {
-            Some(t) => Ok(ChosenTechnique::Admitted(t.clone())),
+            Some(t) => Ok(ChosenTechnique::Admitted(*t)),
             None => Ok(ChosenTechnique::RegionRecompute),
         },
+    }
+}
+
+/// Whether `technique`'s emitted write addresses stored rows individually —
+/// and therefore structurally needs a proven per-row [`RowIdentity::Key`],
+/// never a [`RowIdentity::WholeRow`] fallback — to be a real option for a
+/// cell. **Read-only classification, additive only**: consulted by the
+/// `smelt-runtime` technique-preview builder
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Technique preview set")
+/// to decide a *display-only* `NotApplicable` verdict for a technique this
+/// cell did not admit; it is never consulted by [`resolve_cell_choice`] or
+/// any other real-execution admission path, and adding it changes no
+/// existing function's resolved output (`docs/specs/ui_model_diagnostics.md`
+/// §Design "Why preview *every* technique…": "the wider preview set is
+/// display-only … `resolve_cell_choice`'s real-execution semantics are
+/// unchanged").
+///
+/// `Technique::DeleteInsert` (region recompute) addresses a whole partition
+/// region, never an individual row, so it needs no row identity at all —
+/// `false`. Every targeted-write technique (`KeyedFold`, `ColumnScopedMerge`,
+/// `InPlaceUpdate`) addresses rows individually by key — `true`.
+pub fn technique_requires_row_identity(technique: Technique) -> bool {
+    match technique {
+        Technique::DeleteInsert => false,
+        Technique::KeyedFold
+        | Technique::ColumnScopedMerge
+        | Technique::InPlaceUpdate
+        | Technique::PerGroupRecompute => true,
     }
 }
 
@@ -802,6 +953,30 @@ pub fn enrichment_restrict_column(dimension_unique_key: &[String]) -> Option<&st
 }
 
 #[cfg(test)]
+mod technique_requires_row_identity_tests {
+    use super::*;
+
+    #[test]
+    fn delete_insert_needs_no_row_identity() {
+        assert!(!technique_requires_row_identity(Technique::DeleteInsert));
+    }
+
+    #[test]
+    fn every_targeted_write_technique_needs_row_identity() {
+        for t in [
+            Technique::KeyedFold,
+            Technique::ColumnScopedMerge,
+            Technique::InPlaceUpdate,
+        ] {
+            assert!(
+                technique_requires_row_identity(t),
+                "{t:?} addresses rows individually and must require a proven row identity"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod enrichment_restrict_column_tests {
     use super::*;
 
@@ -826,11 +1001,13 @@ mod enrichment_restrict_column_tests {
 #[cfg(test)]
 mod recompute_restriction_tests {
     use super::*;
-    use crate::maintenance::SkeletonSourceClosure;
+    use crate::maintenance::{RowPreservation, SkeletonSourceClosure};
 
     #[test]
     fn closed_with_nonempty_delta_restricts() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let delta = vec!["ev-1".to_string(), "ev-2".to_string()];
         let verdict = resolve_recompute_restriction(Some(&closure), Some(&delta));
         assert_eq!(
@@ -860,14 +1037,18 @@ mod recompute_restriction_tests {
 
     #[test]
     fn closed_with_absent_delta_falls_back_unrestricted() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let verdict = resolve_recompute_restriction(Some(&closure), None);
         assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
     }
 
     #[test]
     fn closed_with_empty_delta_falls_back_unrestricted() {
-        let closure = SkeletonSourceClosure::Closed;
+        let closure = SkeletonSourceClosure::Closed {
+            row_preservation: RowPreservation::JoinShape,
+        };
         let empty: Vec<String> = vec![];
         let verdict = resolve_recompute_restriction(Some(&closure), Some(&empty));
         assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
@@ -1227,7 +1408,7 @@ mod write_variant_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::maintenance::{Corner, PartitionLocal, PlanCell};
+    use crate::maintenance::{Corner, MaintenancePlan, PartitionLocal, PlanCell};
     use smelt_core::config::MaintenanceCellConfig;
 
     fn admitted_plan(source: &str, technique: Technique, corner: Corner) -> MaintenancePlan {
@@ -1248,6 +1429,7 @@ mod tests {
                 },
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
+                key_scope: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -1267,8 +1449,9 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
-            .expect("pin naming the admitted technique must resolve");
+        let resolved =
+            resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, true)
+                .expect("pin naming the admitted technique must resolve");
         assert_eq!(
             resolved,
             ChosenTechnique::Admitted(Technique::ColumnScopedMerge)
@@ -1281,14 +1464,20 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Fold),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, None, true)
-            .expect_err("pinning an unadmitted technique must refuse");
+        let err = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &bad_overrides,
+            None,
+            true,
+        )
+        .expect_err("pinning an unadmitted technique must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Pinning `rederive_columns` when the backend cannot run it is the
         // same refusal shape — a capability gap is indistinguishable from
         // an unadmitted cell.
-        let err2 = resolve_cell_choice(&plan, &trigger, &overrides, None, false)
+        let err2 = resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, false)
             .expect_err("pin naming a capability-gapped backend must refuse");
         assert!(err2.to_string().contains("MaintenanceUnboundedFootprint"));
 
@@ -1298,8 +1487,14 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Recompute),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, None, true)
-            .expect("recompute is always resolvable");
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &recompute_overrides,
+            None,
+            true,
+        )
+        .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }
 
@@ -1314,15 +1509,130 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
+        let err = resolve_cell_choice(plan.cell_for(&trigger), &trigger, &overrides, None, true)
             .expect_err("a pin naming a cell the plan never admitted must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Absent a pin, the safe default resolves with no error.
-        let resolved =
-            resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), None, true)
-                .expect("no pin + unadmitted cell must fall back safely, not error");
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            None,
+            true,
+        )
+        .expect("no pin + unadmitted cell must fall back safely, not error");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
+    }
+
+    #[test]
+    fn pin_diff_patch_resolves_to_a_diff_write() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+
+        // A `write: diff_patch` pin over a cell whose admitted technique is
+        // a recompute-family member (`DeleteInsert`) resolves to the
+        // diff-patch choice, carrying that technique as the recompute base.
+        let recompute_plan = admitted_plan("users", Technique::DeleteInsert, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            recompute_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a recompute-family cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { recompute, .. } => {
+                assert_eq!(recompute, Technique::DeleteInsert);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+
+        // Also admits a `PerGroupRecompute`-family cell.
+        let per_group_plan =
+            admitted_plan("users", Technique::PerGroupRecompute, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            per_group_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a per-group-recompute cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { recompute, .. } => {
+                assert_eq!(recompute, Technique::PerGroupRecompute);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+
+        // A `write: diff_patch` pin over a cell whose admitted technique is
+        // NOT a recompute-family member (`ColumnScopedMerge`) refuses with a
+        // `ChoiceRefusal` — never a silent downgrade to `RegionRecompute` or
+        // any other technique.
+        let non_recompute_plan =
+            admitted_plan("users", Technique::ColumnScopedMerge, Corner::ColumnMerge);
+        let err = resolve_cell_choice(
+            non_recompute_plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect_err("diff_patch pin over a non-recompute-family cell must refuse");
+        assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+    }
+
+    #[test]
+    fn diff_patch_over_a_per_group_recompute_admits_the_delete_leg() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+        let plan = admitted_plan("users", Technique::PerGroupRecompute, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a per-group-recompute cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { delete_leg, .. } => {
+                assert_eq!(delete_leg, diff_patch::DeleteLeg::Complete);
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diff_patch_over_a_delete_insert_recompute_still_omits_the_delete_leg() {
+        let diff_patch_pattern =
+            crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+        let plan = admitted_plan("users", Technique::DeleteInsert, Corner::ColumnMerge);
+        let resolved = resolve_cell_choice(
+            plan.cell_for(&trigger),
+            &trigger,
+            &EffectiveOverride::default(),
+            Some(diff_patch_pattern),
+            true,
+        )
+        .expect("diff_patch pin over a delete-insert cell must resolve");
+        match resolved {
+            ChosenTechnique::DiffPatch { delete_leg, .. } => {
+                assert!(matches!(delete_leg, diff_patch::DeleteLeg::Omitted { .. }));
+            }
+            other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
+        }
     }
 
     fn cell_cfg(
@@ -1404,8 +1714,159 @@ mod tests {
         let trigger = Trigger::UpstreamMutation {
             source: "sources.users".to_string(),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &effective, None, true)
-            .expect("recompute is always resolvable");
+        let resolved =
+            resolve_cell_choice(plan.cell_for(&trigger), &trigger, &effective, None, true)
+                .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
+    }
+
+    /// Regression test (`docs/plans/20260808-membership-sensitivity.md`
+    /// Phase 3 reviewer fix): a trigger with TWO sibling cells — pin
+    /// resolution must consult BOTH, matching each sibling's own columns,
+    /// never only the first (`MaintenancePlan::cell_for`'s first-match
+    /// pitfall). Mirrors the empirically-found bug: `daily_events_
+    /// enriched`'s `UpstreamMutation(users)` trigger derives a `{user_name}`
+    /// cell AND an `{event_id, event_type, user_id}` sibling cell — a pin
+    /// scoped to the SECOND cell's own columns must be consulted (loud
+    /// refusal for an inadmissible technique, honored for an admissible
+    /// one), never silently ignored just because it isn't the first cell in
+    /// `plan.cells`.
+    #[test]
+    fn pin_scoped_to_a_sibling_cell_is_consulted_not_only_the_first() {
+        fn cell(group: &str, source: &str) -> PlanCell {
+            PlanCell {
+                group: group.to_string(),
+                trigger: Trigger::UpstreamMutation {
+                    source: source.to_string(),
+                },
+                corner: Corner::RecomputeRegion,
+                technique: Technique::DeleteInsert,
+                partition_local: PartitionLocal::Yes,
+                scans: vec![],
+                ledger_catch_up: false,
+                row_identity: RowIdentityVerdict {
+                    identity: RowIdentity::WholeRow,
+                    proven_mismatch: None,
+                },
+                skeleton_source_closure: None,
+                fingerprint_projections: std::collections::BTreeMap::new(),
+                key_scope: None,
+            }
+        }
+        let plan = MaintenancePlan {
+            cells: vec![
+                cell("{user_name}", "users"),
+                cell("{event_id,event_type,user_id}", "users"),
+            ],
+            refusals: vec![],
+            key_locality: None,
+        };
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+
+        // Every sibling's own derived column group — the SAME shape
+        // `maintenance_driver.rs`'s fixed loop builds before consulting any
+        // override.
+        let sibling_group_columns: Vec<Vec<String>> = plan
+            .cells_for(&trigger)
+            .map(|c| match c.group.as_str() {
+                "{user_name}" => vec!["user_name".to_string()],
+                "{event_id,event_type,user_id}" => vec![
+                    "event_id".to_string(),
+                    "event_type".to_string(),
+                    "user_id".to_string(),
+                ],
+                other => panic!("unexpected group {other}"),
+            })
+            .collect();
+
+        // --- Inadmissible pin scoped to the SECOND sibling: must refuse. ---
+        let inadmissible_cells_cfg = vec![cell_cfg(
+            "users",
+            &["event_id"],
+            None,
+            Some(CellTechnique::Fold),
+        )];
+        assert!(
+            unaddressed_technique_pin(&inadmissible_cells_cfg, "users", &sibling_group_columns)
+                .is_none(),
+            "the pin's columns DO address the second sibling — must not be flagged dangling"
+        );
+        let mut refused = false;
+        for (c, group_columns) in plan.cells_for(&trigger).zip(sibling_group_columns.iter()) {
+            let overrides =
+                effective_override(None, &inadmissible_cells_cfg, "users", group_columns);
+            let result = resolve_cell_choice(Some(c), &trigger, &overrides, None, true);
+            if c.group == "{event_id,event_type,user_id}" {
+                let err = result.expect_err(
+                    "the pin scoped to this sibling's own columns must be consulted and refuse \
+                     — Fold is not in this cell's resolvable set {recompute, DeleteInsert}",
+                );
+                assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+                refused = true;
+            } else {
+                result.expect(
+                    "the FIRST sibling carries no matching override — it must resolve its own \
+                     safe default, never see the second sibling's pin",
+                );
+            }
+        }
+        assert!(
+            refused,
+            "the pin scoped to the second sibling's columns must have been consulted"
+        );
+
+        // --- Admissible pin scoped to the SECOND sibling: must be honored. ---
+        let admissible_cells_cfg = vec![cell_cfg(
+            "users",
+            &["event_id"],
+            None,
+            Some(CellTechnique::Recompute),
+        )];
+        assert!(
+            unaddressed_technique_pin(&admissible_cells_cfg, "users", &sibling_group_columns)
+                .is_none()
+        );
+        let mut honored = false;
+        for (c, group_columns) in plan.cells_for(&trigger).zip(sibling_group_columns.iter()) {
+            let overrides = effective_override(None, &admissible_cells_cfg, "users", group_columns);
+            let chosen = resolve_cell_choice(Some(c), &trigger, &overrides, None, true)
+                .expect("recompute is always resolvable");
+            if c.group == "{event_id,event_type,user_id}" {
+                assert_eq!(chosen, ChosenTechnique::RegionRecompute);
+                honored = true;
+            }
+        }
+        assert!(honored, "the admissible pin must have been honored");
+
+        // --- A pin naming columns from NEITHER sibling: dangling, refused. ---
+        let dangling_cells_cfg = vec![cell_cfg(
+            "users",
+            &["totally_unrelated_column"],
+            None,
+            Some(CellTechnique::Fold),
+        )];
+        let dangling =
+            unaddressed_technique_pin(&dangling_cells_cfg, "users", &sibling_group_columns);
+        assert!(
+            dangling.is_some(),
+            "a hard technique pin naming columns absent from every sibling group must be \
+             flagged as dangling, never silently ignored"
+        );
+
+        // --- The same dangling pin as a SOFT `prefer` never refuses. ---
+        let dangling_prefer_cfg = vec![cell_cfg(
+            "users",
+            &["totally_unrelated_column"],
+            Some(TechniquePreference::Fold),
+            None,
+        )];
+        assert!(
+            unaddressed_technique_pin(&dangling_prefer_cfg, "users", &sibling_group_columns)
+                .is_none(),
+            "a soft `prefer` naming columns absent from every sibling group is not flagged — \
+             `prefer` never refuses"
+        );
     }
 }

@@ -10,6 +10,9 @@ target/
 !.claude/skills/
 !.claude/scripts/
 !.claude/active-plan
+!.claude/outcome-backlog
+!.claude/outcome-plan-prompt.txt
+!.claude/outcome-implement-prompt.txt
 !.claude/hardening-baseline.txt
 !.claude/parser-gaps-baseline.txt
 !.claude/registry-migration-baseline.txt
@@ -34,6 +37,7 @@ examples/*/data/
 /data/
 
 # UI
+/node_modules/
 ui/node_modules/
 ui/dist/
 

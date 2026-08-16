@@ -57,6 +57,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
         target: None,
         state: Default::default(),
         maintenance: None,
+        probes: Default::default(),
     }
 }
 
@@ -127,7 +128,8 @@ fn test_logical_graph_cross_engine_edges() {
             grain: None,
             unique_key: None,
             safety_overrides: None,
-            batched: None,
+            batched_retired: (),
+            merge_key: None,
             tags: vec![],
             target: Some("spark_local".to_string()),
             format: None,

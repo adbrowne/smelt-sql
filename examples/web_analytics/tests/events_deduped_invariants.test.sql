@@ -1,5 +1,5 @@
 -- `silver.events_deduped` invariants — the composed keyed+timeseries dedupe
--- stage (`docs/specs/incremental_models.md` §"Key temporal locality (the
+-- stage (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 -- time-partitioned output)"): exactly one row per `event_id`, regardless of
 -- how many times a redelivered duplicate of that event appears in the raw
 -- feed. This test mocks `sources.raw.events` directly (the model's sole

@@ -104,13 +104,13 @@ The `refresh:` frontmatter key controls how a stored model's output is recompute
 | `incremental` | smelt, by running the derived maintenance plan each run | processed-input equivalence, discharged per cell — see [Incremental Models](incremental-models.md) |
 | `materialized_view` | the engine, continuously, via native incremental-view maintenance | end-state; engine-owned — requires a backend with native IVM, see below |
 
-When `refresh:` is omitted, `full` is assumed — the model always rebuilds completely. `refresh: incremental` additionally requires a sibling `grain:` declaration — what a stored row *is* and how it is addressed:
+When `refresh:` is omitted, `full` is assumed — the model always rebuilds completely. `refresh: incremental` is admitted on its two shape-defining facts (`timeseries:` and/or `unique_key:`), which determine a derived `grain` label — what a stored row *is* and how it is addressed. `grain: partition` and `grain: key` may also be written as a check-only assertion; `key_per_partition` has no writable spelling:
 
-| `grain:` | A stored row is… | Identity | `timeseries:` |
+| `grain` (derived label) | A stored row is… | Identity | `timeseries:` |
 |---|---|---|---|
 | `partition` | one row of a complete, partition-addressed table | `unique_key` optional (within-partition dedup aid only) | **required** |
 | `key` | the end-state per key | `unique_key` **required**, composite-valued | **forbidden** — the output has no partition column; partition shape is read from the source |
-| `key_per_partition` | the trajectory: one row per `(key, partition)` | `unique_key` **required** | **required** — the partition axis is half the grain |
+| `key_per_partition` (derived-only) | the trajectory: one row per `(key, partition)` | `unique_key` **required** | **required** — the partition axis is half the grain |
 
 There is no per-model `strategy:` knob that says "delete+insert", "merge", or "fold" — how each part of the output is maintained under each kind of change is *derived* per `(column-group × trigger)` cell (the maintenance plan) and reported by `smelt explain`. One model is routinely append-driven, merge-driven, and recompute-driven at different cells.
 

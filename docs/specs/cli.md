@@ -150,8 +150,16 @@ Contract": its clock, identity, and derived `grain` label), and one contract blo
 edge (upstream dependency) — a declared source or an upstream maintained model, rendered through
 the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
 so the reader knows which provider filled them; a row prints `(none)` when that provider declares
-neither fact. The report is read-only and plain text. `--select` and `--json` are ignored when a
-model-name argument is given, except `--json` combined with `--show-sql` (below).
+neither fact. For every presented column that folds through decomposed state
+(`incremental_shapes.md` §"Decomposed state (rung 2) in keyed models"), the report also lists that
+column's hidden state columns and the presentation expression `π` that recomputes the presented
+value from them, labelled as internal state and explicitly not part of the model's public schema;
+a model with no decomposed-state columns prints no such section. The report is read-only and plain
+text. `--select` is ignored when a model-name argument is given. `--json` is honored with a
+model-name argument — with or without `--show-sql` — and emits the per-model report as JSON (the
+same schema either way, since the JSON form always carries every cell's `statements` and
+`technique_previews` arrays plus the model's `state_columns` array; `--show-sql` only changes the
+*text* rendering). A flag combination is never silently ignored.
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
@@ -166,11 +174,13 @@ by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend sup
 transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
 given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand
 in, so the emitted shape is inspectable without choosing a window. `--show-sql` never connects
-to a backend and never executes anything. With `--json` alongside `--show-sql` (the one case
-where `--json` is honored together with a model-name argument), the per-model report is emitted
+to a backend and never executes anything. With `--json`, the per-model report is emitted
 as JSON with a `statements` array per cell
 (`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable form
-documentation generators embed.
+documentation generators embed. The report also carries a top-level `state_columns` array, one
+entry per presented column that folds through decomposed state (empty when the model has none):
+`{"presented_column": "<name>", "state_columns": ["<name>", ...], "presentation_expr": "<expr>"}`
+— an append-stable addition (§Constraints item 5) to the same JSON shape.
 
 A model with no maintenance plan (not `refresh: incremental`, or no `grain:` declared) prints a
 one-line notice rather than an error, and exits `0`.
@@ -182,6 +192,31 @@ collapse in plain language rather than printing an indistinguishable single-grou
 
 Omitting the model-name argument keeps the existing whole-project graph behavior described below,
 unchanged.
+
+**Declared-fact probes.** The report also prints the model's declared-fact probe set
+(`model_properties.md` §"Probe obligation"): per probe, the declared fact, the named diagnostic it
+raises, the licensed cell, the project cadence governing it (`smelt_yml.md` §"Top-level keys"
+`probes:`), and its cost — the one extra query each dispatched probe adds to a consuming run. A
+model declaring no probe-backed fact prints an empty probe set, not a missing section. The probe
+set stays offline like the rest of the report: probe SQL is built to confirm a declaration is
+probe-backed, never executed, so the cost line is a static "+1 query per consuming run" statement,
+not a measurement.
+
+With `--json`, the per-model report gains an append-stable `probes` array (§Constraints item 5):
+`{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
+"cost": "<one line>"}`.
+
+**Effective contract.** Each cell's block additionally prints its effective contract lattice point
+(`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
+otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`
+(model-level, reaching every cell of a partition-grain model) and/or `deferral: 6 hours`
+(model-level by default, or a `contract.cells[]` refinement, which prints the narrower value and
+labels its origin `(cell)`). A relaxation is never silent — a model declaring `contract:` always
+shows it here, per cell. A per-cell `deferral` refinement prints as declared even though it is not
+yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each cell in the
+`cells` array carries a `contract_point` object with the same information: `frozen_horizon` and/or
+`deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
+cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
 
 ### `smelt bakeoff <model>` flags
 

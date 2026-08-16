@@ -45,20 +45,15 @@ models:
     # `event_id` is the fact source's own declared `unique_key`
     # (`models/sources/raw/events.yml`) and, since this model neither
     # aggregates nor fans the join out, still uniquely identifies each
-    # output row. The `.sql` frontmatter `batched:` sub-block this used to
-    # carry `unique_key` under is retired (`docs/specs/models.md` §"The
-    # Relation Contract"); a top-level `unique_key:` in `.sql` frontmatter
-    # is the *identity* fact instead (grain-determining, requiring an
-    # aggregated `GROUP BY` body for a clocked model), which this row-shaped
-    # join is not — so the MERGE-dedup-only `batched.unique_key` spelling
-    # stays declared here, in the `smelt.yml` model override the sub-block
-    # retirement does not touch.
-    batched:
-      unique_key: [event_id]
+    # output row. `merge_key:` is the write/dedup key a column-scoped MERGE
+    # technique writes on — never the *identity* fact top-level `unique_key:`
+    # is (grain-determining, requiring an aggregated `GROUP BY` body for a
+    # clocked model, which this row-shaped join is not); see
+    # `docs/specs/models.md` §"Batched sub-block retirement".
+    merge_key: [event_id]
   daily_events_enriched:
     # See `daily_events_status`'s comment above — the same MERGE-dedup-only
-    # `batched.unique_key`, kept in `smelt.yml` since this model's own
-    # row-shaped join cannot become the composed key+clock shape (no
-    # `GROUP BY` to satisfy `KeyedRequiresGroupBy`).
-    batched:
-      unique_key: [event_id]
+    # `merge_key:`, needed because this model's own row-shaped join cannot
+    # become the composed key+clock shape (no `GROUP BY` to satisfy
+    # `KeyedRequiresGroupBy`).
+    merge_key: [event_id]

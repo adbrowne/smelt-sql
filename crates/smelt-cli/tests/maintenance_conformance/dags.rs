@@ -24,10 +24,11 @@ use proptest::test_runner::TestRunner;
 use tempfile::TempDir;
 
 use smelt_core::{discover_source_infos, ModelDiscovery};
+use smelt_logical::maintenance::edge_type::Addressing;
 use smelt_logical::maintenance::propagate::{day_ordinal, DayInterval};
 use smelt_maintenance_testkit::dag::{
-    chain_dag, classify_node, diamond_dag, fetch_node_multiset, insert_rows, keyed_sink_dag,
-    leak_dag, stage_dag, DagRecipe,
+    chain_dag, classify_node, diamond_dag, fetch_node_multiset, insert_rows, keyed_chain_dag,
+    keyed_partition_sink_dag, keyed_sink_dag, leak_dag, stage_dag, DagRecipe,
 };
 use smelt_maintenance_testkit::link_c_harness::base_request;
 use smelt_maintenance_testkit::recipe::arb_payload_value;
@@ -486,6 +487,272 @@ fn upstream_payload_in_downstream_skeleton_position() {
         saw_admitted || saw_refused,
         "generator health: the deterministic sample never classified dag_leak_b at all"
     );
+}
+
+/// A [`keyed_chain_dag`] case: an initial batch of rows over distinct ids,
+/// then a delta batch that lands MORE rows for a nonempty proper subset of
+/// those same ids (mutating that subset's `SUM(val)` without touching the
+/// rest) — the shape `keyed_chain_fold_matches_full_refresh_oracle` and
+/// `keyed_chain_maintains_only_the_changed_keys` both need: a real subset
+/// of keys touched, a real subset left alone.
+#[derive(Debug)]
+struct KeyedCase {
+    initial_rows: Vec<(NaiveDate, i64, i64)>,
+    delta_rows: Vec<(NaiveDate, i64, i64)>,
+    touched_ids: Vec<i64>,
+    untouched_ids: Vec<i64>,
+}
+
+fn arb_keyed_case(n_ids: usize) -> impl Strategy<Value = KeyedCase> {
+    assert!(
+        n_ids >= 2,
+        "arb_keyed_case needs at least 2 ids to guarantee a touched/untouched split"
+    );
+    (
+        proptest::collection::vec(arb_payload_value(), n_ids),
+        proptest::collection::vec(arb_payload_value(), n_ids),
+        proptest::collection::vec(proptest::bool::ANY, n_ids),
+    )
+        .prop_map(move |(initial_vals, delta_vals, mut touch_mask)| {
+            if !touch_mask.iter().any(|&t| t) {
+                touch_mask[0] = true;
+            }
+            if touch_mask.iter().all(|&t| t) {
+                touch_mask[1] = false;
+            }
+            let d = base_day();
+            let initial_rows: Vec<(NaiveDate, i64, i64)> = initial_vals
+                .into_iter()
+                .enumerate()
+                .map(|(i, v)| (d, i as i64, v))
+                .collect();
+            let delta_rows: Vec<(NaiveDate, i64, i64)> = delta_vals
+                .into_iter()
+                .zip(touch_mask.iter())
+                .enumerate()
+                .filter_map(|(i, (v, &touched))| touched.then_some((d, i as i64, v)))
+                .collect();
+            let touched_ids: Vec<i64> = touch_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &t)| t.then_some(i as i64))
+                .collect();
+            let untouched_ids: Vec<i64> = touch_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &t)| (!t).then_some(i as i64))
+                .collect();
+            KeyedCase {
+                initial_rows,
+                delta_rows,
+                touched_ids,
+                untouched_ids,
+            }
+        })
+}
+
+/// `keyed_chain_derives_a_typed_keyed_edge` (phase 8 plan test 1): over the
+/// generated [`keyed_chain_dag`], `build_forward_graph` derives an edge
+/// `dag_kchain_a -> dag_kchain_b` carrying a `KeyedUpsert` component
+/// addressed `Addressing::Keyed` — the narrowed refusal admits it, unlike
+/// the append-only-upstream case `keyed_grain_node_excluded_from_generated_graph`
+/// still pins below (unchanged).
+#[test]
+fn keyed_chain_derives_a_typed_keyed_edge() {
+    let dag = keyed_chain_dag();
+    let tmp = TempDir::new().expect("tempdir");
+    let dir = tmp.path().join("proj");
+    let db = dir.join("db.duckdb");
+    std::fs::create_dir_all(&dir).expect("create project dir");
+    stage_dag(&dag, &dir, &db).expect("stage keyed chain dag");
+
+    let (models, source_infos) = discover(&dir).expect("discover");
+    let graph = build_forward_graph(&models, &source_infos).expect("build forward graph");
+    let edge = graph
+        .iter()
+        .find(|e| e.upstream == "dag_kchain_a" && e.downstream == "dag_kchain_b")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an edge dag_kchain_a -> dag_kchain_b in the generated graph: {graph:?}"
+            )
+        });
+    assert!(
+        edge.components.iter().any(|c| matches!(
+            (&c.shape, &c.addressing),
+            (
+                smelt_logical::analysis::output_delta::OutputDelta::KeyedUpsert { .. },
+                Addressing::Keyed { .. }
+            )
+        )),
+        "expected a KeyedUpsert component addressed Addressing::Keyed on the edge into \
+         dag_kchain_b: {edge:?}"
+    );
+}
+
+/// `keyed_chain_fold_matches_full_refresh_oracle` (phase 8 plan test 2):
+/// stage [`keyed_chain_dag`] twice, land an initial batch then a delta
+/// touching a subset of the same ids, drive the inc project through
+/// `execute_project` with no run window at all (a model-selecting run —
+/// `base_request`'s `select: vec![]` runs every node, mirroring
+/// `key_addressed_model_edge_lowering.rs::select_request`'s "these chains
+/// have no clock" posture), and compare against an independently staged
+/// full-refresh oracle over the combined history.
+#[test]
+fn keyed_chain_fold_matches_full_refresh_oracle() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_chain_dag();
+        let tmp = TempDir::new().expect("tempdir");
+        let (inc, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kchain-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kchain-{i}-repair"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+
+        {
+            let conn = full.connect().expect("connect full");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
+        }
+        rt.block_on(full.run_quiet(&format!("kchain-{i}-full"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+
+        assert_every_node_equal(&dag, &inc, &full, i, "keyed chain").expect("compare nodes");
+    }
+}
+
+/// `keyed_chain_maintains_only_the_changed_keys` (phase 8 plan test 3): the
+/// gate-level analogue of phase 7's "no full-input rescan" — after the
+/// repair run, an untouched id's row on `dag_kchain_b` is bit-identical to
+/// its pre-repair value, while a touched id's row moved.
+#[test]
+fn keyed_chain_maintains_only_the_changed_keys() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_chain_dag();
+        let id_col = dag.source.key_column.clone();
+        let tmp = TempDir::new().expect("tempdir");
+        let dir = tmp.path().join(format!("inc-{i}"));
+        let db = dir.join("db.duckdb");
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let inc = stage_dag(&dag, &dir, &db).expect("stage inc");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows");
+        }
+        rt.block_on(inc.run_quiet(&format!("kchain-only-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+
+        let conn = inc.connect().expect("connect inc for before-snapshot");
+        let before: std::collections::BTreeMap<i64, Vec<Vec<String>>> = kcase
+            .touched_ids
+            .iter()
+            .chain(kcase.untouched_ids.iter())
+            .map(|&id| {
+                let rows = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+                (id, rows)
+            })
+            .collect();
+        drop(conn);
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows");
+        }
+        rt.block_on(inc.run_quiet(&format!("kchain-only-{i}-repair"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+
+        let conn = inc.connect().expect("connect inc for after-snapshot");
+        for &id in &kcase.untouched_ids {
+            let after = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+            assert_eq!(
+                before[&id], after,
+                "case {i}: untouched id {id}'s row on dag_kchain_b must be bit-identical \
+                 before/after the repair run"
+            );
+        }
+        for &id in &kcase.touched_ids {
+            let after = fetch_node_multiset(&conn, &dag, 1, Some(&format!("{id_col} = {id}")));
+            assert_ne!(
+                before[&id], after,
+                "case {i}: touched id {id}'s row on dag_kchain_b must have moved after the \
+                 repair run — its delta rows landed but the fold left it unchanged"
+            );
+        }
+    }
+}
+
+/// `keyed_upstream_partition_downstream_matches_oracle` (phase 8 plan test
+/// 4): the [`keyed_partition_sink_dag`] combination phase 7 flagged as
+/// deriving a key-addressed model-edge cell the run loop never dispatches
+/// (`docs/specs/incremental_models.md` §"Known Divergences") — still
+/// multiset-equal to the full-refresh oracle (correctness pin for the
+/// inert-cell case; the divergence is about incrementality, never
+/// correctness).
+#[test]
+fn keyed_upstream_partition_downstream_matches_oracle() {
+    let mut runner = TestRunner::deterministic();
+    let strat = arb_keyed_case(4);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..case_count() {
+        let kcase = strat
+            .new_tree(&mut runner)
+            .expect("generate case")
+            .current();
+        let dag = keyed_partition_sink_dag();
+        let tmp = TempDir::new().expect("tempdir");
+        let (inc, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kpart-{i}-init"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: initial inc build failed: {e}"));
+
+        {
+            let conn = inc.connect().expect("connect inc");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into inc");
+        }
+        rt.block_on(inc.run_quiet(&format!("kpart-{i}-repair"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: repair run failed: {e}"));
+
+        {
+            let conn = full.connect().expect("connect full");
+            insert_rows(&conn, &dag, &kcase.initial_rows).expect("insert initial rows into full");
+            insert_rows(&conn, &dag, &kcase.delta_rows).expect("insert delta rows into full");
+        }
+        rt.block_on(full.run_quiet(&format!("kpart-{i}-full"), base_request("dev")))
+            .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
+
+        assert_every_node_equal(&dag, &inc, &full, i, "keyed partition sink").expect("compare");
+    }
 }
 
 /// Review checklist ("keyed-grain nodes excluded from generated graphs"):

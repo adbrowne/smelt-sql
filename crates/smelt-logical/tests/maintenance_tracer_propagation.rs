@@ -8,7 +8,7 @@
 //! arithmetic running backwards through the same clamps. Day/Month grains
 //! align intervals outward per hop.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::propagate::{
@@ -40,6 +40,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         after_days,
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Day,
+        components: Vec::new(),
     }
 }
 
@@ -82,9 +83,10 @@ fn derived_conversions_clamp_drives_the_propagation() {
         column_groups: vec![ColumnGroup {
             columns: vec!["conversion_score".to_string()],
             mutation_sensitivity: ["conversions"].iter().map(|s| s.to_string()).collect(),
+            membership_sensitivity: BTreeSet::new(),
         }],
         fold: None,
-        column_add_proof: None,
+        old_columns: Vec::new(),
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -433,6 +435,13 @@ fn calendar_math_roundtrips() {
         (2026, 2, 28),
         (2024, 2, 29),
         (1999, 12, 31),
+        (1, 1, 1),
+        (0, 3, 1),
+        (-1, 12, 31),
+        (2100, 3, 1),
+        (2100, 2, 28),
+        (2400, 2, 29),
+        (2000, 2, 29),
     ] {
         assert_eq!(civil_from_ordinal(day_ordinal(ymd.0, ymd.1, ymd.2)), ymd);
     }
@@ -447,6 +456,24 @@ fn a_dirty_day_dirties_its_whole_containing_month() {
     let d17 = day_ordinal(2026, 1, 17);
     let result = propagate(&[e], &deltas(&[("silver", iv(d17, d17 + 1))])).expect("propagate");
     assert_eq!(result.dirty["monthly_report"], vec![month(2026, 1)]);
+}
+
+#[test]
+fn a_dirty_december_day_dirties_only_december_not_a_january_rollover() {
+    // A December delta's month-aligned outward bound must land on the
+    // following January 1st (year rolls over), never wrapping to month 13
+    // of the same year — pins the `ey + 1` (not `ey`) year-rollover arm of
+    // `PartitionGrain::Month`'s `align_outward`.
+    let mut e = edge("silver", "monthly_report", 0, 0);
+    e.downstream_grain = PartitionGrain::Month;
+    let dec17 = day_ordinal(2026, 12, 17);
+    let result = propagate(&[e], &deltas(&[("silver", iv(dec17, dec17 + 1))])).expect("propagate");
+    assert_eq!(result.dirty["monthly_report"], vec![month(2026, 12)]);
+    assert_eq!(
+        result.dirty["monthly_report"][0],
+        iv(day_ordinal(2026, 12, 1), day_ordinal(2027, 1, 1)),
+        "December's outward-aligned month must end at 2027-01-01, not wrap within 2026"
+    );
 }
 
 #[test]
@@ -533,6 +560,7 @@ fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
         after_days: 0,
         upstream_grain: PartitionGrain::Unclocked,
         downstream_grain: PartitionGrain::Day,
+        components: Vec::new(),
     }
 }
 

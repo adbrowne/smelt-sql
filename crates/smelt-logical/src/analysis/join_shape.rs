@@ -36,7 +36,7 @@ pub enum Cardinality {
 /// one declared key-set — a single-column key as well as a genuine COMPOSITE
 /// key (e.g. `(user_id, dt)`, jointly but not individually unique) are both
 /// expressible: a single-column key is just a key-set of size one.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct JoinContext {
     /// Source name (or alias, whichever the join condition qualifies columns
     /// with) -> the declared key-sets for that source. Each inner set is one

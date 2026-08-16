@@ -90,6 +90,8 @@ Owned by `docs/specs/sources.md`.
 | `SourceTypeError` | Error | A source YAML declares a type that smelt does not recognise. |
 | `MalformedSource` | Error | A source YAML block violates a structural rule. |
 | `SourceCountPreservationViolated` | Error (fails the consuming run, transactionally) | A declared `referential_integrity` was disproved: an enrichment join licensed by it returned fewer rows than the driving side over the touched region. |
+| `SourceMutationProfileViolated` | Error (fails the consuming run) | A verification tripwire disproved a declared narrowing fact: a processed partition's row count decreased or its fingerprint changed under `append_only`; a delta-identity collision under `redelivery: none`; a retraction event under `retractions: false`. Names the source, the violated declaration, and the mitigation. |
+| `SourceUniqueKeyViolated` | Error (fails the consuming run) | The uniqueness probe found duplicate rows for the declared `unique_key` within the consuming run's scan window (or on `smelt verify`). |
 
 ---
 
@@ -116,30 +118,36 @@ Owned by `docs/specs/timeseries.md`.
 | `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` but declares neither shape-defining fact (`timeseries:` nor `unique_key:`) and writes no `grain:` assertion to fall back on. |
 | `GrainRequiresIncremental` | Error | A model declares `grain:` without `refresh: incremental`. |
 | `GrainAssertionMismatch` | Error | A written `grain:` check-only assertion disagrees with the label derived from the declared shape-defining facts (`timeseries:` / `unique_key:`). |
+| `DeclaredMonotonicityViolated` | Error (fails the consuming run, transactionally) | The monotonicity probe (`model_properties.md` §"Probe obligation") disproved a declared `timeseries.assert_monotonic`: a processed row's event-time value was found out of non-decreasing order relative to its partition predecessor. Names the model, the offending row, and the remedy — disable the declaration, fix the upstream ordering, or `smelt repair` the affected partition. |
+| `DeclaredFunctionalDependencyViolated` | Error (fails the consuming run, transactionally) | The functional-dependency probe (`model_properties.md` §"Probe obligation") disproved a declared `functional_dependencies:` entry: more than one distinct `determines` value was found for the same `key` within the run's processed rows. Names the declaration, the offending key, and the remedy — drop the declaration, correct the source data, or `smelt repair` the affected keys. |
+| `DeclaredBoundedDomainExceeded` | Error (fails the consuming run, transactionally) | The bounded-domain probe (`model_properties.md` §"Probe obligation") disproved a declared `bounded_domain:`: the declared column's distinct-value count within the run's processed region exceeded `max_cardinality`. Names the column, the observed count, and the remedy — raise `max_cardinality`, narrow the domain upstream, or `smelt repair` the affected keys. |
 
 ---
 
 ### Partition grain
 
-Owned by `docs/specs/incremental_models.md`.
+Owned by `docs/specs/incremental_shapes.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `PartitionGrainNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
+| `PlausibleContractOnSkeletonColumn` | Error | A `columns.<c>.contract: plausible` declaration names a column that also serves as the model's `event_time_column`, `partition_column`, or a `unique_key` member. Names the column and the skeleton role it holds — those positions govern windowing, partition placement, or dedup identity and must stay deterministic. |
 
-A `.sql` frontmatter `batched:` sub-block is refused outright — `YamlParseError` (no dedicated
-code), with a fix-it naming each declared sub-key's top-level replacement and the caller's own
-value under the new spelling (`unique_key` → top-level `unique_key:`, `safety_overrides` →
-top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`;
-`docs/specs/models.md` §"The Relation Contract"). The `smelt.yml` model-override spelling of
-`batched:` is unaffected by this refusal.
+A `batched:` sub-block is refused outright on both surfaces — `.sql` frontmatter and the
+`smelt.yml` model override — `YamlParseError` (no dedicated code), with a fix-it naming each
+declared sub-key's top-level replacement and the caller's own value under the new spelling
+(`unique_key` → top-level `merge_key:`, `safety_overrides` → top-level `safety_overrides:`,
+`nondeterministic_columns` → `columns.<c>.contract: plausible`; `docs/specs/models.md`
+§"Batched sub-block retirement"). `nondeterministic_columns` has no `smelt.yml` spelling either
+way — its fix-it always points at `columns.<c>.contract: plausible` in the model's `.sql`
+frontmatter.
 
 ---
 
 ### Keyed refresh mode
 
-Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
+Owned by `docs/specs/incremental_shapes.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
 unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, and
 `KeyedForbidsPartitionGrain` are **retired outright, not renamed**:
@@ -156,19 +164,20 @@ unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
-| `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
+| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_shapes.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |
 | `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `grain: key` model's SELECT. |
 | `KeyedSqlNotParseable` | Error | A `grain: key` model's SELECT could not be parsed for column-family classification. |
 | `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `grain: key` model's FROM (exactly one is admitted under window-forward). |
-| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column has no once-write provenance proof (key-derived, or a declared functional dependency). Names the column. |
-| `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen). Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
+| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column — bare key-derived, single-reduction, fallback-bearing, or multi-candidate — has no once-write provenance proof for one or more of its candidate columns (`incremental_shapes.md` §"The column-family catalogue"). Names the column, the unproven candidate(s), and the three fixes: a key-derived expression, a declared functional dependency, or remodelling the column out into its own model. |
+| `KeyedStateColumnCollision` | Error | A decomposed-state column name (`<output>__<part>`, `incremental_shapes.md` §"Decomposed state (rung 2) in keyed models") collides with a declared or projected user column. Names both and the reserved suffix. |
+| `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen), and the repair family cannot admit a per-group recompute for the retraction (`incremental_models.md` §"The repair family"). Names the failing repair obligation. Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
-| `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
+| `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window, and the repair family cannot admit a per-group recompute for the change (`incremental_models.md` §"The repair family"). Names the failing repair obligation and points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`incremental_models.md` §Known Divergences "The key grain"). Retired once snapshot-reconcile ships. |
+| `KeyedSnapshotPostureUnsupported` | Error | A `grain: key` model has no clocked driving source, AND no single unambiguous source could be resolved to derive the snapshot-reconcile run shape either (e.g. more than one candidate source joined, none clocked) — genuinely unsupportable, not a "not yet" refusal (`incremental_shapes.md` §"The two run shapes"). |
 
 ---
 
@@ -485,20 +494,42 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceReachNotDerivable` | Error | A required scan bound is neither derivable nor declared. |
 | `MaintenanceScanUnbounded` | Error | A scan or write footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists. |
 | `MaintenanceUnboundedFootprint` | Error | A targeted write was requested for a cell whose write footprint is unbounded (e.g. a stored trajectory under late data). |
-| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
+| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. Owned by `definition_deltas.md` §"Skeleton changes are a new relation". |
 | `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
 | `MaintenanceGranularityMismatch` | Error | A declared `timeseries.granularity` narrows past what the model's own `partition_column` projection actually derives (a `date_trunc`-style grouping check) — a safe widen (declared coarser than or equal to the derived unit) is never flagged. |
 | `MaintenanceWriteAddressingRefused` | Error | A `maintenance.cells[].write` pin names a physical addressing that cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a region write on a cell whose footprint escapes any partition set); names the cell and the refused pattern. |
 | `MaintenanceWritePatternUnavailable` | Error | A `write:` pin names an unrecognised write pattern, or one the target backend's write-pattern capability registry does not provide; names the pattern and the backend, never a silent downgrade. |
-| `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model declares a `grain:` maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
+| `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model's derived grain (from its clock, identity, and `partition_column ∈ key?` facts) is one maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
+| `MaintenanceRepairKeysNotDiscoverable` | Error | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set (`incremental_models.md` §"The repair family" obligation (c)). Names the changed input and why the delta yields no key set. |
+| `MaintenanceRepairSliceUnbounded` | Error | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked (`incremental_models.md` §"The repair family" obligation (b)). Names the source and the unbounded reach. |
+
+Declaring `grain: key_per_partition` in frontmatter is refused outright at config parse —
+`YamlParseError` (no dedicated code) — since the label has no writable spelling; the message
+names the two facts that derive it (a `timeseries:` clock and `partition_column ∈ unique_key`)
+and `grain: key` as the closest supported declared shape (`docs/specs/models.md` §"The Relation
+Contract"). A model whose declared facts *derive* `key_per_partition` still reaches
+`MaintenanceUnsupportedGrain` at plan derivation, unaffected by this refusal.
+
+### Contract lattice
+
+Owned by `docs/specs/incremental_models.md` §"The contract lattice".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `ContractFrozenHorizonInvalid` | Error | A `contract.frozen_horizon` is unparseable or negative, or declared on a non-partition-grain model. |
+| `ContractLateArrivalOutsideHorizon` | Error | Runtime probe, frozen-horizon point only: a frozen-band partition's baseline row count increased (or a new partition appeared in the frozen band); names the partition, the added row count, and `H`. |
+| `ContractDeferralInvalid` | Error | A `contract.deferral` (model- or cell-level) is unparseable or negative, or declared on a cell with no clock to measure lag against. |
+| `ContractDeferralExceeded` | Error | Runtime probe, deferral point only: the ledger-derived lag between a cell's maintained frontier and its input frontier exceeds the declared `D`; names the cell and the measured lag. |
 
 ---
 
 ## Known divergences
 
-- **Four of the ten plan/graph `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, `MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`, and `MaintenanceWritePatternUnavailable` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`), the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`), and the open write-pattern registry's `resolve_write_pin` (`crates/smelt-logical/src/maintenance/mod.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
-- **`SourceCountPreservationViolated` is specified and unimplemented.** No `DiagnosticCode` variant exists yet; it depends on the unbuilt `referential_integrity` declaration parse and the unbuilt skeleton-source-closure proof (`sources.md`, `model_properties.md`). Landing: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Five of the ten plan/graph `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, `MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`, `MaintenanceWritePatternUnavailable`, and `MaintenanceSkeletonColumnAdded` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`), the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`), and the open write-pattern registry's `resolve_write_pin` (`crates/smelt-logical/src/maintenance/mod.rs`). `MaintenanceSkeletonColumnAdded` fires only when the query has a real deployed-schema snapshot to diff against — `smelt-db`'s own Salsa query has no I/O access to that snapshot, so it only reaches its own `file_diagnostics()` mapping from a caller that plumbs one in (today, none does; `smelt-runtime`'s maintenance driver — the production `ColumnAdded` derivation site — reports the same refusal as a run error instead). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`. `MaintenanceRepairKeysNotDiscoverable` and `MaintenanceRepairSliceUnbounded` likewise have no `DiagnosticCode` variant yet — the repair family they belong to has no deriving proof, technique, or emitter (`incremental_models.md` §Known Divergences "The contract, plan, and graph layer"). Landing: `docs/outcomes/20260809-repair-family/outcome.md`.
+- **`SourceCountPreservationViolated` is raised as a named runtime failure, not a `DiagnosticCode` variant.** `smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction` dispatches the count-preservation probe before trusting a declared-`referential_integrity` route's restriction and fails the run (`BackendError::ExecutionFailed`, naming the source, the touched region, and the counts) on a violation, matching `KeyedRecurrenceBoundViolated`'s own shape — a run-time transactional failure surfaced through the backend error path, not a pre-run LSP/CLI diagnostic. Landing: `docs/outcomes/20260809-probe-backed-facts/outcome.md`, `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Three probe-obligation codes are specified and unimplemented.** `DeclaredMonotonicityViolated`, `DeclaredFunctionalDependencyViolated`, and `DeclaredBoundedDomainExceeded` (`model_properties.md` §"Probe obligation") have no `DiagnosticCode` variant yet, though their probe emitters (`emit_monotonicity_probe`, `emit_functional_dependency_probe`, `emit_bounded_domain_probe`) now exist in `crates/smelt-logical/src/maintenance/emit.rs`, proven against a real DuckDB — the coverage gate only asserts enum → catalogue coverage, so a catalogue row may precede its variant, the same posture as the `Maintenance*` rows above. No live run dispatches any of the three yet. Landing the variants and run-driver dispatch is `docs/outcomes/20260809-probe-backed-facts/outcome.md` phases 3-4. The append-only posture's probe (`emit_append_only_posture_probe`, also now built) reuses the already-catalogued `SourceMutationProfileViolated` rather than a new code.
 - **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
+- **All four contract-lattice codes have live derivation or probe-emitter sites; `ContractDeferralExceeded` remains catalogue-ahead-of-variant.** `ContractFrozenHorizonInvalid` and `ContractDeferralInvalid` (`incremental_models.md` §"The contract lattice") both have a `DiagnosticCode` variant: `ContractFrozenHorizonInvalid` is raised at frontmatter-parse time (an unparseable `contract.frozen_horizon`) and by the grain-admissibility check (`smelt_logical::contract::frozen_horizon::validate_frozen_horizon`); `ContractDeferralInvalid` is raised at frontmatter-parse time (an unparseable `contract.deferral`) and by the clock-admissibility check (`smelt_logical::contract::deferral::validate_deferral`), both folded into `check_file_diagnostics`. `ContractLateArrivalOutsideHorizon` and `ContractDeferralExceeded` are raised by `smelt_runtime::contract_probes`'s pure comparisons (`smelt_logical::contract::frozen_horizon::late_arrivals`, `smelt_logical::contract::deferral::deferral_violations`), dispatched at the same pre-write site as the other declared-fact probes — runtime probe failures, like `SourceMutationProfileViolated` and `DeclaredMonotonicityViolated`, so neither has a `DiagnosticCode` variant (the coverage gate only asserts enum → catalogue coverage, not the reverse). Landing: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
 
 ## Open questions
 

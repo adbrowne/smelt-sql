@@ -649,6 +649,12 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
     MalformedTimeseries,
+    /// A `columns.<c>.contract: plausible` declaration names a column that
+    /// also serves as the model's `event_time_column`, `partition_column`,
+    /// or a `unique_key` member.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "PlausibleContractOnSkeletonColumn: `columns.{column}.contract: plausible` cannot be declared — '{column}' is {role}, which must stay deterministic"
+    PlausibleContractOnSkeletonColumn,
     /// A `functional_dependencies:` entry is structurally invalid: an empty
     /// `key`/`determines`, a `determines` column also listed in `key`, or a
     /// `key`/`determines` column absent from the model's SQL body.
@@ -663,7 +669,7 @@ pub enum DiagnosticCode {
     MalformedBoundedDomain,
     /// A model declares `refresh: incremental` without a sibling `grain:`.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`"
+    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key` assertion)"
     GrainRequiredForIncremental,
     /// A model declares `grain:` without `refresh: incremental`.
     /// Anchored at the top of the file (line 0, column 0).
@@ -727,15 +733,28 @@ pub enum DiagnosticCode {
     KeyedForbidsWindowFunctions,
     /// A non-deterministic function appears in a `refresh: keyed` SELECT.
     KeyedForbidsNondeterministic,
-    /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
-    /// clocked driving source and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain").
+    /// A `refresh: keyed` model has no clocked driving source, and no
+    /// single unambiguous source could be resolved to derive the
+    /// snapshot-reconcile run shape either.
     KeyedSnapshotPostureUnsupported,
+    /// A fold-family column (additive, extremal/lattice, or order-monotone
+    /// overwrite) is refused under the derived snapshot-reconcile run shape
+    /// (`docs/specs/incremental_shapes.md` §"Admission matrix").
+    KeyedSnapshotSourceUnsupportedColumn,
     /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
     /// (v1 supports exactly one driving source).
     KeyedMultipleDrivingSources,
     /// A `refresh: keyed` SELECT could not be parsed for classification.
     KeyedSqlNotParseable,
+    /// A `refresh: keyed` `COALESCE`-shaped once-write column has no
+    /// once-write provenance proof (`incremental_shapes.md` §"The
+    /// column-family catalogue"). Names the column and the three fixes:
+    /// key-derived form, declared functional dependency, or remodelling.
+    KeyedOnceWriteUnproven,
+    /// A hidden decomposed-state column (`docs/specs/incremental_models.md`
+    /// §"Decomposed state (rung 2) in keyed models") collides with a
+    /// user-declared or projected output column of the same name.
+    KeyedStateColumnCollision,
     /// A `refresh: keyed` model incorrectly declares a `timeseries:` block
     /// (key temporal locality is not established). The keyed output has no
     /// partition column by default; the rule reads it from the driving
@@ -860,6 +879,12 @@ pub enum DiagnosticCode {
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
+    /// Emitted (Error) when a model's definition-change `Trigger::
+    /// ColumnAdded` names a column that occupies a row-membership/identity
+    /// (skeleton) position — a grain change, never a column backfill
+    /// (EX-39, `definition_deltas.md` §"The verdict per column group").
+    /// Anchored at the model SQL body start.
+    MaintenanceSkeletonColumnAdded,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
@@ -894,6 +919,25 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+
+    // ── Contract lattice diagnostic codes ────────────────────────────────────
+    /// A `contract.frozen_horizon` is unparseable or declared on a
+    /// non-partition-grain model (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractFrozenHorizonInvalid`) and the grain-admissibility check made
+    /// by `smelt_logical::contract::frozen_horizon::validate_frozen_horizon`.
+    /// Anchored at the top of the file (line 0, column 0).
+    ContractFrozenHorizonInvalid,
+    /// A `contract.deferral` (model-level or `contract.cells[].deferral`) is
+    /// unparseable or negative, or declared with no interval-representable
+    /// clock to measure lag against (`incremental_models.md` §"Contract
+    /// relaxations (`contract:`)"). Covers both the frontmatter-parse-time
+    /// format failure (`smelt_core::metadata::MetadataError::
+    /// ContractDeferralInvalid`) and the clock-admissibility check made by
+    /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
+    /// the top of the file (line 0, column 0).
+    ContractDeferralInvalid,
 }
 
 /// Structured metadata attached to diagnostics for code actions

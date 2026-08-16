@@ -3,7 +3,7 @@
 Inspect the logical and physical execution plan for a project, or the derived maintenance plan for a single incremental model.
 
 ```bash
-smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>] [--show-sql] [--period <start>..<end>]
+smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>] [--show-sql] [--period <start>..<end>] [--technique <name>]
 ```
 
 ## Options
@@ -11,11 +11,12 @@ smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>]
 | Flag | Description |
 |---|---|
 | `MODEL_NAME` | Optional. Name of a single model to print the maintenance-plan report for instead of the whole-project graph. |
-| `--json` | Output as JSON instead of human-readable text. Ignored when `MODEL_NAME` is given, except in combination with `--show-sql`. |
+| `--json` | Output as JSON instead of human-readable text. With `MODEL_NAME`, emits the per-model maintenance-plan report as JSON — with or without `--show-sql`, and with the same schema either way. |
 | `--select` | Select models to include (repeatable). Ignored when `MODEL_NAME` is given. |
 | `--project-dir` | Path to the smelt project root. Defaults to the current directory. |
 | `--show-sql` | With `MODEL_NAME`, also print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | With `--show-sql`, real literal date bounds (`<start>..<end>`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
+| `--technique` | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, per cell — including a `NotApplicable` reason where that technique doesn't apply to a given cell. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute`. |
 
 ## Human-readable output
 
@@ -27,9 +28,51 @@ Without `--json` or a `MODEL_NAME`, smelt prints a summary of the logical graph 
 
 Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell executes — the output of the same pure emitters a run executes. Each cell's SELECT body is compiled through the real discovered project's ephemeral resolver and upstream column types, the same way a run compiles it, so the printed SQL matches what a run would compile (referenced ephemeral models are CTE-inlined, and ref-column aggregates cast to their real type). A transactional group (e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines. `--show-sql` never connects to a backend. Combine with `--period <start>..<end>` for the real literal window bounds, or omit it to see the symbolic `{{window_start}}`/`{{window_end}}` placeholders instead. Combined with `--json`, the report is emitted as JSON with a `statements` array per cell.
 
+Add `--technique <name>` alongside `--show-sql` to preview a *different* technique than the one the plan admitted — every technique smelt has an emitter for, rendered against each cell's own contract/identity/column data and labelled with its admissibility: `Admitted` (the plan's own choice), `InterchangeableAlternative` (proven sound here, but not the one picked — region recompute always qualifies when it isn't itself admitted), or `NotApplicable` with a reason (the technique's preconditions aren't met for this cell — reported, never omitted). Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `per_group_recompute`, `recompute` (`recompute` and `delete_insert` are the same technique). The preview always uses the symbolic `{{window_start}}`/`{{window_end}}` placeholders regardless of `--period` — it's a display-only illustration, not a windowed dry run. `--json` output always carries every technique's preview per cell (a `technique_previews` array) plus the model's full derived property set, whether or not `--technique` is given.
+
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
 
-See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report.
+## Internal state columns
+
+Some presented columns (`AVG`, the `STDDEV_*`/`VAR_*` family, `MAX_BY`/`MIN_BY`, and the fallback-bearing or multi-candidate once-write spellings) don't fold their presented value directly — they fold hidden **state columns** instead, and recompute the presented value from that state on every read. `smelt explain <model>` lists these state columns as internal state, distinct from the model's public schema:
+
+```
+State columns:
+  - avg_amount (presented) folds through: avg_amount__sum, avg_amount__count
+      presentation: avg_amount__sum / avg_amount__count
+```
+
+A model with no decomposed-state columns prints no state section. With `--json`, the same information appears as a top-level `state_columns` array: `[{"presented_column": "avg_amount", "state_columns": ["avg_amount__sum", "avg_amount__count"], "presentation_expr": "avg_amount__sum / avg_amount__count"}]`.
+
+## Probes
+
+A declared world-fact (`functional_dependencies:`, `bounded_domain:`, `assert_monotonic`,
+`mutation_profile: {kind: append_only}`, `referential_integrity:`, `key_recurrence`) licenses a
+maintenance technique only because a cheap runtime probe checks it before every consuming write —
+see [`probes:` in the `smelt.yml` reference](smelt-yml.md#probes-configuration). `smelt explain
+<model>` prints the model's declared-fact probe set: per probe, the declared fact, the named
+diagnostic it raises, the maintenance cell it licenses, the project's dispatch cadence, and its
+cost:
+
+```
+Probes (1):
+  cadence: per_run
+  - fact: functional_dependencies:
+      probe: DeclaredFunctionalDependencyViolated
+      licensed cell: main.subscriptions (declared)
+      cost: +1 query per consuming run
+```
+
+A model declaring no probe-backed fact prints `Probes (0):`, not a missing section. The probe set
+stays **offline**: probe SQL is built to confirm a declaration is probe-backed, never executed, so
+`cost` is always the static "+1 query per consuming run" statement — `smelt explain` makes no
+backend connection. With `--json`, the same set appears as a top-level `probes` array:
+`[{"fact": "functional_dependencies:", "probe": "DeclaredFunctionalDependencyViolated", "cell":
+"main.subscriptions (declared)", "cadence": "per_run", "cost": "+1 query per consuming run"}]`.
+See the [run manifest](state.md#run-manifest) for where a live run records each probe's actual
+dispatched/skipped outcome.
+
+See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report. The web UI's [model diagnostics page](../guide/model-diagnostics.md) renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.
 
 ## JSON output schema
 

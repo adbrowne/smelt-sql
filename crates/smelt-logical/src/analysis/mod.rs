@@ -1,14 +1,21 @@
+pub mod affected_keys;
 pub mod bounded_domain;
 pub mod decomposed_state;
+pub mod definition_change;
 pub mod discriminants;
+pub(crate) mod expr_util;
+pub mod faithful_fold;
 pub mod fingerprint;
+pub mod footprint;
 pub mod functional_dependency;
 pub mod horizon_ceiling;
 pub mod input_delta;
 pub mod join_shape;
+pub mod locality_projection;
 pub mod model_diff;
 pub mod monotonicity;
 pub mod not_null;
+pub mod output_delta;
 pub mod presentation;
 pub mod skeleton_closure;
 pub mod source_bounds;
@@ -23,6 +30,9 @@ pub use walk::{
     RelationSource, Scope, ScopeEnum, ScopeEnumeration, ScopeKind, SelectNode, SetOpKind,
     SetOpNode, Transfer, UnsupportedConstruct,
 };
+// `is_constant_literal`/`constant_literal_tag` are `pub(crate)` (crate-internal
+// leaf classifiers, not part of this crate's public surface) — accessed via
+// `crate::analysis::walk::{..}` directly rather than re-exported here.
 
 use serde::Serialize;
 use smelt_types::SqlFunction;
@@ -71,6 +81,11 @@ pub struct SelectAnalysis {
     pub group_by_exprs: Vec<String>,
     /// Whether a `-- smelt:cube_split` comment was found.
     pub has_cube_split_annotation: bool,
+    /// Clauses present on the SELECT that a textual reassembly of
+    /// (items, FROM, WHERE, GROUP BY) would silently drop. Consumers that
+    /// rebuild the query from those parts (e.g. the cube_split rewrite)
+    /// must refuse when any of these is set.
+    pub unreconstructible_clauses: Vec<&'static str>,
 }
 
 /// Classify the items of an already-parsed `SelectList` into `SelectItemKind`s.
@@ -183,7 +198,7 @@ pub fn find_item_expr_by_alias_or_position(
 
 /// The verdict for whether a SELECT scope's own `GROUP BY` / `DISTINCT` key
 /// is a superset of the model's `partition_column` — the shared
-/// partition-alignment signal (`incremental_models.md` §"Safety checks") that
+/// partition-alignment signal (`incremental_shapes.md` §"Safety checks") that
 /// licenses group-aligned `HAVING`/`DISTINCT` admission
 /// (`rules::incremental`) and is available to other per-scope consumers
 /// (UNION-branch / window admission) as the same reusable check.
@@ -260,7 +275,7 @@ pub fn resolve_scope_group_by(
 /// containing the projected `partition_col` expression — found among
 /// `select`'s **own** select-list items, so a subquery/UNION-branch body is
 /// judged by its own projections and its own `GROUP BY`, never the outer
-/// query's (`incremental_models.md` §"Safety checks").
+/// query's (`incremental_shapes.md` §"Safety checks").
 pub fn scope_group_by_alignment(
     select: &smelt_parser::SelectStmt,
     partition_col: &str,
@@ -453,12 +468,30 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
     // Check for smelt:cube_split annotation in comments
     let has_cube_split_annotation = check_cube_split_annotation(stripped);
 
+    let mut unreconstructible_clauses = Vec::new();
+    if select.is_distinct() {
+        unreconstructible_clauses.push("DISTINCT");
+    }
+    if select.having_clause().is_some() {
+        unreconstructible_clauses.push("HAVING");
+    }
+    if select.qualify_clause().is_some() {
+        unreconstructible_clauses.push("QUALIFY");
+    }
+    if select.order_by_clause().is_some() {
+        unreconstructible_clauses.push("ORDER BY");
+    }
+    if select.limit_clause().is_some() {
+        unreconstructible_clauses.push("LIMIT");
+    }
+
     Some(SelectAnalysis {
         items,
         from_text,
         where_text,
         group_by_exprs,
         has_cube_split_annotation,
+        unreconstructible_clauses,
     })
 }
 
@@ -467,7 +500,7 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
 /// surrounding query — safe to compose under the walk.
 ///
 /// Check if a FunctionCall contains the DISTINCT keyword by examining its text.
-fn has_distinct_keyword(func: &smelt_parser::FunctionCall) -> bool {
+pub fn has_distinct_keyword(func: &smelt_parser::FunctionCall) -> bool {
     // Use the function's text representation and check for DISTINCT
     let text = func.text().to_uppercase();
     // Match COUNT(DISTINCT ...) pattern

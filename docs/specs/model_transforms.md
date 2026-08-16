@@ -1,7 +1,7 @@
 ---
 feature: model_transforms
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-23
 owners: [andrew]
 ---
 
@@ -87,8 +87,8 @@ pushdown → create-or-merge) is the *windowed-keyed-maintenance driver* — a m
 mechanism, so it is catalogued here in its own right. Its reference *implementation*
 lives today in the key-grain profile's built seed (`incremental_models.md`
 §"The key grain"; the direct-monoid classifier, the only
-keyed mode built so far) and generalises across `keyed`'s own column families as they
-land, with `versioned` a prospective future consumer of the same driver; the normative
+keyed mode built so far) and generalises across the key grain's own column families as they
+land; the normative
 *description* of the driver mechanism is this catalogue entry, not the mode spec.
 
 **Source-filter pushdown + the two clamps.** Three related mechanisms share one
@@ -223,8 +223,7 @@ identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-o
 with the write physically restricted to the rows whose effect is not the identity.
 
 **Definition-change field-backfill** is the pair of techniques a model gaining
-output fields backfills with (`incremental_models.md` §"The definition-change
-trigger"), chosen by what the added field reads: a payload field that is a
+output fields backfills with (`definition_deltas.md` §"The verdict per column group"), chosen by what the added field reads: a payload field that is a
 *pure function of stored columns* backfills as an **in-place `UPDATE`** (no
 upstream read), admitted only under the additive-only model-diff proof; a
 payload field that *re-derives from upstream* backfills as the **generic
@@ -240,7 +239,7 @@ fold onto.
 
 **The reconciliation-ledger fold/recompute-reset pair** is the bookkeeping every
 additive column-group technique consults before it merges, per
-`incremental_models.md` §"The reconciliation ledger": each `(output-region ×
+`incremental_models.md` §"The frontier record (reconciliation ledger)": each `(output-region ×
 column-group)` ledger entry records the processed-input vector the region has
 already folded. **Fold** refuses (never merges) a delta already reflected in
 the entry's processed set, otherwise combines and extends it — the real
@@ -274,13 +273,11 @@ These are meaningful only *inside* one refresh mode and are **not** catalogued
 here; the mode spec owns them in full:
 
 - **Backfill chunking** (one-shot / auto-sized / per-partition) and **auto-coarsen
-  run window** — `incremental_models.md` §"First-run and backfill".
-- **Close-old / open-new interval maintenance** (SCD2) — `incremental_models.md`
-  §"Close-old / open-new interval maintenance (the combiner)".
+  run window** — `incremental_shapes.md` §"First-run and backfill".
 
 **Deferred, not catalogued as built or unbuilt: eviction / settled-key GC.** Retiring
 keyed state older than `current_window − H` is **not** licensed by any transform today —
-`incremental_models.md` §"No write-eligibility clamp" removed the write-eligibility clamp that
+`incremental_shapes.md` §"No write-eligibility clamp" removed the write-eligibility clamp that
 would have motivated it (`docs/research/20260705-keyed-collapse-application.md` D6). It
 is deliberately deferred rather than catalogued as a mode-local transform: if it is ever
 introduced it must ship together with late-fact accounting (a package, not a standalone
@@ -334,7 +331,7 @@ write.** Controlling per-query write size is a first-class production concern:
 a job with a multi-day skew or lookback is routinely run as several sequential
 bounded updates rather than one large one. The derived output window is a
 *range to be covered*, not a mandate for a single statement — backfill
-chunking (`incremental_models.md` §"First-run and backfill") splits it into
+chunking (`incremental_shapes.md` §"First-run and backfill") splits it into
 sequential DELETE+INSERT pairs exactly as it splits a wide run window, each
 chunk's scan sized from that chunk's own reach. *Scheduling a separate re-run
 of the earlier calendar window* was rejected as the primitive: a calendar-window
@@ -442,7 +439,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   `docs/plans/20260711-derived-output-window.md`.
 - **Ordered (convergent self-edge) execution skips output-window derivation.**
   A self-referential model proven to converge partition-by-partition
-  (`incremental_models.md` §"Window independence and self-referential models")
+  (`incremental_shapes.md` §"Window independence and self-referential models")
   builds strictly sequential single-partition batches over the run window
   verbatim — its self-edge's own bounding relation (e.g. `bal.d >= t.d −
   INTERVAL '1 day'`) is the windowed-driver mechanism's convergence bound,
@@ -513,10 +510,14 @@ by `docs/plans/20260704-model-updates.md` (design:
   `decompose_to_state`): given a decomposable combiner (F4) it derives the
   hidden state columns and a presentation expression, refusing (never
   approximating) a holistic combiner, an unencoded state shape, or a
-  presentation expression that fails the purity proof (F7). Only `AVG`'s
-  `(sum, count)` state shape is encoded so far; wiring it as the driver
-  (`merge_into`) for a live refresh mode (cumulative rung-2) is a later,
-  mode-composition phase.
+  presentation expression that fails the purity proof (F7). The state-shape
+  catalogue this mechanism targets — `AVG`, `STDDEV_*`/`VAR_*`, `MAX_BY`/
+  `MIN_BY`'s hidden ordering, and once-write's `(value, written)` pair — is
+  fixed by `incremental_shapes.md` §"Decomposed state (rung 2) in keyed
+  models"; only `AVG`'s `(sum, count)` shape is encoded so far. Wiring it as
+  the driver (`merge_into`) for the key grain's decomposed-fold and
+  order-monotone-overwrite column families (`incremental_models.md`
+  §"The column-family catalogue") is separate, unfinished consumer work.
 - **Duplicated licensing analyses.** Several transforms are licensed by proofs that
   exist in duplicate in the tree (two driving-fact resolvers); the licences these
   transforms read are being consolidated in `model_properties.md`. The interval-reach
@@ -531,9 +532,8 @@ by `docs/plans/20260704-model-updates.md` (design:
 - The **windowed-keyed-maintenance driver** is a standalone mechanism (mode-agnostic
   classify → step over driving partitions in temporal order → per-partition pushdown →
   create-or-merge loop, fail-closed on a non-monoid combiner) with the built `cumulative`
-  seed (now `incremental_models.md`'s key grain) as its first named consumer. `versioned` composes the
-  same driver as it lands; the mechanism's normative home is this spec, not the mode
-  that first implements it.
+  seed (now `incremental_models.md`'s key grain) as its first named consumer; the
+  mechanism's normative home is this spec, not the mode that first implements it.
 
 ## References
 

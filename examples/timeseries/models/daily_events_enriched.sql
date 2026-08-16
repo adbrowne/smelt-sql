@@ -14,8 +14,9 @@ timeseries:
 # regular incremental execution loop's column-scoped `MERGE` (MP11) keys on
 # when a `raw.users` mutation drives the `{user_name}` cell, in place of the
 # default region-recompute `DELETE`+`INSERT` — the retired
-# `batched.unique_key: [event_id]` spelling this model used to carry here
-# never fed row-identity derivation for a partition-grain output either
+# `batched.unique_key: [event_id]` sub-block spelling (now `merge_key:` in
+# smelt.yml) this model used to carry here never fed row-identity derivation
+# for a partition-grain output either
 # (`derive::ModelInputs::declared_unique_key` is empty for every
 # `Grain::Partition`), so dropping it changes nothing.
 maintenance:

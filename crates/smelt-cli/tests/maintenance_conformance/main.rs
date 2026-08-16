@@ -14,9 +14,12 @@
 //! small default case count (`SMELT_CONFORMANCE_CASES` env override — see
 //! `gate.rs`).
 
+mod contract_points;
 mod dags;
+mod fact_violations;
 mod gate;
 mod harness_self_check;
 mod pinned;
 mod probes;
 mod registry;
+mod repair;

@@ -6,7 +6,7 @@
 //! recurrence-bounded, declared `sources.raw.events`'s
 //! `mutation_profile.key_recurrence`). A landed delta declared on the raw
 //! source propagates *through* the composed node (widened by its recurrence
-//! bound, `incremental_models.md` §"What the composed shape uniquely
+//! bound, `incremental_shapes.md` §"What the composed shape uniquely
 //! enables") to its downstream consumer `silver.sessions` — the composed
 //! stage sits inside a real propagation chain end to end, not just at its
 //! own creation edge or mid-chain in a synthetic fixture (the same real

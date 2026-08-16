@@ -16,6 +16,7 @@ smelt-backends = { path = "../smelt-backends" }
 smelt-state = { path = "../smelt-state" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-dialect = { path = "../smelt-dialect" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-runtime = { path = "../smelt-runtime" }
 
 # Web server

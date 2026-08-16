@@ -9,7 +9,7 @@ timeseries:
 ---
 -- A downstream **keyed** model whose driving source is the composed
 -- `user_daily_spend` model's own output — not a declared `sources:` entry
--- (`docs/specs/incremental_models.md` §"Key temporal locality (the
+-- (`docs/specs/incremental_shapes.md` §"Key temporal locality (the
 -- time-partitioned output)" — "The output as a clocked source": "a
 -- downstream keyed model may take it as its clocked driving source"). This
 -- model's own `(user_id, spend_date)` GROUP BY makes `spend_date` (the

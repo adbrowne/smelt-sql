@@ -63,6 +63,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         },
         unique_key: None,
         safety_overrides: None,
+        merge_key: None,
         batched: emitted.incremental_config.clone(),
         target: None,
         tags: emitted.tags.clone(),
@@ -85,6 +86,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         bounded_domain: None,
         horizon_ceiling: None,
         maintenance: None,
+        contract: None,
     });
 
     // Virtual path: generator_file path with the model name appended as

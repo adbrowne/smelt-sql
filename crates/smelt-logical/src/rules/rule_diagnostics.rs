@@ -49,8 +49,11 @@ pub enum RuleDiagnosticCode {
     KeyedForbidsWindowFunctions,
     KeyedForbidsNondeterministic,
     KeyedSnapshotPostureUnsupported,
+    KeyedSnapshotSourceUnsupportedColumn,
     KeyedMultipleDrivingSources,
     KeyedSqlNotParseable,
+    KeyedOnceWriteUnproven,
+    KeyedStateColumnCollision,
     PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
@@ -89,6 +92,16 @@ pub struct RuleContext<'a> {
     pub timeseries_config: Option<&'a TimeseriesConfig>,
     /// Frontmatter `incremental:` block, if any.
     pub incremental_config: Option<&'a PartitionGrainConfig>,
+    /// The model's own declared `functional_dependencies:` block — the
+    /// keyed classifier's once-write family consults it
+    /// (`rules::cumulative::classify_once_write`,
+    /// `docs/plans/20260809-keyed-frontier.md` Phase 4).
+    pub declared_functional_dependencies: &'a [smelt_core::config::FunctionalDependency],
+    /// Columns declared `columns.<c>.contract: plausible` in the model's
+    /// `.sql` frontmatter — threaded through to `incremental::detect`'s
+    /// non-determinism flow/taint check the same way the build itself
+    /// resolves it, so the LSP diagnostic and the build agree.
+    pub plausible_columns: &'a BTreeSet<String>,
 }
 
 /// A planner rule that surfaces its rejections as diagnostics.
@@ -116,6 +129,7 @@ impl PlannerRule for KeyedRule {
             ctx.refs,
             ctx.source_timeseries,
             ctx.timeseries_config.is_some(),
+            ctx.declared_functional_dependencies,
         ) {
             Ok(_) => Vec::new(),
             Err(diags) => diags.iter().map(keyed_to_rule).collect(),
@@ -152,7 +166,7 @@ impl PlannerRule for IncrementalRule {
         }
 
         // Advisory surfacing of the unified bound map's roll-up
-        // (`incremental_models.md` §"Batch safety classification"): a
+        // (`incremental_shapes.md` §"Batch safety classification"): a
         // `NotDerivable` source is flagged here so the editor sees it, but
         // (per `check_batched_bound_derivable`'s doc comment) the actual
         // fail-closed enforcement with the `--allow-downgrade` escape hatch
@@ -170,6 +184,7 @@ impl PlannerRule for IncrementalRule {
             refs: ctx.refs.to_vec(),
             timeseries_config: Some(ts.clone()),
             incremental_config: Some(inc.clone()),
+            plausible_columns: ctx.plausible_columns.clone(),
         };
         match incremental::detect(&model) {
             Ok(_) => Vec::new(),
@@ -190,7 +205,7 @@ impl PlannerRule for IncrementalRule {
 ///
 /// **Advisory, not blocking** — mirrors [`IncrementalRule`]'s existing
 /// severity policy (see its doc comment): the actual fail-closed enforcement
-/// of `incremental_models.md` §"Partition-grain constraints" #10 ("No silent downgrade to
+/// of `incremental_shapes.md` §"Partition-grain constraints" #10 ("No silent downgrade to
 /// full-refresh") happens at the CLI/runtime layer
 /// (`smelt_runtime::safety::check_bound_derivation`), which hard-refuses by
 /// default and honours the explicit `--allow-downgrade` escape hatch. This
@@ -495,10 +510,19 @@ fn keyed_to_rule(diag: &KeyedDiagnostic) -> RuleDiagnostic {
         KeyedDiagnostic::KeyedSnapshotPostureUnsupported => {
             RuleDiagnosticCode::KeyedSnapshotPostureUnsupported
         }
+        KeyedDiagnostic::KeyedSnapshotSourceUnsupportedColumn { .. } => {
+            RuleDiagnosticCode::KeyedSnapshotSourceUnsupportedColumn
+        }
         KeyedDiagnostic::KeyedMultipleDrivingSources { .. } => {
             RuleDiagnosticCode::KeyedMultipleDrivingSources
         }
         KeyedDiagnostic::KeyedSqlNotParseable => RuleDiagnosticCode::KeyedSqlNotParseable,
+        KeyedDiagnostic::KeyedOnceWriteUnproven { .. } => {
+            RuleDiagnosticCode::KeyedOnceWriteUnproven
+        }
+        KeyedDiagnostic::KeyedStateColumnCollision { .. } => {
+            RuleDiagnosticCode::KeyedStateColumnCollision
+        }
     };
     RuleDiagnostic {
         code,
@@ -592,6 +616,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -617,6 +643,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -637,6 +665,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: None,
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -644,7 +674,7 @@ mod tests {
     fn inc_config() -> PartitionGrainConfig {
         PartitionGrainConfig {
             unique_key: vec!["event_date".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         }
     }
@@ -655,7 +685,7 @@ mod tests {
         // is a SELECT alias and a GROUP BY key), but a LIMIT clause makes it
         // not batch-safe → the incremental safety classifier rejects it.
         // (A group-aligned HAVING here would now be legitimately admitted —
-        // `incremental_models.md` §"Safety checks" — so LIMIT, which never
+        // `incremental_shapes.md` §"Safety checks" — so LIMIT, which never
         // commutes with the partition filter, is used instead.)
         let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.src \
                    GROUP BY event_date LIMIT 10";
@@ -671,6 +701,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -697,6 +729,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -722,6 +756,8 @@ mod tests {
             source_timeseries: &ts,
             timeseries_config: None,
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
@@ -764,6 +800,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -816,6 +854,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -844,7 +884,7 @@ mod tests {
         };
         let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["month_start".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -856,6 +896,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -888,6 +930,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             detect_builtin_rules(&ctx).is_empty(),
@@ -929,6 +973,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         let hit = diags
@@ -966,7 +1012,7 @@ mod tests {
         ts_map.insert("smelt.src".to_string(), tsc.clone());
         let inc = PartitionGrainConfig {
             unique_key: vec![],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: crate::types::PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
@@ -980,6 +1026,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         let diags = detect_builtin_rules(&ctx);
         assert!(
@@ -1013,6 +1061,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&tsc),
             incremental_config: Some(&inc),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         assert!(
             check_batched_bound_derivable(&ctx).is_none(),
@@ -1036,7 +1086,7 @@ mod tests {
         };
         let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["event_ts".to_string()],
-            nondeterministic_columns: vec![],
+            nondeterministic_columns_retired: (),
             safety_overrides: Default::default(),
         };
         let ts_map: SourceTimeseriesMap = HashMap::new();
@@ -1048,6 +1098,8 @@ mod tests {
             source_timeseries: &ts_map,
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
+            declared_functional_dependencies: &[],
+            plausible_columns: &BTreeSet::new(),
         };
         // Note: PartitionGrainNotSafe Warning may fire (subquery in FROM),
         // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.

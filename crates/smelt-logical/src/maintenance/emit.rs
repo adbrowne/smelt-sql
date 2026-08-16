@@ -22,6 +22,7 @@
 //! never author maintenance-statement text of their own
 //! (`docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 
+use super::diff_patch::DeleteLeg;
 use super::ScanClamp;
 
 /// One SQL statement a maintenance run executes.
@@ -31,7 +32,7 @@ pub struct MaintenanceStatement {
 }
 
 impl MaintenanceStatement {
-    fn new(sql: String) -> Self {
+    pub(crate) fn new(sql: String) -> Self {
         Self { sql }
     }
 }
@@ -86,7 +87,7 @@ pub fn widened_scan_predicate(clamp: &ScanClamp, region: &Region) -> String {
 }
 
 impl Region {
-    fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
+    pub fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
         let col = match qualifier {
             Some(q) => format!("{q}.{column}"),
             None => column.to_string(),
@@ -304,25 +305,49 @@ pub fn emit_column_scoped_merge_suppressed(
 
 /// In-place field backfill (top-left with an empty input delta): `UPDATE`
 /// the stored region from its own columns; no upstream read at all.
+///
+/// `region` is `Some((partition_col, region))` for a maintenance run's
+/// region-scoped backfill, or `None` for an unregioned, unconditional
+/// `UPDATE` — the shape backbuild's B1/D1 self-read backfill needs (every
+/// row touched, no maintenance `Region` in scope yet). Backbuild's
+/// `backbuild::emit::emit_in_place_update` is a thin `None`-region wrapper
+/// over this function, not a second, forked emitter
+/// (`docs/plans/20260808-substrate-unification.md`, "emitter unification"
+/// — the two shapes are one statement family with an optional predicate,
+/// not two).
 pub fn emit_in_place_update(
     table: &str,
     assignments: &[(String, String)],
-    partition_col: &str,
-    region: &Region,
+    region: Option<(&str, &Region)>,
 ) -> Vec<String> {
+    vec![render_in_place_update(table, assignments, region)]
+}
+
+/// Shared string assembly behind [`emit_in_place_update`], exposed
+/// `pub(crate)` so `backbuild::emit::emit_in_place_update` can render the
+/// unregioned form directly without allocating (and immediately
+/// discarding) a one-element `Vec`.
+pub(crate) fn render_in_place_update(
+    table: &str,
+    assignments: &[(String, String)],
+    region: Option<(&str, &Region)>,
+) -> String {
     let sets = assignments
         .iter()
         .map(|(c, expr)| format!("{c} = {expr}"))
         .collect::<Vec<_>>()
         .join(", ");
-    vec![format!(
-        "UPDATE {table} SET {sets} WHERE {}",
-        region.predicate(None, partition_col)
-    )]
+    match region {
+        Some((partition_col, region)) => format!(
+            "UPDATE {table} SET {sets} WHERE {}",
+            region.predicate(None, partition_col)
+        ),
+        None => format!("UPDATE {table} SET {sets}"),
+    }
 }
 
 /// A target-scan slice predicate for a locality-admitted keyed fold
-/// (`docs/specs/incremental_models.md` §"Key temporal locality"): restricts
+/// (`docs/specs/incremental_shapes.md` §"Key temporal locality"): restricts
 /// the `MERGE`'s `ON` condition to target rows the write provably cannot
 /// touch outside of. The two shapes mirror the two routes
 /// [`crate::maintenance::locality::LocalitySlice`] can derive:
@@ -374,7 +399,7 @@ pub enum TargetSlicePredicate {
 /// (no branch reads it yet).
 ///
 /// `slice` is the target-scan slice predicate a locality-admitted model
-/// (`incremental_models.md` §"Key temporal locality") licenses: an extra
+/// (`incremental_shapes.md` §"Key temporal locality") licenses: an extra
 /// `AND target.<partition_column> BETWEEN '<lower>' AND '<upper>'` clause on
 /// the `ON` condition, restricting which target rows the `MERGE` needs to
 /// scan/match. It is provably safe — a target row outside the slice cannot
@@ -638,6 +663,384 @@ pub fn emit_staged_candidate_conditional(
     }
 }
 
+/// The staged-candidate conditional `DELETE`+`INSERT`, **full-recompute**
+/// variant (`docs/plans/20260808-membership-sensitivity.md` Phase 3): the
+/// membership-sensitive counterpart of [`emit_staged_candidate_conditional`]
+/// above, for the single production caller whose `candidate_select` is
+/// always the model's own FULL (unwindowed) recompute — never a
+/// region/window-scoped delta
+/// (`smelt-runtime`'s `execute_staged_membership_recompute`). Because the
+/// candidate is genuinely the model's entire current state, a stored row
+/// whose key is absent from it is not "out of this run's touched region" —
+/// it has genuinely **departed** (e.g. the dimension row a fact joined on
+/// was itself deleted, so the fact no longer appears in the recompute at
+/// all), and must be deleted.
+///
+/// This is a distinct emitter, not a modified [`emit_staged_candidate_conditional`],
+/// because that function's own "absence = out of this run's touched region,
+/// leave untouched" contract is *correct* and load-bearing for its own
+/// region/window-scoped callers (`crates/smelt-runtime/tests/
+/// statement_parity.rs::staged_candidate_conditional_statements_come_from_the_emitter`'s
+/// "user 3 … must be left untouched entirely"; `crates/smelt-cli/tests/
+/// maintenance_conformance/gate.rs::keyed_pool_t1_t2_and_full_refresh_agree_at_fixed_s`'s
+/// "device 3 (absent from the delta) must never be touched") — conflating
+/// the two absence semantics into one function would silently break one
+/// caller to fix the other. Single-owner discipline
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)")
+/// is preserved by keeping both variants declared side by side in this
+/// module, sharing every predicate-building helper's *shape*.
+///
+/// Adds one more transactional step to [`emit_staged_candidate_conditional`]'s
+/// five:
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `DELETE FROM <table> USING <staged_relation> WHERE <key join> AND
+///    (<IS DISTINCT FROM over compared_columns>)` — matched-and-changed rows.
+/// 4. **`DELETE FROM <table> WHERE NOT EXISTS (SELECT 1 FROM
+///    <staged_relation> WHERE <key join>)`** — departed rows: every stored
+///    row whose key does not appear in the staged candidate at all. A
+///    no-op (deletes zero rows) whenever every stored key is still present
+///    in the candidate — the change-suppression contract for step 3's
+///    matched-unchanged rows is untouched by this step, since it never
+///    matches a still-present key.
+/// 5. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — reinserts rows
+///    deleted by step 3, plus brand-new keys. A row deleted by step 4
+///    (departed) is never reinserted here: its key is absent from
+///    `<staged_relation>` by construction, so it is not among `s.*`.
+/// 6. `DROP TABLE <staged_relation>`
+///
+/// The whole group runs in one transaction, same as
+/// [`emit_staged_candidate_conditional`].
+///
+/// # NULL-keyed rows (known caveat, not yet closed)
+/// Every join this emitter builds (steps 3-5) compares keys with plain
+/// `=`, never a NULL-safe join — mirroring [`emit_staged_candidate_conditional`]'s
+/// own predicate-building style. SQL's `NULL = NULL` is never true, so a
+/// stored row whose key is (or contains) `NULL` never matches ANY staged
+/// candidate row on ANY of these joins, on ANY run — not even one where its
+/// own key is still genuinely present, unchanged, in the candidate. The
+/// practical effect: step 4's departed-key `DELETE` deletes it, and step 5's
+/// reinsert immediately reinserts it (its key is genuinely absent from the
+/// live `<table>` at that point, by step 4's own action) — every single
+/// run, forever. End-state equivalence with a full-refresh oracle still
+/// holds (the reinserted row's values are correct), but the change-
+/// suppression contract ("nothing changed → nothing written") silently does
+/// not hold for that one row: it is delete+reinserted even when genuinely
+/// unchanged. `key_expr_for_columns` (below, ~line 1093) already has a
+/// `COALESCE`-based NULL-safe join pattern for a different call site; this
+/// emitter does not yet use it — tracked in `docs/TODO.md`.
+///
+/// # Panics
+/// Same contract as [`emit_staged_candidate_conditional`]: panics if `key`
+/// or `compared_columns` is empty.
+pub fn emit_staged_candidate_conditional_recompute(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_staged_candidate_conditional_recompute requires a non-empty row identity (key) \
+         for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_staged_candidate_conditional_recompute requires a non-empty compared-column set \
+         for {table}"
+    );
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_table_s_departed = key
+        .iter()
+        .map(|k| format!("{table}.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete_changed = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression})"
+    );
+    let delete_departed = format!(
+        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM {staged_relation} AS s WHERE \
+         {key_join_table_s_departed})"
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete_changed),
+            MaintenanceStatement::new(delete_departed),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
+/// The repair family's per-group recompute (`docs/specs/incremental_models.md`
+/// §"The repair family"): a targeted `DELETE`+`INSERT` restricted to the
+/// admitted [`super::repair::AdmittedRepair`]'s affected-key relation —
+/// `candidate_select` is the caller's already-bounded per-group recompute
+/// (`super::repair::AdmittedRepair::slice`'s clamp, already injected into
+/// `candidate_select`'s read by the runtime transformer, mirroring every
+/// other emitter's "caller-clamped body" contract).
+///
+/// `affected_keys_select` is a **single-column `delta_key` relation** — the
+/// same canonical shape [`key_expr_for_columns`] builds, whether the caller
+/// sourced it from the append-only clamped scan
+/// (`smelt_runtime::maintenance_driver::repair_affected_keys_select`) or the
+/// `mutable_snapshot` group-grain sidecar diff ([`emit_repair_group_sidecar_diff`]).
+/// One shape for both paths, joined here by KEY EXPRESSION rather than by
+/// raw key columns (`table.k1 = __smelt_affected.k1 AND ...`): a deleted
+/// group's typed column values are unrecoverable by construction — the
+/// sidecar diff's "vanished" leg has nothing but the group's own
+/// `delta_key` text to offer — so a column-shaped join could never serve
+/// that path, and the append-only path adopts the same shape rather than
+/// carrying two joins.
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `DELETE FROM <table> USING (<affected_keys_select>) WHERE <key-expr
+///    join>` — every stored row whose key expression is in the affected-key
+///    relation, so a group that vanished entirely from the recompute (its
+///    key no longer appears in `candidate_select`) is still removed.
+/// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s JOIN
+///    (<affected_keys_select>) ON <key-expr join>` — restricted to the SAME
+///    affected-key relation as step 3, so both write statements are
+///    predicated on the named key set; no statement touches `table`
+///    unrestricted.
+/// 5. `DROP TABLE <staged_relation>`
+///
+/// The whole group runs in one transaction — a failed `INSERT` must roll
+/// back the `DELETE` (`docs/specs/incremental_models.md` §"Statement
+/// emission (single owner)").
+///
+/// # Panics
+/// Panics if `key` is empty — per-group recompute has no meaning without a
+/// group key to restrict its writes to.
+pub fn emit_per_group_recompute(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    affected_keys_select: &str,
+    candidate_select: &str,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_per_group_recompute requires a non-empty row identity (key) for {table}"
+    );
+
+    let affected_relation = format!(
+        "(SELECT DISTINCT delta_key FROM ({affected_keys_select}) AS __smelt_affected_src) AS \
+         __smelt_affected"
+    );
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+
+    let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
+    let table_key_expr = key_expr_for_columns(&table_key_columns);
+    let delete = format!(
+        "DELETE FROM {table} USING {affected_relation} WHERE {table_key_expr} = \
+         __smelt_affected.delta_key"
+    );
+
+    let staged_key_columns: Vec<String> = key.iter().map(|k| format!("s.{k}")).collect();
+    let staged_key_expr = key_expr_for_columns(&staged_key_columns);
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s JOIN {affected_relation} ON \
+         {staged_key_expr} = __smelt_affected.delta_key"
+    );
+
+    let drop = format!("DROP TABLE {staged_relation}");
+
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
+/// The `diff_patch` write pattern (`docs/specs/incremental_models.md`
+/// §"The write-pattern set is open" → "`diff_patch` — compute, diff, write
+/// only the difference"): stage the computed candidate slice, then patch
+/// stored state to match it — updating rows whose compared columns differ,
+/// inserting rows the stored slice is missing, and (only when the caller's
+/// [`DeleteLeg`] proves the candidate is complete over the slice) deleting
+/// stored rows the candidate no longer contains.
+///
+/// This is **one function with a conditional statement**, not two sibling
+/// emitters the way [`emit_staged_candidate_conditional`] /
+/// [`emit_staged_candidate_conditional_recompute`] split — that pair splits
+/// because their difference is a distinct, fixed caller population (a
+/// region-scoped caller versus the one full-recompute membership-sensitive
+/// caller); `diff_patch`'s delete-leg degradation is instead a per-call
+/// *runtime* fact (this call's own [`DeleteLeg`] verdict), so branching on
+/// it inside one function is the correct shape, not a second copy of the
+/// other four statements.
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0` —
+///    stage an empty relation shaped like the candidate rows.
+/// 2. `INSERT INTO <staged_relation> <candidate_select>` — populate it with
+///    this run's computed candidate rows (already slice-restricted by
+///    construction — the caller's `candidate_select` is the slice, not the
+///    whole table).
+/// 3. **Update leg** (always emitted): `DELETE FROM <table> USING
+///    <staged_relation> WHERE <key join> AND (<IS DISTINCT FROM over
+///    compared_columns>) AND <slice_predicate>` — remove exactly the
+///    stored rows, within the slice, whose staged candidate differs from
+///    what is stored. The slice restriction is load-bearing: without it a
+///    stored row outside the slice could spuriously match the key join
+///    against a staged row that does not actually correspond to it.
+/// 4. **Delete leg** (only when `delete_leg` is [`DeleteLeg::Complete`] —
+///    omitted entirely otherwise): `DELETE FROM <table> WHERE
+///    <slice_predicate> AND NOT EXISTS (<staged_relation> row for this
+///    key)` — remove stored rows, WITHIN THE SLICE, absent from the
+///    candidate. The outer slice restriction is load-bearing here too, and
+///    for a different reason than step 3's: `diff_patch`'s candidate is only
+///    ever a slice of the table, never the full current state (unlike
+///    [`emit_staged_candidate_conditional_recompute`]'s full-recompute
+///    candidate) — a stored row's absence from the candidate says nothing
+///    about whether it departed when that row lies OUTSIDE the slice in the
+///    first place, so this delete must never reach past the slice boundary.
+///
+/// `slice_predicate` is a single caller-composed predicate (already
+/// `<table>`-qualified on every column it names), not a `(partition_col,
+/// Region)` pair: a keyed aggregate output routed through the repair family
+/// has no partition column at all, only an affected-key-set membership test
+/// — exactly the slice the routable recompute produces — so the pattern
+/// cannot be tied to a partition axis (per this module's "callers resolve
+/// strings, emitters assemble" contract). A region-partitioned caller passes
+/// `region.predicate(Some(table), col)` verbatim.
+/// 5. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — insert candidate
+///    rows the target does not yet have. No additional slice restriction is
+///    needed here: the candidate rows are already slice-restricted by
+///    construction (`candidate_select`).
+/// 6. `DROP TABLE <staged_relation>` — cleanup.
+///
+/// One transaction, same contract as every other staged-candidate emitter
+/// in this module (`StatementGroup::transactional`).
+///
+/// # Panics
+/// Panics if `key` or `compared_columns` is empty — mirrors
+/// [`emit_staged_candidate_conditional`]'s own contract: an identity-free or
+/// vacuous-compare call has no sound diff shape to emit.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_diff_patch(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    slice_predicate: &str,
+    delete_leg: &DeleteLeg,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_diff_patch requires a non-empty row identity (key) for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_diff_patch requires a non-empty compared-column set for {table}"
+    );
+
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_table_s_departed = key
+        .iter()
+        .map(|k| format!("{table}.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete_changed = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression}) AND {slice_predicate}"
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+
+    let mut statements = vec![
+        MaintenanceStatement::new(create),
+        MaintenanceStatement::new(insert_candidates),
+        MaintenanceStatement::new(delete_changed),
+    ];
+
+    if let DeleteLeg::Complete = delete_leg {
+        let delete_departed = format!(
+            "DELETE FROM {table} WHERE {slice_predicate} AND NOT EXISTS (SELECT 1 FROM \
+             {staged_relation} AS s WHERE {key_join_table_s_departed})"
+        );
+        statements.push(MaintenanceStatement::new(delete_departed));
+    }
+
+    statements.push(MaintenanceStatement::new(insert));
+    statements.push(MaintenanceStatement::new(drop));
+
+    StatementGroup {
+        statements,
+        transactional: true,
+    }
+}
+
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
 /// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
 /// §"Key temporal locality", route 3): a read-only query the caller
@@ -669,20 +1072,7 @@ pub fn emit_recurrence_bound_probe(
     slice_lower: &str,
     dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
-    // The unsized string-cast type name and the "join sampled keys into one
-    // string" aggregate both vary by dialect: DuckDB accepts an unsized
-    // `VARCHAR` and has `STRING_AGG`; Spark SQL requires a length on
-    // `VARCHAR` (`DATATYPE_MISSING_SIZE`) and has no `STRING_AGG` — its
-    // unsized string type is `STRING`, and the equivalent join-aggregate is
-    // `CONCAT_WS(', ', COLLECT_LIST(...))`. Confirmed live against Spark
-    // (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
-    let (cast_type, sample_expr) = match dialect {
-        MaintenanceDialect::DuckDb => ("VARCHAR", "STRING_AGG(violation_key, ', ')".to_string()),
-        MaintenanceDialect::Spark => (
-            "STRING",
-            "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
-        ),
-    };
+    let cast_type = probe_dialect_string_type(dialect);
     let key_list = key.join(", ");
     let join_cond = key
         .iter()
@@ -695,20 +1085,75 @@ pub fn emit_recurrence_bound_probe(
         .collect::<Vec<_>>()
         .join(" || '|' || ");
     let safe_lower = slice_lower.replace('\'', "''");
-    let sql = format!(
-        "WITH __recurrence_violations AS (\
-            SELECT DISTINCT {key_concat} AS violation_key \
-            FROM {schema_table} AS target \
-            JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
-            WHERE target.{partition_column} < '{safe_lower}'\
-         ) \
+    let violations_select = format!(
+        "SELECT DISTINCT {key_concat} AS violation_key \
+         FROM {schema_table} AS target \
+         JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
+         WHERE target.{partition_column} < '{safe_lower}'"
+    );
+    let sql = wrap_violation_probe("__recurrence_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The unsized string-cast type name for a probe's key-display expression:
+/// DuckDB accepts an unsized `VARCHAR`; Spark SQL requires a length on
+/// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
+/// `STRING`. Confirmed live against Spark
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
+pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
+    match dialect {
+        MaintenanceDialect::DuckDb => "VARCHAR",
+        MaintenanceDialect::Spark => "STRING",
+    }
+}
+
+/// The "join up to 5 sampled `violation_key` values into one string"
+/// aggregate: DuckDB has `STRING_AGG`; Spark SQL has no `STRING_AGG`, so the
+/// equivalent join-aggregate is `CONCAT_WS(', ', COLLECT_LIST(...))`.
+/// Shared by every probe emitter in this module (`docs/outcomes/
+/// 20260809-probe-backed-facts/phases/02-plan.md` — "Design constraint: one
+/// probe result shape").
+fn probe_dialect_sample_agg(dialect: MaintenanceDialect) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb => "STRING_AGG(violation_key, ', ')".to_string(),
+        MaintenanceDialect::Spark => "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
+    }
+}
+
+/// Wraps a caller-supplied `violations_select` — any `SELECT` projecting a
+/// `violation_key` column, one row per offending identifier — into the
+/// canonical one-row probe result every emitter in this module returns:
+/// `violation_count` (the number of offending rows) and `sample_keys` (up to
+/// 5 comma-joined offending identifiers, `NULL` when `violation_count` is
+/// `0`). `cte_name` lets each caller pick its own descriptive CTE alias
+/// (`docs/specs/model_properties.md` §"Probe obligation" — "a probe's answer
+/// is a single `violation_count`/`sample_keys` row").
+fn wrap_violation_probe(
+    cte_name: &str,
+    violations_select: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let sample_expr = probe_dialect_sample_agg(dialect);
+    format!(
+        "WITH {cte_name} AS ({violations_select}) \
          SELECT COUNT(*) AS violation_count, \
                 (SELECT {sample_expr} FROM \
-                 (SELECT violation_key FROM __recurrence_violations LIMIT 5) AS __sample) \
+                 (SELECT violation_key FROM {cte_name} LIMIT 5) AS __sample) \
                  AS sample_keys \
-         FROM __recurrence_violations"
-    );
-    MaintenanceStatement::new(sql)
+         FROM {cte_name}"
+    )
+}
+
+/// A key's display expression for a probe's `violation_key` column: each
+/// column CAST to the dialect's unsized string type and pipe-concatenated —
+/// the same composite-key shape [`emit_recurrence_bound_probe`] uses,
+/// factored out so the four declaration probes below share it.
+fn probe_key_display_expr(columns: &[String], cast_type: &str) -> String {
+    columns
+        .iter()
+        .map(|c| format!("CAST({c} AS {cast_type})"))
+        .collect::<Vec<_>>()
+        .join(" || '|' || ")
 }
 
 /// The referential-integrity count-preservation tripwire
@@ -744,6 +1189,368 @@ pub fn emit_count_preservation_probe(
     let sql = format!(
         "SELECT (SELECT COUNT(*) FROM ({driving_select}) AS __smelt_driving) AS driving_count, \
          (SELECT COUNT(*) FROM ({enriched_select}) AS __smelt_enriched) AS enriched_count"
+    );
+    MaintenanceStatement::new(sql)
+}
+
+/// Build [`emit_count_preservation_probe`]'s `driving_select`/`enriched_select`
+/// pair directly from a model's own already-compiled `body_sql`, for a
+/// caller (`smelt-runtime`'s `execute_delete_insert_with_delta_restriction`)
+/// that has the body but not a hand-maintained pair of scoped `SELECT`s: the
+/// **enriched** side is `body_sql`'s own top-level `FROM`/`JOIN`/`WHERE`
+/// text unchanged (the join against `enrichment_source` still present); the
+/// **driving** side is the SAME text with that one join clause spliced out
+/// by text range — never re-authored, never re-derived from a second parse
+/// of a different string, so both sides carry byte-identical scoping
+/// (WHERE, other joins) except for the one join this probe exists to
+/// falsify.
+///
+/// `body_sql` is already-compiled SQL (`smelt.<path>` refs already resolved
+/// to physical `schema.table` names by the SQL compiler, matching what
+/// `execute_delete_insert_with_delta_restriction` actually holds at its
+/// call site) — the join is found by `TableRef::bare_path_text`'s plain
+/// dotted-identifier text, never `analysis::source_bounds::
+/// resolve_table_ref_source_name` (which only recognises unresolved
+/// `smelt.<path>` refs and would never match a compiled body). A match is
+/// exact-path or last-segment equality, so a caller may name
+/// `enrichment_source` either as the full physical path (`main.dim`) or
+/// just its bare table name (`dim`).
+///
+/// Fail-closed to `None` — never a best-effort guess — when `body_sql` has
+/// no top-level `SELECT`, no `FROM` clause, or no join against
+/// `enrichment_source` found in that `FROM` clause's own joins.
+pub fn emit_count_preservation_probe_from_body(
+    body_sql: &str,
+    enrichment_source: &str,
+) -> Option<MaintenanceStatement> {
+    let parse = smelt_parser::parse(body_sql);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let from_clause = select.from_clause()?;
+
+    let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let target_last = last_segment(enrichment_source);
+    let join = from_clause.joins().find(|join| {
+        join.table_ref()
+            .and_then(|table_ref| table_ref.bare_path_text())
+            .is_some_and(|path| path == enrichment_source || last_segment(&path) == target_last)
+    })?;
+
+    let from_range = from_clause.text_range();
+    let join_range = join.syntax().text_range();
+    let where_suffix = select
+        .where_clause()
+        .map(|w| format!(" {}", &body_sql[w.text_range()]))
+        .unwrap_or_default();
+
+    let enriched_from = &body_sql[from_range];
+    let before_join = smelt_parser::TextRange::new(from_range.start(), join_range.start());
+    let after_join = smelt_parser::TextRange::new(join_range.end(), from_range.end());
+    let driving_from = format!("{}{}", &body_sql[before_join], &body_sql[after_join]);
+
+    let driving_select = format!("SELECT 1 {driving_from}{where_suffix}");
+    let enriched_select = format!("SELECT 1 {enriched_from}{where_suffix}");
+
+    Some(emit_count_preservation_probe(
+        &driving_select,
+        &enriched_select,
+    ))
+}
+
+/// The functional-dependency probe (`docs/specs/model_properties.md`
+/// §"Probe obligation", row `functional_dependencies:`): a read-only query
+/// re-aggregating the declared `key` over `scope_select`'s own processed
+/// rows and counting the distinct `determines` values found per key. A key
+/// with more than one distinct `determines` value disproves the declared
+/// per-key constancy the once-write column family was admitted on the
+/// strength of (`model_properties.md` §Known Divergences).
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns (`docs/outcomes/20260809-probe-backed-facts/
+/// phases/02-plan.md`): the number of offending keys, and up to 5
+/// comma-joined offending key values.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed rows; this emitter does no scoping of its own, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `key` is empty — an empty `GROUP BY` would aggregate the whole
+/// scope into one row, never a per-key constancy check.
+pub fn emit_functional_dependency_probe(
+    scope_select: &str,
+    key: &[String],
+    determines: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !key.is_empty(),
+        "emit_functional_dependency_probe requires a non-empty key"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let key_list = key.join(", ");
+    let violation_key = probe_key_display_expr(key, cast_type);
+    let violations_select = format!(
+        "SELECT {violation_key} AS violation_key \
+         FROM ({scope_select}) AS __smelt_scope \
+         GROUP BY {key_list} \
+         HAVING COUNT(DISTINCT {determines}) > 1"
+    );
+    let sql = wrap_violation_probe("__fd_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The bounded-domain probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `bounded_domain:`): a read-only query counting the
+/// distinct values of the declared `column` within `scope_select`'s own
+/// processed region and comparing that count against the declared
+/// `max_cardinality`.
+///
+/// Returns one row: `violation_count` is the distinct-value count when it
+/// exceeds `max_cardinality`, `0` when the domain is within cap;
+/// `sample_keys` is up to 5 comma-joined sample values, `NULL` when within
+/// cap — the same shape every probe in this module returns, specialised
+/// (unlike the key-recurring probes) to a magnitude check rather than a
+/// membership check.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed region; this emitter does no scoping of its own,
+/// matching every other function in this module.
+pub fn emit_bounded_domain_probe(
+    scope_select: &str,
+    column: &str,
+    max_cardinality: u64,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    let cast_type = probe_dialect_string_type(dialect);
+    let sample_expr = probe_dialect_sample_agg(dialect);
+    let sql = format!(
+        "WITH __bounded_domain_values AS (\
+            SELECT DISTINCT CAST({column} AS {cast_type}) AS violation_key \
+            FROM ({scope_select}) AS __smelt_scope\
+         ), __bounded_domain_count AS (\
+            SELECT COUNT(*) AS distinct_count FROM __bounded_domain_values\
+         ) \
+         SELECT CASE WHEN distinct_count > {max_cardinality} THEN distinct_count ELSE 0 END \
+                AS violation_count, \
+                CASE WHEN distinct_count > {max_cardinality} THEN \
+                  (SELECT {sample_expr} FROM \
+                   (SELECT violation_key FROM __bounded_domain_values LIMIT 5) AS __sample) \
+                ELSE NULL END AS sample_keys \
+         FROM __bounded_domain_count"
+    );
+    MaintenanceStatement::new(sql)
+}
+
+/// The monotonicity probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `timeseries.assert_monotonic`): a read-only query
+/// re-deriving the traced event-time ordering over `scope_select`'s own
+/// processed rows, per `partition_key` — a `LAG` window over
+/// `event_time_column` ordered by itself within each partition, flagging a
+/// row whose event time falls below its partition predecessor's.
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns: the number of out-of-order rows, and up to 5
+/// comma-joined offending partition-key values.
+///
+/// `scope_select` is the caller's own already-compiled `SELECT` over the
+/// run's processed rows; this emitter does no scoping of its own, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `partition_key` is empty — an empty partition would order the
+/// entire scope as one sequence, never a per-partition monotonicity check.
+pub fn emit_monotonicity_probe(
+    scope_select: &str,
+    partition_key: &[String],
+    event_time_column: &str,
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !partition_key.is_empty(),
+        "emit_monotonicity_probe requires a non-empty partition key"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let partition_list = partition_key.join(", ");
+    let violation_key = probe_key_display_expr(partition_key, cast_type);
+    // The `LAG` must be ordered by the run's own PROCESSED-row order (a
+    // `ROW_NUMBER() OVER ()` ordinal over `scope_select`'s own row
+    // sequence), never by `event_time_column` itself — ordering the window
+    // by the very column being checked would sort every partition into
+    // non-decreasing order by construction, making a violation
+    // undetectable. "The traced event-time ordering" (`docs/specs/
+    // model_properties.md` §"Probe obligation") means the order rows were
+    // processed in, which the caller's `scope_select` already reflects
+    // (e.g. an append-only ingestion order).
+    let violations_select = format!(
+        "SELECT {violation_key} AS violation_key \
+         FROM (\
+            SELECT {partition_list}, __smelt_event_time, \
+                   LAG(__smelt_event_time) OVER (\
+                       PARTITION BY {partition_list} ORDER BY __smelt_seq\
+                   ) AS __smelt_prev_event_time \
+            FROM (\
+               SELECT {partition_list}, {event_time_column} AS __smelt_event_time, \
+                      ROW_NUMBER() OVER () AS __smelt_seq \
+               FROM ({scope_select}) AS __smelt_scope\
+            ) AS __smelt_seqd\
+         ) AS __smelt_lagged \
+         WHERE __smelt_prev_event_time IS NOT NULL \
+         AND __smelt_event_time < __smelt_prev_event_time"
+    );
+    let sql = wrap_violation_probe("__monotonicity_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// One partition's recorded baseline for [`emit_append_only_posture_probe`]:
+/// the row count and skeleton-column fingerprint observed the last time the
+/// posture was checked, kept by the caller (the run driver, phases 3-4 of
+/// `docs/outcomes/20260809-probe-backed-facts/outcome.md`) — this emitter
+/// carries no storage of its own, matching the maintenance-plan purity
+/// invariant (`docs/specs/architecture.md` §"Constraints & Invariants" item
+/// 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendOnlyBaselinePartition {
+    /// The partition column's value, as text.
+    pub partition_value: String,
+    /// The row count last recorded for this partition.
+    pub recorded_count: i64,
+    /// The row-content fingerprint (hex `sha256`) last recorded for this
+    /// partition, over the same `digest_columns` the caller passes to
+    /// [`emit_append_only_posture_probe`].
+    pub recorded_fingerprint: String,
+    /// Whether this partition's fingerprint leg is checked this run. A
+    /// whole-partition fingerprint changes on a *legitimate* append, so the
+    /// caller gates this to `false` for the still-open partition (the
+    /// recorded maximum `partition_value`) and `true` for every partition
+    /// strictly below it (`docs/outcomes/20260809-probe-backed-facts/
+    /// outcome.md` phase 6: "the frontier gate"). The count leg is never
+    /// gated — a count decrease always violates append-only posture
+    /// regardless of this flag.
+    pub check_fingerprint: bool,
+}
+
+/// The append-only posture probe (`docs/specs/model_properties.md` §"Probe
+/// obligation", row `mutation_profile.kind: append_only`; `docs/specs/
+/// sources.md` §Semantics 4 — "watermark-monotonicity + frontier-checksum"):
+/// a read-only query comparing each partition's CURRENT row count and
+/// row-content fingerprint (over `digest_columns`, the source's skeleton
+/// columns) against a caller-supplied recorded `baseline` — a partition
+/// whose row count decreased (a delete or reload) or whose fingerprint
+/// changed (an in-place update) disproves the declared `append_only`
+/// posture.
+///
+/// Returns the same `violation_count`/`sample_keys` shape every probe in
+/// this module returns: the number of violating partitions, and up to 5
+/// comma-joined offending partition values.
+///
+/// The per-row fingerprint reuses [`row_fingerprint_expr`] (the same
+/// collision-free construction the fingerprint sidecar digests with); the
+/// per-partition aggregate fingerprint is `sha256` of those row
+/// fingerprints joined in a fixed (sorted) order, so two runs over the same
+/// unchanged partition content always agree regardless of physical row
+/// order.
+///
+/// `source_table` is already fully qualified (`schema.table`); `baseline`
+/// is rendered as a `VALUES` list, one row per recorded partition — a
+/// partition with no baseline row is not compared (nothing recorded yet to
+/// disprove). Each baseline row's `check_fingerprint` gates whether that
+/// partition's fingerprint leg participates this run — the count leg is
+/// never gated (`AppendOnlyBaselinePartition::check_fingerprint`'s doc
+/// comment).
+///
+/// # Panics
+/// Panics if `digest_columns` or `baseline` is empty — nothing to
+/// fingerprint, or nothing recorded to compare against, is not a
+/// degenerate always-passing probe.
+pub fn emit_append_only_posture_probe(
+    source_table: &str,
+    partition_column: &str,
+    digest_columns: &[String],
+    baseline: &[AppendOnlyBaselinePartition],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_append_only_posture_probe requires a non-empty digest column set for {source_table}"
+    );
+    assert!(
+        !baseline.is_empty(),
+        "emit_append_only_posture_probe requires a non-empty recorded baseline for {source_table}"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let snapshot =
+        emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
+    let baseline_values = baseline
+        .iter()
+        .map(|b| {
+            let value = b.partition_value.replace('\'', "''");
+            let fingerprint = b.recorded_fingerprint.replace('\'', "''");
+            let check_fingerprint = if b.check_fingerprint { "TRUE" } else { "FALSE" };
+            format!(
+                "('{value}', {}, '{fingerprint}', {check_fingerprint})",
+                b.recorded_count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let violations_select = format!(
+        "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
+         FROM ({}) AS __current \
+         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, \
+               recorded_fingerprint, check_fingerprint) \
+         ON __current.partition_value = __baseline.partition_value \
+         WHERE __current.current_count < __baseline.recorded_count \
+         OR (__baseline.check_fingerprint AND __current.current_fingerprint IS DISTINCT FROM \
+             __baseline.recorded_fingerprint)",
+        snapshot.sql
+    );
+    let sql = wrap_violation_probe("__append_only_violations", &violations_select, dialect);
+    MaintenanceStatement::new(sql)
+}
+
+/// The per-partition CURRENT-state `SELECT` [`emit_append_only_posture_probe`]
+/// compares its recorded baseline against: `partition_value`,
+/// `current_count`, and `current_fingerprint` for every partition presently
+/// in `source_table`. Extracted as its own emitter so the runtime can
+/// execute it standalone to refresh the recorded baseline after a held
+/// probe (`docs/outcomes/20260809-probe-backed-facts/outcome.md` phase 6) —
+/// the recorded and compared fingerprints are then the literally same SQL
+/// construction, never two independent renderings that could drift.
+///
+/// `source_table` is already fully qualified (`schema.table`). The
+/// fingerprint construction is identical to
+/// [`emit_append_only_posture_probe`]'s own (see that function's doc
+/// comment).
+///
+/// # Panics
+/// Panics if `digest_columns` is empty — nothing to fingerprint is not a
+/// degenerate probe.
+pub fn emit_append_only_baseline_snapshot(
+    source_table: &str,
+    partition_column: &str,
+    digest_columns: &[String],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_append_only_baseline_snapshot requires a non-empty digest column set for {source_table}"
+    );
+    let cast_type = probe_dialect_string_type(dialect);
+    let row_hash = row_fingerprint_expr(digest_columns, dialect);
+    let agg_fingerprint = match dialect {
+        MaintenanceDialect::DuckDb => {
+            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+        }
+        MaintenanceDialect::Spark => {
+            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
+        }
+    };
+    let sql = format!(
+        "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
+         COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
+         FROM {source_table} \
+         GROUP BY {partition_column}"
     );
     MaintenanceStatement::new(sql)
 }
@@ -785,7 +1592,7 @@ pub fn emit_create_table_as(
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/incremental_models.md` §"First-run and backfill" —
+/// (`docs/specs/incremental_shapes.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"): the target does not
 /// exist yet, and the model's own first-batch SELECT reads that same target
 /// via `smelt.<self>`, so `CREATE TABLE … AS SELECT …` cannot resolve it —
@@ -855,6 +1662,412 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
     }
 }
 
+// ── Decomposed-state column fold expansion (`docs/specs/
+// incremental_shapes.md` §"Decomposed state (rung 2) in keyed models",
+// "Combiner over state") ─────────────────────────────────────────────────
+
+/// Expand one [`AggregatorColumn`](crate::rules::cumulative::AggregatorColumn)
+/// into its `(column, combine_expression)` fold pairs for the `MERGE`'s
+/// `SET` clause. Single-owner statement rule (`docs/specs/
+/// incremental_models.md` §"Statement emission (single owner)"): both the
+/// executed keyed-fold `MERGE` (`smelt-runtime::cumulative::
+/// build_cumulative_merge_sql`) and the `smelt explain` preview
+/// (`smelt-runtime::diagnostics`) call this so their fold shapes can never
+/// diverge (`docs/outcomes/20260809-rung2-state-shapes` row 7).
+///
+/// A stateless column (`state: None`, every family admitted before this
+/// mechanism existed) still produces exactly the one pair it always has. A
+/// state-bearing column expands into one pair per hidden state column (each
+/// folded by its own combiner over `target.<c>`/`delta.<c>`) plus the
+/// presented column, set to the presentation expression with every
+/// state-column reference substituted by that column's own *merged*
+/// expression — so the presented value is always recomputed fresh from the
+/// just-merged state, never folded directly.
+pub fn expand_aggregator_column_folds(
+    col: &crate::rules::cumulative::AggregatorColumn,
+) -> Vec<(String, String)> {
+    let Some(state) = &col.state else {
+        let target_col = format!("target.{}", col.output_name);
+        let delta_col = format!("delta.{}", col.output_name);
+        let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
+        return vec![(col.output_name.clone(), expr)];
+    };
+
+    let mut folds: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len() + 1);
+    let mut merged_by_name: Vec<(String, String)> = Vec::with_capacity(state.state_columns.len());
+    for state_col in &state.state_columns {
+        let target_col = format!("target.{}", state_col.name);
+        let delta_col = format!("delta.{}", state_col.name);
+        let merged = state_col.combiner.render(&target_col, &delta_col);
+        merged_by_name.push((state_col.name.clone(), merged.clone()));
+        folds.push((state_col.name.clone(), merged));
+    }
+    // One simultaneous pass over the ORIGINAL presentation expression, not a
+    // chain of dependent substitutions — a state column's own merged
+    // expression can embed another state column's qualified name (the
+    // order-monotone `v` column's fold text names its sibling `o` column,
+    // e.g. `target.status__o`), and re-scanning already-substituted text for
+    // the next name would corrupt it (`docs/outcomes/
+    // 20260809-rung2-state-shapes` row 5).
+    let presentation_expr = substitute_identifiers(&state.presentation_expr, &merged_by_name);
+    folds.push((col.output_name.clone(), presentation_expr));
+    folds
+}
+
+/// Replace every whole-identifier occurrence of each `(name, replacement)`
+/// pair in `text`, in one simultaneous left-to-right pass over the
+/// ORIGINAL `text` — a match must not be preceded or followed by another
+/// identifier character (`[A-Za-z0-9_]`), so `avg_amount__sum` is not
+/// matched inside `avg_amount__sum_2`. A single pass (rather than N
+/// sequential single-name substitutions) matters: a replacement text can
+/// itself contain another pair's `name` as a substring (a state column's
+/// merged fold expression naming a sibling state column), and re-scanning
+/// already-substituted output for the next name would corrupt it. Used to
+/// rewrite a `DecomposedState` presentation expression's state-column
+/// references onto their merged fold expressions
+/// (`expand_aggregator_column_folds`) — plain string substitution over SQL
+/// identifiers, not general SQL rewriting.
+fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> String {
+    fn is_ident_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || c == '_'
+    }
+
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut skip_until = 0usize;
+    for (i, ch) in text.char_indices() {
+        if i < skip_until {
+            continue;
+        }
+        let matched = replacements.iter().find(|(name, _)| {
+            text[i..].starts_with(name.as_str())
+                && (i == 0 || !is_ident_char(bytes[i - 1] as char))
+                && {
+                    let after = i + name.len();
+                    after >= bytes.len() || !is_ident_char(bytes[after] as char)
+                }
+        });
+        if let Some((name, replacement)) = matched {
+            result.push('(');
+            result.push_str(replacement);
+            result.push(')');
+            skip_until = i + name.len();
+            continue;
+        }
+        result.push(ch);
+    }
+    result
+}
+
+// ── Decomposed state (rung 2) select augmentation (`docs/specs/
+// incremental_shapes.md` §"Decomposed state (rung 2) in keyed models") ────
+
+/// Why [`state_augmented_projection`] could not append the state columns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateAugmentRefusal {
+    /// `sql` could not be parsed, or its SELECT list could not be located —
+    /// fail-closed rather than text-splice blind.
+    Unparseable,
+}
+
+/// Append one `, <per_partition_expr> AS <name>` select item per
+/// `state_columns` to `sql`'s own SELECT list, leaving every other clause
+/// (the key/GROUP BY columns, the model's own presented select items, WHERE/
+/// FROM/GROUP BY) byte-unchanged. `state_columns` is derived once from the
+/// classification (`decomposed_state::DecomposedState::state_columns`
+/// across every state-bearing `AggregatorColumn`); the caller applies this
+/// to the compiled delta SELECT so the stored table and the delta agree on
+/// columns before `CREATE TABLE AS` / `MERGE ... WHEN NOT MATCHED THEN
+/// INSERT *` (`docs/specs/incremental_shapes.md` §"Decomposed state (rung 2)
+/// in keyed models"). `state_columns.is_empty()` returns `sql` unchanged —
+/// the stateless shape every column family admitted before this mechanism
+/// existed still produces.
+///
+/// The insertion point is located via the CST (the last select item's own
+/// `text_range`), never a whole-text scan — this emitter is a leaf
+/// operation over one already-parsed SELECT, not a second admission pass
+/// (`docs/specs/architecture.md` §"Property composition walk rule").
+/// Refuses (never mangles the string) when `sql` doesn't parse or its
+/// SELECT list can't be located.
+pub fn state_augmented_projection(
+    sql: &str,
+    state_columns: &[crate::analysis::decomposed_state::StateColumn],
+) -> Result<String, StateAugmentRefusal> {
+    if state_columns.is_empty() {
+        return Ok(sql.to_string());
+    }
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax()).ok_or(StateAugmentRefusal::Unparseable)?;
+    let select = file.select_stmt().ok_or(StateAugmentRefusal::Unparseable)?;
+    let list = select
+        .select_list()
+        .ok_or(StateAugmentRefusal::Unparseable)?;
+    let last_item = list
+        .items()
+        .last()
+        .ok_or(StateAugmentRefusal::Unparseable)?;
+    let insert_at: usize = last_item.range().end().into();
+
+    let mut additions = String::new();
+    for state_col in state_columns {
+        additions.push_str(&format!(
+            ", {} AS {}",
+            state_col.per_partition_expr, state_col.name
+        ));
+    }
+    let mut out = String::with_capacity(sql.len() + additions.len());
+    out.push_str(&sql[..insert_at]);
+    out.push_str(&additions);
+    out.push_str(&sql[insert_at..]);
+    Ok(out)
+}
+
+// ── Presentation projection (rung 2, `docs/specs/incremental_models.md`
+// §"Decomposed state (rung 2) in keyed models" → "Presentation
+// projection") ────────────────────────────────────────────────────────
+
+/// Why [`presentation_projection`] could not hide state columns behind a
+/// wildcard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresentationRefusal {
+    /// `sql` could not be parsed, or its SELECT list could not be located —
+    /// fail-closed rather than text-splice blind.
+    Unparseable,
+    /// A wildcard's relation could not be resolved while a state-bearing
+    /// model was in scope. Passing it through unrewritten risks leaking
+    /// state columns into the consumer's schema, so this refuses instead of
+    /// guessing (`docs/specs/incremental_shapes.md` §"Decomposed state
+    /// (rung 2) in keyed models" → "Presentation projection").
+    UnresolvableWildcard {
+        /// The offending wildcard's own source text (`*` or
+        /// `<qualifier>.*`).
+        wildcard: String,
+    },
+}
+
+impl std::fmt::Display for PresentationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PresentationRefusal::Unparseable => {
+                write!(f, "SQL could not be parsed for presentation projection")
+            }
+            PresentationRefusal::UnresolvableWildcard { wildcard } => write!(
+                f,
+                "wildcard `{wildcard}` could not be resolved to a FROM/JOIN relation while a \
+                 state-bearing model is in scope"
+            ),
+        }
+    }
+}
+
+/// One relation in a SELECT's `FROM`/`JOIN` clause, as `presentation_
+/// projection` needs it: the name a wildcard can qualify it by, and (when
+/// it is a `smelt.<path>` reference) the leaf model name `state_bearing`
+/// is keyed by.
+struct Relation {
+    /// The name this relation can be referenced by from the select list —
+    /// its explicit/implicit alias, falling back to the leaf model name or
+    /// plain identifier when unaliased. `None` only for a relation this
+    /// walk cannot name at all (e.g. an unaliased subquery).
+    qualifier: Option<String>,
+    /// The name `state_bearing` is keyed by: a `smelt.<path>` reference's
+    /// leaf segment, or a plain identifier. `None` for a relation with
+    /// neither (a subquery), which can never be state-bearing.
+    resolved_name: Option<String>,
+}
+
+/// Resolve one `TableRef`'s leaf `smelt.<path>` model name (value or
+/// call form), mirroring the leaf-segment extraction every other
+/// `smelt-logical` walk over a `FROM`/`JOIN` clause already duplicates
+/// (`analysis/walk.rs`'s `normalize_table_ref`, `analysis/source_bounds.rs`,
+/// `rules/incremental.rs`) — there is no shared helper to call instead, and
+/// `smelt-logical` has no dependency on `smelt-db` to borrow one from.
+fn table_ref_model_name(table_ref: &smelt_parser::ast::TableRef) -> Option<String> {
+    table_ref
+        .smelt_path_ref()
+        .and_then(|p| p.segments().last().cloned())
+        .or_else(|| {
+            table_ref
+                .smelt_path_call()
+                .and_then(|p| p.segments().last().cloned())
+        })
+}
+
+/// All relations a SELECT's `FROM`/comma-list/`JOIN`s contribute, in source
+/// order — the same `table_refs().chain(joins()...)` traversal
+/// `analysis/walk.rs`'s `normalize_from` already uses for from-clause
+/// enumeration.
+fn from_relations(from: &smelt_parser::ast::FromClause) -> Vec<Relation> {
+    from.table_refs()
+        .chain(from.joins().filter_map(|j| j.table_ref()))
+        .map(|table_ref| {
+            let resolved_name = table_ref_model_name(&table_ref).or_else(|| table_ref.identifier());
+            let qualifier = table_ref.alias().or_else(|| resolved_name.clone());
+            Relation {
+                qualifier,
+                resolved_name,
+            }
+        })
+        .collect()
+}
+
+/// Rewrite `sql`'s wildcard select items so a state-bearing model's
+/// `__part` state columns never reach a consumer's schema: a wildcard over
+/// a relation `state_bearing` names is expanded to that model's presented
+/// columns (`state_bearing`'s values, in schema order); a wildcard over a
+/// relation `state_bearing` does not name is left byte-unchanged.
+/// `state_bearing` maps model name → presented column names — its values
+/// come from the public schema (`UpstreamSchemas::models` at the caller),
+/// its keys from the set of models classified as state-bearing; this
+/// function invents no new source of truth for "which columns are
+/// presented".
+///
+/// Returns `sql` byte-identical when no relation in scope is
+/// state-bearing (`state_bearing.is_empty()` or none of its keys appear in
+/// `sql`'s `FROM`/`JOIN`) — the parity path every project not using
+/// decomposed state still takes. Refuses
+/// ([`PresentationRefusal::UnresolvableWildcard`]) rather than passing a
+/// wildcard through unexpanded when a state-bearing relation is in scope
+/// and the wildcard's own relation cannot be resolved (an unknown
+/// qualifier, or a bare `*` over an unnameable relation) — a silent
+/// pass-through there would leak state columns into the consumer's schema.
+///
+/// The rewrite locates each wildcard select item via its own CST
+/// `range()`, never a whole-text scan for `*` — this emitter is a leaf
+/// operation over one already-parsed SELECT (`docs/specs/architecture.md`
+/// §"Property composition walk rule"), so a `*` inside a string literal
+/// (wrapped in an `EXPRESSION` node, `SelectItem::is_wildcard()` returns
+/// `false` for it) is never touched.
+pub fn presentation_projection(
+    sql: &str,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Result<String, PresentationRefusal> {
+    let parse = smelt_parser::parse(sql);
+    let file = smelt_parser::File::cast(parse.syntax()).ok_or(PresentationRefusal::Unparseable)?;
+    let select = file.select_stmt().ok_or(PresentationRefusal::Unparseable)?;
+    let list = select
+        .select_list()
+        .ok_or(PresentationRefusal::Unparseable)?;
+    let relations: Vec<Relation> = select
+        .from_clause()
+        .map(|from| from_relations(&from))
+        .unwrap_or_default();
+
+    let any_state_bearing = relations
+        .iter()
+        .any(|r| matches_state_bearing(r, state_bearing));
+    if !any_state_bearing {
+        return Ok(sql.to_string());
+    }
+
+    let mut out = String::with_capacity(sql.len());
+    let mut last_end: usize = 0;
+    for item in list.items() {
+        let replacement = if let Some(qualifier) = item.qualified_wildcard_target() {
+            match relations
+                .iter()
+                .find(|r| r.qualifier.as_deref() == Some(qualifier.as_str()))
+            {
+                Some(rel) => match state_bearing_columns(rel, state_bearing) {
+                    Some(cols) => Some(
+                        cols.iter()
+                            .map(|c| format!("{qualifier}.{c}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                    None => None,
+                },
+                None => {
+                    return Err(PresentationRefusal::UnresolvableWildcard {
+                        wildcard: sql[item.range()].to_string(),
+                    });
+                }
+            }
+        } else if item.is_wildcard() {
+            Some(
+                expand_bare_wildcard(&relations, state_bearing).ok_or_else(|| {
+                    PresentationRefusal::UnresolvableWildcard {
+                        wildcard: sql[item.range()].to_string(),
+                    }
+                })?,
+            )
+        } else {
+            None
+        };
+
+        if let Some(replacement) = replacement {
+            let start: usize = item.range().start().into();
+            let end: usize = item.range().end().into();
+            out.push_str(&sql[last_end..start]);
+            out.push_str(&replacement);
+            last_end = end;
+        }
+    }
+    out.push_str(&sql[last_end..]);
+    Ok(out)
+}
+
+fn matches_state_bearing(
+    rel: &Relation,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    rel.resolved_name
+        .as_deref()
+        .is_some_and(|n| state_bearing.contains_key(n))
+}
+
+fn state_bearing_columns<'a>(
+    rel: &Relation,
+    state_bearing: &'a std::collections::BTreeMap<String, Vec<String>>,
+) -> Option<&'a Vec<String>> {
+    rel.resolved_name
+        .as_deref()
+        .and_then(|n| state_bearing.get(n))
+}
+
+/// Expand a bare `*` given the relations in scope. A single relation
+/// expands to its bare (unqualified) presented column list; multiple
+/// relations expand per-relation — a state-bearing relation to its
+/// qualified presented columns, a non-state-bearing (or non-state-bearing-
+/// unresolvable) relation to `<qualifier>.*`. `None` means the wildcard
+/// cannot be resolved (a relation this walk cannot name, still in scope
+/// alongside a state-bearing one) and the caller must refuse.
+fn expand_bare_wildcard(
+    relations: &[Relation],
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> Option<String> {
+    if relations.len() == 1 {
+        let rel = &relations[0];
+        return match state_bearing_columns(rel, state_bearing) {
+            Some(cols) => Some(cols.join(", ")),
+            // Only reachable if this sole relation isn't state-bearing —
+            // but the caller only reaches `expand_bare_wildcard` once it
+            // has already established some relation in scope IS
+            // state-bearing, and with one relation that must be this one.
+            // Kept as a refusal (never a silent unchanged copy) rather
+            // than an `unreachable!()`, so a future relaxation of the
+            // caller's gate fails loud instead of miscompiling.
+            None => None,
+        };
+    }
+    let mut parts = Vec::with_capacity(relations.len());
+    for rel in relations {
+        match state_bearing_columns(rel, state_bearing) {
+            Some(cols) => {
+                let qualifier = rel.qualifier.as_deref()?;
+                for c in cols {
+                    parts.push(format!("{qualifier}.{c}"));
+                }
+            }
+            None => {
+                let qualifier = rel.qualifier.as_deref()?;
+                parts.push(format!("{qualifier}.*"));
+            }
+        }
+    }
+    Some(parts.join(", "))
+}
+
 // ── Fingerprint sidecar diff (F3, `docs/plans/20260715-composed-axes-
 // conditional-maintenance.md` Phase F3; `docs/specs/sources.md` §"The
 // fingerprint sidecar") ────────────────────────────────────────────────
@@ -899,9 +2112,9 @@ const VALUE_TAG: &str = "V";
 /// join multiple columns' fingerprints with no separator at all — see its
 /// own doc comment for why fixed-length concatenation removes the
 /// separator-collision hazard structurally rather than by convention.
-fn column_fingerprint_expr(column: &str) -> String {
+fn column_fingerprint_expr(column: &str, cast_type: &str) -> String {
     format!(
-        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS VARCHAR)) END)"
+        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS {cast_type})) END)"
     )
 }
 
@@ -930,9 +2143,17 @@ fn column_fingerprint_expr(column: &str) -> String {
 /// literal, un-hashed value instead; see that function's own doc comment
 /// for why.
 fn concat_varchar_expr(columns: &[String]) -> String {
+    concat_varchar_expr_typed(columns, "VARCHAR")
+}
+
+/// [`concat_varchar_expr`], parameterized over the unsized string-cast type
+/// name — DuckDB's `VARCHAR` for every existing (DuckDB-only) caller, or the
+/// dialect's own type via [`probe_dialect_string_type`] for
+/// [`row_fingerprint_expr`]'s dialect-aware probe caller.
+fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
     let per_column = columns
         .iter()
-        .map(|c| column_fingerprint_expr(c))
+        .map(|c| column_fingerprint_expr(c, cast_type))
         .collect::<Vec<_>>()
         .join(", ");
     if columns.len() == 1 {
@@ -941,6 +2162,22 @@ fn concat_varchar_expr(columns: &[String]) -> String {
     } else {
         format!("CONCAT({per_column})")
     }
+}
+
+/// A whole-row content fingerprint over `columns`: `sha256` of the
+/// per-column digest-of-digests concatenation ([`concat_varchar_expr_typed`])
+/// — the same construction [`emit_fingerprint_digest_select`] uses for its
+/// `delta_digest` column, factored out so
+/// [`emit_append_only_posture_probe`] can build the identical row-content
+/// hash without re-authoring the hashing SQL. `dialect` selects the
+/// unsized string-cast type ([`probe_dialect_string_type`]) — DuckDB's
+/// `VARCHAR` or Spark's `STRING` — so the fingerprint is well-formed under
+/// either dialect, unlike [`concat_varchar_expr`]'s DuckDB-only default.
+fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
+    format!(
+        "sha256({})",
+        concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect))
+    )
 }
 
 /// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
@@ -980,7 +2217,15 @@ const KEY_NULL_SENTINEL: &str = "\u{2}NULL\u{2}";
 /// contract to preserve, and the composite-key collision the review flagged
 /// (two distinct real composite keys silently overwriting the same sidecar
 /// row because their old-scheme joined text collided) is worth closing.
-fn key_expr_for_columns(columns: &[String]) -> String {
+///
+/// `pub`, not module-private: the repair family's runtime driver
+/// (`smelt_runtime::maintenance_driver`) builds the SAME canonical
+/// `delta_key` expression over the model's own group-key columns, for the
+/// affected-key relation and its `emit_per_group_recompute` joins
+/// (`docs/outcomes/20260809-repair-family/phases/09-plan.md`) — one shape,
+/// shared by both the sidecar diff and the append-only clamped-scan path,
+/// never a second, independently-typed key expression.
+pub fn key_expr_for_columns(columns: &[String]) -> String {
     if columns.len() == 1 {
         format!(
             "COALESCE(CAST({} AS VARCHAR), '{KEY_NULL_SENTINEL}')",
@@ -1028,10 +2273,8 @@ pub fn emit_fingerprint_digest_select(
         "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
     );
     let key_expr = key_expr_for_columns(source_key);
-    let digest_expr = concat_varchar_expr(digest_columns);
-    format!(
-        "SELECT {key_expr} AS delta_key, sha256({digest_expr}) AS delta_digest FROM {source_table}"
-    )
+    let digest_expr = row_fingerprint_expr(digest_columns, MaintenanceDialect::DuckDb);
+    format!("SELECT {key_expr} AS delta_key, {digest_expr} AS delta_digest FROM {source_table}")
 }
 
 /// The synthesized external change-feed diff (`docs/specs/sources.md`
@@ -1091,6 +2334,31 @@ pub fn emit_fingerprint_sidecar_diff(
 ) -> String {
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, digest_columns, dialect);
+    sidecar_diff_over_digest_select(
+        &digest_select,
+        sidecar_table,
+        source_address,
+        projection_identity,
+        stamp,
+    )
+}
+
+/// Shared `FULL OUTER JOIN` shape both [`emit_fingerprint_sidecar_diff`]
+/// (per-row grain) and [`emit_repair_group_sidecar_diff`] (group grain, P9)
+/// build over their own `digest_select` — the comparison logic (three-way
+/// new/deleted/changed classification, the stamp filter) is identical at
+/// either grain; only what `digest_select` projects one `delta_key`/
+/// `delta_digest` pair PER (a source row, or a source-derived output group)
+/// differs. See [`emit_fingerprint_sidecar_diff`]'s own doc comment for the
+/// full rationale — this helper exists purely to keep that rationale in one
+/// place rather than duplicated across two near-identical `format!` bodies.
+fn sidecar_diff_over_digest_select(
+    digest_select: &str,
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+) -> String {
     let source_address_lit = source_address.replace('\'', "''");
     let projection_identity_lit = projection_identity.replace('\'', "''");
     let stamp_lit = stamp.replace('\'', "''");
@@ -1104,6 +2372,160 @@ pub fn emit_fingerprint_sidecar_diff(
          WHERE __smelt_sidecar.source_key IS NULL \
          OR __smelt_src.delta_key IS NULL \
          OR __smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"
+    )
+}
+
+/// The repair family's group-grain digest `SELECT`
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "Partition grain";
+/// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): one row per `group_key` value,
+/// projecting the same canonical `delta_key` expression
+/// [`emit_fingerprint_digest_select`] builds ([`key_expr_for_columns`] over
+/// `group_key`), paired with an **order-insensitive** digest over that
+/// group's own contributing source rows.
+///
+/// Each contributing row is hashed independently first, via the same
+/// tagged, NULL-safe, fixed-length per-row digest [`concat_varchar_expr`]
+/// builds for the per-row sidecar (`sha256(...)` over `digest_columns`);
+/// `hash(...)` (DuckDB's scalar hash, `UBIGINT`) turns that fixed-length
+/// hex digest into an integer, and `bit_xor(...)` combines every row's
+/// integer digest within the group — XOR is commutative and associative, so
+/// the group's digest does not depend on the order its rows are read in
+/// (the same content in a different row order digests identically), while
+/// removing, adding, or changing any one row's content still flips bits in
+/// the combined result (a collision needs two DISTINCT per-row digest sets
+/// to XOR to the same value, no likelier than the per-row sidecar's own
+/// assumed SHA-256 collision-soundness invariant `sources.md` §"The
+/// fingerprint sidecar" — "Digest" already relies on).
+///
+/// `dialect` is accepted for signature symmetry with
+/// [`emit_fingerprint_digest_select`]; only the DuckDB shape (`sha256`,
+/// `hash`, `bit_xor` are all DuckDB built-ins) is built today, matching this
+/// phase's DuckDB-only scope.
+///
+/// # Panics
+/// Panics if `group_key` or `digest_columns` is empty — mirrors
+/// [`emit_fingerprint_digest_select`]'s own contract.
+pub fn emit_repair_group_digest_select(
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !group_key.is_empty(),
+        "emit_repair_group_digest_select requires a non-empty group key for {source_table}"
+    );
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_repair_group_digest_select requires a non-empty digest column set for \
+         {source_table}"
+    );
+    let key_expr = key_expr_for_columns(group_key);
+    let group_by_list = group_key.join(", ");
+    let row_digest_expr = concat_varchar_expr(digest_columns);
+    format!(
+        "SELECT {key_expr} AS delta_key, CAST(bit_xor(hash(sha256({row_digest_expr}))) AS \
+         VARCHAR) AS delta_digest FROM {source_table} GROUP BY {group_by_list}"
+    )
+}
+
+/// The repair family's group-grain counterpart of
+/// [`emit_fingerprint_sidecar_diff`] (P9,
+/// `docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
+/// over a `mutable_snapshot` source"): the same `FULL OUTER JOIN` diff
+/// shape, over [`emit_repair_group_digest_select`]'s group-grain digest
+/// instead of the per-row one — so a group whose entire contribution
+/// departed the source still surfaces via the diff's "sidecar row with no
+/// matching source key" leg (`__smelt_src.delta_key IS NULL`), even though
+/// no source row survives to name it.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_repair_group_sidecar_diff(
+    source_table: &str,
+    group_key: &[String],
+    digest_columns: &[String],
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let digest_select =
+        emit_repair_group_digest_select(source_table, group_key, digest_columns, dialect);
+    sidecar_diff_over_digest_select(
+        &digest_select,
+        sidecar_table,
+        source_address,
+        projection_identity,
+        stamp,
+    )
+}
+
+/// A key-addressed model edge's affected-keys relation
+/// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
+/// downstream's own key columns (`KeyScope::keys`), distinct, for every
+/// upstream row whose own `KeyedUpsert` key (`upstream_keys`) is one of the
+/// already-resolved `changed_keys` — the changed-key set the group-grain
+/// fingerprint sidecar diff over the upstream's output table discovered
+/// (`diff_repair_group_sidecar_changed_keys`, `smelt-runtime`). This is the
+/// key-correspondence projection: an upstream key that changed does not
+/// necessarily equal the downstream's own key column set, so the relation
+/// re-selects the downstream's key expression over the upstream table rather
+/// than reusing the changed keys directly.
+///
+/// Same `key_expr_for_columns` canonicalisation
+/// [`repair_affected_keys_select`]/[`repair_candidate_select`] (`smelt-
+/// runtime`) use for the resulting `delta_key` column, so this relation
+/// composes into the same repair-family candidate-select/write emitters
+/// unchanged — only how the affected-key relation itself is discovered
+/// differs from the ordinary clamped-scan repair path.
+///
+/// `changed_keys` is a literal `VARCHAR` value list (already resolved by the
+/// caller's sidecar-diff read, not opaque SQL) — the same shape
+/// [`super::super::maintenance_driver`]'s `repair_keys_literal_select`-style
+/// callers pass. An empty `changed_keys` yields a well-typed EMPTY relation
+/// (`WHERE FALSE`), never an unrestricted `SELECT DISTINCT`: a run
+/// discovering no changed upstream keys touches nothing.
+///
+/// `dialect` is accepted for signature symmetry with this module's other
+/// repair-family emitters; only the DuckDB shape is built today, matching
+/// this phase's DuckDB-only discovery-route scope.
+///
+/// # Panics
+/// Panics if `upstream_keys` or `downstream_keys` is empty — mirrors
+/// [`emit_repair_group_digest_select`]'s own contract.
+pub fn emit_key_addressed_affected_keys_select(
+    upstream_table: &str,
+    upstream_keys: &[String],
+    downstream_keys: &[String],
+    changed_keys: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !upstream_keys.is_empty(),
+        "emit_key_addressed_affected_keys_select requires a non-empty upstream key for \
+         {upstream_table}"
+    );
+    assert!(
+        !downstream_keys.is_empty(),
+        "emit_key_addressed_affected_keys_select requires a non-empty downstream key for \
+         {upstream_table}"
+    );
+    let downstream_key_expr = key_expr_for_columns(downstream_keys);
+    if changed_keys.is_empty() {
+        return format!(
+            "SELECT {downstream_key_expr} AS delta_key FROM {upstream_table} WHERE FALSE"
+        );
+    }
+    let upstream_key_expr = key_expr_for_columns(upstream_keys);
+    let literals = changed_keys
+        .iter()
+        .map(|k| format!("'{}'", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT DISTINCT {downstream_key_expr} AS delta_key FROM {upstream_table} WHERE \
+         {upstream_key_expr} IN ({literals})"
     )
 }
 
@@ -1467,6 +2889,132 @@ mod fingerprint_sidecar_tests {
             "WHERE source_address = 'smelt.sources.dim_users' AND projection_identity = \
              'cols:name' AND stamp = 'v2:cols:name:sha256:newhash'"
         ));
+    }
+
+    /// Run [`emit_repair_group_digest_select`] over `source_table` (a
+    /// derived-table expression) against a real DuckDB and return the
+    /// `(delta_key, delta_digest)` pairs it produces, sorted by key — used
+    /// by the group-digest order-insensitivity and vanished-group tests
+    /// below to prove the FIX's actual SQL output against real DuckDB
+    /// semantics, not merely string-literal expectations.
+    fn group_digests(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        group_key: &[String],
+        digest_columns: &[String],
+    ) -> Vec<(String, String)> {
+        let sql = emit_repair_group_digest_select(
+            source_table,
+            group_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        let mut stmt = conn.prepare(&sql).expect("prepare group digest select");
+        let mut rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query group digest select")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect group digest rows");
+        rows.sort();
+        rows
+    }
+
+    /// P9 test 1 (`docs/outcomes/20260809-repair-family/phases/09-plan.md`):
+    /// the group digest is an order-insensitive aggregate — inserting the
+    /// same group's rows in a different order must not change its digest —
+    /// while removing one of the group's rows must.
+    #[test]
+    fn repair_group_digest_select_is_order_insensitive() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let group_key = vec!["customer_id".to_string()];
+        let digest_columns = vec!["amount".to_string()];
+
+        let forward = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 10), (1, 20), (1, 30)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        let shuffled = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 30), (1, 10), (1, 20)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        assert_eq!(
+            forward, shuffled,
+            "the same group's rows in a different order must digest identically"
+        );
+
+        let one_row_deleted = group_digests(
+            &conn,
+            "(SELECT * FROM (VALUES (1, 10), (1, 20)) AS t(customer_id, amount))",
+            &group_key,
+            &digest_columns,
+        );
+        assert_ne!(
+            forward, one_row_deleted,
+            "deleting one of the group's rows must change its digest"
+        );
+    }
+
+    /// P9 test 2: the group-grain sidecar diff over a group-grain partition
+    /// reports a group present in the sidecar and absent from the source —
+    /// the `__smelt_src.delta_key IS NULL` leg — with the vanished group's
+    /// key value intact, proving a wholly-deleted group is still
+    /// discoverable via the stored comparandum.
+    #[test]
+    fn repair_group_digest_diff_reports_a_vanished_group() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_table = "(SELECT * FROM (VALUES (1, 10)) AS t(customer_id, amount))";
+        let group_key = vec!["customer_id".to_string()];
+        let digest_columns = vec!["amount".to_string()];
+
+        // Customer 1's digest under the CURRENT source content — seeded
+        // into the sidecar as an already-matching comparandum, so it must
+        // NOT surface as changed; only customer 2 (present in the sidecar,
+        // absent from the source) should.
+        let customer_1_digest = group_digests(&conn, source_table, &group_key, &digest_columns)
+            .into_iter()
+            .find(|(key, _)| key == "1")
+            .expect("customer 1's digest")
+            .1;
+        conn.execute_batch(&format!(
+            "CREATE TABLE sidecar (source_address VARCHAR, projection_identity VARCHAR, \
+             source_key VARCHAR, digest VARCHAR, stamp VARCHAR); \
+             INSERT INTO sidecar VALUES \
+             ('src', 'repair:group=customer_id:digest=amount', '1', '{customer_1_digest}', \
+             'stamp1'), \
+             ('src', 'repair:group=customer_id:digest=amount', '2', \
+             'stale-digest-for-vanished-group', 'stamp1');"
+        ))
+        .expect("seed sidecar: customer 1 matches current content, customer 2 has vanished");
+
+        let sql = emit_repair_group_sidecar_diff(
+            source_table,
+            &group_key,
+            &digest_columns,
+            "sidecar",
+            "src",
+            "repair:group=customer_id:digest=amount",
+            "stamp1",
+            MaintenanceDialect::DuckDb,
+        );
+        let mut stmt = conn.prepare(&sql).expect("prepare group sidecar diff");
+        let keys: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query group sidecar diff")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect diff keys");
+        assert_eq!(
+            keys,
+            vec!["2".to_string()],
+            "customer 2's group vanished entirely from the source — the diff must still report \
+             it, sourced from the sidecar's own stored comparandum, while customer 1's unchanged \
+             group must not surface: {keys:?}"
+        );
     }
 }
 
@@ -1907,6 +3455,100 @@ mod count_preservation_probe_tests {
              COUNT(*) FROM (SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON \
              e.user_id = u.user_id WHERE e.event_date >= '2026-07-01') AS __smelt_enriched) AS \
              enriched_count"
+        );
+    }
+}
+
+#[cfg(test)]
+mod per_group_recompute_tests {
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["customer_id".to_string()]
+    }
+
+    #[test]
+    fn emit_per_group_recompute_deletes_affected_keys_and_inserts_slice_recompute() {
+        let group = emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &key(),
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.transactional);
+        let sqls: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(sqls.len(), 5);
+        assert!(sqls[0].starts_with("CREATE TEMP TABLE __staged AS SELECT * FROM"));
+        assert!(sqls[1].starts_with("INSERT INTO __staged SELECT customer_id, SUM(amount)"));
+        assert!(
+            sqls[2].starts_with("DELETE FROM main.customer_totals USING"),
+            "{}",
+            sqls[2]
+        );
+        assert!(
+            sqls[3].starts_with("INSERT INTO main.customer_totals SELECT s.* FROM __staged"),
+            "{}",
+            sqls[3]
+        );
+        assert_eq!(sqls[4], "DROP TABLE __staged");
+    }
+
+    #[test]
+    fn emit_per_group_recompute_is_key_restricted() {
+        let group = emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &key(),
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::DuckDb,
+        );
+        let delete = &group.statements[2].sql;
+        let insert = &group.statements[3].sql;
+        assert!(
+            delete.contains("__smelt_affected") && delete.contains("customer_id"),
+            "DELETE must be predicated on the affected-key relation: {delete}"
+        );
+        assert!(
+            insert.contains("__smelt_affected") && insert.contains("customer_id"),
+            "INSERT must be predicated on the affected-key relation: {insert}"
+        );
+        for sql in [delete.as_str(), insert.as_str()] {
+            assert!(
+                sql.contains("__smelt_affected"),
+                "every write statement touching main.customer_totals must be restricted to the \
+                 affected-key relation, never unrestricted: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn emit_per_group_recompute_repeats_identically() {
+        let build = || {
+            emit_per_group_recompute(
+                "main.customer_totals",
+                "__staged",
+                &key(),
+                "SELECT customer_id FROM delta",
+                "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+                MaintenanceDialect::DuckDb,
+            )
+        };
+        assert_eq!(build(), build());
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty row identity")]
+    fn emit_per_group_recompute_panics_on_empty_key() {
+        emit_per_group_recompute(
+            "main.customer_totals",
+            "__staged",
+            &[],
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id FROM orders_slice",
+            MaintenanceDialect::DuckDb,
         );
     }
 }
