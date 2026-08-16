@@ -72,7 +72,7 @@ run shape.
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
-| 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
+| 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | planned |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
@@ -353,6 +353,27 @@ run shape.
   `mutation_sensitivity` source as the trigger address, since `derive_guarantee_ledger` has no
   per-cell context to resolve against — documented as a known under-report for a multi-trigger
   group with differing per-cell `deferral` overrides, never a fabricated merge.
+
+- 2026-08-16 (phase 11 planning): no reshape of the rows — phase 10's summary confirms row 11 is
+  unaffected by it, and the walk gap is exactly as phase 2 recorded. Three things pinned so the
+  implementer does not rediscover them. (1) The defect is shared: `scope_group_by_alignment`
+  (`analysis/mod.rs`) compares raw `GROUP BY` key text to the partition item's *expression*, so a
+  scope grouping by the partition column's alias reports `NotAligned` — the same false negative in
+  a second consumer. Both call sites get one shared pure resolver rather than two copies of the
+  alias rule, so the walk-rule single-ownership posture holds. (2) The resolution rule is
+  user-visible correctness (a family of ordinary grouped models stops being refused), so it gets a
+  spec sentence in `model_properties.md` §"Region row identity" plus the alignment clause in
+  `incremental_shapes.md` §"Safety checks" before wiring — phase 5/7's precedent. (3) The
+  fail-closed leg does **not** change: a key resolving to neither expression text, alias, nor
+  ordinal still yields `Grain::unkeyed()` for the scope; widening only covers keys the engines
+  themselves resolve. Also scoped out explicitly: `derive_affected_keys` returning every grain
+  column into `KeyScope` (phase 2's second flagged sharp edge) is NOT touched here — if the
+  testkit's `PartitionOverKeyedId` workaround still cannot be reverted after the walk fix, the
+  phase records the real remaining reason in the comments rather than chasing it.
+- 2026-08-16: phase 10's summary flagged that `Refusal::ReachNotDerivable`,
+  `RepairKeysNotDiscoverable`, and `RepairSliceUnbounded` have no `DiagnosticCode` variant; that
+  residue is folded into row 13's close-out sweep rather than getting its own row (it is a
+  catalogue alignment, not outcome-criterion work).
 
 ## Blocked
 
