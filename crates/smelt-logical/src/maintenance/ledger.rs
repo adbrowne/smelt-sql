@@ -214,8 +214,8 @@ impl RefusalSummary {
 pub fn render_refusal(refusal: &Refusal) -> RefusalSummary {
     match refusal {
         Refusal::SkeletonColumnAdded { column } => RefusalSummary {
-            code: "MaintenanceSkeletonColumnAdded".to_string(),
-            message: format!("column '{column}' was added in a skeleton position"),
+            code: "MaintenanceSkeletonChanged".to_string(),
+            message: format!("column '{column}' was added or changed in a skeleton position"),
         },
         Refusal::ScanUnbounded { source, why } => RefusalSummary {
             code: "MaintenanceScanUnbounded".to_string(),
@@ -390,5 +390,15 @@ mod tests {
         let summary = render_refusal(&locality_refusal);
         assert_eq!(summary.code, "KeyedForbidsTimeseries");
         assert!(!summary.message.starts_with("KeyedForbidsTimeseries"));
+    }
+
+    #[test]
+    fn skeleton_refusal_names_the_renamed_code() {
+        let refusal = Refusal::SkeletonColumnAdded {
+            column: "user_id".to_string(),
+        };
+        let summary = render_refusal(&refusal);
+        assert_eq!(summary.code, "MaintenanceSkeletonChanged");
+        assert!(summary.render().starts_with("MaintenanceSkeletonChanged: "));
     }
 }

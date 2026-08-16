@@ -424,8 +424,11 @@ fn column_added_trigger_derived_from_deployed_schema() {
 /// column that occupies a `GROUP BY` key position is a grain change, never
 /// a column backfill (EX-39) — the plan refuses with
 /// `Refusal::SkeletonColumnAdded`, which `smelt-db`'s refusal→diagnostic
-/// mapping surfaces as `MaintenanceSkeletonColumnAdded`
-/// (`crates/smelt-db/src/lib.rs`'s `file_diagnostics` match arm).
+/// mapping surfaces as `MaintenanceSkeletonChanged`
+/// (`crates/smelt-db/src/lib.rs`'s `file_diagnostics` match arm). That
+/// mapping is not exercised here — `maintenance_plan_diagnostics` always
+/// passes an empty deployed-column set (`docs/specs/definition_deltas.md`
+/// §Known Divergences), so this test drives the pure derivation directly.
 #[test]
 fn column_added_trigger_skeleton_position_refuses() {
     use smelt_core::config::{Grain, RefreshStrategy};

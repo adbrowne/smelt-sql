@@ -110,3 +110,68 @@ fn every_diagnostic_code_is_catalogued() {
         );
     }
 }
+
+/// Standing ratchet (mirrors `rebuild_dry_run.rs`'s `no_backbuild_verb_in_user_docs`):
+/// the retired skeleton-change diagnostic-code name must never reappear in
+/// `crates/`, `docs/specs/`, or `docs-site/docs/`. `docs/plans/` and
+/// `docs/outcomes/` are historical and excluded. The retired name is built
+/// from parts so this test's own source does not trip the scan it performs.
+#[test]
+fn no_old_skeleton_code_name_in_specs_or_code() {
+    let repo_root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+    let repo_root = std::path::Path::new(repo_root)
+        .canonicalize()
+        .expect("repo root exists");
+
+    let old_name = ["MaintenanceSkeleton", "ColumnAdded"].concat();
+    let mut offenders = Vec::new();
+    for dir in ["crates", "docs/specs", "docs-site/docs"] {
+        let root = repo_root.join(dir);
+        for entry in walkdir(&root) {
+            if entry.ends_with("tests/integration/diagnostics_catalogue.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&entry).unwrap_or_default();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains(&old_name) {
+                    offenders.push(format!("{}:{}: {}", entry.display(), i + 1, line));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "found retired diagnostic-code name `{old_name}` still referenced:\n{}",
+        offenders.join("\n")
+    );
+}
+
+fn walkdir(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n == "target" || n == "node_modules" || n == "site")
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}

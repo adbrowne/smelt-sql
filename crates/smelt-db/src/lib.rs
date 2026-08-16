@@ -2675,11 +2675,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
                 crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
                     (
-                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
+                        DiagnosticCode::MaintenanceSkeletonChanged,
                         format!(
                             "column '{column}' occupies a row-membership/identity (skeleton) \
                          position — a grain change, never a column backfill (EX-39, \
-                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                         docs/specs/definition_deltas.md §\"Skeleton changes are a new relation\")",
                         ),
                     )
                 }

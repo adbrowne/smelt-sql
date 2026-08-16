@@ -249,7 +249,7 @@ collapsing the whole model to `General`.
 
 ### Definition-change column classification
 
-`classify_definition_change(added_column, sql, ctx)` composes three of the proofs above into the verdict `definition_deltas.md` §"The verdict per column group" needs: skeleton-role extraction decides whether the added column lands in a skeleton position (`SkeletonAdd` — refused, a grain change, never a column backfill); if not, the additive-only model-diff confirms the change is a pure addition; and per-column provenance decides whether the new column's expression is a pure function of already-stored columns (`PureBackfill`, admits an in-place `UPDATE`, no upstream read) or reaches upstream (`UpstreamRederive`, admits a column-scoped `MERGE`, keyed where the source is keyed). The plan-level policy — which technique each verdict maps to, group convergence, the `MaintenanceSkeletonColumnAdded` diagnostic — stays in `definition_deltas.md`; this row is the classification itself.
+`classify_definition_change(added_column, sql, ctx)` composes three of the proofs above into the verdict `definition_deltas.md` §"The verdict per column group" needs: skeleton-role extraction decides whether the added column lands in a skeleton position (`SkeletonAdd` — refused, a grain change, never a column backfill); if not, the additive-only model-diff confirms the change is a pure addition; and per-column provenance decides whether the new column's expression is a pure function of already-stored columns (`PureBackfill`, admits an in-place `UPDATE`, no upstream read) or reaches upstream (`UpstreamRederive`, admits a column-scoped `MERGE`, keyed where the source is keyed). The plan-level policy — which technique each verdict maps to, group convergence, the `MaintenanceSkeletonChanged` diagnostic — stays in `definition_deltas.md`; this row is the classification itself.
 
 ### Skeleton-source closure
 
@@ -360,7 +360,7 @@ recorded here — history lives in git and §References → Plans.
   it, so a locality-admitted keyed model's clamps still carry the assumed write-footprint mirror
   into propagation. Cross-ref `incremental_models.md` §Known Divergences "The contract, plan, and
   graph layer".
-- **`MaintenanceSkeletonColumnAdded` is not yet surfaced as an LSP/CLI diagnostic ahead of a run**
+- **`MaintenanceSkeletonChanged` is not yet surfaced as an LSP/CLI diagnostic ahead of a run**
   — reachable from the pure derivation and from `smelt-runtime`'s maintenance driver, but
   `smelt-db`'s own diagnostics/`smelt explain` path always derives an empty trigger set. Cross-ref
   `incremental_models.md` §Known Divergences "The contract, plan, and graph layer".

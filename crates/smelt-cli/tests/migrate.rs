@@ -203,6 +203,44 @@ fn migrate_presents_rebuild_for_skeleton_change() {
 }
 
 #[test]
+fn skeleton_change_plan_names_the_diagnostic_code() {
+    let (_tmp, project_dir) = stage_fixture();
+
+    let build_output = run_build(&project_dir);
+    assert!(
+        build_output.status.success(),
+        "initial build failed: stderr={}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    // Change the GROUP BY grain — a skeleton change (G1), never targetable.
+    std::fs::write(
+        project_dir.join("models/orders.sql"),
+        "SELECT id, SUM(amount) AS amount FROM (VALUES (1, 100.0), (2, 200.0)) AS t(id, amount) \
+         GROUP BY id\n",
+    )
+    .unwrap();
+
+    let output = run_migrate(&project_dir, "orders");
+    assert_eq!(output.status.code(), Some(3));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("MaintenanceSkeletonChanged"),
+        "expected the diagnostic code in the human render:\n{stdout}"
+    );
+
+    let json_output = run_migrate_args(&project_dir, "orders", &["--json"]);
+    assert_eq!(json_output.status.code(), Some(3));
+    let json_stdout = String::from_utf8_lossy(&json_output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|e| panic!("not valid JSON: {e}\n{json_stdout}"));
+    let groups = json["groups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["verdict"], "skeleton_change");
+    assert_eq!(groups[0]["diagnostic_code"], "MaintenanceSkeletonChanged");
+}
+
+#[test]
 fn migrate_on_unchanged_model_reports_eclipsed() {
     let (_tmp, project_dir) = stage_fixture();
 

@@ -463,7 +463,7 @@ impl Backend {
                 DbCode::GrainAssertionMismatch => "grain-assertion-mismatch",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
-                DbCode::MaintenanceSkeletonColumnAdded => "maintenance-skeleton-column-added",
+                DbCode::MaintenanceSkeletonChanged => "maintenance-skeleton-changed",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
                 DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
                 DbCode::MaintenanceWritePatternUnavailable => {

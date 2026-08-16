@@ -84,7 +84,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
-| 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | planned |
+| 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
 | 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | pending |
 | 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
 | 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |

@@ -567,7 +567,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 | `MaintenanceRepairKeysNotDiscoverable` | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set; names the changed input and why the delta yields no key set (§"The repair family"). |
 | `MaintenanceRepairSliceUnbounded` | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked; names the source and the unbounded reach (§"The repair family"). |
 
-`MaintenanceSkeletonColumnAdded` — a definition delta adding or changing a field in a skeleton
+`MaintenanceSkeletonChanged` — a definition delta adding or changing a field in a skeleton
 position — is owned by `definition_deltas.md` §Surface.
 
 **Contract-lattice codes.**
@@ -2024,7 +2024,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
   poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
   assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonColumnAdded` is reachable (unit coverage, and via `smelt-runtime`'s
+  `MaintenanceSkeletonChanged` is reachable (unit coverage, and via `smelt-runtime`'s
   maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
   but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
   diagnostics/`smelt explain` path always derives an empty trigger set);

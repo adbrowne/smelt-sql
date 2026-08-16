@@ -951,7 +951,7 @@ pub enum MaintenanceRefusal {
     LocalityNotEstablished {
         message: String,
     },
-    /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
+    /// `MaintenanceSkeletonChanged` — an added column occupies a
     /// row-membership/identity (skeleton) position, a grain change rather
     /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
     SkeletonColumnAdded {

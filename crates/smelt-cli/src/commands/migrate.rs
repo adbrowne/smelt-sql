@@ -383,7 +383,20 @@ fn verdict_label(verdict: Verdict) -> &'static str {
         Verdict::Eclipsed => "eclipsed",
         Verdict::BackfillInPlace => "backfill in place",
         Verdict::ReDerive => "re-derive",
-        Verdict::SkeletonChange => "skeleton change (rebuild required)",
+        Verdict::SkeletonChange => {
+            "skeleton change (rebuild required) — MaintenanceSkeletonChanged"
+        }
+    }
+}
+
+/// The `DiagnosticCode` a group's verdict names, if any
+/// (`docs/specs/diagnostics.md`'s `MaintenanceSkeletonChanged` catalogue
+/// row: `smelt migrate`'s `SkeletonChange` verdict names the same code the
+/// maintenance driver's refusal does).
+fn verdict_diagnostic_code(verdict: Verdict) -> Option<&'static str> {
+    match verdict {
+        Verdict::SkeletonChange => Some("MaintenanceSkeletonChanged"),
+        Verdict::Eclipsed | Verdict::BackfillInPlace | Verdict::ReDerive => None,
     }
 }
 
@@ -434,6 +447,7 @@ fn group_json(group: &ColumnGroupPlan) -> serde_json::Value {
     serde_json::json!({
         "label": group.label,
         "verdict": verdict_code(group.verdict),
+        "diagnostic_code": verdict_diagnostic_code(group.verdict),
         "candidates": group.candidates.iter().map(candidate_json).collect::<Vec<_>>(),
         "refusals": group.refusals.iter().map(|r| serde_json::json!({
             "atom": r.atom,

@@ -883,8 +883,9 @@ pub enum DiagnosticCode {
     /// ColumnAdded` names a column that occupies a row-membership/identity
     /// (skeleton) position — a grain change, never a column backfill
     /// (EX-39, `definition_deltas.md` §"The verdict per column group").
-    /// Anchored at the model SQL body start.
-    MaintenanceSkeletonColumnAdded,
+    /// Also names `smelt migrate`'s `SkeletonChange` verdict — one code
+    /// spans both mechanisms. Anchored at the model SQL body start.
+    MaintenanceSkeletonChanged,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`

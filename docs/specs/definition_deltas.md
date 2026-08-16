@@ -422,8 +422,8 @@ refines the plan-hash decision above rather than introducing a second one.
 (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §7.)
 
 **The skeleton-change diagnostic is one code, not a split add/changed pair.**
-`MaintenanceSkeletonColumnAdded` is renamed to `MaintenanceSkeletonChanged`, covering a
-skeleton-position field that is added or changed alike. Both trigger the identical refusal and
+`MaintenanceSkeletonChanged` covers a skeleton-position field that is added or changed alike, one
+code for both directions. Both trigger the identical refusal and
 the identical remediation (a rebuild is the only honest plan — §"Skeleton changes are a new
 relation"), so a split pair would carry two codes for one decision path. This matches how every
 other `Maintenance*` code names the refused condition rather than the trigger that produced it
@@ -482,13 +482,12 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   destructive candidate as a group's first candidate refuses to execute that group (and, by the
   all-groups-admitted-first rule, the whole plan) rather than running it unverified. Tracked:
   `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
-- **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
-  `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
-  the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
-  add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
-  sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
-  `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
-  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 8.
+- **The diagnostic code is not yet surfaced ahead of a run.** `MaintenanceSkeletonChanged` is the
+  shipped `DiagnosticCode` variant and covers both mechanisms (the maintenance driver's refusal
+  and `smelt migrate`'s skeleton-change verdict), but `smelt-db`'s Salsa query has no
+  deployed-schema input to diff against — the code never fires ahead of a run for the LSP or
+  `smelt explain`. Tracked: `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`
+  phase 9.
 - **The pending-delta run refusal is not implemented.** §Detection's "`smelt run` refuses to fold
   data deltas while a non-eclipsed definition delta is pending" is not yet enforced: today a
   windowed or incrementally-maintained run under changed SQL folds data deltas under the new SQL
