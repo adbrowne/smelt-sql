@@ -68,7 +68,7 @@ run shape.
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
-| 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | pending |
+| 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | planned |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
 | 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
@@ -235,6 +235,23 @@ run shape.
   the scheduler-currency bullet's live-resolution parenthetical loses its observed-delta clause
   (key-value live resolution stays open, row 7). All five planned tests pass; no reshape of the
   phase table.
+
+- 2026-08-16 (phase 7 planning): no reshape — phase 6's summary flagged nothing that changes
+  row 7's scope, and its "ask the planner module for the key list" precedent is exactly the
+  shape this phase reuses. Three things pinned so the implementer does not rediscover them.
+  (1) The sidecar partition identity is per `(upstream, consumer)` — the identity hashes the
+  *consumer's* digest projection — so an upstream's seed is the **union** of its consumers'
+  diffs; that composition rule is user-visible correctness and gets a spec sentence in
+  §"Keyed dirt-sets and the narrowed refusal" before it is wired, matching phase 5's precedent
+  for the restriction-union rule. (2) The upstream identity formula
+  (`smelt.models.{edge}` + the upstream's own per-model target schema) is currently inline in
+  `dispatch_key_addressed_model_edge`; the seed resolver must call a shared extraction of it,
+  because a divergence silently misses the sidecar partition rather than failing loudly.
+  (3) The plan-time read must not refresh any sidecar — the refresh stays inside the write
+  transaction, so the run-time diff re-derives the same set and the dispatch union only widens.
+  Also confirmed the non-DuckDB leg has a spec home already (§"Unresolved seeds"): an
+  unsupported-dialect diff becomes `KeyValues::Unresolved`, not a run failure and not an empty
+  resolved set.
 
 ## Blocked
 
