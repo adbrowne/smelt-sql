@@ -187,18 +187,23 @@ struct RunArgs {
     /// caller-declared per-source deltas (`--source`/`--landed`), computed
     /// through the maintenance-plan propagation graph
     /// (`incremental_models.md` §"The graph layer"). Requires at least one
-    /// `--source`/`--landed` pair.
+    /// `--source`.
     #[arg(long = "since-upstream")]
     since_upstream: bool,
 
     /// A source address whose landed delta is declared via the paired
     /// `--landed` flag (repeatable — the Nth `--source` pairs with the Nth
-    /// `--landed`). Only meaningful with `--since-upstream`.
+    /// `--landed` positionally, or `--landed <address>=<start>..<end>` pairs
+    /// by address). A `--source` with no paired `--landed` resolves from its
+    /// persisted watermark (`run_state.md` §"Per-source watermark"). Only
+    /// meaningful with `--since-upstream`.
     #[arg(long = "source", requires = "since_upstream")]
     since_upstream_source: Vec<String>,
 
-    /// The landed interval for the paired `--source`: `<start>..<end>`
-    /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
+    /// The landed interval for the paired `--source`: bare `<start>..<end>`
+    /// (positional pairing) or `<address>=<start>..<end>` (pairing by
+    /// address) — ISO `YYYY-MM-DD`, end exclusive. Repeatable; see
+    /// `--source`.
     #[arg(long = "landed", requires = "since_upstream")]
     since_upstream_landed: Vec<String>,
 

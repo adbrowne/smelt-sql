@@ -42,6 +42,7 @@ pub mod select;
 pub mod source_probes;
 pub mod transformer;
 pub mod types;
+pub mod watermark;
 pub mod windowing;
 
 pub use backfill::targeted_column_backfill;

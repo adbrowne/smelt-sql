@@ -456,11 +456,16 @@ contract:
   those per-source deltas through the edges and runs exactly the propagated per-edge regions
   with their trigger cells (§"The graph layer"). `--source` accepts a declared source or an
   upstream maintained model (a model's landed delta is the output window a completed run
-  wrote). A source named with neither a matching `--landed` nor a persisted watermark
-  propagates nothing, and the refusal names the missing watermark — never a silent no-op and
-  never an implicit full-table fallback. Opt-in; the intended default
-  posture once trusted. Prints the **dirty set** — the per-model regions propagation says must
-  run (§"The graph layer") — before acting.
+  wrote). A `--landed` value is spelled either bare `<start>..<end>`, paired positionally with
+  the `--source` at the same index (equal counts required), or address-qualified
+  `<address>=<start>..<end>`, pairing by address with no positional constraint; the two
+  spellings must not be mixed in one invocation. A `--source` with no paired `--landed`
+  resolves from its watermark. A source named with neither a matching `--landed` nor a
+  persisted watermark makes the run fail with a named error identifying that source and the
+  missing watermark (pointing at `--landed`) — never a silent per-source skip that would
+  quietly under-propagate, and never an implicit full-table fallback. Opt-in; the intended
+  default posture once trusted. Prints the **dirty set** — the per-model regions propagation
+  says must run (§"The graph layer") — before acting.
 - `smelt run --auto` — process only the intervals the run-state interval ledger
   (`run_state.md`) does not yet cover for the selected models; the keyed grain's staleness
   interaction is `incremental_shapes.md` §"Interaction with `--auto` / staleness".
@@ -1945,10 +1950,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
   day-intervals in most respects: the graph layer's keyed channel now carries resolved key
   *values*, not just key columns and provenance (§"Keyed dirt-sets and the narrowed refusal"),
-  but only when a caller feeds them in as a seed; and cross-model runs require the operator to state
-  what landed upstream on the command line, because no per-source watermark is yet persisted (the
-  watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no run yet writes or
-  reads one). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:
+  but only when a caller feeds them in as a seed; cross-model runs no longer require the operator
+  to state what landed upstream on the command line for a source a prior run already covered — the
+  per-source watermark (`run_state.md` §"Per-source watermark") is now written and read — but
+  `--landed` stays required for a source no completed run has yet covered (no watermark to resolve
+  from). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:
   a clockless `keyed upsert` upstream feeding a `grain: partition` downstream runs the repair
   family's `PerGroupRecompute` cell, not the ordinary route, and several key-addressed edges into
   one downstream compose — each dispatches in the same tick rather than only the first. The
@@ -2026,11 +2032,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
   self-referential model and a bare-keyed model with readers each refuse the whole-workspace
   graph); no `--select` scoping exists.
-- **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
-  landed deltas on the command line; the per-source watermark is pinned as surface
-  (`run_state.md` §"Per-source watermark") but no run yet persists or reads one, so `--landed`
-  is not yet optional in practice. Automatic **snapshot diffing** of an external source with
-  no native delta feed remains genuinely future work (§Future Extensions).
+- **Automatic snapshot diffing for `--since-upstream` remains future work.** `--landed` is
+  optional once a persisted watermark exists for a source (`run_state.md` §"Per-source
+  watermark"); the residue is an external source with no native delta feed and no prior smelt
+  run over it — its delta must still be declared explicitly, since there is nothing yet to diff
+  against (§Future Extensions).
 - **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key
   footprint chaining across history;
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).

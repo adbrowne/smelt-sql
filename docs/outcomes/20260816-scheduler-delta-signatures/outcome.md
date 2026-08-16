@@ -69,7 +69,7 @@ run shape.
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
-| 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | planned |
+| 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | done |
 | 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
 | 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
 | 11 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
@@ -280,6 +280,18 @@ run shape.
   sweep runs one `execute_project` per model and is therefore selective by construction, so it
   never advances a watermark — only a run completing every consumer of the source does, exactly
   as §Design "per source, not per `(source, consumer)`" intends.
+
+- 2026-08-16 (phase 8 implemented): `SourceLanding::watermark` + `LandedDeltaStore::
+  watermark`/`advance_watermark` land in `smelt-state::landed_deltas`; pure
+  `smelt-runtime::watermark::watermark_advances` (every consumer of a source completed this run)
+  is called at `execute.rs`'s single success path, deriving `consumers_by_source` from the SAME
+  `build_forward_graph` propagation already builds. `propagation::pair_source_deltas_with_
+  watermarks` adds the two `--landed` spellings (bare positional / `<address>=<start>..<end>`
+  qualified) and resolves an unpaired source from its watermark, refusing by name when neither
+  exists; `pair_source_deltas` keeps today's behaviour exactly, delegating with no store.
+  `run.rs::run_since_upstream` now loads the landed-delta store and calls the watermark-aware
+  pairing. Spec + docs-site updated; both flagged Known Divergences bullets narrowed to the
+  residue that remains (automatic snapshot diffing only). No reshape of the phase table.
 
 ## Blocked
 

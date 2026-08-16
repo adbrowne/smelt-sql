@@ -1,10 +1,10 @@
 #![cfg(feature = "duckdb")]
 //! MP15 (`docs/plans/20260707-maintenance-plan-impl.md`): `smelt run
-//! --since-upstream` — forward propagation from caller-declared per-source
-//! deltas (`incremental_models.md` §CLI, §"The graph layer"). Per the ratified
-//! decision (2026-07-10, "Blocked phases"), the delta source is explicit
-//! (`--source <address> --landed <start>..<end>`, repeatable) — no
-//! `smelt-state` watermark, no automatic recorded-state diffing.
+//! --since-upstream` — forward propagation from per-source deltas
+//! (`incremental_models.md` §CLI, §"The graph layer"): either declared
+//! directly (`--source <address> --landed <start>..<end>`, repeatable) or,
+//! for a source with no paired `--landed`, resolved from its persisted
+//! `smelt-state` watermark (`run_state.md` §"Per-source watermark").
 //!
 //! Fixture: `silver` reads two CLOCKED append-only sources (`bronze`,
 //! `aux`), joined via an explicit derivable window predicate (`aux.d2
@@ -942,5 +942,88 @@ fn since_upstream_resolves_a_live_non_empty_keyed_restriction() {
         downstream_total(&db_path, 2),
         "70.00",
         "user 2's row must be unchanged — it was never in the resolved key set"
+    );
+}
+
+/// Persisted per-source watermark (`docs/specs/run_state.md` §"Per-source
+/// watermark"): a plain `smelt run` over a window advances every source
+/// `silver` consumes (`bronze`); a following `--since-upstream --source
+/// sources.bronze` with **no** `--landed` resolves the delta from that
+/// watermark instead of requiring the operator to restate what landed.
+#[test]
+fn full_run_then_since_upstream_without_landed_propagates() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_sources(&db_path);
+    // The watermark is written under `.smelt/`, so this fixture (unlike the
+    // rest of this file's `--landed`-driven tests) needs a `state.mode` that
+    // persists it — `stage_workspace`'s default `smelt.yml` declares none,
+    // which defaults to `stateless` (writes nothing).
+    write(
+        &project_dir,
+        "smelt.yml",
+        "name: since_upstream_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\nstate:\n  mode: environments\n",
+    );
+
+    let full = run_smelt(
+        &project_dir,
+        &["--start", "2026-01-01", "--end", "2026-01-11"],
+    );
+    assert!(
+        full.status.success(),
+        "full run over the seeded window must succeed: stderr={}",
+        String::from_utf8_lossy(&full.stderr)
+    );
+
+    let output = run_smelt(
+        &project_dir,
+        &["--since-upstream", "--source", "sources.bronze"],
+    );
+    assert!(
+        output.status.success(),
+        "watermark-resolved --since-upstream must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dirty set (--since-upstream):"),
+        "must print the dirty set before acting: {stdout}"
+    );
+    assert!(
+        stdout.contains("silver <- bronze"),
+        "the watermark-resolved delta must propagate to silver: {stdout}"
+    );
+}
+
+/// A `--source` with neither a paired `--landed` nor a persisted watermark
+/// is a named run error — never a silent per-source skip that would quietly
+/// under-propagate (`run_state.md` §"Per-source watermark": "the refusal
+/// names the missing watermark").
+#[test]
+fn since_upstream_without_landed_or_watermark_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_sources(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &["--since-upstream", "--source", "sources.bronze"],
+    );
+    assert!(
+        !output.status.success(),
+        "must refuse when neither --landed nor a persisted watermark exists"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bronze"),
+        "error must name the source: {stderr}"
+    );
+    assert!(
+        stderr.contains("watermark"),
+        "error must name the missing watermark: {stderr}"
     );
 }

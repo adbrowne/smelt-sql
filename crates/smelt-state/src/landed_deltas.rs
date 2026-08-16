@@ -52,6 +52,12 @@ pub struct SourceLanding {
     /// Sorted, non-overlapping covered intervals — same shape and merge
     /// convention as `intervals::ModelIntervals::covered_intervals`.
     pub covered_intervals: Vec<Interval>,
+    /// The per-source propagation watermark (`docs/specs/run_state.md`
+    /// §"Per-source watermark"): the point bound forward propagation has
+    /// already consumed through for this source. `None` until a run
+    /// advances it (every consumer of the source completed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watermark: Option<String>,
 }
 
 impl SourceLanding {
@@ -120,6 +126,25 @@ impl LandedDeltaStore {
     /// Get the recorded coverage for `source_address`, read-only.
     pub fn get(&self, source_address: &str) -> Option<&SourceLanding> {
         self.sources.get(source_address)
+    }
+
+    /// The recorded propagation watermark for `source_address`, if a prior
+    /// run has advanced it.
+    pub fn watermark(&self, source_address: &str) -> Option<&str> {
+        self.sources
+            .get(source_address)
+            .and_then(|s| s.watermark.as_deref())
+    }
+
+    /// Advance `source_address`'s watermark to `to`, monotonically — a no-op
+    /// if `to` is not strictly past the currently recorded watermark
+    /// (string compare on the source's own ISO axis, same convention
+    /// `intervals.rs` already uses).
+    pub fn advance_watermark(&mut self, source_address: &str, to: &str) {
+        let entry = self.get_or_create(source_address);
+        if entry.watermark.as_deref().is_none_or(|w| to > w) {
+            entry.watermark = Some(to.to_string());
+        }
     }
 }
 

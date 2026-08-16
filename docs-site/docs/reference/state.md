@@ -13,7 +13,7 @@ Every artifact `.smelt/` can contain, and what it records:
 | `.smelt/targets/<target>/runs/<run_id>.json` | One run manifest per execution: per-model outcome (`success`/`failed`/`skipped`), strategy, row count, duration, `definition_hash`, and `retry_count`. |
 | `.smelt/targets/<target>/reports/<run_id>.json` | The run-report artifact -- a summary derived entirely from the matching manifest: outcome counts, total duration, and per-failure error text. Written at every point a manifest is persisted, so a report exists even for an interrupted or aborted run. |
 | `.smelt/targets/<target>/intervals.json` | Cumulative interval coverage per incremental model, keyed by calendar date (half-open `[start, end)`); read by `smelt status` for gap detection and by backfill planning. |
-| `.smelt/targets/<target>/landed_deltas.json` | Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address; consumed by `smelt run --since-upstream` forward propagation. |
+| `.smelt/targets/<target>/landed_deltas.json` | Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address -- plus each source's propagation **watermark**, the point a prior completed run already propagated it through; both are consumed by `smelt run --since-upstream` forward propagation, the watermark letting a `--source` omit `--landed`. |
 | `.smelt/targets/<target>/schemas/<model>.json` | The deployed schema snapshot for one model -- column names/types/nullability as of its last successful write; consumed by schema-evolution diffing. |
 | `.smelt/targets/<target>/snapshots.json` | Fingerprint-keyed reuse snapshots (`state.mode: environments` only). |
 

@@ -931,6 +931,55 @@ mod tests {
         assert!(loaded.sources.is_empty());
     }
 
+    /// A pre-existing `landed_deltas.json` written before the watermark
+    /// field existed (no `watermark` key at all) must still deserialise —
+    /// `#[serde(default)]` on `SourceLanding::watermark` (`landed_deltas.rs`)
+    /// is what makes this backward-compatible.
+    #[test]
+    fn landed_deltas_file_without_watermark_still_loads() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
+        std::fs::create_dir_all(dir.path().join(".smelt/targets/dev")).unwrap();
+        std::fs::write(
+            dir.path().join(".smelt/targets/dev/landed_deltas.json"),
+            r#"{"sources.orders":{"covered_intervals":[{"start":"2026-01-01","end":"2026-01-10"}]}}"#,
+        )
+        .unwrap();
+
+        let loaded = store.load_landed_deltas().unwrap();
+        assert_eq!(loaded.watermark("sources.orders"), None);
+        assert_eq!(
+            loaded
+                .get("sources.orders")
+                .unwrap()
+                .covered_intervals
+                .len(),
+            1
+        );
+    }
+
+    /// Under `state.mode: stateless`, saving an advanced watermark leaves no
+    /// file on disk and a reload yields no watermark — the watermark is a
+    /// field on the landed-delta record, so it inherits that record's
+    /// `state.mode` residency exactly (`run_state.md` §"Per-source
+    /// watermark").
+    #[test]
+    fn stateless_mode_persists_no_watermark() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+
+        let mut deltas = LandedDeltaStore::default();
+        deltas.advance_watermark("sources.orders", "2026-01-20");
+        store.save_landed_deltas(&deltas).unwrap();
+
+        assert!(
+            !dir.path().join(".smelt").exists(),
+            "stateless save must never create .smelt/"
+        );
+        let loaded = store.load_landed_deltas().unwrap();
+        assert_eq!(loaded.watermark("sources.orders"), None);
+    }
+
     #[test]
     fn test_empty_store() {
         let dir = TempDir::new().unwrap();

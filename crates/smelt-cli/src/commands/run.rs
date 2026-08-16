@@ -312,9 +312,22 @@ async fn run_since_upstream(
     models: &[smelt_cli::ModelFile],
     graph: DependencyGraph,
 ) -> Result<()> {
-    let deltas = smelt_runtime::propagation::pair_source_deltas(
+    // Watermark-aware pairing (`docs/specs/run_state.md` §"Per-source
+    // watermark"): a `--source` with no paired `--landed` resolves from its
+    // persisted watermark instead of requiring the operator to restate what
+    // landed. `state.mode: stateless` loads an empty store, so a stateless
+    // project's `--source` still requires an explicit `--landed` (no
+    // watermark was ever persisted for it to resolve from).
+    let landed_delta_store =
+        smelt_state::file_store::FileStore::new(project_dir, &args.target, config.state.mode)
+            .load_landed_deltas()
+            .with_context(|| "Failed to load the per-source landed-delta store")?;
+    let now = Utc::now().format("%Y-%m-%d").to_string();
+    let deltas = smelt_runtime::propagation::pair_source_deltas_with_watermarks(
         &args.since_upstream_source,
         &args.since_upstream_landed,
+        Some(&landed_delta_store),
+        &now,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 

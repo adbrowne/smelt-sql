@@ -37,6 +37,7 @@ use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
     ColumnGroup, MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
 };
+use smelt_state::landed_deltas::LandedDeltaStore;
 
 use crate::types::KeyedRestriction;
 
@@ -101,8 +102,126 @@ pub fn parse_landed_range(value: &str) -> Result<DayInterval> {
 /// Pair up `--source`/`--landed` flags positionally (the Nth `--source`
 /// pairs with the Nth `--landed`) into [`SourceDelta`]s. A named CLI error
 /// (never a panic) when the two lists' lengths disagree — `--landed`
-/// without a matching `--source`, or vice versa.
+/// without a matching `--source`, or vice versa. The no-watermark
+/// delegating wrapper (`docs/specs/incremental_models.md` §Surface, "Run
+/// flags"): existing callers keep today's behaviour exactly — bare spelling
+/// only, equal counts required, no unpaired-source resolution. Use
+/// [`pair_source_deltas_with_watermarks`] to also honour the qualified
+/// `<address>=<start>..<end>` spelling and resolve an unpaired source from
+/// its persisted watermark.
 pub fn pair_source_deltas(sources: &[String], landed: &[String]) -> Result<Vec<SourceDelta>> {
+    pair_source_deltas_with_watermarks(sources, landed, None, "")
+}
+
+/// One `--landed` value's spelling (`incremental_models.md` §Surface,
+/// "Run flags"): bare `<start>..<end>` (paired positionally with the
+/// `--source` at the same index) or address-qualified
+/// `<address>=<start>..<end>` (paired by address, no positional
+/// constraint). A bare value never contains `=` (ISO dates don't), so its
+/// presence discriminates the two spellings unambiguously.
+enum LandedSpelling<'a> {
+    Bare,
+    Qualified(&'a str, &'a str),
+}
+
+fn classify_landed(value: &str) -> LandedSpelling<'_> {
+    match value.split_once('=') {
+        Some((addr, range)) => LandedSpelling::Qualified(addr, range),
+        None => LandedSpelling::Bare,
+    }
+}
+
+/// Resolve a `--source` with no paired `--landed` from its persisted
+/// watermark: `[watermark, now)`. A source with neither a paired `--landed`
+/// nor a persisted watermark is a named run error (`run_state.md`
+/// §"Per-source watermark": "the refusal names the missing watermark") —
+/// never a silent per-source skip that would quietly under-propagate.
+fn resolve_from_watermark(
+    source: &str,
+    store: Option<&LandedDeltaStore>,
+    now: &str,
+) -> Result<SourceDelta> {
+    let watermark = store.and_then(|s| s.watermark(source));
+    match watermark {
+        Some(w) => Ok(SourceDelta {
+            source: source.to_string(),
+            landed: DayInterval::new(iso_to_day_ordinal(w)?, iso_to_day_ordinal(now)?),
+        }),
+        None => bail!(
+            "--source '{source}' has neither a paired --landed nor a persisted watermark — pass \
+             --landed <start>..<end> (or --landed {source}=<start>..<end>) for it, or run a prior \
+             `smelt run` over it so a watermark exists"
+        ),
+    }
+}
+
+fn iso_to_day_ordinal(value: &str) -> Result<i64> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .with_context(|| format!("malformed ISO date '{value}'"))?;
+    Ok(day_ordinal(date.year() as i64, date.month(), date.day()))
+}
+
+/// Pair up `--source`/`--landed` flags into [`SourceDelta`]s, honouring both
+/// `--landed` spellings and resolving an unpaired source from `store`'s
+/// persisted watermark (`docs/specs/run_state.md` §"Per-source watermark").
+///
+/// - **Bare** `<start>..<end>` values pair positionally, same as
+///   [`pair_source_deltas`] — requires equal `--source`/`--landed` counts,
+///   unchanged. An entirely empty `landed` list is the one exception: every
+///   `--source` is then unpaired and resolves from its watermark.
+/// - **Qualified** `<address>=<start>..<end>` values pair by address, no
+///   positional constraint; a `--source` absent from the qualified list
+///   resolves from its watermark.
+/// - Mixing the two spellings in one invocation is refused.
+pub fn pair_source_deltas_with_watermarks(
+    sources: &[String],
+    landed: &[String],
+    store: Option<&LandedDeltaStore>,
+    now: &str,
+) -> Result<Vec<SourceDelta>> {
+    let has_bare = landed
+        .iter()
+        .any(|l| matches!(classify_landed(l), LandedSpelling::Bare));
+    let has_qualified = landed
+        .iter()
+        .any(|l| matches!(classify_landed(l), LandedSpelling::Qualified(_, _)));
+    if has_bare && has_qualified {
+        bail!(
+            "--landed values must not mix the bare '<start>..<end>' and qualified \
+             '<address>=<start>..<end>' spellings in one invocation"
+        );
+    }
+
+    if has_qualified {
+        let mut by_addr: HashMap<String, DayInterval> = HashMap::new();
+        for l in landed {
+            let LandedSpelling::Qualified(addr, range) = classify_landed(l) else {
+                unreachable!("has_qualified implies every entry classifies as Qualified");
+            };
+            by_addr.insert(normalize_source_address(addr), parse_landed_range(range)?);
+        }
+        return sources
+            .iter()
+            .map(|src| {
+                let normalized = normalize_source_address(src);
+                match by_addr.get(&normalized) {
+                    Some(landed) => Ok(SourceDelta {
+                        source: normalized,
+                        landed: *landed,
+                    }),
+                    None => resolve_from_watermark(&normalized, store, now),
+                }
+            })
+            .collect();
+    }
+
+    if landed.is_empty() && store.is_some() && !sources.is_empty() {
+        return sources
+            .iter()
+            .map(|src| resolve_from_watermark(&normalize_source_address(src), store, now))
+            .collect();
+    }
+
     if sources.len() != landed.len() {
         bail!(
             "--source and --landed must be passed the same number of times ({} --source vs {} \
@@ -1672,6 +1791,108 @@ mod tests {
         )
         .expect_err("mismatched counts must error");
         assert!(err.to_string().contains("--source and --landed"));
+    }
+
+    #[test]
+    fn missing_landed_resolves_watermark_to_now_span() {
+        let mut store = LandedDeltaStore::default();
+        store.advance_watermark("bronze", "2026-01-01");
+
+        // No --landed at all: resolves from the watermark to `now`.
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &[],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("resolve from watermark");
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].source, "bronze");
+        assert_eq!(
+            deltas[0].landed,
+            DayInterval::new(
+                iso_to_day_ordinal("2026-01-01").unwrap(),
+                iso_to_day_ordinal("2026-01-10").unwrap()
+            )
+        );
+
+        // An explicit --landed for the same source overrides the watermark.
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &["2026-02-01..2026-02-05".to_string()],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("explicit landed overrides");
+        assert_eq!(
+            deltas[0].landed,
+            parse_landed_range("2026-02-01..2026-02-05").unwrap()
+        );
+    }
+
+    #[test]
+    fn qualified_landed_pairs_by_address() {
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &["aux=2026-01-05..2026-01-06".to_string()],
+            None,
+            "2026-01-10",
+        );
+        // "bronze" is unpaired with no watermark available -> named error.
+        assert!(deltas.is_err());
+
+        let mut store = LandedDeltaStore::default();
+        store.advance_watermark("bronze", "2026-01-01");
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &["aux=2026-01-05..2026-01-06".to_string()],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("qualified pairing with watermark fallback");
+        assert_eq!(deltas[0].source, "bronze");
+        assert_eq!(
+            deltas[0].landed,
+            DayInterval::new(
+                iso_to_day_ordinal("2026-01-01").unwrap(),
+                iso_to_day_ordinal("2026-01-10").unwrap()
+            )
+        );
+        assert_eq!(deltas[1].source, "aux");
+        assert_eq!(
+            deltas[1].landed,
+            parse_landed_range("2026-01-05..2026-01-06").unwrap()
+        );
+
+        // Mixing bare and qualified spellings is refused.
+        let err = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &[
+                "2026-01-01..2026-01-02".to_string(),
+                "aux=2026-01-05..2026-01-06".to_string(),
+            ],
+            None,
+            "2026-01-10",
+        )
+        .expect_err("mixed spellings must be refused");
+        assert!(err.to_string().contains("must not mix"));
+    }
+
+    #[test]
+    fn source_without_landed_or_watermark_is_named_error() {
+        let err = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &[],
+            Some(&LandedDeltaStore::default()),
+            "2026-01-10",
+        )
+        .expect_err("no landed and no watermark must error");
+        let msg = err.to_string();
+        assert!(msg.contains("bronze"), "error must name the source: {msg}");
+        assert!(
+            msg.contains("watermark"),
+            "error must name the missing watermark: {msg}"
+        );
     }
 
     #[test]

@@ -4593,6 +4593,67 @@ pub async fn execute_project(
     if let Err(e) = file_store.save_run(&manifest) {
         tracing::warn!("Failed to save run manifest: {}", e);
     }
+
+    // Per-source watermark advance (`docs/specs/run_state.md` §"Per-source
+    // watermark"): a source's watermark advances only when every model
+    // consuming it (the SAME forward-propagation graph `--since-upstream`
+    // builds) completed this run — never a speculative advance. Window end
+    // = `request.end`; an unbounded window (`None`, e.g. a full non-temporal
+    // run) advances nothing, since there is no window end to advance to.
+    if let Some(window_end) = request.end.as_deref() {
+        let source_names: HashSet<String> = source_infos
+            .iter()
+            .map(|s| crate::propagation::bare_name(&s.address_segments))
+            .collect();
+        let mut consumers_by_source: std::collections::BTreeMap<String, HashSet<String>> =
+            std::collections::BTreeMap::new();
+        match crate::propagation::build_forward_graph(&all_models, source_infos) {
+            Ok(edges) => {
+                for edge in edges {
+                    if source_names.contains(&edge.upstream) {
+                        consumers_by_source
+                            .entry(edge.upstream)
+                            .or_default()
+                            .insert(edge.downstream);
+                    }
+                }
+            }
+            Err(e) => {
+                // A graph-build failure means coverage is unprovable: stall
+                // (no advance) is the safe direction, never a speculative one.
+                tracing::warn!(
+                    "watermark advance skipped for sources {:?}: propagation graph build \
+                     failed: {}",
+                    source_names,
+                    e
+                );
+            }
+        }
+        if !consumers_by_source.is_empty() {
+            let completed_models: HashSet<String> = manifest
+                .models
+                .iter()
+                .filter(|(_, record)| record.outcome == smelt_state::RunOutcomeKind::Success)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let _io_guard = state_io_lock.lock().await;
+            if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
+                let advances = crate::watermark::watermark_advances(
+                    &consumers_by_source,
+                    &completed_models,
+                    window_end,
+                    &landed_deltas,
+                );
+                if !advances.is_empty() {
+                    for (source, to) in advances {
+                        landed_deltas.advance_watermark(&source, &to);
+                    }
+                    let _ = file_store.save_landed_deltas(&landed_deltas);
+                }
+            }
+        }
+    }
+
     if let Err(e) = write_run_report(file_store, &manifest) {
         tracing::warn!("Failed to write run report: {}", e);
     }
