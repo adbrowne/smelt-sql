@@ -70,13 +70,33 @@ this outcome runs first in the programme.
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
 | 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
-| 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | pending |
+| 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | planned |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | pending |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
 | 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
 | 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
+
+- **2026-08-16 (phase 6 plan).** No reshape of the remaining rows (7–10 stand as written).
+  Planning phase 6 established that `contract.deferral`'s lag is measured from the
+  **`.smelt/`-resident** interval-store and landed-delta frontiers
+  (`smelt_runtime::contract_probes::resolve_deferral_frontiers`), not from the engine-resident
+  frontier record phase 4 built — so the structure the declaration requires is
+  observability-class and the `stateless` posture withholds it. That makes the refusal's real
+  trigger the **posture**, correcting phase 1's decision-log assumption ("measured from the
+  correctness-class frontier, which no posture can withhold"). Phase 6 therefore carries a small
+  spec delta of its own in `state.md` §"Declarations stay fail-loud" (spec-first) rather than
+  shipping code that contradicts the spec sentence, plus the `diagnostics.md` catalogue row the
+  phase-5 sweep left out. `examples/timeseries` is the live proof of the gap: it declares
+  `contract.deferral: '6 hours'` under the default `stateless` posture, so its probe can never
+  fire today; the example gains `state.mode: intervals` as part of the phase.
+- **2026-08-16 (phase 6 plan).** The refusal rides `file_diagnostics` at Error severity rather
+  than a bespoke runtime check: `smelt_runtime::gate::gate_diagnostics` already blocks a run on
+  any Error-severity analyzer diagnostic, so the declaration is refused in the editor and at
+  build time from one owner. The validator itself stays pure in `smelt-logical`
+  (`required_state_structures` / `validate_contract_state`), with `smelt-db` only resolving the
+  effective posture and backends — the contract-lattice single-ownership rule.
 
 - **2026-08-16 (phase 5 implement).** Phase 5 landed: the pure
   `smelt_logical::maintenance::availability` module (`StateAvailability`,
