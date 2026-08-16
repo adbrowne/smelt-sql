@@ -57,6 +57,10 @@ run shape.
   addressing) — keyed/partition residue outcomes, after the decision track grows their scope.
 - The definition-delta vertical (programme outcome 3).
 - Automatic source diffing beyond the persisted watermark (snapshot diffing stays future work).
+- `derive_affected_keys` projecting every grain column into a cell's `KeyScope` (instead of
+  intersecting with the upstream's own proven key columns) — phase 11 characterized it precisely;
+  it blocks only the honest `GROUP BY d, id` spelling of a recipe whose constant-projection
+  spelling already covers criteria 1/7, so it belongs to `20260816-keyed-grain-residue-v2`.
 
 ## Phases
 
@@ -73,7 +77,7 @@ run shape.
 | 9 | `smelt explain` headline: the model's derived delta signature + addressing + grain label + derived run shape, printed as the report's first line (text and `--json`) | done |
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | done |
-| 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
+| 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | planned |
 | 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
@@ -385,6 +389,24 @@ run shape.
   real cause instead of the now-fixed walk explanation, per the phase's own instruction not to
   chase `derive_affected_keys` here. That gap is now precisely characterized (two comments name
   the exact diagnostic and the fix shape) for whoever picks it up. No reshape of the phase table.
+
+- 2026-08-16 (phase 12 planning): no row changes — phase 11's summary confirms row 12 is
+  unblocked and row 13's close-out scope is unchanged. One item moved to "## Out of scope":
+  the `derive_affected_keys` `KeyScope` over-projection phase 11 characterized. It is not
+  criterion work (the constant-projection recipe shape already exercises the keyed→partition
+  dispatch this outcome exists to prove; only the alternative `GROUP BY d, id` spelling is
+  blocked), and it is squarely the keyed-grain residue outcome's territory. Three things
+  pinned so the implementer does not rediscover them. (1) The test must NOT hand-roll the
+  CLI's live-plan sequence — a hand-rolled copy would stay green while `run.rs` drifted — so
+  the phase opens by extracting `propagation_live::resolve_live_plan` and having `run.rs`
+  delegate; the conformance test calls the same function. (2) Two scenarios are needed
+  because they resolve different seeds: a source-rooted sweep plans before the keyed upstream
+  re-runs, so its plan-time sidecar diff is legitimately empty (the run-time union at
+  dispatch does the repair), while a model-rooted `--source dag_kpart_a` sweep planned after
+  that rebuild is the one that yields real live key values — criterion 2's evidence. (3) If
+  the live seed resolves `Unresolved` rather than to values, the test is not to be weakened
+  into vacuity: the oracle + incrementality legs stand and the real reason is recorded for
+  row 13.
 
 ## Blocked
 
