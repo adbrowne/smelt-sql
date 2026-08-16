@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-08-17
 owners: [andrew]
 ---
 
@@ -87,6 +87,21 @@ silently maintaining a table whose definition no longer matches its contents; on
 plan is approved and applying, data deltas fold under the rules of §"Mid-migration data
 folds".
 
+The definition is recorded on **first deployment**, regardless of which maintenance route the
+model's run takes — the ordinary windowed route, the cumulative (`grain: key`) route, and the
+key-addressed-dispatch route all record it the same way. It is re-recorded only by a full refresh
+or by `smelt migrate --apply`; a windowed or incrementally-maintained run under changed SQL never
+overwrites the recorded definition, so a pending definition delta survives — visible to `smelt
+migrate` — until it is migrated.
+
+Detection also fires **ahead of a run**: the deployed column names recorded in the per-model
+schema snapshot are read once, at workspace load — never inside an analysis query — and are the
+"before" side the pre-run skeleton-change diagnostic (`MaintenanceSkeletonChanged`) diffs
+against. Both the LSP and `smelt explain` read this same input, so a skeleton change (a column
+addition occupying a `GROUP BY`/partition key position) is flagged before either invokes a run or
+`smelt migrate`. A model with no recorded schema snapshot derives no definition-change trigger at
+all — fail-closed, never a guess.
+
 ### `smelt migrate`
 
 ```
@@ -102,14 +117,28 @@ smelt migrate <model> --json     # machine-readable plan + exit-code contract (C
   plan step. If the model's SQL, its inputs' declared facts, or anything else that feeds the plan
   has changed since — so the freshly derived plan's hash no longer matches the recorded one —
   `--apply` refuses and prints the new plan instead. Approval is therefore always approval of the
-  exact statements that will run, never of a stale description.
-- **Resume.** An interrupted `--apply` resumes on re-invocation: the frontier records which
-  regions each affected column group has caught up (§"Frontier semantics"), and re-applying the
-  same approved plan continues from there.
+  exact statements that will run, never of a stale description. On a hash match, `--apply`
+  executes each column group's **first presented candidate** — the plan is deterministic and the
+  plan hash covers every candidate, so approving the plan approves that selection — as one
+  transactional statement group per column group, in plan order (§"The atomicity rule"). Admission
+  is checked over **every** group before anything executes: a plan containing a skeleton-change
+  group, a group with no admissible candidate, or a destructive (column-drop) candidate executes
+  **nothing** and exits `3` with the refusing group named — the honest route for that plan is
+  `smelt build --full-refresh` or `smelt rebuild`. On success `--apply` re-records the deployed
+  definition, so the next plan step reports eclipsed.
+- **Resume.** An interrupted `--apply` resumes on re-invocation, recorded **per column group** in
+  the approval store (`.smelt/targets/<target>/migration-approvals.json`, `run_state.md`
+  §"`.smelt/` directory layout"): a group already applied under the currently-approved hash is
+  skipped, and the remaining groups in plan order execute. A re-invocation once every group has
+  applied executes nothing and reports "already applied", exiting `0`.
 - **CI mode.** `--json` plus the exit-code contract makes the pending-migration state visible to
-  CI: exit 0 when there is no definition delta or the delta is eclipsed-only; a distinct non-zero
-  exit when a non-trivial migration is derived but unapproved. "The deploy changes what this
-  table means" becomes a checkable pipeline state; formatting-only changes pass silently.
+  CI: exit `0` when there is no definition delta or the delta is eclipsed-only; exit `3` when a
+  non-trivial migration is derived but unapproved (`cli.md` §"Exit codes"). "The deploy changes
+  what this table means" becomes a checkable pipeline state; formatting-only changes pass
+  silently.
+- **Where approval lives.** The plan step writes the recorded plan hash to
+  `.smelt/targets/<target>/migration-approvals.json`, one entry per model (`run_state.md`
+  §"`.smelt/` directory layout").
 
 ### `smelt rebuild`
 
@@ -312,10 +341,26 @@ never to revisit. The plan-and-approve gate is where that conflict is resolved, 
 
 A backfill-in-place group's physical column and its backfilled values are created by the **same
 statement group** as the schema migration adding the column — never a separately-dispatched
-write that could observe the column added but not yet backfilled. On a backend with
-transactional DDL, a group failure leaves neither the column nor the values, and the next apply
-retries the whole group. There is no window in which the deployed schema outruns the column's
-real values.
+write that could observe the column added but not yet backfilled. This holds unconditionally,
+on every backend and every declared `schema_evolution` strategy: no run may ever apply a
+definition change as a separately-dispatched `ADD COLUMN` followed by a standalone `UPDATE`.
+
+A model's definition change routes to exactly one of three outcomes, decided once per run before
+anything is written:
+
+- **Atomic group** — the default strategy on a backend with transactional DDL: today's single
+  `StatementGroup` carrying the `ADD COLUMN` and its backfill together. A group failure leaves
+  neither the column nor the values, and the next apply retries the whole group. There is no
+  window in which the deployed schema outruns the column's real values.
+- **Full rebuild** — a model declaring `schema_evolution: strategy: full_refresh` routes here
+  unconditionally: the declaration is the consent to rebuild the table from the new definition
+  rather than migrate it in place, so there is no in-place backfill step to make atomic. A
+  non-transactional backend also routes here when the run opts in with `--allow-full-refresh`.
+- **Refuse** — a non-transactional backend without that opt-in refuses the run: nothing is
+  applied, the recorded definition is left untouched, and the error names the recovery
+  (`smelt run --full-refresh <model>` or `--allow-full-refresh`). Refusal *is* the repair path —
+  because nothing was written, the next invocation re-derives the identical pending change rather
+  than needing separate reconciliation.
 
 ### Downstream of a migration
 
@@ -335,8 +380,9 @@ strategy, and the stored-schema format for *declared-schema* changes. This spec 
 migration of a **maintained model's stored data** across a change in its defining SQL. Where
 both apply — an added column on an incremental model is both a schema change and a definition
 delta — the definition-delta path governs, because only it carries the frontier bookkeeping and
-the plan-and-approve gate. (`schema_evolution.md`'s `strategy: full_refresh` escape currently
-bypasses that gate — a recorded divergence, §Known Divergences.)
+the plan-and-approve gate. `schema_evolution.md`'s `strategy: full_refresh` does not escape that
+gate: it selects the full-rebuild route §"The atomicity rule" names, so the declared strategy and
+the atomicity rule agree rather than one bypassing the other.
 
 ### What stays data-side
 
@@ -384,8 +430,8 @@ refines the plan-hash decision above rather than introducing a second one.
 (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §7.)
 
 **The skeleton-change diagnostic is one code, not a split add/changed pair.**
-`MaintenanceSkeletonColumnAdded` is renamed to `MaintenanceSkeletonChanged`, covering a
-skeleton-position field that is added or changed alike. Both trigger the identical refusal and
+`MaintenanceSkeletonChanged` covers a skeleton-position field that is added or changed alike, one
+code for both directions. Both trigger the identical refusal and
 the identical remediation (a rebuild is the only honest plan — §"Skeleton changes are a new
 relation"), so a split pair would carry two codes for one decision path. This matches how every
 other `Maintenance*` code names the refused condition rather than the trigger that produced it
@@ -427,38 +473,33 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **The definition-delta synthesis layer is unwired.** The classification and emission machinery
-  (`crates/smelt-logical/src/backbuild/` — diff factoring, per-group verdicts, the technique
-  catalogue, script assembly) exists and is fully tested, but nothing outside its own crate
-  calls it: no CLI verb reaches it, no plan derivation consumes it. Tracked:
-  `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2 (no
-  implementation plan yet).
-- **`smelt migrate` does not exist**, and the ranged-rebuild verb ships under the name
-  `smelt backbuild` rather than `smelt rebuild`. The live handling of definition changes is a
-  narrower third mechanism covering **column additions only** (the definition-change trigger in
-  the maintenance driver); a changed column's redefinition falls to a full recompute. Same
-  tracking as above.
-- **The atomicity rule is conditional in practice.** A model whose
-  `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
-  a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
-  rule" forbids — and that path is also the only one exercised on a backend without
-  transactional DDL. Neither case has a repair path today. Tracked:
-  `docs/plans/20260809-sensitivity-precision.md`. The
-  `schema_evolution.md` full-refresh escape bypassing the gate is the divergence §"Boundary with
-  `schema_evolution.md`" names; the unification should subsume it, not inherit it.
-- **The conformance harness has no definition-edit step kind yet** — the oracle extension in
-  §"The oracle" is specified ahead of the harness work.
-- **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
-  data structure per §Design "The plan hash covers the plan data structure, not only rendered
-  SQL", is unbuilt. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
-- **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
-  `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
-  the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's
-  add-only derivation. The rename is a diagnostic-API change and needs its own sweep across
-  sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
-  `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7.
+- **Outside `smelt migrate`, only column additions get a dedicated live mechanism** (the
+  maintenance driver's `Trigger::ColumnAdded` path). A redefined or removed column has no
+  narrower live handling at all — it is the same gap as the pending-delta run refusal below, not
+  a separate one: a windowed or incrementally-maintained run under such a change folds data
+  deltas under the new SQL while the old definition stays recorded, invisibly. Tracked as out of
+  scope in `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope" (the
+  pending-delta run refusal entry).
+- **Migration resume is recorded per column group, not per region.** §"Frontier semantics"
+  describes per-region catch-up as the general frontier mechanism; `--apply`'s resume (§Surface
+  "`smelt migrate`" "Resume") only distinguishes "this group's statements ran" from "they
+  haven't" — a group that partially wrote its rows before an interruption re-runs its whole
+  statement group on resume rather than resuming mid-region. Per-cell frontier addressing for
+  migration groups is out of scope for this outcome; see
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope".
+- **Destructive legs are refused, not executed — by deliberate design, not a residual gap.**
+  §"The migration plan" promises verification probes (row-count and fingerprint checks) surface
+  as part of the presented plan for a column-drop or table-swap leg; `--apply` does not emit those
+  probes yet, so a plan containing a destructive candidate as a group's first candidate refuses to
+  execute that group (and, by the all-groups-admitted-first rule, the whole plan) rather than
+  running it unverified. This narrowing is permanent for this outcome, recorded in its phase 3
+  decision log (`docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`, 2026-08-16);
+  closing it needs the verification-probe emitters, which have no current tracker.
+- **The pending-delta run refusal is not implemented.** §Detection's "`smelt run` refuses to fold
+  data deltas while a non-eclipsed definition delta is pending" is not yet enforced: today a
+  windowed or incrementally-maintained run under changed SQL folds data deltas under the new SQL
+  while the old definition stays recorded, rather than refusing. Tracked as out of scope in
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope".
 
 ## Future Extensions
 
@@ -473,19 +514,34 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/backbuild/{mod,diff,classify,emit,requalify}.rs` (the
-  synthesis layer: diff factoring, verdicts, technique catalogue, script emission);
-  `crates/smelt-logical/src/analysis/definition_change.rs` and
+- **Code**: `crates/smelt-logical/src/backbuild/{mod,diff,classify,emit,requalify,plan}.rs` (the
+  synthesis layer: diff factoring, verdicts, technique catalogue, script emission, the pure plan
+  and its hash); `crates/smelt-logical/src/analysis/definition_change.rs` and
   `crates/smelt-logical/src/maintenance/skeleton.rs` (the live column-add classification and
   skeleton refusal); `crates/smelt-runtime/src/maintenance_driver.rs` (the live
-  definition-change trigger path).
+  definition-change trigger path); `crates/smelt-runtime/src/migrate.rs` (`smelt migrate`'s plan
+  assembly and `--apply` execution); `crates/smelt-runtime/src/schema_evolution.rs`
+  (`resolve_definition_change_route`, the atomicity-route decision); `crates/smelt-state/src/migration_approvals.rs`
+  (the approval store); `crates/smelt-cli/src/commands/migrate.rs` and
+  `crates/smelt-cli/src/commands/rebuild.rs` (the CLI verbs); `crates/smelt-db/src/workspace_ingest.rs`
+  (`read_deployed_columns`, populating `ProjectInput::deployed_columns`).
 - **Tests**: `crates/smelt-logical/src/backbuild/` module tests;
   `crates/smelt-logical/tests/maintenance_skeleton.rs`;
   `crates/smelt-logical/tests/maintenance_tracer_evolution.rs`;
+  `crates/smelt-logical/tests/backbuild_docs.rs` (the doc-sync gate);
   `crates/smelt-runtime/tests/tracer_evolution.rs`;
-  `crates/smelt-cli/tests/targeted_column_backfill.rs`.
-- **User docs**: none yet — the docs-site page for migration lands with the wiring plan.
-- **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking).
+  `crates/smelt-cli/tests/targeted_column_backfill.rs`;
+  `crates/smelt-cli/tests/migrate.rs` and `crates/smelt-cli/tests/exit_codes.rs` (plan/apply CLI
+  coverage); `crates/smelt-cli/tests/rebuild_dry_run.rs` (the `smelt rebuild` rename ratchets);
+  `crates/smelt-cli/tests/maintenance_conformance/` (the generative definition-edit pool and the
+  pinned `MigrateApply` conformance legs).
+- **User docs**: `docs-site/docs/guide/backbuild-synthesis.md` (the migration guide, built around
+  `smelt migrate`/`--apply`); `docs-site/docs/reference/cli.md` §`smelt migrate`.
+- **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking);
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` (wiring `smelt migrate` end to
+  end: the approval gate, `--apply` execution, the `smelt rebuild` rename, the generative
+  definition-edit pool, the atomicity unification, the diagnostic rename, and the pre-run
+  surfacing this References list now names).
 - **Research**: `docs/research/20260802-backbuild-synthesis.md` (the technique catalogue and its
   correctness oracle); `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the
   unification and the plan-and-approve workflow).

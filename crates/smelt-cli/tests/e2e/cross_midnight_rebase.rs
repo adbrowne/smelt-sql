@@ -238,6 +238,7 @@ async fn run_single_day_window(
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     execute_project(
@@ -1377,6 +1378,7 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let reporter = SqlCapturingReporter::new();

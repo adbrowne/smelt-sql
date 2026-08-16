@@ -13,12 +13,11 @@ Every artifact `.smelt/` can contain, and what it records:
 | `.smelt/targets/<target>/runs/<run_id>.json` | One run manifest per execution: per-model outcome (`success`/`failed`/`skipped`), strategy, row count, duration, `definition_hash`, and `retry_count`. |
 | `.smelt/targets/<target>/reports/<run_id>.json` | The run-report artifact -- a summary derived entirely from the matching manifest: outcome counts, total duration, and per-failure error text. Written at every point a manifest is persisted, so a report exists even for an interrupted or aborted run. |
 | `.smelt/targets/<target>/intervals.json` | Cumulative interval coverage per incremental model, keyed by calendar date (half-open `[start, end)`); read by `smelt status` for gap detection and by backfill planning. |
-| `.smelt/targets/<target>/reconciliation.json` | The reconciliation ledger -- per `grain: key` (and `key_per_partition`) model, the processed-input vector for each `(output-region x column-group)` cell (see "The reconciliation ledger" below). |
-| `.smelt/targets/<target>/landed_deltas.json` | Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address; consumed by `smelt run --since-upstream` forward propagation. |
+| `.smelt/targets/<target>/landed_deltas.json` | Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address -- plus each source's propagation **watermark**, the point a prior completed run already propagated it through; both are consumed by `smelt run --since-upstream` forward propagation, the watermark letting a `--source` omit `--landed`. |
 | `.smelt/targets/<target>/schemas/<model>.json` | The deployed schema snapshot for one model -- column names/types/nullability as of its last successful write; consumed by schema-evolution diffing. |
 | `.smelt/targets/<target>/snapshots.json` | Fingerprint-keyed reuse snapshots (`state.mode: environments` only). |
 
-Every run-scoped artifact nests under `.smelt/targets/<target>/`; only `meta.json` and `lock` live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no `intervals.json`, and one with no `grain: key` models has no `reconciliation.json`.
+Every run-scoped artifact nests under `.smelt/targets/<target>/`; only `meta.json` and `lock` live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no `intervals.json`. The reconciliation ledger is **not** in this table -- it is engine-resident, not a `.smelt/` artifact; see "The reconciliation ledger" below.
 
 ## Run manifest
 
@@ -46,7 +45,7 @@ backward-compatible.
 
 ## Locking
 
-A run acquires an exclusive advisory lock on `.smelt/lock` for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly -- the error names the PID recorded in the lock file -- rather than interleaving writes with the first process. The lock is project-wide, not per-target, and is held for the whole run regardless of how many models execute concurrently under `--jobs`; every write to a shared per-target file (the interval ledger, the landed-delta store, the reconciliation ledger) is additionally serialized within the locked run so two models finishing at the same moment cannot each drop the other's write. Every write under `.smelt/` goes through a temp-file-then-rename path, so a process killed mid-write leaves either the old file intact or the new one -- never a truncated one.
+A run acquires an exclusive advisory lock on `.smelt/lock` for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly -- the error names the PID recorded in the lock file -- rather than interleaving writes with the first process. The lock is project-wide, not per-target, and is held for the whole run regardless of how many models execute concurrently under `--jobs`; every write to a shared per-target file (the interval ledger, the landed-delta store) is additionally serialized within the locked run so two models finishing at the same moment cannot each drop the other's write. The reconciliation ledger is not part of this serialization -- it lives in the warehouse and gets its own transactional guarantee per write, independent of `.smelt/lock` (see "The reconciliation ledger lives in the warehouse" below). Every write under `.smelt/` goes through a temp-file-then-rename path, so a process killed mid-write leaves either the old file intact or the new one -- never a truncated one.
 
 ## What `smelt status` and `smelt history` read
 
@@ -56,28 +55,58 @@ A run acquires an exclusive advisory lock on `.smelt/lock` for its entire durati
 
 `smelt run --resume` (or `smelt build --resume`) re-runs a previously interrupted or partially-failed selection while skipping models that do not need to run again. A model is skipped when **both** hold: its outcome in the most recent *incomplete* run (a manifest with `completed_at: null`, or one whose selection overlaps the current run and ended with at least one non-`success` outcome) was `success`, **and** its `definition_hash` in that manifest entry matches the model's current compiled-definition hash. A model that previously `failed` or was `skipped`, or whose definition changed since, always re-runs -- and so does every downstream dependent of any such model, since a dependent's prior `success` said nothing about inputs rebuilt out from under it. `--resume` refuses with a hard error (never a silent full run) when there is no incomplete run to resume from -- the most recent run completed successfully, or no run manifest exists at all -- so a stale or typo'd `--resume` invocation is never mistaken for "nothing needed doing."
 
-## The reconciliation ledger
+## The reconciliation ledger lives in the warehouse
 
-A **frontier** is the record of which typed deltas a cell has absorbed. The reconciliation ledger
-is the frontier's warehouse-independent realization: `grain: key` (and `key_per_partition`)
-models are maintained through a merge into an existing table rather than a full recompute, and
-the reconciliation ledger is the correctness structure that makes repeated, possibly-overlapping
-runs safe. (A window-forward keyed model's own merge writes a second realization, the
-transactional frontier write, directly into the target table -- see
+A **frontier** is the record of which typed deltas a cell has absorbed. The reconciliation
+ledger is the frontier's realization, and it is **engine-resident, not part of `.smelt/`**:
+`grain: key` (and `key_per_partition`) models are maintained through a merge into an existing
+table rather than a full recompute, and the ledger is the correctness structure that makes
+repeated, possibly-overlapping runs safe. On DuckDB targets it lives in two backend tables,
+transactional with the fold they guard:
+
+- **`_smelt_ledger`** -- one row per already-folded delta identity, for **additive** column
+  groups (a running sum, a count). Re-folding an already-present delta would double-count, so
+  a repeat insert violates a primary key and refuses the run before the merge executes a
+  second time, rather than after.
+- **`_smelt_frontier`** -- one row per `(output-region x column-group)` cell, for **idempotent**
+  groups (a last-write-wins column, a MAX aggregate). Re-applying an already-seen delta is
+  harmless, so this table only needs to know how far processing has reached, not the identity
+  of every delta absorbed.
+
+(A window-forward keyed model's own merge writes a second, table-resident frontier realization
+directly into the target table in the same transaction as the row data -- see
 [Incremental models -- The reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger).)
-Each ledger entry keys a `(output-region x column-group)` cell to the processed-input vector that
-has already been folded into it. Storage is graded by the column-group's algebra:
+Two operations act on the ledger: **fold** (extend an entry with a new delta, refusing if that
+delta is already in the entry's processed set) and **recompute-reset** (a region recompute
+resets every intersecting entry to exactly the input it read).
 
-- **Additive** groups (a running sum, a count) record the **delta identities** already folded in -- re-folding the same delta a second time would double-count, so the ledger's job is to refuse a repeat.
-- **Idempotent** groups (a last-write-wins column, a MAX aggregate) record only a **frontier** watermark -- re-applying an already-seen delta is harmless, so the ledger only needs to know how far processing has reached.
+Because both tables live in the warehouse, **deleting `.smelt/` cannot affect correctness for a
+keyed additive fold or a region recompute** -- the ledger and frontier survive `.smelt/`
+deletion and a fresh clone equally, and the reconciliation ledger's presence is a property of
+the derived plan, not of `state.mode`: a `state.mode: stateless` project with `grain: key`
+models still gets correct, ledger-enforced reprocessing refusal. A `.smelt/reconciliation.json`
+left by a binary that predates this residency move is imported into the engine tables once, on
+the first run that can reach a ledger-capable backend, then removed.
 
-Two operations act on the ledger: **fold** (extend an entry with a new delta, refusing if that delta is already in the entry's processed set) and **recompute-reset** (a region recompute resets every intersecting entry to exactly the input it read). For an additive-graded cell, the fold is transactional with the write it accompanies -- on DuckDB targets, the delta identity is folded into a warehouse-resident ledger table in the same transaction as the merge, so a repeat delta violates a primary key and refuses the run before the merge executes a second time, rather than after.
+This ledger is distinct from the interval ledger (`intervals.json`) above, which stays in
+`.smelt/`: intervals are project-wide observability ("what has this project run, and where are
+the gaps") that a `state.mode: stateless` project can forgo entirely with no correctness
+impact.
 
-This ledger is distinct from the interval ledger (`intervals.json`) above: intervals are project-wide observability ("what has this project run, and where are the gaps") that a `state.mode: stateless` project can forgo entirely; the reconciliation ledger is required correctness structure for every plan-managed `grain: key` model, present whenever the plan is, independent of `state.mode`.
+**No ledger builder exists outside DuckDB today.** An additive-graded cell (or a region
+recompute needing a frontier reset) on a backend with no `_smelt_ledger`/`_smelt_frontier`
+builder downgrades to the recompute family instead -- a recorded, `smelt explain`-visible
+`MaintenanceStateDowngraded` (see [`smelt explain` -- State downgrade](smelt-explain.md#state-downgrade)),
+never a silent shape change or a refusal.
 
 ## Recovery playbook
 
-**`.smelt/` is lost (deleted, never backed up, new environment).** State is regenerable: an incremental model's interval ledger and reconciliation ledger rebuild from a full re-run over the model's complete history; there is no data loss to the warehouse tables themselves, only a loss of the bookkeeping that lets *future* runs skip already-covered work. Re-run the affected selection with a full time range (or the whole project) to rebuild coverage from scratch.
+**`.smelt/` is lost (deleted, never backed up, new environment).** `.smelt/`'s own state is
+regenerable: the interval ledger rebuilds from a full re-run over the model's complete history,
+and there is no data loss to the warehouse tables themselves. The reconciliation ledger is
+engine-resident and is not affected by `.smelt/` loss at all -- see "The reconciliation ledger
+lives in the warehouse" above. Re-run the affected selection with a full time range (or the
+whole project) to rebuild `.smelt/`'s observability coverage from scratch.
 
 **`.smelt/` is corrupt (malformed JSON, truncated file, manually edited).** Because every write is atomic (temp file + rename), a file smelt itself wrote cannot be left truncated by a crash -- a corrupt file is evidence of something else (disk-level corruption, an out-of-band edit, a copy taken mid-write by a tool that doesn't respect the rename). smelt fails loudly with a parse or read error naming the file rather than silently discarding the record; there is no automatic quarantine-and-continue. Treat a corrupt `.smelt/` the same as a lost one: remove the affected file (or the whole directory) and let the next run regenerate it. Restore from a known-good backup first if one exists, to avoid losing more coverage history than necessary.
 

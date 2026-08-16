@@ -697,12 +697,12 @@ The partitions a run actually writes — the **output window** — are not alway
 
 The output window is what the `DELETE` and the output clamp both key off; every written partition's **scan** is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.
 
-## Backbuilding
+## Rebuilding
 
-Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
+`smelt rebuild` rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
 
 ```bash
-smelt backbuild +daily_revenue --start 2025-01-01 --end 2025-02-01
+smelt rebuild +daily_revenue --start 2025-01-01 --end 2025-02-01
 ```
 
 The `+` prefix means "include upstream dependencies." smelt will:
@@ -711,9 +711,9 @@ The `+` prefix means "include upstream dependencies." smelt will:
 2. Process each upstream model for the specified time range, in topological order.
 3. Process the target model last.
 
-Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
+Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
-Backbuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+Rebuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
 
 ## Incremental strategies
 
@@ -785,12 +785,15 @@ double-count), and recomputing a region — a full `DELETE`+`INSERT` of that reg
 ledger entry, since the recompute already incorporates everything up to that point.
 
 This project-wide bookkeeping is the frontier's **reconciliation ledger** realization (see
-[State — The reconciliation ledger](../reference/state.md#the-reconciliation-ledger)). A
+[State — The reconciliation ledger lives in the warehouse](../reference/state.md#the-reconciliation-ledger-lives-in-the-warehouse)). A
 window-forward keyed model's own `MERGE` writes a second realization, the **transactional
 frontier write**, directly into the target table alongside the row data it accompanies, in the
 same transaction: it lives backend-resident, not in a separate smelt-managed store. You don't
 declare or configure either realization directly; `smelt explain <model>` shows whether a given
-cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell.
+cell routes through the reconciliation ledger via the `ledger_catch_up` flag on that cell. On a
+target backend with no ledger/frontier builder (DuckDB has one; others don't yet), a cell that
+would need it downgrades to the recompute family instead of failing — see [`smelt explain` —
+State downgrade](../reference/smelt-explain.md#state-downgrade).
 
 ## grain: partition vs grain: key
 

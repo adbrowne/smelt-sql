@@ -78,21 +78,25 @@ pub enum DagBody {
     /// typing/phases/08-plan.md`'s `keyed_chain_dag`).
     KeyedFold,
     /// `SELECT DATE '2024-01-01' AS d, id, ANY_VALUE(total) AS total FROM
-    /// <upstream> GROUP BY d, id` — a `grain: partition` downstream reading
-    /// a clockless `KeyedUpsert` upstream directly by its key column
+    /// <upstream> GROUP BY id` — a `grain: partition` downstream reading a
+    /// clockless `KeyedUpsert` upstream directly by its key column
     /// (`keyed_partition_sink_dag`): the combination phase 7 flagged as
     /// deriving a key-addressed model-edge cell the run loop never
     /// dispatches (`docs/specs/incremental_models.md` §"Known
-    /// Divergences"). The partition column is a constant and the `GROUP
-    /// BY` is a structural no-op (the upstream is already one row per
-    /// `id`) — this body exists only to PROVE the downstream's own row
+    /// Divergences"). The partition column is a constant and left OUT of
+    /// `GROUP BY` — this body exists only to PROVE the downstream's own row
     /// identity includes `id` (via the walk, not a declared `unique_key`:
     /// a declared `unique_key: id` alongside `grain: partition` trips the
     /// `GrainAssertionMismatch` diagnostic, since a declared key alone
     /// reads as key-grain shape facts) so `admit_key_addressed_recompute`'s
     /// grain proof resolves through `id`, exercising plan derivation and
     /// the full-refresh fallback correctness rather than pinning a real
-    /// time axis.
+    /// time axis. Grouping by `d`'s own alias too would prove grain `[d,
+    /// id]`, but `derive_affected_keys` then names `d` in the cell's
+    /// `key_scope`, and `d` is absent from the upstream's own proven key
+    /// columns (`[id]`) — the cell would be refused
+    /// (`MaintenanceKeyScopeColumnMissing`) rather than admitted; see
+    /// [`DagBody::PartitionOverKeyedId`]'s own render comment.
     PartitionOverKeyedId,
 }
 
@@ -296,27 +300,28 @@ pub fn keyed_chain_dag() -> DagRecipe {
     }
 }
 
-/// The flagged inert-cell combination (phase 7's "for the next planner"
-/// note): `dag_kpart_a` (`KeyedAgg`, `NodeGrain::Key`) aggregates the
-/// source by `id` into `dag_kpart_b` (`PartitionOverKeyedId`,
-/// `NodeGrain::Partition`) — a `grain: partition` downstream whose body
-/// `GROUP BY`s its own constant partition column AND the upstream's key
-/// column (`id`), so the walk PROVES its row identity includes `id`
+/// `dag_kpart_a` (`KeyedAgg`, `NodeGrain::Key`) aggregates the source by
+/// `id` into `dag_kpart_b` (`PartitionOverKeyedId`, `NodeGrain::Partition`)
+/// — a `grain: partition` downstream whose body `GROUP BY`s the upstream's
+/// key column (`id`) alone (its own partition column, `d`, is a constant
+/// projection left OUT of `GROUP BY` — see `DagBody::PartitionOverKeyedId`'s
+/// own doc comment), so the walk PROVES its row identity includes `id`
 /// without a declared `unique_key` (a declared `unique_key: id` alongside
-/// `grain: partition` trips `GrainAssertionMismatch` — see
-/// `DagBody::PartitionOverKeyedId`'s own doc comment), letting
+/// `grain: partition` trips `GrainAssertionMismatch`), letting
 /// `admit_key_addressed_recompute`'s grain proof resolve through `id` (the
-/// edge's own key) even though the model's declared partition axis (`d`,
-/// a constant) is a different column entirely. Plan derivation admits a
-/// key-addressed `PerGroupRecompute` cell for this edge (the clock-based
-/// route never applies — `dag_kpart_a` has no clock to derive), but the
-/// run loop's key-addressed dispatch lives entirely inside the `grain:
-/// key` branch (`smelt-runtime/src/execute.rs`), so a `grain: partition`
-/// downstream like this one never reaches it — the admitted cell is
-/// inert, and the model instead maintains via its ordinary (here:
-/// always-widens-to-whole, since the upstream carries no clock) window
-/// route. `keyed_upstream_partition_downstream_matches_oracle` pins that
-/// this divergence is still CORRECT, only non-incremental.
+/// edge's own key) even though the model's declared partition axis (`d`)
+/// is a different column entirely. Plan derivation admits a key-addressed
+/// `PerGroupRecompute` cell for this edge (the clock-based route never
+/// applies — `dag_kpart_a` has no clock to derive), and — since the
+/// scheduler-delta-signatures outcome's phase 2
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/02-plan.md`)
+/// — the run loop actually DISPATCHES it: key-addressed dispatch is no
+/// longer confined to the `grain: key` branch
+/// (`smelt-runtime/src/execute.rs`), so this `grain: partition` downstream
+/// reaches it too. `keyed_upstream_partition_downstream_matches_oracle`
+/// pins both that this combination is CORRECT and (now) that it is
+/// incremental — the manifest strategy is `per_group_recompute`, not a
+/// whole-table reconcile.
 pub fn keyed_partition_sink_dag() -> DagRecipe {
     DagRecipe {
         source: SourceRecipe::events(crate::recipe::KeyShape::Single),
@@ -407,9 +412,26 @@ pub fn render_node_body(dag: &DagRecipe, idx: usize) -> String {
         }
         DagBody::PartitionOverKeyedId => {
             let src = upstream_ref(dag, node.upstreams[0]);
+            // `{d}` is NOT in the `GROUP BY` list — a literal projection is
+            // trivially single-valued per group (DuckDB/Postgres both
+            // accept a constant select item outside `GROUP BY`), so the
+            // grain reduces to `{id}` alone rather than the pair. This is
+            // NOT a walk limitation anymore — `analysis::walk::
+            // group_by_output_keys` now resolves `GROUP BY {d}, {id}`
+            // against both items' output aliases
+            // (`docs/outcomes/20260816-scheduler-delta-signatures/phases/
+            // 11-plan.md`), proving grain `[{d}, {id}]`. But
+            // `derive_affected_keys` then names both grain columns in the
+            // key-addressed cell's `key_scope`, and `{d}` is absent from
+            // the upstream's own proven `KeyedUpsert` key columns (`[{id}]`
+            // only), so the cell is refused
+            // (`MaintenanceKeyScopeColumnMissing`) rather than admitted.
+            // Widening `derive_affected_keys` to key_scope-project only
+            // columns the upstream actually carries is out of this phase's
+            // scope.
             format!(
                 "SELECT DATE '2024-01-01' AS {d}, {id}, ANY_VALUE(total) AS total FROM {src} \
-                 GROUP BY {d}, {id}"
+                 GROUP BY {id}"
             )
         }
     }
@@ -604,7 +626,8 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
     })?;
 
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let dialect_name = crate::dialect_name_for_config(&config);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, dialect_name);
 
     let named: Vec<smelt_db::Diagnostic> = diagnostics
         .iter()

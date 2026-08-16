@@ -169,7 +169,7 @@ pub async fn get_runs(
     Query(query): Query<TargetQuery>,
 ) -> Result<Json<Vec<RunHistoryEntry>>, impl IntoResponse> {
     require_known_target(&state, &query.target)?;
-    let file_store = FileStore::new(&state.project_dir, &query.target);
+    let file_store = FileStore::new(&state.project_dir, &query.target, state.config.state.mode);
     match file_store.load_runs(Some(50)) {
         Ok(manifests) => {
             let entries: Vec<RunHistoryEntry> = manifests
@@ -217,7 +217,7 @@ pub async fn get_run(
     Query(query): Query<TargetQuery>,
 ) -> Result<Json<RunHistoryEntry>, impl IntoResponse> {
     require_known_target(&state, &query.target)?;
-    let file_store = FileStore::new(&state.project_dir, &query.target);
+    let file_store = FileStore::new(&state.project_dir, &query.target, state.config.state.mode);
     match file_store.load_run(&id) {
         Ok(Some(m)) => {
             let models = m

@@ -4,6 +4,7 @@
 //! have been processed, enabling gap detection and automatic incremental runs.
 
 use super::*;
+use smelt_core::config::StateMode;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::{compute_model_hash, IntervalStore, ModelIntervals};
 
@@ -84,7 +85,7 @@ fn test_model_hash_invalidation_clears_intervals() {
 #[test]
 fn test_interval_store_persistence() {
     let dir = tempfile::TempDir::new().unwrap();
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Save
     let mut store = IntervalStore::default();
@@ -121,7 +122,7 @@ async fn test_incremental_run_updates_intervals() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
     seed_transactions(&backend).await?;
 
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
     let model_sql = DAILY_REVENUE_SQL;
     let model_hash = compute_model_hash(model_sql);
 

@@ -387,9 +387,27 @@ async fn assert_example_workspace_clean(name: &str) {
     for (uri, ds) in diags {
         latest.insert(uri, ds);
     }
-    // Filter: any non-empty list is a real diagnostic.
+    // `maintenance-state-downgraded` (`docs/specs/state.md` §"The
+    // degradation contract") is an expected advisory, not a regression
+    // signal, for any example that declares a non-DuckDB active backend —
+    // see `crates/smelt-cli/tests/example_diagnostics.rs`'s own exclusion
+    // for the same code and rationale.
+    let is_expected_advisory = |d: &lsp_types::Diagnostic| {
+        d.code.as_ref().is_some_and(|c| {
+            matches!(c, lsp_types::NumberOrString::String(s) if s == "maintenance-state-downgraded")
+        })
+    };
+    // Filter: any non-empty list (after dropping expected advisories) is a
+    // real diagnostic.
     let dirty: Vec<(String, Vec<lsp_types::Diagnostic>)> = latest
         .into_iter()
+        .map(|(uri, ds)| {
+            let ds: Vec<lsp_types::Diagnostic> = ds
+                .into_iter()
+                .filter(|d| !is_expected_advisory(d))
+                .collect();
+            (uri, ds)
+        })
         .filter(|(_, ds)| !ds.is_empty())
         .collect();
 

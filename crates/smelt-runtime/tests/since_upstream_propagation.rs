@@ -13,8 +13,10 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, plan_since_upstream_with_observed_deltas,
-    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    build_forward_graph, fold_keyed_seed_values, keyed_restrictions_from_plan,
+    keyed_seed_diff_result_to_key_values, keyed_seed_diffs_to_read, observed_delta_keys_to_read,
+    plan_since_upstream, plan_since_upstream_with_keyed_seeds,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -491,12 +493,13 @@ fn recursive_composed_driving_source_reaches_the_same_verdict_as_smelt_explain()
     // The `smelt explain` verdict: the real Salsa-backed derivation
     // `maintenance_plan_report` calls, never re-derived by this test.
     let (db, workspace, target) = build_db_and_target(&project_dir, "user_spend_running_total");
-    let report = smelt_db::maintenance_plan_report(&db, workspace, target).unwrap_or_else(|| {
-        panic!(
-            "user_spend_running_total must derive a maintenance plan (refresh: incremental, \
+    let report = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb")
+        .unwrap_or_else(|| {
+            panic!(
+                "user_spend_running_total must derive a maintenance plan (refresh: incremental, \
              grain: key)"
-        )
-    });
+            )
+        });
     let key_locality = report.plan.key_locality.as_ref().unwrap_or_else(|| {
         panic!(
             "smelt explain must admit key temporal locality for user_spend_running_total via \
@@ -1370,4 +1373,707 @@ fn bare_keyed_origin_refusal_narrows_to_general() {
     let msg = refused.to_string();
     assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
     assert!(msg.contains("general_agg"), "{msg}");
+}
+
+/// Phase 3 (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`):
+/// a keyed seed passed into `plan_since_upstream_with_keyed_seeds` surfaces
+/// resolved key values in the returned plan's `keyed_dirty` and
+/// `dirty_set_report`, and the consumer key scope `build_forward_graph`
+/// attaches to the edge is the downstream's own derived `KeyScope` (folded
+/// from phase 2's key-addressed dispatch substitution, `PlanCell::key_scope`)
+/// — the same clockless-`KeyedUpsert`-into-`grain: partition` shape
+/// `typed_edge_graph.rs::clockless_keyed_upstream_is_walkable_on_the_real_graph`
+/// exercises.
+#[test]
+fn keyed_seed_values_flow_through_plan_since_upstream() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect("build graph");
+    let agg_edge = edges
+        .iter()
+        .find(|e| e.upstream == "agg" && e.downstream == "downstream")
+        .unwrap_or_else(|| panic!("expected an agg -> downstream edge: {edges:?}"));
+    assert_eq!(
+        agg_edge.consumer_key_scope,
+        vec!["user_id".to_string()],
+        "the downstream's own derived key scope must be attached to the inbound edge: {agg_edge:?}"
+    );
+
+    let order = vec!["downstream".to_string()];
+    let mut keyed_seeds = std::collections::BTreeMap::new();
+    keyed_seeds.insert(
+        "agg".to_string(),
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "1".to_string(),
+            "2".to_string(),
+        ]),
+    );
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &[], &keyed_seeds)
+            .expect("plan with keyed seeds");
+
+    let kd = plan
+        .keyed_dirty
+        .get("downstream")
+        .expect("downstream must carry keyed dirt")
+        .first()
+        .expect("at least one keyed dirt record");
+    assert_eq!(
+        kd.values,
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "1".to_string(),
+            "2".to_string()
+        ]),
+        "the seeded key values must project onto downstream's own key scope: {kd:?}"
+    );
+    assert!(
+        plan.dirty_set_report.contains("downstream <- agg: keyed"),
+        "the dirty-set report must surface the keyed channel: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains("[\"1\", \"2\"]")
+            || plan.dirty_set_report.contains("Resolved"),
+        "the dirty-set report must surface the resolved values: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// Shared fixture for the [`keyed_restrictions_from_plan`] tests below —
+/// same `agg` (grain: key) -> `downstream` chain as
+/// [`keyed_seed_values_flow_through_plan_since_upstream`].
+fn stage_agg_downstream_chain(root: &Path) {
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+}
+
+/// Phase 5 test 5 (`docs/outcomes/20260816-scheduler-delta-signatures/
+/// phases/05-plan.md`): a plan built via [`plan_since_upstream_with_keyed_seeds`]
+/// converts, through [`keyed_restrictions_from_plan`], into a `model ->
+/// [KeyedRestriction]` map carrying the resolved values.
+#[test]
+fn keyed_restrictions_from_plan_carries_resolved_values() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    stage_agg_downstream_chain(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+    let order = vec!["downstream".to_string()];
+
+    let mut keyed_seeds = std::collections::BTreeMap::new();
+    keyed_seeds.insert(
+        "agg".to_string(),
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "2".to_string(),
+            "1".to_string(),
+            "2".to_string(),
+        ]),
+    );
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &[], &keyed_seeds)
+            .expect("plan with keyed seeds");
+
+    let restrictions = keyed_restrictions_from_plan(&plan);
+    let downstream_restrictions = restrictions
+        .get("downstream")
+        .expect("downstream must carry a keyed restriction");
+    assert_eq!(downstream_restrictions.len(), 1);
+    let restriction = &downstream_restrictions[0];
+    assert_eq!(restriction.upstream, "agg");
+    assert_eq!(restriction.keys, vec!["user_id".to_string()]);
+    assert_eq!(
+        restriction.values,
+        vec!["1".to_string(), "2".to_string()],
+        "values must be sorted and deduplicated: {restriction:?}"
+    );
+}
+
+/// Phase 5 test 6: an unseeded admitted keyed edge propagates a symbolic
+/// `KeyValues::Unresolved` record (`docs/specs/incremental_models.md`
+/// §"Unresolved seeds") — [`keyed_restrictions_from_plan`] must contribute
+/// **no** map entry for it, never narrowing the union its consumer computes
+/// with a spurious empty restriction.
+#[test]
+fn keyed_restrictions_from_plan_drops_unresolved_values() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    stage_agg_downstream_chain(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+    let order = vec!["agg".to_string(), "downstream".to_string()];
+
+    // `agg` itself is the delta origin (a landed-model delta, mirroring
+    // `model_delta_origin_propagates_to_downstreams_without_rerunning_origin`)
+    // — this marks `agg` dirty so its outbound admitted keyed edge is
+    // actually visited, but no seed is provided for `agg`, so the edge still
+    // propagates a symbolic Unresolved record on the keyed channel.
+    let deltas = vec![SourceDelta {
+        source: "agg".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let keyed_seeds = std::collections::BTreeMap::new();
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &deltas, &keyed_seeds)
+            .expect("plan with no keyed seeds");
+    assert!(
+        plan.keyed_dirty.contains_key("downstream"),
+        "the unseeded edge must still propagate a symbolic Unresolved record: {:?}",
+        plan.keyed_dirty
+    );
+
+    let restrictions = keyed_restrictions_from_plan(&plan);
+    assert!(
+        !restrictions.contains_key("downstream"),
+        "an unresolved seed must contribute no restriction entry: {restrictions:?}"
+    );
+}
+
+/// Phase 6 (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`):
+/// `observed_delta_keys_to_read` returns exactly one key for a delta on a
+/// locality-admitted composed origin (`user_daily_spend`, route 1
+/// key-embedded — the same fixture `composed_model_as_source` reuses), and
+/// no key at all for a delta on a raw `sources.*` address (`raw.events`) or
+/// a bare `grain: partition` model with no key-temporal-locality route
+/// (`daily_events`) — mirroring `plan_since_upstream_with_observed_deltas`'s
+/// own eligibility rule, since both consult the same `key_locality_slice`.
+#[test]
+fn observed_delta_keys_to_read_lists_only_locality_admitted_origins() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let deltas = vec![
+        SourceDelta {
+            source: "user_daily_spend".to_string(),
+            landed: window,
+        },
+        SourceDelta {
+            source: "raw.events".to_string(),
+            landed: window,
+        },
+        SourceDelta {
+            source: "daily_events".to_string(),
+            landed: window,
+        },
+    ];
+
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+
+    assert_eq!(
+        keys,
+        vec![(
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        )],
+        "only the locality-admitted composed origin must contribute a key: {keys:?}"
+    );
+}
+
+/// Phase 6: the live "delta empty" leg — `resolve_observed_delta_lookup`
+/// reads a present-and-empty row (recorded via the real
+/// `generate_observed_delta_upsert_sql`, not a hand-built `ObservedDeltaLookup`)
+/// off a real DuckDB backend, and the resulting plan schedules zero
+/// downstream regions, exactly like `empty_observed_delta_schedules_zero_downstream_regions`'s
+/// hand-built-lookup counterpart.
+#[tokio::test]
+async fn live_observed_lookup_suppresses_downstream_for_present_and_empty_delta() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let window_start = smelt_logical::maintenance::propagate::ordinal_to_iso(window.start);
+    let window_end = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ddl).await.expect("create delta table");
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "user_daily_spend",
+        &window_start,
+        &window_end,
+        "SELECT NULL::VARCHAR AS delta_key, NULL::VARCHAR AS delta_partition WHERE FALSE",
+    );
+    backend
+        .execute_sql(&upsert)
+        .await
+        .expect("record the fully-suppressed run's empty delta");
+
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let observed =
+        smelt_runtime::propagation_live::resolve_observed_delta_lookup(&backend, "main", &keys)
+            .await
+            .expect("live lookup succeeds");
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        plan.runs.is_empty(),
+        "a present-and-empty recorded delta read live must schedule zero downstream regions: \
+         {:?}",
+        plan.runs
+    );
+}
+
+/// Phase 6: an absent record (nothing recorded for this window) makes
+/// `resolve_observed_delta_lookup` return an empty lookup, and the plan
+/// falls back to the declared `--landed` window unchanged (widen-never-
+/// narrow) — the live read must not turn absent into empty.
+#[tokio::test]
+async fn live_observed_lookup_falls_back_to_declared_window_when_absent() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    // No row recorded — the table isn't even created before this read.
+
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let observed =
+        smelt_runtime::propagation_live::resolve_observed_delta_lookup(&backend, "main", &keys)
+            .await
+            .expect("live lookup succeeds even with nothing recorded");
+    assert!(
+        observed.is_empty(),
+        "an unrecorded window must resolve to an empty lookup, not a fabricated entry: \
+         {observed:?}"
+    );
+
+    let with_live_lookup = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("absent record must fall back, not error");
+    let baseline = plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("baseline plan_since_upstream");
+
+    assert_eq!(
+        with_live_lookup.runs, baseline.runs,
+        "an absent live-read observed delta must propagate identically to the declared window"
+    );
+    assert!(
+        with_live_lookup
+            .runs
+            .iter()
+            .any(|r| r.model == "user_spend_rollup"),
+        "the declared window must still propagate downstream: {:?}",
+        with_live_lookup.runs
+    );
+}
+
+/// Phase 7 test 1 (`docs/outcomes/20260816-scheduler-delta-signatures/
+/// phases/07-plan.md`): a clockless `keyed upsert` model origin with two
+/// `grain: partition` consumers yields one [`KeyedSeedDiff`] per
+/// `(upstream, consumer)`, each carrying the upstream's admitted key
+/// columns and that consumer's own table (db) name.
+#[test]
+fn keyed_seed_diffs_to_read_names_each_consumer_of_a_keyed_origin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream_a.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+    write(
+        root,
+        "models/downstream_b.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg WHERE total > 0\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let deltas = vec![SourceDelta {
+        source: "agg".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+    }];
+    let diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+
+    assert_eq!(
+        diffs.len(),
+        2,
+        "expected one descriptor per consumer of the keyed origin: {diffs:?}"
+    );
+    let mut consumers: Vec<&str> = diffs.iter().map(|d| d.consumer.as_str()).collect();
+    consumers.sort();
+    assert_eq!(consumers, vec!["downstream_a", "downstream_b"]);
+    for diff in &diffs {
+        assert_eq!(diff.upstream, "agg");
+        assert_eq!(diff.upstream_keys, vec!["user_id".to_string()]);
+        assert!(
+            !diff.digest_columns.is_empty(),
+            "the consumer's own digest column set must be non-empty: {diff:?}"
+        );
+        assert!(!diff.consumer_clean_sql.trim().is_empty());
+    }
+}
+
+/// Phase 7 test 2: a declared-source `--source` origin (not a maintained
+/// model) yields no descriptor — there is no key-addressed cell to seed for
+/// a node with no upstream `ModelFile`.
+#[test]
+fn keyed_seed_diffs_to_read_skips_a_raw_source_origin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.sources.bronze\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let deltas = vec![SourceDelta {
+        source: "bronze".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+    }];
+    let diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+    assert!(
+        diffs.is_empty(),
+        "a raw source origin must contribute no keyed-seed descriptor: {diffs:?}"
+    );
+}
+
+/// Phase 7 test 3: two consumers of one upstream fold to one sorted/deduped
+/// `KeyValues::Resolved`; a diff that found nothing stays `Resolved(vec![])`,
+/// never `Unresolved`.
+#[test]
+fn fold_keyed_seed_values_unions_across_consumers() {
+    use smelt_logical::maintenance::propagate::KeyValues;
+
+    let folded = fold_keyed_seed_values(vec![
+        KeyValues::Resolved(vec!["2".to_string(), "1".to_string()]),
+        KeyValues::Resolved(vec!["3".to_string(), "1".to_string()]),
+    ]);
+    assert_eq!(
+        folded,
+        KeyValues::Resolved(vec!["1".to_string(), "2".to_string(), "3".to_string()])
+    );
+
+    let empty = fold_keyed_seed_values(vec![KeyValues::Resolved(vec![])]);
+    assert_eq!(
+        empty,
+        KeyValues::Resolved(vec![]),
+        "a diff that found nothing must stay resolved-and-empty, never unresolved"
+    );
+}
+
+/// Phase 7 test 4: the classifier that turns a diff result into `KeyValues`
+/// maps a `BackendError::unsupported` (non-DuckDB target) to
+/// `KeyValues::Unresolved` naming the dialect.
+#[test]
+fn unsupported_dialect_diff_yields_an_unresolved_seed() {
+    use smelt_logical::maintenance::propagate::KeyValues;
+
+    let err = smelt_backend::BackendError::unsupported(
+        "postgres",
+        "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
+    );
+    let kv = keyed_seed_diff_result_to_key_values(Err(err))
+        .expect("an unsupported-feature error classifies rather than propagates");
+    match kv {
+        KeyValues::Unresolved { reason } => {
+            assert!(reason.contains("postgres"), "{reason}");
+        }
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
+}
+
+/// `resolve_live_plan_matches_hand_wired_sequence`
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/12-plan.md`
+/// test 1): `resolve_live_plan` must be the single owner of the live-plan
+/// sequence `run.rs::run_since_upstream` drives — this pins the extraction
+/// by proving it returns exactly what hand-calling the four underlying
+/// functions in order produces, over a real staged keyed→partition project
+/// (`dag_kpart_a` -> `dag_kpart_b`) with a landed delta on the source.
+#[tokio::test]
+async fn resolve_live_plan_matches_hand_wired_sequence() {
+    let dag = smelt_maintenance_testkit::dag::keyed_partition_sink_dag();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    let db_path = tmp.path().join("db.duckdb");
+    std::fs::create_dir_all(&project_dir).expect("create project dir");
+    let project = smelt_maintenance_testkit::dag::stage_dag(&dag, &project_dir, &db_path)
+        .expect("stage keyed partition sink dag");
+
+    let base_day = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let initial_rows = vec![(base_day, 0_i64, 10_i64), (base_day, 1_i64, 20_i64)];
+    {
+        let conn = project.connect().expect("connect");
+        smelt_maintenance_testkit::dag::insert_rows(&conn, &dag, &initial_rows)
+            .expect("insert initial rows");
+    }
+    project
+        .run_quiet(
+            "resolve-live-plan-init",
+            smelt_maintenance_testkit::link_c_harness::base_request("dev"),
+        )
+        .await
+        .expect("initial build succeeds (creation)");
+    // A second no-change run is `dag_kpart_b`'s own FIRST live key-addressed
+    // dispatch (`table_exists_before_run` now true) — this is what seeds its
+    // group-grain sidecar partition over `dag_kpart_a`
+    // (`resolve_keyed_seeds_reads_changed_keys_off_the_sidecar`'s own
+    // precedent in `key_addressed_model_edge_lowering.rs`), so a later live
+    // seed read has a prior snapshot to diff against.
+    project
+        .run_quiet(
+            "resolve-live-plan-seed",
+            smelt_maintenance_testkit::link_c_harness::base_request("dev"),
+        )
+        .await
+        .expect("second build succeeds (sidecar seed)");
+
+    let delta_rows = vec![(base_day, 0_i64, 99_i64)];
+    {
+        let conn = project.connect().expect("connect");
+        smelt_maintenance_testkit::dag::insert_rows(&conn, &dag, &delta_rows)
+            .expect("insert delta rows");
+    }
+
+    let config = smelt_core::config::Config::load(&project_dir).expect("load smelt.yml");
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &config.paths);
+    let order = dag.order();
+    // The delta names `dag_kpart_a` itself (an upstream MAINTAINED MODEL, not
+    // the raw declared source) — the only address shape that reaches
+    // `dag_kpart_b`'s keyed edge at all: `dag_kpart_a` (`grain: key`) never
+    // derives an inbound propagation edge from the raw source
+    // (`keyed_grain_model_never_derives_an_edge`), so a delta on the raw
+    // `events` source cannot inform anything here. `dag_kpart_a` has not
+    // been rebuilt yet at this point, so the live sidecar diff is
+    // legitimately empty — `dag_kpart_b` still gets scheduled (whole table)
+    // because a non-keyed-grain downstream of an admitted keyed edge always
+    // widens once its upstream is visited, regardless of the seed's value.
+    let deltas = vec![SourceDelta {
+        source: "dag_kpart_a".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(
+            smelt_logical::maintenance::propagate::day_ordinal(2024, 1, 1),
+            smelt_logical::maintenance::propagate::day_ordinal(2024, 1, 2),
+        ),
+    }];
+
+    let backend_for_extracted = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb for resolve_live_plan");
+    let extracted = smelt_runtime::propagation_live::resolve_live_plan(
+        &backend_for_extracted,
+        &config,
+        "dev",
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+    )
+    .await
+    .expect("resolve_live_plan succeeds");
+
+    let backend_for_hand = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb for hand-wired sequence");
+    let observed_keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let keyed_seed_diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+    let schema = &config.targets["dev"].schema;
+    let observed = smelt_runtime::propagation_live::resolve_observed_delta_lookup(
+        &backend_for_hand,
+        schema,
+        &observed_keys,
+    )
+    .await
+    .expect("resolve_observed_delta_lookup succeeds");
+    let keyed_seeds = smelt_runtime::propagation_live::resolve_keyed_seeds(
+        &backend_for_hand,
+        &config,
+        "dev",
+        &keyed_seed_diffs,
+    )
+    .await
+    .expect("resolve_keyed_seeds succeeds");
+    let hand_wired = smelt_runtime::propagation::plan_since_upstream_live(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+        &keyed_seeds,
+    )
+    .expect("plan_since_upstream_live succeeds");
+
+    assert_eq!(
+        extracted.runs, hand_wired.runs,
+        "resolve_live_plan must schedule the same runs as the hand-wired sequence"
+    );
+    assert_eq!(
+        extracted.dirty_set_report, hand_wired.dirty_set_report,
+        "resolve_live_plan must print the same dirty-set report as the hand-wired sequence"
+    );
+    assert_eq!(
+        extracted.keyed_dirty, hand_wired.keyed_dirty,
+        "resolve_live_plan must resolve the same keyed-dirty map as the hand-wired sequence"
+    );
+    assert!(
+        !extracted.runs.is_empty(),
+        "a delta on dag_kpart_a must schedule dag_kpart_b (whole table) via the keyed edge: {}",
+        extracted.dirty_set_report
+    );
 }

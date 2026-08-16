@@ -14,8 +14,8 @@ use smelt_types::SqlFunction;
 
 use super::{
     ColumnGroup, Corner, FingerprintProjection, Grain, MaintenancePlan, MutationProfile,
-    OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
-    SourceFacts, Technique, Trigger,
+    OutputSpec, PartitionLocal, PlanCell, RecomputeFallback, Refusal, RowIdentity,
+    RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::definition_change::{
     classify_definition_change, DefinitionChangeClass, DefinitionChangeCtx,
@@ -435,6 +435,7 @@ pub fn append_model_edge_cells(
                     // cell's own empty verdict.
                     fingerprint_projections: BTreeMap::new(),
                     key_scope: Some(key_scope),
+                    recompute_fallback: None,
                 });
             }
             Err(refusal) => {
@@ -554,6 +555,7 @@ pub fn append_model_edge_cells(
             // empty case).
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         });
     }
 }
@@ -1040,6 +1042,7 @@ fn derive_new_data(
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
+                recompute_fallback: None,
             });
         }
         Grain::Key { unique_key } => {
@@ -1326,6 +1329,33 @@ fn derive_new_data(
                 return;
             }
 
+            // The availability fallback (`availability::resolve_state_availability`,
+            // `state.md` §"The degradation contract"): a `KeyedFold` cell on
+            // a backend with no reconciliation ledger downgrades to the
+            // repair family's per-group recompute rather than running
+            // anyway. Admitted (or refused) with the SAME inputs this fold
+            // was just admitted against — never a wider/unconstrained
+            // fallback than the repair family's own obligations allow.
+            // `Err` here means no admissible fallback exists; the cell's
+            // `recompute_fallback` stays `None`, which is what drives
+            // resolution's fail-loud `Refusal::NoAdmissibleTechnique`
+            // instead of a silent keyed fold on a ledger-less backend.
+            let fallback_delta = repair::delta_shape_for_source(inputs.sql, facts);
+            let recompute_fallback = repair::admit_per_group_recompute(
+                inputs.sql,
+                unique_key,
+                facts,
+                inputs.output_partition_col(),
+                loc,
+                &fallback_delta,
+            )
+            .ok()
+            .map(|admitted| RecomputeFallback {
+                technique: Technique::PerGroupRecompute,
+                scans: vec![admitted.slice],
+                key_scope: None,
+            });
+
             plan.cells.push(PlanCell {
                 group: format!(
                     "{{{}}}",
@@ -1347,6 +1377,7 @@ fn derive_new_data(
                 skeleton_source_closure: None,
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
+                recompute_fallback,
             });
         }
     }
@@ -1457,6 +1488,7 @@ fn derive_mutation(
             skeleton_source_closure: closure.clone(),
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         });
     }
 }
@@ -1669,6 +1701,7 @@ fn derive_column_added(
                         skeleton_source_closure: None,
                         fingerprint_projections: BTreeMap::new(),
                         key_scope: None,
+                        recompute_fallback: None,
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
@@ -1755,6 +1788,7 @@ fn derive_column_added(
             skeleton_source_closure: None,
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         });
     }
 }
@@ -1780,6 +1814,7 @@ fn derive_backfill(
         skeleton_source_closure: None,
         fingerprint_projections: BTreeMap::new(),
         key_scope: None,
+        recompute_fallback: None,
     });
 }
 

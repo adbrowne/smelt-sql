@@ -89,7 +89,7 @@ impl RunReporter for CliReporter {
         // `--dry-run` prints the maintenance statements this invocation would
         // execute (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
         // statements"). A real run does not re-print them — its progress is the
-        // `batch_completed`/`model_completed` summary. A backbuild whose range
+        // `batch_completed`/`model_completed` summary. A rebuild whose range
         // was split into chunks introduces each chunk's block with a boundary
         // line naming its `[start, end)` window and position.
         if !self.dry_run {
@@ -132,6 +132,14 @@ impl RunReporter for CliReporter {
 
     fn run_cancelled(&self, _run_id: &str) {
         eprintln!("smelt: run cancelled");
+    }
+
+    fn probe_advisory(&self, _run_id: &str, model: &str, code: &str, message: &str) {
+        eprintln!("smelt: warning: {}: model '{}': {}", code, model, message);
+    }
+
+    fn dispatch_widened(&self, _run_id: &str, model: &str, reason: &str) {
+        eprintln!("smelt: warning: model '{}': {}", model, reason);
     }
 }
 
@@ -195,8 +203,13 @@ fn hint_for(cause: FailureCause) -> &'static str {
 /// be read back (e.g. a stateless project, or a pre-execution failure with
 /// no run directory yet) — `run_failed`'s per-model lines above still ran
 /// either way.
-pub fn print_failure_summary(project_dir: &std::path::Path, target: &str, run_id: &str) {
-    let file_store = smelt_state::file_store::FileStore::new(project_dir, target);
+pub fn print_failure_summary(
+    project_dir: &std::path::Path,
+    target: &str,
+    run_id: &str,
+    state_mode: smelt_core::config::StateMode,
+) {
+    let file_store = smelt_state::file_store::FileStore::new(project_dir, target, state_mode);
     let Ok(Some(report)) = file_store.load_report(run_id) else {
         return;
     };

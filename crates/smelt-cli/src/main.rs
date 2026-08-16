@@ -42,8 +42,8 @@ enum Commands {
     Init(InitArgs),
     /// Run models and materialize them in the target database
     Run(RunArgs),
-    /// Backbuild: rebuild a target model and all its upstreams for a time range
-    Backbuild(BackbuildArgs),
+    /// Rebuild: rebuild a target model and all its upstreams for a time range
+    Rebuild(RebuildArgs),
     /// Show column types for a model
     Table(TableArgs),
     /// Start the web UI for visualizing the model graph
@@ -64,6 +64,8 @@ enum Commands {
     Bakeoff(BakeoffArgs),
     /// Show pending schema changes between model definitions and deployed state
     Diff(DiffArgs),
+    /// Print the definition-delta migration plan for a changed model (plan-only; executes nothing)
+    Migrate(MigrateArgs),
     /// Run unit tests for models
     Test(TestArgs),
     /// Run data-quality checks against the configured target
@@ -187,18 +189,23 @@ struct RunArgs {
     /// caller-declared per-source deltas (`--source`/`--landed`), computed
     /// through the maintenance-plan propagation graph
     /// (`incremental_models.md` §"The graph layer"). Requires at least one
-    /// `--source`/`--landed` pair.
+    /// `--source`.
     #[arg(long = "since-upstream")]
     since_upstream: bool,
 
     /// A source address whose landed delta is declared via the paired
     /// `--landed` flag (repeatable — the Nth `--source` pairs with the Nth
-    /// `--landed`). Only meaningful with `--since-upstream`.
+    /// `--landed` positionally, or `--landed <address>=<start>..<end>` pairs
+    /// by address). A `--source` with no paired `--landed` resolves from its
+    /// persisted watermark (`run_state.md` §"Per-source watermark"). Only
+    /// meaningful with `--since-upstream`.
     #[arg(long = "source", requires = "since_upstream")]
     since_upstream_source: Vec<String>,
 
-    /// The landed interval for the paired `--source`: `<start>..<end>`
-    /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
+    /// The landed interval for the paired `--source`: bare `<start>..<end>`
+    /// (positional pairing) or `<address>=<start>..<end>` (pairing by
+    /// address) — ISO `YYYY-MM-DD`, end exclusive. Repeatable; see
+    /// `--source`.
     #[arg(long = "landed", requires = "since_upstream")]
     since_upstream_landed: Vec<String>,
 
@@ -220,7 +227,7 @@ struct RunArgs {
 }
 
 #[derive(Parser)]
-struct BackbuildArgs {
+struct RebuildArgs {
     /// Target model selector (e.g., +daily_revenue, model_name)
     selector: String,
 
@@ -581,6 +588,40 @@ struct DiffArgs {
 }
 
 #[derive(Parser)]
+struct MigrateArgs {
+    /// Name of the model to derive a migration plan for
+    model: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — the deployed-schema snapshot the
+    /// diff's "before" side is read from is recorded per target.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// DuckDB database file path override — only opened by `--apply` on a
+    /// matching hash, to execute the approved plan's statements.
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Execute the most recently approved plan — refuses (exit 3) if the
+    /// freshly re-derived plan hash doesn't match the recorded one, or if
+    /// the approved plan itself refuses to execute (a skeleton-change
+    /// group, a group with no admissible candidate, or a destructive
+    /// candidate).
+    #[arg(long)]
+    apply: bool,
+
+    /// Emit the plan as machine-readable JSON instead of the human-readable
+    /// report (CI mode; `docs/specs/definition_deltas.md` §Surface "`smelt
+    /// migrate`").
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Parser)]
 struct TestArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -698,7 +739,7 @@ async fn main() -> std::process::ExitCode {
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
         Commands::Run(args) => commands::run::run(args, scope).await,
-        Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
+        Commands::Rebuild(args) => commands::rebuild::rebuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
         Commands::Ui(args) => commands::ui::ui(args).await,
         Commands::Seed(args) => commands::seed::run_seed(args, scope).await,
@@ -709,6 +750,7 @@ async fn main() -> std::process::ExitCode {
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
         Commands::Bakeoff(args) => commands::bakeoff::bakeoff(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
+        Commands::Migrate(args) => commands::migrate::migrate(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,
         Commands::List(args) => commands::list::list(args, scope).await,

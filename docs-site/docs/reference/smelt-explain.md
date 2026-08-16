@@ -32,6 +32,31 @@ Add `--technique <name>` alongside `--show-sql` to preview a *different* techniq
 
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
 
+## State downgrade
+
+A cell whose derived technique needs the reconciliation ledger or its frontier record
+(`docs/specs/state.md` §"The degradation contract") downgrades to its recompute-family
+equivalent instead of failing when the model's real target backend has no ledger/frontier
+builder — DuckDB has one today; other backends don't (see [State & Recovery — The
+reconciliation ledger lives in the warehouse](state.md#the-reconciliation-ledger-lives-in-the-warehouse)).
+`smelt explain <model>` resolves the model's actual target dialect and prints the downgrade
+right under the affected cell:
+
+```
+  - group main on trigger Incremental
+      corner:    ...
+      technique: DeleteInsert
+      state downgrade: DeleteInsert (ideal: DeleteInsert, missing FrontierRecord) — no engine-resident frontier builder for this backend; ...
+      ledger_catch_up: true
+```
+
+The line names the resolved technique (what actually runs), the ideal technique (what would run
+if the missing structure were available), and the missing structure. A model whose backend has
+every structure it needs prints no downgrade line. `--json` carries the same information as a
+`state_downgrades` array (`{cell_group, trigger, resolved_technique, ideal_technique,
+missing_structure, why}` per entry) alongside the report — see `docs/specs/cli.md` §"`smelt
+explain --json` output schema".
+
 ## Internal state columns
 
 Some presented columns (`AVG`, the `STDDEV_*`/`VAR_*` family, `MAX_BY`/`MIN_BY`, and the fallback-bearing or multi-candidate once-write spellings) don't fold their presented value directly — they fold hidden **state columns** instead, and recompute the presented value from that state on every read. `smelt explain <model>` lists these state columns as internal state, distinct from the model's public schema:

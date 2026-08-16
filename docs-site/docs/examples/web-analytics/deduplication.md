@@ -146,6 +146,10 @@ smelt explain silver.events_deduped
 
 <!-- smelt-generate: @cwd=tutorial_stages/06_composed_dedupe @render=text explain silver.events_deduped -->
 ```text
+emits: keyed upsert over [event_id], key-addressed, grain: key, run shape: window-forward, locality: route 3 (recurrence-bounded, declared key_recurrence)
+
+Refusals: (none)
+
 Maintenance plan: silver.events_deduped
 
 Cells (2):
@@ -177,7 +181,15 @@ Key temporal locality:
   settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
   observed-delta projection: widened by `r` + margins
 
-Refusals: (none)
+Guarantees:
+  - amplitude_id (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - device_id (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - event_name (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - event_ts (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - platform (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - url (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - user_id (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
+  - utm_campaign (group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign}): default, settle: after 259200s (recurrence bound) + 0s margin
 
 Relation contract:
   clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day

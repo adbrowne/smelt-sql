@@ -30,9 +30,9 @@ use smelt_maintenance_testkit::recipe::{
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
 use smelt_maintenance_testkit::schedule_gen::{
-    arb_mixed_schedule, arb_schedule_for, boundary_rows_for,
+    arb_mixed_schedule, arb_schedule_for, arb_schedule_with_definition_edit, boundary_rows_for,
     check_profile as check_mixed_schedule_profile, read_source_snapshot, scan_clamp_for,
-    ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep,
+    ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep, StateResidencyOp,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
 use smelt_planner::{
@@ -74,6 +74,20 @@ fn case_count() -> usize {
         .unwrap_or(DEFAULT_CASES)
 }
 
+/// Delete `.smelt/` from `project`'s directory in place — the
+/// [`ConformanceStep::DropStateDir`]/[`StateResidencyOp::DropStateDir`]
+/// implementation, exposed separately (rather than inlined in the match arm)
+/// so `state_deletion.rs`'s anti-vacuity test
+/// (`drop_state_dir_step_actually_removes_the_directory`) can call it
+/// directly and assert it actually removes the directory — an unobservable
+/// no-op here would let the whole residency leg pass while proving nothing
+/// (`docs/outcomes/20260816-state-residency/phases/08-plan.md` test 1).
+pub fn drop_state_dir(project: &LinkCProject) -> anyhow::Result<()> {
+    let dir = project.project_dir.join(".smelt");
+    std::fs::remove_dir_all(&dir)
+        .map_err(|e| anyhow::anyhow!("remove_dir_all({}): {e}", dir.display()))
+}
+
 /// Stage `recipe` into a fresh temp project + DuckDB file, returning the
 /// loaded [`LinkCProject`].
 pub fn stage_recipe(recipe: &ModelRecipe, tmp: &tempfile::TempDir) -> anyhow::Result<LinkCProject> {
@@ -112,16 +126,27 @@ async fn insert_row(
 /// Drive `schedule` against `project`/`recipe` through the real
 /// `execute_project` pipeline, asserting S-restricted multiset equivalence
 /// after every `RunWindow` step (design §6). Returns the fully-populated
-/// [`STracker`] plus the index of the last recorded run, so
-/// `harness_self_check` can reuse the green end-state without re-driving
-/// the whole schedule.
+/// [`STracker`], the index of the last recorded run (so `harness_self_check`
+/// can reuse the green end-state without re-driving the whole schedule), and
+/// the observed exit code of each `smelt migrate <model> --apply` subprocess
+/// spawned by a [`ConformanceStep::MigrateApply`] step, in schedule order
+/// (empty when the schedule has none) — the caller owns asserting on it,
+/// this driver only records it (`docs/outcomes/
+/// 20260816-definition-delta-migrate-v2/phases/06-plan.md` task 6).
 pub async fn drive_and_assert(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     schedule: &ConformanceSchedule,
-) -> anyhow::Result<(STracker, usize)> {
+) -> anyhow::Result<(STracker, usize, Vec<i32>)> {
+    // Local, reassignable handle: `ConformanceStep::FreshClone` replaces it
+    // with a clone at a new path mid-loop
+    // (`docs/outcomes/20260816-state-residency/phases/08-plan.md` task 3).
+    // Every subsequent reference to `project` below therefore already reads
+    // this shadowed local, not the caller's original handle.
+    let mut project = project.clone();
     let mut tracker = STracker::new(&recipe.source);
     let mut last_k: Option<usize> = None;
+    let mut migrate_apply_exit_codes: Vec<i32> = Vec::new();
     // The most recent `RewriteModel` step's edit (Phase 9), or `None` before
     // any rewrite — threads into every subsequent assertion so the oracle
     // re-renders against the CURRENT on-disk body, never the pre-rewrite one
@@ -132,7 +157,7 @@ pub async fn drive_and_assert(
         match step {
             ConformanceStep::RunWindow { start, end, rows } => {
                 for row in rows {
-                    insert_row(project, recipe, row).await?;
+                    insert_row(&project, recipe, row).await?;
                 }
 
                 let snapshot = {
@@ -148,10 +173,10 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::AppendLateRow(row) => {
-                insert_row(project, recipe, row).await?;
+                insert_row(&project, recipe, row).await?;
             }
             ConformanceStep::RerunWindow { start, end } => {
                 // Redelivery: same window as an earlier `RunWindow`, no new
@@ -170,7 +195,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::FullRefreshRun => {
                 // Unwindowed run: `execute_project` takes the full-refresh
@@ -190,7 +215,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_full_refresh(snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
@@ -208,7 +233,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
+                assert_equivalence_with_edit(&project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::RewriteModel { edit } => {
                 // Definition change (Phase 9): rewrite the model file on
@@ -225,12 +250,88 @@ pub async fn drive_and_assert(
                 )?;
                 current_edit = Some(*edit);
             }
+            ConformanceStep::DropStateDir => {
+                // Residency leg (`docs/outcomes/20260816-state-residency/
+                // phases/08-plan.md` task 3): delete `.smelt/` in place. No
+                // accompanying run — the next window step's own equivalence
+                // assertion is the proof that nothing correctness-class rode
+                // on the deleted directory.
+                drop_state_dir(&project)?;
+            }
+            ConformanceStep::FreshClone => {
+                // Residency leg: replace the project handle with a fresh
+                // clone at a new path, carrying no `.smelt/` — catches
+                // anything keyed on the old absolute path that a same-path
+                // `DropStateDir` cannot.
+                let dest = project
+                    .project_dir
+                    .parent()
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "project_dir {:?} has no parent to clone alongside",
+                            project.project_dir
+                        )
+                    })?
+                    .join(format!("fresh_clone_{i}"));
+                project = project.fresh_clone(&dest)?;
+            }
+            ConformanceStep::MigrateApply => {
+                // Migration recovery (`docs/outcomes/
+                // 20260816-definition-delta-migrate-v2/phases/06-plan.md`
+                // task 6): drives the real `smelt migrate` subcommand as a
+                // subprocess — never `smelt_runtime::migrate::
+                // apply_migration_plan` directly — so the approval store and
+                // the exit-code contract are exercised end to end, the way
+                // an operator actually invokes recovery. No
+                // `duckdb::Connection` is held open across either spawn
+                // (every prior step's connection is already scoped to its
+                // own block and dropped) — the CLI subprocess opens the
+                // same DuckDB file and would contend for its lock otherwise.
+                let model = recipe.model_name.clone();
+                let project_dir = project.project_dir.clone();
+
+                let plan_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+                    .arg("migrate")
+                    .arg(&model)
+                    .arg("--project-dir")
+                    .arg(&project_dir)
+                    .arg("--target")
+                    .arg("dev")
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("spawn `smelt migrate {model}`: {e}"))?;
+                let plan_exit = plan_output.status.code().unwrap_or(-1);
+                let plan_stdout = String::from_utf8_lossy(&plan_output.stdout);
+                anyhow::ensure!(
+                    plan_exit == 3,
+                    "step {i}: `smelt migrate {model}` (plan mode) exited {plan_exit}, \
+                     expected 3 (a non-trivial migration pending): stdout={plan_stdout}\n\
+                     stderr={}",
+                    String::from_utf8_lossy(&plan_output.stderr),
+                );
+                anyhow::ensure!(
+                    plan_stdout.contains(&format!("Migration plan for {model}")),
+                    "step {i}: `smelt migrate {model}` printed no plan: {plan_stdout}"
+                );
+
+                let apply_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+                    .arg("migrate")
+                    .arg(&model)
+                    .arg("--project-dir")
+                    .arg(&project_dir)
+                    .arg("--target")
+                    .arg("dev")
+                    .arg("--apply")
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("spawn `smelt migrate {model} --apply`: {e}"))?;
+                let apply_exit = apply_output.status.code().unwrap_or(-1);
+                migrate_apply_exit_codes.push(apply_exit);
+            }
         }
     }
 
     let last_k =
         last_k.ok_or_else(|| anyhow::anyhow!("schedule {schedule:?} had no RunWindow step"))?;
-    Ok((tracker, last_k))
+    Ok((tracker, last_k, migrate_apply_exit_codes))
 }
 
 /// The S-restricted oracle assertion (design §6): materialize `S_k`, then
@@ -607,8 +708,8 @@ pub fn classify_mixed(
             target_path.display()
         )
     })?;
-    let plan_result =
-        smelt_db::maintenance_plan_report(&db, workspace, target).ok_or_else(|| {
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb")
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "no maintenance plan report for mixed-pool model {:?}",
                 recipe.model_name
@@ -955,18 +1056,18 @@ fn delete_row_keyed_snapshot(
     Ok(())
 }
 
-/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): drive the ONE family
-/// the admission matrix actually admits under snapshot-reconcile
-/// (plain-overwrite, `ANY_VALUE`) end to end through the real
-/// `execute_project` pipeline and the now-built snapshot-reconcile
-/// executor: seed rows, run (creation), mutate/delete/insert source rows,
-/// run again (reconcile), and assert the maintained table equals the
-/// current snapshot's own aggregation UNION the pre-mutation state of any
-/// key that departed the snapshot — the SAME retained-departed-keys
-/// carve-out `retained_departed_keys_adjusts_the_oracle` above pins as pure
-/// data, now exercised against a real backend.
+/// `docs/outcomes/20260816-keyed-grain-residue-v2` phase 1 (supersedes
+/// `snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys`,
+/// retired with the decision track's posture-derived deletion, PR #167):
+/// drive the ONE family the admission matrix actually admits under
+/// snapshot-reconcile (plain-overwrite, `ANY_VALUE`) end to end through the
+/// real `execute_project` pipeline and the anti-join delete leg: seed rows,
+/// run (creation), mutate/delete/insert source rows, run again (reconcile),
+/// and assert the maintained table equals the **unadjusted** full-scan
+/// oracle over the CURRENT source — no departed-keys exemption — plus an
+/// explicit check that the departed key's row is actually gone.
 #[tokio::test]
-async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys() {
+async fn snapshot_reconcile_plain_overwrite_settles_after_key_departure() {
     let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
@@ -999,68 +1100,136 @@ async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys(
         assert!(equal, "creation run must equal the full-scan oracle");
     }
 
-    // Snapshot the pre-mutation source state — the retained-departed-keys
-    // formula needs the departing key's value AS OF BEFORE it departed.
-    {
-        let conn = project.connect().expect("connect");
-        conn.execute_batch(&format!(
-            "CREATE TABLE main.pre_mutation_snapshot AS SELECT * FROM main.sources_{}",
-            recipe.source.name
-        ))
-        .expect("snapshot pre-mutation state");
-    }
-
     // Mutate: update id=1's value, delete id=2 (genuine departure), insert
     // a fresh id=4.
     update_row_keyed_snapshot(&project, &recipe, 1, 999).expect("update id=1");
     delete_row_keyed_snapshot(&project, &recipe, 2).expect("delete id=2");
     insert_row_keyed_snapshot(&project, &recipe, 4, 400).expect("insert id=4");
 
-    // Second run: still no window — reconciles via the whole-source MERGE.
+    // Second run: still no window — reconciles via the whole-source MERGE +
+    // departed-key DELETE.
     project
         .run_quiet("snapshot-reconcile-2", base_request("dev"))
         .await
         .expect("second (reconcile) run must succeed");
 
-    let adjusted_oracle_sql = format!(
-        "{full_scan_oracle_sql} \
-         UNION ALL \
-         SELECT {key}, {attr} AS current_val FROM main.pre_mutation_snapshot \
-         WHERE {key} NOT IN (SELECT {key} FROM main.sources_{name})",
-        key = recipe.source.key_column,
-        attr = recipe.source.payload_column,
-        name = recipe.source.name,
-    );
     {
         let backend = project.backend().await.expect("backend");
         let equal =
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &adjusted_oracle_sql)
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &full_scan_oracle_sql)
                 .await
                 .expect("comparison must run");
         assert!(
             equal,
-            "reconcile run must equal the oracle's current rows plus the retained departed key"
+            "reconcile run must equal the unadjusted full-scan oracle — no departed-keys \
+             exemption under the default point"
         );
     }
 
     // Explicit assertion, not just the multiset comparison: the departed
-    // key (id=2) is present, unchanged from its PRE-mutation value (200) —
-    // not silently deleted.
+    // key (id=2) is gone, not retained.
     let conn = project.connect().expect("connect");
-    let departed_value: i64 = conn
+    let departed_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT current_val FROM main.{} WHERE id = 2",
+                "SELECT COUNT(*) FROM main.{} WHERE id = 2",
                 recipe.model_name
             ),
             [],
             |row| row.get(0),
         )
-        .expect("departed key must still be present");
+        .expect("count query must run");
     assert_eq!(
-        departed_value, 200,
-        "the departed key must be RETAINED at its pre-departure value, never deleted"
+        departed_count, 0,
+        "the departed key must be DELETED under the default posture-derived-deletion point"
     );
+}
+
+/// Generative counterpart of
+/// `snapshot_reconcile_plain_overwrite_settles_after_key_departure`: for the
+/// snapshot-admitted combiner (plain-overwrite, `ANY_VALUE` — the only
+/// family the admission matrix currently admits under snapshot-reconcile,
+/// `crates/smelt-logical/src/rules/cumulative.rs`'s `is_snapshot_reconcile`
+/// arm), drive a generated insert/update/delete mutation schedule
+/// (`arb_snapshot_mutation_schedule`) through the real `execute_project`
+/// pipeline and assert the maintained table equals the unadjusted
+/// full-refresh oracle over the current source after EVERY step — no
+/// departed-keys exemption.
+#[test]
+fn snapshot_reconcile_pool_upholds_end_state_equivalence() {
+    use smelt_maintenance_testkit::schedule_gen::{
+        arb_snapshot_mutation_schedule, SnapshotMutation,
+    };
+
+    let n = keyed_case_count();
+    let mut runner = TestRunner::deterministic();
+    let schedule_strat = arb_snapshot_mutation_schedule();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..n {
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+        let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: snapshot recipe failed to stage: {e}"));
+
+        rt.block_on(async {
+            let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+            let full_scan_oracle_sql = format!(
+                "SELECT {key}, ANY_VALUE({attr}) AS current_val FROM main.sources_{name} GROUP \
+                 BY {key}",
+                key = recipe.source.key_column,
+                attr = recipe.source.payload_column,
+                name = recipe.source.name,
+            );
+
+            for (step_idx, mutation) in schedule.iter().enumerate() {
+                match mutation {
+                    SnapshotMutation::Insert { id, val } => {
+                        insert_row_keyed_snapshot(&project, &recipe, *id, *val).unwrap_or_else(
+                            |e| panic!("case {i} step {step_idx}: insert failed: {e}"),
+                        );
+                    }
+                    SnapshotMutation::Update { id, val } => {
+                        update_row_keyed_snapshot(&project, &recipe, *id, *val).unwrap_or_else(
+                            |e| panic!("case {i} step {step_idx}: update failed: {e}"),
+                        );
+                    }
+                    SnapshotMutation::Delete { id } => {
+                        delete_row_keyed_snapshot(&project, &recipe, *id).unwrap_or_else(|e| {
+                            panic!("case {i} step {step_idx}: delete failed: {e}")
+                        });
+                    }
+                }
+
+                project
+                    .run_quiet(
+                        &format!("snapshot-pool-{i}-{step_idx}"),
+                        base_request("dev"),
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("case {i} step {step_idx}: run failed: {e}"));
+
+                let backend = project.backend().await.expect("backend");
+                let equal = multiset_equal_via_backend(
+                    backend.as_ref(),
+                    &maintained_sql,
+                    &full_scan_oracle_sql,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("case {i} step {step_idx}: comparison failed to run: {e}")
+                });
+                assert!(
+                    equal,
+                    "case {i} step {step_idx}: maintained table diverged from the full-refresh \
+                     oracle after {mutation:?} — schedule so far: {:?}",
+                    &schedule[..=step_idx]
+                );
+            }
+        });
+    }
 }
 
 /// Phase 3: `--event-time-start`/`--event-time-end` on a snapshot-reconcile
@@ -1138,7 +1307,7 @@ pub fn classify_keyed_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -1347,11 +1516,55 @@ pub async fn drive_keyed_and_assert(
     recipe: &KeyedRecipe,
     schedule: &KeyedSchedule,
 ) -> anyhow::Result<()> {
+    drive_keyed_and_assert_with_state_ops(
+        project,
+        recipe,
+        schedule,
+        &std::collections::BTreeMap::new(),
+    )
+    .await
+}
+
+/// [`drive_keyed_and_assert`], additionally applying a
+/// [`StateResidencyOp`] before window `i` whenever `ops` names one for that
+/// index (`docs/outcomes/20260816-state-residency/phases/08-plan.md` task
+/// 5) — the keyed pool's residency hook. `KeyedSchedule`/`KeyedRunWindow`
+/// themselves stay untouched: no new field, no churn to every existing
+/// construction site.
+pub async fn drive_keyed_and_assert_with_state_ops(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    schedule: &KeyedSchedule,
+    ops: &std::collections::BTreeMap<usize, StateResidencyOp>,
+) -> anyhow::Result<()> {
+    let mut project = project.clone();
     let mut tracker = STracker::new(&recipe.source);
 
     for (i, window) in schedule.0.iter().enumerate() {
+        if let Some(op) = ops.get(&i) {
+            project = match op {
+                StateResidencyOp::DropStateDir => {
+                    drop_state_dir(&project)?;
+                    project
+                }
+                StateResidencyOp::FreshClone => {
+                    let dest = project
+                        .project_dir
+                        .parent()
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "project_dir {:?} has no parent to clone alongside",
+                                project.project_dir
+                            )
+                        })?
+                        .join(format!("fresh_clone_keyed_{i}"));
+                    project.fresh_clone(&dest)?
+                }
+            };
+        }
+
         for row in &window.rows {
-            insert_row_keyed(project, recipe, row)?;
+            insert_row_keyed(&project, recipe, row)?;
         }
 
         let snapshot = {
@@ -1367,7 +1580,7 @@ pub async fn drive_keyed_and_assert(
             .await?;
 
         let k = tracker.record_run(window.start, window.end, snapshot);
-        assert_keyed_equivalence(project, recipe, &tracker, k).await?;
+        assert_keyed_equivalence(&project, recipe, &tracker, k).await?;
     }
     Ok(())
 }
@@ -2435,7 +2648,7 @@ fn classify_keyed_enriched_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -2531,6 +2744,7 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
         &sources,
         &explicitly_mutable,
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error")
     .expect(
@@ -3147,7 +3361,7 @@ fn classify_value_enriched_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -4160,6 +4374,318 @@ fn column_add_between_runs_recovers_equivalence() {
         );
 }
 
+/// `definition_edit_pool_upholds_equivalence`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/05-plan.md`
+/// test 4): the standing generative gate for the definition-edit leg — the
+/// generative counterpart of the hand-written
+/// `column_add_between_runs_recovers_equivalence` above. Deterministic seed,
+/// [`case_count`] cases over [`RecipePool::partition_append_only`], admitted
+/// recipes only; drives [`arb_schedule_with_definition_edit`]'s schedule
+/// through [`drive_and_assert`], which already asserts S-restricted
+/// equivalence against the CURRENT on-disk body's own oracle after every
+/// step (including the steps after a `RewriteModel`, per
+/// `assert_equivalence_with_edit`'s `current_edit` threading). Asserts
+/// `rewritten_cases > 0` so a generator that silently stops emitting
+/// rewrites (e.g. every drawn recipe carrying empty `evolution`) fails the
+/// gate rather than passing vacuously.
+#[test]
+fn definition_edit_pool_upholds_equivalence() {
+    let n = case_count();
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut admitted_cases = 0;
+    let mut rewritten_cases = 0;
+
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        let schedule = arb_schedule_with_definition_edit(&recipe)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+
+        match verdict {
+            Verdict::Refused(_) => continue,
+            Verdict::Admitted(_) => {
+                admitted_cases += 1;
+                if schedule
+                    .0
+                    .iter()
+                    .any(|s| matches!(s, ConformanceStep::RewriteModel { .. }))
+                {
+                    rewritten_cases += 1;
+                }
+                rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "case {i}: recipe {recipe:?} schedule {schedule:?} \
+                             equivalence check failed: {e}"
+                        )
+                    });
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic sample admitted zero cases — generator/derivation regression"
+    );
+    assert!(
+        rewritten_cases > 0,
+        "N={n} deterministic sample staged zero RewriteModel steps across {admitted_cases} \
+         admitted cases — the definition-edit generator silently stopped emitting rewrites"
+    );
+}
+
+/// `definition_edit_grouping_column_upholds_equivalence` (phase 5 plan test
+/// 5): the `AddGroupingColumn` (skeleton-widening) leg over the aggregate
+/// constructs specifically, PINNED to that edit rather than left to
+/// [`arb_schedule_with_definition_edit`]'s draw — the aggregate constructs'
+/// `evolution` also contains `AddPayloadColumn`, so leaving the edit to the
+/// draw would only probabilistically cover the skeleton-widening leg.
+#[test]
+fn definition_edit_grouping_column_upholds_equivalence() {
+    let n = case_count();
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![
+            ConstructKind::AdditiveAgg,
+            ConstructKind::IdempotentAgg,
+            ConstructKind::DecomposedAgg,
+            ConstructKind::HolisticAgg,
+        ],
+    };
+    let recipe_strat = arb_recipe(pool);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut admitted_cases = 0;
+
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        assert!(
+            recipe.evolution.contains(&ModelEdit::AddGroupingColumn),
+            "case {i}: aggregate recipe {recipe:?} must carry AddGroupingColumn in its evolution"
+        );
+        let base_schedule = arb_schedule_for(&recipe)
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        // Pin the edit: splice RewriteModel{AddGroupingColumn} + FullRefreshRun
+        // right after the first RunWindow, mirroring
+        // `arb_schedule_with_definition_edit`'s own splice placement.
+        let mut steps = base_schedule.0;
+        steps.splice(
+            1..1,
+            [
+                ConformanceStep::RewriteModel {
+                    edit: ModelEdit::AddGroupingColumn,
+                },
+                ConformanceStep::FullRefreshRun,
+            ],
+        );
+        let schedule = ConformanceSchedule(steps);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+        let verdict = classify(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+
+        match verdict {
+            Verdict::Refused(_) => continue,
+            Verdict::Admitted(_) => {
+                admitted_cases += 1;
+                rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "case {i}: recipe {recipe:?} schedule {schedule:?} \
+                             equivalence check failed: {e}"
+                        )
+                    });
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic sample admitted zero aggregate cases — \
+         generator/derivation regression"
+    );
+}
+
+/// `migrate_apply_recovers_equivalence_after_payload_column_add`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+/// 06-plan.md` test 7): a `PassThrough` recipe's `AddPayloadColumn` edit
+/// recovers equivalence purely through `smelt migrate --apply` — no
+/// intervening run of any kind between the rewrite and the apply (unlike
+/// `column_add_between_runs_recovers_equivalence`'s `FullRefreshRun`
+/// catch-up, and unlike `pure_backfill_column_add_executes_in_place_update`'s
+/// windowed re-run, both of which recover the SAME edit through a different
+/// mechanism). Proves the migrate-gated recovery leg genuinely closes the
+/// gap on its own.
+#[test]
+fn migrate_apply_recovers_equivalence_after_payload_column_add() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::PassThrough],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddPayloadColumn),
+        "PassThrough recipe {recipe:?} must carry AddPayloadColumn in its evolution"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected PassThrough append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: 10,
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: 20,
+            }],
+        },
+        // Definition change: add a derived payload column, same skeleton.
+        ConformanceStep::RewriteModel {
+            edit: ModelEdit::AddPayloadColumn,
+        },
+        // The ONLY recovery mechanism in this schedule — no accompanying
+        // run either side of it.
+        ConformanceStep::MigrateApply,
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (tracker, k, exit_codes) = rt
+        .block_on(drive_and_assert(&project, &recipe, &schedule))
+        .expect("schedule through MigrateApply must succeed");
+    assert_eq!(
+        exit_codes,
+        vec![0],
+        "expected the pure-backfill-in-place plan's --apply to execute cleanly"
+    );
+
+    rt.block_on(assert_equivalence_with_edit(
+        &project,
+        &recipe,
+        &tracker,
+        k,
+        Some(ModelEdit::AddPayloadColumn),
+    ))
+    .expect(
+        "smelt migrate --apply must recover full equivalence against the rewritten body's own \
+         oracle with no accompanying run",
+    );
+}
+
+/// `migrate_refuses_skeleton_change_then_full_refresh_recovers`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+/// 06-plan.md` test 8): an `AddGroupingColumn` edit (a skeleton change —
+/// `Verdict::SkeletonChange`, never targetable) makes `smelt migrate
+/// --apply` refuse — exit `3`, nothing executed — mirroring
+/// `crates/smelt-cli/tests/migrate.rs::apply_refuses_a_skeleton_change_plan`
+/// at the conformance-gate level. The honest recovery route stays a full
+/// refresh, exactly as `column_add_between_runs_recovers_equivalence`
+/// already proves for the payload-column edit.
+#[test]
+fn migrate_refuses_skeleton_change_then_full_refresh_recovers() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddGroupingColumn),
+        "aggregate recipe {recipe:?} must carry AddGroupingColumn in its evolution"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected additive-agg append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: 10,
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: 20,
+            }],
+        },
+        // Definition change: widen the GROUP BY skeleton.
+        ConformanceStep::RewriteModel {
+            edit: ModelEdit::AddGroupingColumn,
+        },
+        // Refused — a skeleton-change group admits no candidate.
+        ConformanceStep::MigrateApply,
+        // The honest recovery route.
+        ConformanceStep::FullRefreshRun,
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (_tracker, _k, exit_codes) = rt
+        .block_on(drive_and_assert(&project, &recipe, &schedule))
+        .expect(
+            "the refused MigrateApply step and the recovering FullRefreshRun step must both \
+             succeed (drive_and_assert asserts the FullRefreshRun step's own equivalence)",
+        );
+    assert_eq!(
+        exit_codes,
+        vec![3],
+        "expected the skeleton-change plan's --apply to refuse (exit 3), executing nothing"
+    );
+}
+
 /// Real deployed-schema column names for a staged recipe's model, read
 /// straight from the on-disk `FileStore` `smelt-runtime`'s maintenance
 /// driver itself reads (`crate::maintenance_driver::
@@ -4167,7 +4693,11 @@ fn column_add_between_runs_recovers_equivalence() {
 /// synthetic stand-in. `None` when no schema has been deployed yet (before
 /// the model's first successful run).
 fn deployed_column_names(project: &LinkCProject, table: &str) -> Vec<String> {
-    let file_store = smelt_state::file_store::FileStore::new(&project.project_dir, "dev");
+    let file_store = smelt_state::file_store::FileStore::new(
+        &project.project_dir,
+        "dev",
+        smelt_core::config::StateMode::Environments,
+    );
     file_store
         .load_schema(table)
         .ok()
@@ -4218,6 +4748,7 @@ fn derive_plan_with_real_deployed_schema(
         &[],
         &deployed,
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .ok_or_else(|| anyhow::anyhow!("model {:?} carries no maintenance plan", recipe.model_name))?;
     Ok(result.plan)
@@ -4618,7 +5149,7 @@ pub fn classify_composed_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 

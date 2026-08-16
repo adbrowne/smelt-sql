@@ -30,6 +30,16 @@ fn scaffold(tmp: &TempDir) -> PathBuf {
         "smelt init should succeed.\nstderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    // `smelt init`'s template project defaults to `state.mode: stateless`
+    // (`docs/specs/state.md` §"`state.mode` and what each posture
+    // provides"), which writes no run report — the failure summary this
+    // suite exercises is read back from that report, so opt the scaffolded
+    // project into `intervals`.
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut smelt_yml =
+        std::fs::read_to_string(&smelt_yml_path).expect("scaffolded smelt.yml must exist");
+    smelt_yml.push_str("state:\n  mode: intervals\n");
+    std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
     project_dir
 }
 

@@ -188,11 +188,11 @@ fn diagnostics_tables_carry_the_four_lattice_codes() {
 #[test]
 fn constraint_and_claude_md_state_the_lattice_invariant() {
     let spec = read("docs/specs/incremental_models.md");
-    let section = section_body(&spec, "### The contract, plan, and graph layer");
+    let section = h2_section_body(&spec, "## Constraints & Invariants");
     assert!(
         section.contains("lattice point") && section.contains("smelt-logical"),
-        "§Constraints & Invariants → \"The contract, plan, and graph layer\" must state the \
-         lattice-point single-owner rule, naming `smelt-logical`"
+        "§\"Constraints & Invariants\" must state the lattice-point single-owner rule, naming \
+         `smelt-logical`"
     );
 
     let claude_md = read("CLAUDE.md");

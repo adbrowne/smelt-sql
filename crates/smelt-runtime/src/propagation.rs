@@ -19,7 +19,7 @@
 //! pure `propagate`; it never re-implements admission or the graph
 //! composition math itself.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use chrono::Datelike;
@@ -31,12 +31,15 @@ use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::output_delta::{self, OutputDelta, OutputDeltaFacts};
 use smelt_logical::maintenance::edge_type::type_edge;
 use smelt_logical::maintenance::propagate::{
-    day_ordinal, ordinal_to_iso, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+    day_ordinal, ordinal_to_iso, required_inputs, DayInterval, Edge, PartitionGrain,
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
     ColumnGroup, MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
 };
+use smelt_state::landed_deltas::LandedDeltaStore;
+
+use crate::types::KeyedRestriction;
 
 /// One caller-declared per-source delta: the partitions that landed on
 /// `source` (bare name, the `sources.` breadcrumb stripped — matches
@@ -99,8 +102,126 @@ pub fn parse_landed_range(value: &str) -> Result<DayInterval> {
 /// Pair up `--source`/`--landed` flags positionally (the Nth `--source`
 /// pairs with the Nth `--landed`) into [`SourceDelta`]s. A named CLI error
 /// (never a panic) when the two lists' lengths disagree — `--landed`
-/// without a matching `--source`, or vice versa.
+/// without a matching `--source`, or vice versa. The no-watermark
+/// delegating wrapper (`docs/specs/incremental_models.md` §Surface, "Run
+/// flags"): existing callers keep today's behaviour exactly — bare spelling
+/// only, equal counts required, no unpaired-source resolution. Use
+/// [`pair_source_deltas_with_watermarks`] to also honour the qualified
+/// `<address>=<start>..<end>` spelling and resolve an unpaired source from
+/// its persisted watermark.
 pub fn pair_source_deltas(sources: &[String], landed: &[String]) -> Result<Vec<SourceDelta>> {
+    pair_source_deltas_with_watermarks(sources, landed, None, "")
+}
+
+/// One `--landed` value's spelling (`incremental_models.md` §Surface,
+/// "Run flags"): bare `<start>..<end>` (paired positionally with the
+/// `--source` at the same index) or address-qualified
+/// `<address>=<start>..<end>` (paired by address, no positional
+/// constraint). A bare value never contains `=` (ISO dates don't), so its
+/// presence discriminates the two spellings unambiguously.
+enum LandedSpelling<'a> {
+    Bare,
+    Qualified(&'a str, &'a str),
+}
+
+fn classify_landed(value: &str) -> LandedSpelling<'_> {
+    match value.split_once('=') {
+        Some((addr, range)) => LandedSpelling::Qualified(addr, range),
+        None => LandedSpelling::Bare,
+    }
+}
+
+/// Resolve a `--source` with no paired `--landed` from its persisted
+/// watermark: `[watermark, now)`. A source with neither a paired `--landed`
+/// nor a persisted watermark is a named run error (`run_state.md`
+/// §"Per-source watermark": "the refusal names the missing watermark") —
+/// never a silent per-source skip that would quietly under-propagate.
+fn resolve_from_watermark(
+    source: &str,
+    store: Option<&LandedDeltaStore>,
+    now: &str,
+) -> Result<SourceDelta> {
+    let watermark = store.and_then(|s| s.watermark(source));
+    match watermark {
+        Some(w) => Ok(SourceDelta {
+            source: source.to_string(),
+            landed: DayInterval::new(iso_to_day_ordinal(w)?, iso_to_day_ordinal(now)?),
+        }),
+        None => bail!(
+            "--source '{source}' has neither a paired --landed nor a persisted watermark — pass \
+             --landed <start>..<end> (or --landed {source}=<start>..<end>) for it, or run a prior \
+             `smelt run` over it so a watermark exists"
+        ),
+    }
+}
+
+fn iso_to_day_ordinal(value: &str) -> Result<i64> {
+    let date = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .with_context(|| format!("malformed ISO date '{value}'"))?;
+    Ok(day_ordinal(date.year() as i64, date.month(), date.day()))
+}
+
+/// Pair up `--source`/`--landed` flags into [`SourceDelta`]s, honouring both
+/// `--landed` spellings and resolving an unpaired source from `store`'s
+/// persisted watermark (`docs/specs/run_state.md` §"Per-source watermark").
+///
+/// - **Bare** `<start>..<end>` values pair positionally, same as
+///   [`pair_source_deltas`] — requires equal `--source`/`--landed` counts,
+///   unchanged. An entirely empty `landed` list is the one exception: every
+///   `--source` is then unpaired and resolves from its watermark.
+/// - **Qualified** `<address>=<start>..<end>` values pair by address, no
+///   positional constraint; a `--source` absent from the qualified list
+///   resolves from its watermark.
+/// - Mixing the two spellings in one invocation is refused.
+pub fn pair_source_deltas_with_watermarks(
+    sources: &[String],
+    landed: &[String],
+    store: Option<&LandedDeltaStore>,
+    now: &str,
+) -> Result<Vec<SourceDelta>> {
+    let has_bare = landed
+        .iter()
+        .any(|l| matches!(classify_landed(l), LandedSpelling::Bare));
+    let has_qualified = landed
+        .iter()
+        .any(|l| matches!(classify_landed(l), LandedSpelling::Qualified(_, _)));
+    if has_bare && has_qualified {
+        bail!(
+            "--landed values must not mix the bare '<start>..<end>' and qualified \
+             '<address>=<start>..<end>' spellings in one invocation"
+        );
+    }
+
+    if has_qualified {
+        let mut by_addr: HashMap<String, DayInterval> = HashMap::new();
+        for l in landed {
+            let LandedSpelling::Qualified(addr, range) = classify_landed(l) else {
+                unreachable!("has_qualified implies every entry classifies as Qualified");
+            };
+            by_addr.insert(normalize_source_address(addr), parse_landed_range(range)?);
+        }
+        return sources
+            .iter()
+            .map(|src| {
+                let normalized = normalize_source_address(src);
+                match by_addr.get(&normalized) {
+                    Some(landed) => Ok(SourceDelta {
+                        source: normalized,
+                        landed: *landed,
+                    }),
+                    None => resolve_from_watermark(&normalized, store, now),
+                }
+            })
+            .collect();
+    }
+
+    if landed.is_empty() && store.is_some() && !sources.is_empty() {
+        return sources
+            .iter()
+            .map(|src| resolve_from_watermark(&normalize_source_address(src), store, now))
+            .collect();
+    }
+
     if sources.len() != landed.len() {
         bail!(
             "--source and --landed must be passed the same number of times ({} --source vs {} \
@@ -345,6 +466,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     let ClampAndLocality {
         clamp_days,
         locality_admitted,
+        key_scope_by_model,
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
 
@@ -393,6 +515,10 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &consumer_groups,
         );
 
+        let consumer_key_scope = key_scope_by_model
+            .get(&downstream)
+            .cloned()
+            .unwrap_or_default();
         edges.push(Edge {
             upstream,
             downstream,
@@ -401,6 +527,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             upstream_grain,
             downstream_grain,
             components,
+            consumer_key_scope,
         });
     }
     Ok(edges)
@@ -429,6 +556,16 @@ struct ClampAndLocality {
     /// never re-derived; the SAME verdict `locality_admitted` above folds
     /// `Some(_).is_some()` from.
     key_locality_slice: BTreeMap<String, smelt_logical::maintenance::locality::LocalitySlice>,
+    /// Every maintained model's own derived key scope (Phase 3,
+    /// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`): the
+    /// key columns of a `PlanCell::key_scope` this model's own derived
+    /// `MaintenancePlan` carries on ANY of its cells (populated by the
+    /// key-addressed dispatch substitution, `smelt-logical::maintenance::
+    /// derive`) — folded here so [`build_forward_graph`] can attach it as an
+    /// inbound edge's [`Edge::consumer_key_scope`] without a second
+    /// derivation. Absent for a model whose own plan carries no key-scoped
+    /// cell.
+    key_scope_by_model: BTreeMap<String, Vec<String>>,
 }
 
 fn derive_clamp_and_locality(
@@ -481,6 +618,7 @@ fn derive_clamp_and_locality(
             clamp_days,
             locality_admitted,
             key_locality_slice,
+            key_scope_by_model,
         } = derive_clamp_and_locality_pass(
             models,
             source_infos,
@@ -534,6 +672,7 @@ fn derive_clamp_and_locality(
                 clamp_days,
                 locality_admitted,
                 key_locality_slice,
+                key_scope_by_model,
             });
         }
         composed_sources = next_composed_sources;
@@ -578,6 +717,10 @@ fn derive_clamp_and_locality_pass(
         String,
         smelt_logical::maintenance::locality::LocalitySlice,
     > = BTreeMap::new();
+    // Every model's own derived key scope (`ClampAndLocality::
+    // key_scope_by_model`'s own doc comment) — populated from
+    // `PlanCell::key_scope` inside the per-model pass below.
+    let mut key_scope_by_model: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for model in models {
         let Some(metadata) = model.metadata.as_deref() else {
@@ -805,6 +948,11 @@ fn derive_clamp_and_locality_pass(
             // `UpstreamMutation` cell's closure is real here too, never a
             // separately re-derived admission.
             &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
+            // Not (yet) backend-aware at this call site — the propagation
+            // graph walk reads dirt-interval facts, not the executed
+            // technique, so an un-downgraded ideal plan is the correct
+            // input here (same posture as `smelt explain`'s report path).
+            smelt_logical::maintenance::availability::StateAvailability::all(),
         ) else {
             continue;
         };
@@ -822,6 +970,16 @@ fn derive_clamp_and_locality_pass(
         }
 
         for cell in &result.plan.cells {
+            // Phase 3 (`docs/outcomes/20260816-scheduler-delta-signatures/
+            // outcome.md`): a cell substituted onto the key-addressed route
+            // (phase 2's dispatch, `derive.rs`'s `key_scope: Some(key_scope)`
+            // push site) names the key columns this model's own maintenance
+            // plan restricts by — fold it once per model so
+            // `build_forward_graph` can attach it to every inbound edge as
+            // `Edge::consumer_key_scope`, never re-deriving it.
+            if let Some(key_scope) = &cell.key_scope {
+                key_scope_by_model.insert(table.clone(), key_scope.keys.clone());
+            }
             for clamp in &cell.scans {
                 let e = Edge::from_clamp(&table, clamp);
                 let entry = clamp_days
@@ -896,6 +1054,7 @@ fn derive_clamp_and_locality_pass(
         clamp_days,
         locality_admitted,
         key_locality_slice,
+        key_scope_by_model,
     })
 }
 
@@ -999,6 +1158,16 @@ pub struct PropagatedRun {
 pub struct SinceUpstreamPlan {
     pub runs: Vec<PropagatedRun>,
     pub dirty_set_report: String,
+    /// The keyed dirt-set channel's own per-model merge (`model` → the
+    /// [`smelt_logical::maintenance::propagate::KeyedDirt`] records that
+    /// dirtied it) — the keyed-channel counterpart to `runs`/
+    /// `dirty_set_report`'s interval-channel reporting. Populated whenever
+    /// the assembled graph carries an admitted keyed edge, regardless of
+    /// whether [`plan_since_upstream_with_keyed_seeds`] seeded it (an
+    /// unseeded admitted edge still propagates a symbolic
+    /// [`smelt_logical::maintenance::propagate::KeyValues::Unresolved`]
+    /// record).
+    pub keyed_dirty: BTreeMap<String, Vec<smelt_logical::maintenance::propagate::KeyedDirt>>,
 }
 
 fn render_interval(iv: &DayInterval) -> String {
@@ -1052,6 +1221,213 @@ pub type ObservedDeltaKey = (String, String, String);
 /// changed-row set for that exact window.
 pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckdb::ObservedDelta>;
 
+/// The exact set of [`ObservedDeltaKey`]s
+/// [`plan_since_upstream_with_observed_deltas`] would consult for `deltas` —
+/// one key per delta whose `source` names a locality-admitted composed
+/// model, derived from the SAME [`derive_clamp_and_locality`]
+/// `key_locality_slice` the planner itself reads for eligibility (never a
+/// second, independently re-derived "is this origin locality-admitted"
+/// rule). A delta whose origin has no admitted key-temporal-locality route
+/// (a raw `sources.*` address, or a bare `grain: partition` model) is not
+/// eligible at all and contributes no key — a live resolver has nothing to
+/// read for it, exactly as [`plan_since_upstream_with_observed_deltas`]
+/// itself never looks such an origin up in `observed`.
+///
+/// Pure — no backend I/O. The live resolver (`propagation_live.rs`) calls
+/// this first to know which `(model, window)` keys to actually read off the
+/// warehouse, then passes the resulting [`ObservedDeltaLookup`] to
+/// [`plan_since_upstream_with_observed_deltas`].
+pub fn observed_delta_keys_to_read(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    deltas: &[SourceDelta],
+) -> Result<Vec<ObservedDeltaKey>> {
+    let ClampAndLocality {
+        key_locality_slice, ..
+    } = derive_clamp_and_locality(models, source_infos)?;
+    Ok(deltas
+        .iter()
+        .filter(|d| key_locality_slice.contains_key(&d.source))
+        .map(|d| {
+            (
+                d.source.clone(),
+                ordinal_to_iso(d.landed.start),
+                ordinal_to_iso(d.landed.end),
+            )
+        })
+        .collect())
+}
+
+/// One `(upstream, consumer)` keyed-seed descriptor
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`):
+/// everything [`crate::propagation_live::resolve_keyed_seeds`] needs to run
+/// ONE group-grain sidecar diff for a consumer's own admitted key-addressed
+/// edge onto `upstream`. Bare model addresses and bare db names only —
+/// schema qualification is the live half's job
+/// (`crate::execute::model_edge_source_identity`), mirroring
+/// [`observed_delta_keys_to_read`]'s own "the pure half names WHAT to read,
+/// the live half reads it" split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedSeedDiff {
+    pub upstream: String,
+    pub upstream_db_name: String,
+    pub consumer: String,
+    pub consumer_db_name: String,
+    pub upstream_keys: Vec<String>,
+    pub digest_columns: Vec<String>,
+    pub consumer_clean_sql: String,
+}
+
+/// The exact set of [`KeyedSeedDiff`] descriptors the live keyed-seed
+/// resolver needs to read for `deltas` — one descriptor per `(upstream,
+/// consumer)` pair where `upstream` names a delta origin that is a
+/// maintained model in `models` AND `consumer` (any other model in the
+/// workspace) admits a key-addressed model-edge cell onto it
+/// ([`smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges`]
+/// via [`crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells`]
+/// — the SAME resolver the run loop's own dispatch composition calls, never a
+/// second independent derivation). A delta origin absent from `models` (a
+/// declared `sources.*` address) contributes no descriptor at all — there is
+/// no upstream `ModelFile` for any consumer to key-address against.
+///
+/// An upstream's seed is the **union** of every one of its consumers' own
+/// diffs (`docs/specs/incremental_models.md` §"Keyed dirt-sets and the
+/// narrowed refusal": the sidecar partition identity is per `(upstream,
+/// consumer)`, since each consumer hashes its own digest projection) — this
+/// function only enumerates the per-consumer descriptors; the union itself
+/// happens in [`fold_keyed_seed_values`], after each descriptor's own diff
+/// has been read live.
+///
+/// Pure — assumes DuckDB when deriving which cells a consumer admits (the
+/// group-grain sidecar diff is DuckDB-only regardless of the actual run
+/// target; the non-DuckDB degradation is the LIVE read side's job, not
+/// descriptor generation — see [`keyed_seed_diff_result_to_key_values`]).
+pub fn keyed_seed_diffs_to_read(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    deltas: &[SourceDelta],
+) -> Result<Vec<KeyedSeedDiff>> {
+    let model_by_addr: HashMap<String, ModelFile> = models
+        .iter()
+        .map(|m| (m.canonical_path(), m.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for delta in deltas {
+        let Some(upstream_model) = model_by_addr.get(&delta.source) else {
+            continue;
+        };
+        for consumer in models {
+            let table = consumer.canonical_path();
+            if table == delta.source {
+                continue;
+            }
+            let Some(metadata) = consumer.metadata.as_deref() else {
+                continue;
+            };
+            let model_edges =
+                crate::execute::model_edges_for(consumer, &model_by_addr, source_infos);
+            let (sources, explicitly_mutable) =
+                crate::execute::build_maint_source_facts(consumer, source_infos);
+            let sql = smelt_parser::strip_frontmatter(&consumer.content);
+            let cells = crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells(
+                &sql,
+                &table,
+                metadata,
+                &sources,
+                &explicitly_mutable,
+                &model_edges,
+                smelt_dialect::SqlDialect::DuckDB,
+            )?;
+            for (edge_name, _cell, _key_scope, upstream_keys, digest_columns, _write) in cells {
+                if edge_name != delta.source {
+                    continue;
+                }
+                out.push(KeyedSeedDiff {
+                    upstream: edge_name,
+                    upstream_db_name: upstream_model.db_name_owned(),
+                    consumer: table.clone(),
+                    consumer_db_name: consumer.db_name_owned(),
+                    upstream_keys,
+                    digest_columns,
+                    consumer_clean_sql: sql.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Turn one [`KeyedSeedDiff`]'s live sidecar-diff result into a
+/// [`smelt_logical::maintenance::propagate::KeyValues`] (`docs/specs/
+/// incremental_models.md` §"Unresolved seeds"): `Ok` folds to `Resolved`
+/// (even an empty `Vec` — nothing changed is resolved-and-empty, never
+/// unresolved); a non-DuckDB target's `BackendError::UnsupportedFeature`
+/// folds to `Unresolved` naming the dialect, the honest degradation rather
+/// than a run failure or a fabricated empty set; any other error propagates
+/// (fail loud).
+pub fn keyed_seed_diff_result_to_key_values(
+    result: std::result::Result<Vec<String>, smelt_backend::BackendError>,
+) -> Result<smelt_logical::maintenance::propagate::KeyValues> {
+    use smelt_logical::maintenance::propagate::KeyValues;
+    match result {
+        Ok(values) => Ok(KeyValues::Resolved(values)),
+        Err(smelt_backend::BackendError::UnsupportedFeature { dialect, feature }) => {
+            Ok(KeyValues::Unresolved {
+                reason: format!(
+                    "'{dialect}' does not support {feature} — the group-grain sidecar diff \
+                     that resolves a keyed seed live is DuckDB-only"
+                ),
+            })
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Fold every [`KeyValues`](smelt_logical::maintenance::propagate::KeyValues)
+/// resolved for one upstream's own consumers into the single seed
+/// [`plan_since_upstream_with_keyed_seeds`] consumes for that upstream —
+/// the **union** rule §"Keyed dirt-sets and the narrowed refusal" pins.
+/// `Resolved` folds by set union (sorted, deduplicated) — a diff that found
+/// nothing contributes nothing but does not itself make the fold
+/// `Unresolved` (empty-and-resolved is not the same as unresolved). An empty
+/// `results` slice or one containing only `Unresolved` entries folds to
+/// `Resolved(vec![])` — one consumer's genuine "nothing changed" — UNLESS
+/// EVERY entry is `Unresolved`, in which case the fold stays `Unresolved`
+/// (naming the first reason) rather than silently claiming resolution no
+/// consumer actually achieved.
+pub fn fold_keyed_seed_values(
+    results: Vec<smelt_logical::maintenance::propagate::KeyValues>,
+) -> smelt_logical::maintenance::propagate::KeyValues {
+    use smelt_logical::maintenance::propagate::KeyValues;
+    let mut values: Vec<String> = Vec::new();
+    let mut any_resolved = false;
+    let mut first_unresolved_reason: Option<String> = None;
+    for kv in results {
+        match kv {
+            KeyValues::Resolved(v) => {
+                any_resolved = true;
+                values.extend(v);
+            }
+            KeyValues::Unresolved { reason } => {
+                if first_unresolved_reason.is_none() {
+                    first_unresolved_reason = Some(reason);
+                }
+            }
+        }
+    }
+    if any_resolved {
+        values.sort();
+        values.dedup();
+        KeyValues::Resolved(values)
+    } else if let Some(reason) = first_unresolved_reason {
+        KeyValues::Unresolved { reason }
+    } else {
+        // No descriptors at all for this upstream — resolved-and-empty, the
+        // same convention an actually-diffed-and-empty consumer gets.
+        KeyValues::Resolved(Vec::new())
+    }
+}
+
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
 /// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely
@@ -1084,6 +1460,61 @@ pub fn plan_since_upstream_with_observed_deltas(
     order: &[String],
     deltas: &[SourceDelta],
     observed: &ObservedDeltaLookup,
+) -> Result<SinceUpstreamPlan> {
+    plan_since_upstream_live(
+        models,
+        source_infos,
+        order,
+        deltas,
+        observed,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`plan_since_upstream`]'s keyed-seed sibling: mirrors
+/// [`plan_since_upstream_with_observed_deltas`]'s shape but instead of
+/// projecting a recorded observed delta, seeds the keyed dirt-set channel
+/// with `keyed_seeds` (node name → resolved
+/// [`smelt_logical::maintenance::propagate::KeyValues`]) via
+/// `smelt_logical::maintenance::propagate::propagate_with_keys`. The
+/// resolved values reach the returned plan's [`SinceUpstreamPlan::keyed_dirty`]
+/// and are rendered into `dirty_set_report` alongside the interval channel.
+/// Live resolution of the seed values themselves (reading the actual
+/// changed keys off the backend) is phase 5's work
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`); this
+/// function only threads an already-resolved seed map through to the graph.
+pub fn plan_since_upstream_with_keyed_seeds(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+    keyed_seeds: &BTreeMap<String, smelt_logical::maintenance::propagate::KeyValues>,
+) -> Result<SinceUpstreamPlan> {
+    plan_since_upstream_live(
+        models,
+        source_infos,
+        order,
+        deltas,
+        &BTreeMap::new(),
+        keyed_seeds,
+    )
+}
+
+/// The full form both [`plan_since_upstream_with_observed_deltas`] and
+/// [`plan_since_upstream_with_keyed_seeds`] delegate to — both channels
+/// (observed deltas + keyed seeds) at once. `pub` so
+/// `smelt-cli`'s `run_since_upstream` can call it directly once it has
+/// resolved BOTH a live observed-delta lookup and a live keyed-seed map
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`)
+/// — the two existing wrappers stay as the single-channel convenience
+/// entry points tests already depend on.
+pub fn plan_since_upstream_live(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+    observed: &ObservedDeltaLookup,
+    keyed_seeds: &BTreeMap<String, smelt_logical::maintenance::propagate::KeyValues>,
 ) -> Result<SinceUpstreamPlan> {
     refuse_bare_keyed_origins(models, source_infos, deltas)?;
     let edges = build_forward_graph(models, source_infos)?;
@@ -1129,11 +1560,15 @@ pub fn plan_since_upstream_with_observed_deltas(
             .extend(projected);
     }
 
-    let prop = propagate(&edges, &source_deltas)
-        .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}",))?;
+    let prop = smelt_logical::maintenance::propagate::propagate_with_keys(
+        &edges,
+        &source_deltas,
+        keyed_seeds,
+    )
+    .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}",))?;
 
     let mut report = String::from("Dirty set (--since-upstream):\n");
-    if prop.per_edge.is_empty() {
+    if prop.per_edge.is_empty() && prop.per_edge_keys.is_empty() {
         report.push_str("  (no source landed a delta that any model reads — nothing to run)\n");
     }
     for ((downstream, upstream), intervals) in &prop.per_edge {
@@ -1141,6 +1576,14 @@ pub fn plan_since_upstream_with_observed_deltas(
             report.push_str(&format!(
                 "  {downstream} <- {upstream}: {}\n",
                 render_interval(iv)
+            ));
+        }
+    }
+    for ((downstream, upstream), keyed) in &prop.per_edge_keys {
+        for kd in keyed {
+            report.push_str(&format!(
+                "  {downstream} <- {upstream}: keyed {:?} = {:?}\n",
+                kd.keys, kd.values
             ));
         }
     }
@@ -1193,7 +1636,45 @@ pub fn plan_since_upstream_with_observed_deltas(
     Ok(SinceUpstreamPlan {
         runs,
         dirty_set_report: report,
+        keyed_dirty: prop.keyed_dirty,
     })
+}
+
+/// Convert a [`SinceUpstreamPlan::keyed_dirty`] channel into the
+/// [`ExecuteRequest::keyed_restrictions`](crate::types::ExecuteRequest::keyed_restrictions)
+/// wire shape the CLI's `run_since_upstream` populates each per-model
+/// request from (`docs/specs/incremental_models.md` §"Restrictions compose
+/// by union", phase 5,
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/05-plan.md`).
+/// Pure data conversion — only [`smelt_logical::maintenance::propagate::
+/// KeyValues::Resolved`] entries contribute a [`KeyedRestriction`]; an
+/// unresolved entry contributes **nothing** to the map (never narrows the
+/// union its consumer computes) rather than erroring or defaulting to an
+/// empty restriction. Values are sorted and deduplicated per entry, mirroring
+/// the union arithmetic performed downstream in `maintenance_driver.rs`.
+pub fn keyed_restrictions_from_plan(
+    plan: &SinceUpstreamPlan,
+) -> BTreeMap<String, Vec<KeyedRestriction>> {
+    let mut out: BTreeMap<String, Vec<KeyedRestriction>> = BTreeMap::new();
+    for (model, keyed) in &plan.keyed_dirty {
+        for kd in keyed {
+            let smelt_logical::maintenance::propagate::KeyValues::Resolved(values) = &kd.values
+            else {
+                continue;
+            };
+            let mut values = values.clone();
+            values.sort();
+            values.dedup();
+            out.entry(model.clone())
+                .or_default()
+                .push(KeyedRestriction {
+                    upstream: kd.from.clone(),
+                    keys: kd.keys.clone(),
+                    values,
+                });
+        }
+    }
+    out
 }
 
 /// The resolved backward-resolution plan for `smelt build --include-upstreams`:
@@ -1310,6 +1791,108 @@ mod tests {
         )
         .expect_err("mismatched counts must error");
         assert!(err.to_string().contains("--source and --landed"));
+    }
+
+    #[test]
+    fn missing_landed_resolves_watermark_to_now_span() {
+        let mut store = LandedDeltaStore::default();
+        store.advance_watermark("bronze", "2026-01-01");
+
+        // No --landed at all: resolves from the watermark to `now`.
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &[],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("resolve from watermark");
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].source, "bronze");
+        assert_eq!(
+            deltas[0].landed,
+            DayInterval::new(
+                iso_to_day_ordinal("2026-01-01").unwrap(),
+                iso_to_day_ordinal("2026-01-10").unwrap()
+            )
+        );
+
+        // An explicit --landed for the same source overrides the watermark.
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &["2026-02-01..2026-02-05".to_string()],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("explicit landed overrides");
+        assert_eq!(
+            deltas[0].landed,
+            parse_landed_range("2026-02-01..2026-02-05").unwrap()
+        );
+    }
+
+    #[test]
+    fn qualified_landed_pairs_by_address() {
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &["aux=2026-01-05..2026-01-06".to_string()],
+            None,
+            "2026-01-10",
+        );
+        // "bronze" is unpaired with no watermark available -> named error.
+        assert!(deltas.is_err());
+
+        let mut store = LandedDeltaStore::default();
+        store.advance_watermark("bronze", "2026-01-01");
+        let deltas = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &["aux=2026-01-05..2026-01-06".to_string()],
+            Some(&store),
+            "2026-01-10",
+        )
+        .expect("qualified pairing with watermark fallback");
+        assert_eq!(deltas[0].source, "bronze");
+        assert_eq!(
+            deltas[0].landed,
+            DayInterval::new(
+                iso_to_day_ordinal("2026-01-01").unwrap(),
+                iso_to_day_ordinal("2026-01-10").unwrap()
+            )
+        );
+        assert_eq!(deltas[1].source, "aux");
+        assert_eq!(
+            deltas[1].landed,
+            parse_landed_range("2026-01-05..2026-01-06").unwrap()
+        );
+
+        // Mixing bare and qualified spellings is refused.
+        let err = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string(), "sources.aux".to_string()],
+            &[
+                "2026-01-01..2026-01-02".to_string(),
+                "aux=2026-01-05..2026-01-06".to_string(),
+            ],
+            None,
+            "2026-01-10",
+        )
+        .expect_err("mixed spellings must be refused");
+        assert!(err.to_string().contains("must not mix"));
+    }
+
+    #[test]
+    fn source_without_landed_or_watermark_is_named_error() {
+        let err = pair_source_deltas_with_watermarks(
+            &["sources.bronze".to_string()],
+            &[],
+            Some(&LandedDeltaStore::default()),
+            "2026-01-10",
+        )
+        .expect_err("no landed and no watermark must error");
+        let msg = err.to_string();
+        assert!(msg.contains("bronze"), "error must name the source: {msg}");
+        assert!(
+            msg.contains("watermark"),
+            "error must name the missing watermark: {msg}"
+        );
     }
 
     #[test]

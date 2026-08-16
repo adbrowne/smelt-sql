@@ -11,6 +11,13 @@ When an incremental model runs, smelt:
 3. **Plans operations** -- safe changes produce ALTER TABLE statements; unsafe changes trigger a full refresh.
 4. **Executes DDL** -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, and Spark+Parquet each have their own code paths.
 
+!!! note
+    On a maintained (incremental) model, `ALTER TABLE ADD COLUMN` and its backfill always run in
+    the same atomic step — never a separately-dispatched backfill that could observe the column
+    added but not yet populated. A backend without transactional DDL (Spark) never takes that
+    two-step path: it rebuilds the table when you pass `--allow-full-refresh`, and otherwise
+    refuses the run and tells you which flag to pass.
+
 ## Configuration
 
 Schema evolution is configured in the model's **SQL frontmatter**. The `schema_evolution` and `columns` keys are frontmatter-only — they have no effect if placed under `models.<name>:` in `smelt.yml`.
@@ -40,7 +47,7 @@ FROM smelt.upstream_model
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `schema_evolution.strategy` | string | `alter_and_backfill` | How to handle schema changes. `alter_and_backfill` uses ALTER TABLE when possible; `full_refresh` always drops and recreates. |
+| `schema_evolution.strategy` | string | `alter_and_backfill` | How to handle schema changes. `alter_and_backfill` uses ALTER TABLE when possible; `full_refresh` always drops and recreates — on a maintained model this always rebuilds on a detected change rather than skipping migration. |
 
 ### Per-column fields
 

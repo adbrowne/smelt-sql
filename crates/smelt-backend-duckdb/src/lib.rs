@@ -866,6 +866,58 @@ impl Backend for DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
+
+    /// Real transactional override (`docs/outcomes/20260816-state-residency/
+    /// phases/04-plan.md`; `docs/specs/incremental_models.md` §"The frontier
+    /// record (reconciliation ledger)"): every statement in `write_group`,
+    /// then `reset_delete_sql`, then `insert_sql`, all run inside one
+    /// `duckdb::Transaction`, so either the write and the frontier reset
+    /// both commit, or neither does. `ensure_sql` (the idempotent `CREATE
+    /// TABLE IF NOT EXISTS`) runs first, outside that transaction — same
+    /// precedent as `fold_ledger_delta`'s and
+    /// `execute_write_and_refresh_fingerprint_sidecar`'s own `ensure_sql`
+    /// handling. `Transaction`'s default `DropBehavior::Rollback` means a
+    /// failure anywhere in `write_group`, `reset_delete_sql`, or
+    /// `insert_sql` rolls back every statement already applied in this
+    /// call — a failed write never leaves a reset frontier record behind
+    /// (the write and the reset share one commit point).
+    async fn execute_write_and_reset_frontier(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        reset_delete_sql: &str,
+        insert_sql: &str,
+    ) -> Result<(), BackendError> {
+        let ensure_sql = ensure_sql.to_string();
+        let mut statements: Vec<String> = write_group
+            .statements
+            .iter()
+            .map(|s| s.sql.clone())
+            .collect();
+        statements.push(reset_delete_sql.to_string());
+        statements.push(insert_sql.to_string());
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+
+            conn.execute(&ensure_sql, [])
+                .map_err(|e| BackendError::execution_failed("frontier", e.to_string()))?;
+
+            let tx = conn
+                .transaction()
+                .map_err(|e| BackendError::execution_failed("frontier", e.to_string()))?;
+            for sql in &statements {
+                tx.execute(sql, [])
+                    .map_err(|e| BackendError::execution_failed("frontier", e.to_string()))?;
+            }
+            tx.commit()
+                .map_err(|e| BackendError::execution_failed("frontier", e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
 }
 
 /// Whether a DuckDB error message reports a constraint violation (`PRIMARY
@@ -1629,6 +1681,122 @@ mod tests {
         assert_eq!(
             total_rows, 0,
             "a failed write must leave no sidecar digest behind"
+        );
+    }
+
+    // ── execute_write_and_reset_frontier (state residency phase 4) ──────
+
+    #[tokio::test]
+    async fn write_and_reset_frontier_commits_together() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (id INTEGER)")
+            .await
+            .unwrap();
+
+        let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl("main");
+        let write_group = StatementGroup {
+            statements: vec![smelt_backend::MaintenanceStatement {
+                sql: "INSERT INTO main.device_stats VALUES (1)".to_string(),
+            }],
+            transactional: false,
+        };
+        let reset_delete_sql = smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "2026-01-01",
+            "2026-01-10",
+        );
+        let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "self",
+            "2026-01-10",
+            "2026-01-01",
+            "2026-01-10",
+        );
+
+        backend
+            .execute_write_and_reset_frontier(
+                &ensure_sql,
+                &write_group,
+                &reset_delete_sql,
+                &insert_sql,
+            )
+            .await
+            .expect("write + frontier reset commits together");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 1, "the write ran and committed");
+
+        let rows = backend
+            .execute_sql("SELECT model_name, region_start FROM main._smelt_frontier")
+            .await
+            .unwrap();
+        let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1, "exactly one frontier row recorded");
+    }
+
+    #[tokio::test]
+    async fn failed_write_leaves_frontier_untouched() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (id INTEGER)")
+            .await
+            .unwrap();
+
+        let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl("main");
+        // A write statement that fails (references a nonexistent table) —
+        // the frontier reset must never land.
+        let write_group = StatementGroup {
+            statements: vec![smelt_backend::MaintenanceStatement {
+                sql: "INSERT INTO main.does_not_exist VALUES (1)".to_string(),
+            }],
+            transactional: false,
+        };
+        let reset_delete_sql = smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "2026-01-01",
+            "2026-01-10",
+        );
+        let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "self",
+            "2026-01-10",
+            "2026-01-01",
+            "2026-01-10",
+        );
+
+        let result = backend
+            .execute_write_and_reset_frontier(
+                &ensure_sql,
+                &write_group,
+                &reset_delete_sql,
+                &insert_sql,
+            )
+            .await;
+        assert!(result.is_err(), "the failed write must surface an error");
+
+        let rows = backend
+            .execute_sql("SELECT * FROM main._smelt_frontier")
+            .await
+            .unwrap();
+        let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 0,
+            "a failed write must leave no frontier record behind"
         );
     }
 

@@ -883,8 +883,9 @@ pub enum DiagnosticCode {
     /// ColumnAdded` names a column that occupies a row-membership/identity
     /// (skeleton) position — a grain change, never a column backfill
     /// (EX-39, `definition_deltas.md` §"The verdict per column group").
-    /// Anchored at the model SQL body start.
-    MaintenanceSkeletonColumnAdded,
+    /// Also names `smelt migrate`'s `SkeletonChange` verdict — one code
+    /// spans both mechanisms. Anchored at the model SQL body start.
+    MaintenanceSkeletonChanged,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
@@ -919,6 +920,15 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+    /// Emitted (Warning) when a cell's derived technique requires a state
+    /// structure (the reconciliation ledger or its frontier record) with no
+    /// realisation on a target backend — the cell was downgraded to its
+    /// recompute-family equivalent (`docs/specs/state.md` §"The degradation
+    /// contract"). Advisory: the resolved plan already reflects the
+    /// downgrade, so this only reports it. Names the cell, the ideal
+    /// technique, the resolved technique, and the missing structure.
+    /// Anchored at the model SQL body start.
+    MaintenanceStateDowngraded,
 
     // ── Contract lattice diagnostic codes ────────────────────────────────────
     /// A `contract.frozen_horizon` is unparseable or declared on a
@@ -938,6 +948,17 @@ pub enum DiagnosticCode {
     /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
     /// the top of the file (line 0, column 0).
     ContractDeferralInvalid,
+    /// Emitted (Error) when a declared contract point's semantics require a
+    /// state structure the effective posture or a project's declared
+    /// backend cannot supply — today, only `contract.deferral` (model- or
+    /// cell-level): its lag is measured against the interval ledger and
+    /// landed-delta record, which `state.mode: stateless` withholds
+    /// entirely (`docs/specs/state.md` §"Declarations stay fail-loud").
+    /// `contract.frozen_horizon` never raises this code — its baseline
+    /// degrades with `ProbeBaselineUnavailable` instead. Names the
+    /// declaration and the missing structure. Anchored at the top of the
+    /// file (line 0, column 0).
+    DeclaredContractRequiresState,
 }
 
 /// Structured metadata attached to diagnostics for code actions

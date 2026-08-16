@@ -22,6 +22,11 @@ smelt-types = { path = "../smelt-types" }
 # pin validation (`queries/maintenance.rs::backend_write_capabilities_for`) —
 # a real (non-dev) dependency now, not just for test fixtures.
 smelt-dialect = { path = "../smelt-dialect" }
+# Deployed-column-name snapshot reads for the `ProjectInput.deployed_columns`
+# Salsa input, populated at the workspace-loading edge
+# (`workspace_ingest::read_deployed_columns`) — smelt-state does not depend
+# on smelt-db, so no cycle.
+smelt-state = { path = "../smelt-state" }
 walkdir = "2"
 line-index.workspace = true
 tracing.workspace = true
@@ -32,6 +37,7 @@ arrow = { workspace = true }
 proptest = { workspace = true }
 smelt-runtime = { path = "../smelt-runtime" }
 tempfile = "3"
+chrono = "0.4"
 
 [features]
 default = []

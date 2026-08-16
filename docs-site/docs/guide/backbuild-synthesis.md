@@ -18,24 +18,12 @@ it emits one only when fail-closed structural conditions hold, and every
 technique is verified against a full-rebuild oracle in smelt's conformance
 suite.
 
-!!! note "Naming: two things called “backbuild”"
-
-    [`smelt backbuild`](../reference/cli.md#smelt-backbuild) is the CLI command
-    that re-runs a model (and its upstreams) over a date range — reprocessing
-    *data* under an unchanged definition. **Backbuild synthesis**, this page, is
-    about *definition* changes: deriving a migration script from the diff
-    between two versions of a model's SQL. The two share a goal (avoid
-    recomputing what you don't have to) but operate on different inputs.
-
-!!! warning "Availability"
-
-    There is no CLI command for this yet — today you cannot invoke synthesis on
-    your own project. The classifier, script emitters, and every technique on
-    this page are complete and verified against a DuckDB oracle in the
-    conformance suite
-    (`crates/smelt-logical/tests/backbuild_conformance.rs`); what remains is
-    the surface on top: sourcing the "before" definition, and choosing and
-    executing an option. Emitted scripts are DuckDB dialect.
+Two CLI verbs share the word "backbuild" but operate on different inputs:
+[`smelt rebuild`](../reference/cli.md#smelt-rebuild) re-runs a model (and its
+upstreams) over a date range, reprocessing *data* under an unchanged
+definition, while **backbuild synthesis** — this page, invoked via
+[`smelt migrate`](../reference/cli.md#smelt-migrate) — derives a migration
+script from the diff between two versions of a model's *SQL*.
 
 ## The idea in one example
 
@@ -70,6 +58,16 @@ suite asserts the result is row-for-row identical to a fresh rebuild — and tha
 `id`, `amount`, and `rate` are byte-identical before and after.
 
 Throughout this page, `t` stands for the model's deployed table.
+
+## Running a migration
+
+Once you've edited the model, `smelt migrate <model>` derives and prints the
+plan above — nothing executes yet. Read it, then run
+`smelt migrate <model> --apply` to execute it: `--apply` only ever runs the
+exact plan that was just printed (matched by its hash), so approving the
+printed plan *is* the approval step — there's no separate sign-off command.
+See [`smelt migrate`](../reference/cli.md#smelt-migrate) for the full flag
+reference and exit-code contract.
 
 ## How it works
 
@@ -559,6 +557,30 @@ script — it never decides on its own whether the drop is allowed to run.
 Column removal stays an explicit opt-in at run time (see [schema
 evolution](schema-evolution.md)), applied independently of this ordering.
 
+## What `--apply` will and won't execute
+
+`--apply` executes each column group's **first presented candidate** — the
+plan is deterministic and the plan hash covers every candidate, so approving
+the plan approves that selection; there is no separate per-candidate choice.
+Each group runs as one transactional statement group, and admission is
+checked over **every** group before anything executes.
+
+Three cases refuse to execute — `--apply` exits without running a single
+statement, naming the refusing group and pointing at the honest route:
+
+- a **skeleton change** — no in-place script exists; rebuild with
+  `smelt build --full-refresh` or `smelt rebuild`.
+- a group with **no admissible candidate** — same honest routes as above.
+- a **destructive** candidate (a column drop) — sequenced but never executed
+  by `smelt migrate`; see [Current scope](#current-scope) and [Several changes
+  at once](#several-changes-at-once).
+
+**Resume and CI.** An interrupted `--apply` resumes on re-invocation: progress
+is recorded per column group, so already-applied groups are skipped and the
+rest run in plan order. `--json` plus the exit-code contract (`0` no pending
+delta, `3` unapproved or refused-to-execute) makes "this deploy changes what
+the table means" a checkable CI gate.
+
 ## When smelt refuses
 
 Refusals are first-class output, not error noise. Three flavors:
@@ -629,13 +651,18 @@ page cannot drift from what smelt actually emits.
   variants. Note the win is also engine-dependent: on a copy-on-write
   warehouse format a column-scoped `UPDATE` still rewrites every touched file
   — what it saves there is the upstream scans and joins, not the write.
-- smelt **enumerates options; it does not yet choose** between a targeted
-  script and full refresh — a cost model over the recorded option metadata is
-  the planned chooser.
+- `smelt migrate --apply` executes the **first presented candidate** per
+  column group — a cost model over the recorded option metadata that chooses
+  among several admissible candidates is future work.
+- Resume is recorded **per column group**, not per region within a group —
+  each group runs as one transaction, so an interrupted apply either finishes
+  or fully rolls back a group before resuming with the next.
 - Dropped columns are sequenced into the script (`ALTER ... DROP COLUMN`,
-  always last), but whether a drop is *allowed to run at all* stays owned by
-  [schema evolution](schema-evolution.md)'s `--allow-column-removal` opt-in —
-  backbuild only orders the statement, never gates it.
+  always last), but a plan containing one is a **destructive candidate** and
+  `--apply` refuses to execute it (see [What `--apply` will and won't
+  execute](#what-apply-will-and-wont-execute)); whether the drop is *allowed
+  to run at all* stays owned by [schema evolution](schema-evolution.md)'s
+  `--allow-column-removal` opt-in.
 - Not yet classified: refs repointed to a different upstream. These refuse
   with named reasons today. (A changed *cast* is not a type change — it is a
   changed expression, handled above; a bare type change with no expression
@@ -643,8 +670,10 @@ page cannot drift from what smelt actually emits.
 
 ## Related pages
 
+- [CLI Reference: `smelt migrate`](../reference/cli.md#smelt-migrate) — the
+  full flag reference, approval contract, and exit codes.
 - [Incremental Models](incremental-models.md) — maintenance of *data* changes
-  under an unchanged definition, including the `smelt backbuild` range rebuild.
+  under an unchanged definition, including the `smelt rebuild` range rebuild.
 - [Schema Evolution](schema-evolution.md) — physical schema change
   classification and DDL capability per backend.
 - [Incremental Equivalence](../concepts/incremental-equivalence.md) — the same

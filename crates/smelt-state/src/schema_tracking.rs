@@ -119,6 +119,14 @@ pub struct DeployedSchema {
     pub deployed_at: DateTime<Utc>,
     pub model_hash: String,
     pub columns: Vec<DeployedColumn>,
+    /// The definition SQL the table was last maintained under
+    /// (`docs/specs/definition_deltas.md` §Detection) — the "before" side a
+    /// definition-delta diff compares the model's current compiled SQL
+    /// against. `#[serde(default)]` so a pre-existing snapshot written
+    /// before this field existed deserialises to an empty string, read back
+    /// as "no recorded definition" — fail-closed, never a guess.
+    #[serde(default)]
+    pub definition_sql: String,
 }
 
 /// A column in a deployed schema.
@@ -1877,6 +1885,7 @@ mod tests {
             version: 1,
             deployed_at: Utc::now(),
             model_hash: "sha256:abc123".to_string(),
+            definition_sql: String::new(),
             columns: vec![
                 col("order_date", "DATE", false),
                 col("total", "DECIMAL(10,2)", true),
@@ -1888,6 +1897,41 @@ mod tests {
         assert_eq!(deserialized.model, "daily_revenue");
         assert_eq!(deserialized.columns.len(), 2);
         assert_eq!(deserialized.columns[0].name, "order_date");
+    }
+
+    #[test]
+    fn deployed_schema_round_trips_definition_sql() {
+        let schema = DeployedSchema {
+            model: "daily_revenue".to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "sha256:abc123".to_string(),
+            columns: vec![col("order_date", "DATE", false)],
+            definition_sql: "SELECT order_date FROM orders".to_string(),
+        };
+
+        let json = serde_json::to_string_pretty(&schema).unwrap();
+        let deserialized: DeployedSchema = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.definition_sql, "SELECT order_date FROM orders");
+    }
+
+    #[test]
+    fn legacy_snapshot_without_definition_sql_reads_empty() {
+        // A snapshot written before `definition_sql` existed has no such
+        // key at all — must deserialize to "no recorded definition"
+        // (fail-closed), never panic and never guess a value.
+        let legacy_json = r#"{
+            "model": "daily_revenue",
+            "version": 1,
+            "deployed_at": "2024-01-01T00:00:00Z",
+            "model_hash": "sha256:abc123",
+            "columns": []
+        }"#;
+
+        let deserialized: DeployedSchema = serde_json::from_str(legacy_json).unwrap();
+
+        assert_eq!(deserialized.definition_sql, "");
     }
 
     #[test]

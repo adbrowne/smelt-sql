@@ -13,7 +13,14 @@ use crate::helpers::infer_deployed_columns;
 use crate::DiffArgs;
 
 enum ModelDiffStatus {
-    New,
+    New {
+        /// Set when the deployed-schema snapshot is absent because
+        /// `state.mode` excludes it (`stateless`), not because the model is
+        /// genuinely new — `docs/specs/schema_evolution.md`'s absent-state
+        /// degradation (`docs/specs/state.md` §"The optionality rule": the
+        /// degradation must be reported).
+        snapshot_absent_reason: Option<String>,
+    },
     Unchanged,
     Changed {
         diff: SchemaDiff,
@@ -136,7 +143,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .filter(|name| selected_names.contains(name.as_str()))
         .collect();
 
-    let file_store = FileStore::new(&project_dir, &args.target);
+    let file_store = FileStore::new(&project_dir, &args.target, config.state.mode);
 
     // Build model name → ModelFile lookup keyed by the canonical dot-path.
     let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();
@@ -167,7 +174,15 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
             .unwrap_or("dev");
 
         let status = match deployed {
-            None => ModelDiffStatus::New,
+            None => ModelDiffStatus::New {
+                snapshot_absent_reason: (config.state.mode
+                    == smelt_core::config::StateMode::Stateless)
+                    .then(|| {
+                        "deployed-schema snapshot absent: `state.mode: stateless` writes no \
+                         schema snapshots"
+                            .to_string()
+                    }),
+            },
             Some(deployed_schema) => {
                 let schema_diff = diff_schemas(&deployed_schema.columns, &inferred);
                 if schema_diff.is_empty() {
@@ -254,10 +269,15 @@ fn print_text(entries: &[ModelDiffEntry]) {
             ModelDiffStatus::Unchanged => {
                 unchanged += 1;
             }
-            ModelDiffStatus::New => {
+            ModelDiffStatus::New {
+                snapshot_absent_reason,
+            } => {
                 new += 1;
                 println!("Model: {}", entry.name);
                 println!("  + New model (not yet deployed)");
+                if let Some(reason) = snapshot_absent_reason {
+                    println!("  ⚠ {}", reason);
+                }
                 println!();
             }
             ModelDiffStatus::Removed => {
@@ -335,11 +355,14 @@ fn print_json(entries: &[ModelDiffEntry]) {
                 unchanged += 1;
                 None
             }
-            ModelDiffStatus::New => {
+            ModelDiffStatus::New {
+                snapshot_absent_reason,
+            } => {
                 new += 1;
                 Some(json!({
                     "name": entry.name,
-                    "status": "new"
+                    "status": "new",
+                    "snapshot_absent_reason": snapshot_absent_reason
                 }))
             }
             ModelDiffStatus::Removed => {

@@ -7,6 +7,7 @@ use smelt_cli::{
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_runtime::execute::BackendFactory;
 use smelt_runtime::types::ExecuteRequest;
 use smelt_state::generate_run_id;
 use std::sync::Arc;
@@ -167,7 +168,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
     let (auto_start, auto_end) = if args.auto && effective_start.is_none() {
-        compute_auto_time_range(&project_dir, &args.target, &graph)
+        compute_auto_time_range(&project_dir, &args.target, &graph, config.state.mode)
             .map_or((None, None), |(s, e)| (Some(s), Some(e)))
     } else {
         (None, None)
@@ -194,6 +195,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let request = ExecuteRequest {
@@ -217,10 +219,12 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         retry_backoff_ms: None,
         resume: args.resume,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let run_id = generate_run_id();
     let config_arc = Arc::new(config);
+    let state_mode = config_arc.state.mode;
     let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
     let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
     let reporter = CliReporter::new(args.verbose, args.dry_run, args.show_results);
@@ -243,7 +247,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
-            print_failure_summary(&project_dir, &args.target, &run_id);
+            print_failure_summary(&project_dir, &args.target, &run_id, state_mode);
             return Err(e);
         }
     };
@@ -309,9 +313,22 @@ async fn run_since_upstream(
     models: &[smelt_cli::ModelFile],
     graph: DependencyGraph,
 ) -> Result<()> {
-    let deltas = smelt_runtime::propagation::pair_source_deltas(
+    // Watermark-aware pairing (`docs/specs/run_state.md` §"Per-source
+    // watermark"): a `--source` with no paired `--landed` resolves from its
+    // persisted watermark instead of requiring the operator to restate what
+    // landed. `state.mode: stateless` loads an empty store, so a stateless
+    // project's `--source` still requires an explicit `--landed` (no
+    // watermark was ever persisted for it to resolve from).
+    let landed_delta_store =
+        smelt_state::file_store::FileStore::new(project_dir, &args.target, config.state.mode)
+            .load_landed_deltas()
+            .with_context(|| "Failed to load the per-source landed-delta store")?;
+    let now = Utc::now().format("%Y-%m-%d").to_string();
+    let deltas = smelt_runtime::propagation::pair_source_deltas_with_watermarks(
         &args.since_upstream_source,
         &args.since_upstream_landed,
+        Some(&landed_delta_store),
+        &now,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
@@ -355,9 +372,47 @@ async fn run_since_upstream(
         .execution_order()
         .with_context(|| "Failed to compute execution order")?;
 
-    let plan =
-        smelt_runtime::propagation::plan_since_upstream(models, &source_infos, &order, &deltas)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Live observed-delta consumption (`docs/outcomes/
+    // 20260816-scheduler-delta-signatures/outcome.md` phase 6): read the
+    // recorded `_smelt_observed_delta` table off the real backend for every
+    // key `observed_delta_keys_to_read` says matters, rather than trusting
+    // only the command-line `--landed` window. Runs under `--dry-run` too —
+    // it is a read plus the same idempotent `CREATE TABLE IF NOT EXISTS`
+    // every other state read performs, and a dry run must preview the SAME
+    // dirty set the live run would compute. A backend-creation failure is a
+    // named error here, never a silent fallback to an empty lookup (which
+    // would silently widen every eligible origin back to its declared
+    // window).
+    let plan = {
+        let target_config = config
+            .targets
+            .get(&args.target)
+            .ok_or_else(|| anyhow::anyhow!("Target '{}' not found in smelt.yml", args.target))?;
+        let live_read_backend_factory = CliBackendFactory {
+            database_override: args.database.clone(),
+        };
+        let backend = live_read_backend_factory
+            .create(&args.target, target_config, project_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create the '{}' backend to read recorded deltas",
+                    args.target
+                )
+            })?;
+
+        smelt_runtime::propagation_live::resolve_live_plan(
+            backend.as_ref(),
+            config,
+            &args.target,
+            models,
+            &source_infos,
+            &order,
+            &deltas,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+    };
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {
@@ -377,6 +432,7 @@ async fn run_since_upstream(
         &salsa_models,
         project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let config_arc = Arc::new(config.clone());
@@ -386,6 +442,14 @@ async fn run_since_upstream(
     let backend_factory = CliBackendFactory {
         database_override: args.database.clone(),
     };
+
+    // The propagated keyed-restriction channel (`docs/specs/incremental_models.md`
+    // §"Restrictions compose by union"): the WHOLE resolved map is computed
+    // once from `plan` and passed to every per-model request — `execute_project`
+    // selects each model's own entries by name (`ExecuteRequest::keyed_restrictions`
+    // is keyed by consumer model name), so a run's request never carries a
+    // narrower view of the plan than the plan itself resolved.
+    let keyed_restrictions = smelt_runtime::propagation::keyed_restrictions_from_plan(&plan);
 
     for run in &plan.runs {
         info!(
@@ -417,6 +481,7 @@ async fn run_since_upstream(
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: keyed_restrictions.clone(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

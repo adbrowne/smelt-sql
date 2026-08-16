@@ -78,14 +78,20 @@ Any target with `state.mode` other than the default `stateless` persists run sta
   targets/<target>/
     runs/<run_id>.json              # one run manifest per execution
     intervals.json                  # cumulative interval coverage across runs
-    reconciliation.json             # reconciliation ledger for grain: key models
     landed_deltas.json              # per-source landed-delta intervals
     snapshots.json                  # fingerprint snapshots (state.mode: environments)
     schemas/<model>.json            # deployed schema snapshot per model
     reports/<run_id>.json           # run-report artifact for the run
 ```
 
-Every run-scoped artifact is nested under `.smelt/targets/<target>/`, keyed by the target the run executed against -- a `dev` run's interval ledger or reconciliation state never answers a question about `prod`, and vice versa. Only `meta.json` and `lock` live at the project root, shared across every target.
+Every run-scoped artifact is nested under `.smelt/targets/<target>/`, keyed by the target the run executed against -- a `dev` run's interval coverage never answers a question about `prod`, and vice versa. Only `meta.json` and `lock` live at the project root, shared across every target.
+
+A `grain: key` model's **reconciliation ledger** is not in this listing: it is a correctness
+structure, not observability, so it lives engine-resident in the target warehouse
+(`_smelt_ledger`/`_smelt_frontier`), transactional with the fold it guards, present whenever
+the plan needs it -- independent of `state.mode` and outside `.smelt/`'s backup/restore
+surface entirely. See [State & Recovery -- The reconciliation ledger lives in the
+warehouse](../reference/state.md#the-reconciliation-ledger-lives-in-the-warehouse).
 
 Set `state.mode` in `smelt.yml` to opt into persistence -- `stateless` (the default) writes nothing and requires no `.smelt/` directory at all:
 
@@ -100,7 +106,7 @@ A run acquires an exclusive advisory lock on `.smelt/lock` for its entire durati
 
 ## Backup and restore
 
-`.smelt/` is plain JSON files, safe to copy with any file-level backup tool while no run is in progress (or, for a live backup, after acquiring the same advisory lock your ops tooling uses for other maintenance). Every write under `.smelt/` is atomic (temp file + rename), so a snapshot taken between runs is always internally consistent -- there is no "flush" step to coordinate. Restoring is copying the backed-up `.smelt/` directory back into place; because state is opt-in and regenerable (a `stateless` project needs none, and an `intervals`/`environments` project can rebuild its ledgers from a full re-run), a lost `.smelt/` is a correctness/performance regression to full recomputation, never data loss of your warehouse tables.
+`.smelt/` is plain JSON files, safe to copy with any file-level backup tool while no run is in progress (or, for a live backup, after acquiring the same advisory lock your ops tooling uses for other maintenance). Every write under `.smelt/` is atomic (temp file + rename), so a snapshot taken between runs is always internally consistent -- there is no "flush" step to coordinate. Restoring is copying the backed-up `.smelt/` directory back into place; because `.smelt/`'s content is opt-in observability state and regenerable (a `stateless` project needs none, and an `intervals`/`environments` project can rebuild its interval coverage from a full re-run), a lost `.smelt/` only degrades what smelt can tell you or how cheaply it can run -- it never affects the correctness of a maintained table, since the reconciliation ledger a keyed model's correctness depends on lives outside `.smelt/` entirely (see "`.smelt/` state layout" above).
 
 ## Upgrades
 

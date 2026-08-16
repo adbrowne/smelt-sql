@@ -26,8 +26,8 @@ use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
 use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_keyed_fold, emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect,
-    TargetSlicePredicate,
+    emit_keyed_fold, emit_keyed_fold_suppressed, emit_recurrence_bound_probe,
+    emit_snapshot_reconcile, MaintenanceDialect, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
@@ -493,13 +493,14 @@ pub async fn execute_cumulative_aggregate(
 /// `[run_start, run_end)` window — the whole source is re-scanned every
 /// run. First run (target does not yet exist) creates the table from the
 /// compiled SELECT directly; every subsequent run `MERGE`s the whole-source
-/// scan into the existing target via [`build_cumulative_merge_sql`]
-/// (`emit_keyed_fold`'s shape carries no `DELETE`, so a key present in the
-/// target but absent from the incoming scan is retained unchanged — the
-/// documented carve-out, `incremental_shapes.md` §"End-state equivalence").
-/// No reconciliation ledger: `classification`'s plain-overwrite columns are
-/// idempotent by construction (re-running an unchanged snapshot converges),
-/// so `Grade::Idempotent` semantics apply without any ledger bookkeeping —
+/// scan into the existing target AND deletes any key absent from that scan
+/// (`incremental_shapes.md` §"Departed keys and deletion") via
+/// [`build_snapshot_reconcile_group`]/[`emit_snapshot_reconcile`], executed
+/// as one transactional [`StatementGroup`] through
+/// `Backend::execute_statement_group`. No reconciliation ledger:
+/// `classification`'s plain-overwrite columns are idempotent by
+/// construction (re-running an unchanged snapshot converges), so
+/// `Grade::Idempotent` semantics apply without any ledger bookkeeping —
 /// this executor never touches one.
 ///
 /// `classification` must have already derived the snapshot-reconcile run
@@ -554,16 +555,15 @@ pub async fn execute_snapshot_reconcile(
             .with_context(|| format!("Failed to create keyed model {}", model_name))?;
     } else {
         let suppression = resolve_cumulative_write_suppression(classification, &clean_sql);
-        let merge_sql = build_cumulative_merge_sql(
+        let group = build_snapshot_reconcile_group(
             schema,
             db_table_name,
             &compiled.sql,
             classification,
-            None,
             &suppression,
         );
         backend
-            .execute_sql(&merge_sql)
+            .execute_statement_group(&group)
             .await
             .with_context(|| format!("Failed to reconcile keyed model {}", model_name))?;
     }
@@ -653,6 +653,39 @@ pub fn build_cumulative_merge_sql(
         ),
     };
     group.statements[0].sql.clone()
+}
+
+/// Build the snapshot-reconcile keyed `MERGE` + departed-key `DELETE`
+/// [`StatementGroup`] (`docs/specs/incremental_shapes.md` §"Departed keys
+/// and deletion"): the same combiner-rendering step
+/// [`build_cumulative_merge_sql`] performs, handed to the single-owner
+/// [`emit_snapshot_reconcile`] emitter rather than [`emit_keyed_fold`]/
+/// [`emit_keyed_fold_suppressed`] directly — the caller
+/// ([`execute_snapshot_reconcile`]) executes the returned group as one
+/// transaction via `Backend::execute_statement_group`, never issuing the
+/// `MERGE`/`DELETE` as separate `execute_sql` calls.
+pub fn build_snapshot_reconcile_group(
+    schema: &str,
+    table: &str,
+    delta_sql: &str,
+    classification: &CumulativeClassification,
+    suppression: &WriteSuppression,
+) -> StatementGroup {
+    let folds: Vec<(String, String)> = classification
+        .aggregator_columns
+        .iter()
+        .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+        .collect();
+
+    let schema_table = format!("{schema}.{table}");
+    emit_snapshot_reconcile(
+        &schema_table,
+        &classification.unique_key,
+        &folds,
+        delta_sql,
+        suppression,
+        MaintenanceDialect::DuckDb,
+    )
 }
 
 /// Resolve this classification's [`WriteSuppression`] verdict

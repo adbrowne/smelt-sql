@@ -43,7 +43,7 @@ Every `smelt` subcommand follows the same exit-code contract, so orchestrators (
 
 ## State lock errors
 
-Any command that mutates run state (`smelt run`, `smelt build`, `smelt backbuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
+Any command that mutates run state (`smelt run`, `smelt build`, `smelt rebuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
 
 ```
 Error: state locked by PID <n>
@@ -196,14 +196,14 @@ smelt run [OPTIONS]
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
-| `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
-| `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
+| `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag, or resolved from a persisted watermark when `--landed` is omitted for it (repeatable). Only meaningful with `--since-upstream`. |
+| `--landed` | | string[] | | The landed interval for the paired `--source`: bare `<start>..<end>` (pairs positionally, the Nth `--landed` with the Nth `--source`) or `<address>=<start>..<end>` (pairs by address) — ISO `YYYY-MM-DD`, end exclusive. Repeatable; see `--source`. |
 | `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
 | `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#--resume--continue-after-a-partial-failure). |
 
 ### Parallel execution with `--jobs`
 
-The run engine (shared by `smelt run`, `smelt build`, and `smelt backbuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
+The run engine (shared by `smelt run`, `smelt build`, and `smelt rebuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
 
 - Omitted (the default) — resolves to the host's available parallelism (`std::thread::available_parallelism()`), typically the number of logical CPUs.
 - `--jobs 1` — strictly serial: one model at a time, in `execution_order`. This is the pre-`--jobs` behavior and remains available as an explicit opt-out.
@@ -215,7 +215,7 @@ Concurrency helps most when a project's DAG is wide (many independent models per
 
 ### Retrying transient backend failures
 
-`smelt run`, `smelt build`, and `smelt backbuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
+`smelt run`, `smelt build`, and `smelt rebuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
 
 A retry always re-runs the model's *entire* write step for the attempt that failed — the full drop-and-recreate for a table, one incremental batch's complete DELETE+INSERT, a column-scoped MERGE, or a keyed model's create-or-merge partition write — never a partial slice of it, so a retried model never leaves a half-applied write behind. Coverage is uniform across every write technique a model can dispatch to, including the delta-restricted recompute a model-edge creation trigger can take. Retries use exponential backoff between attempts; the delay is derived deterministically from the run and model identity rather than real-clock jitter, so repeated runs behave predictably.
 
@@ -225,7 +225,7 @@ By default, up to 3 attempts are made per write step before the model is reporte
 
 ### Run report and failure summary
 
-Every `smelt run`/`smelt build`/`smelt backbuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
+Every `smelt run`/`smelt build`/`smelt rebuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
 
 When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line and a one-line hint toward the likely next action:
 
@@ -301,17 +301,19 @@ smelt run --auto
 
 ### `--dry-run` — inspect the maintenance statements before they run
 
-`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
+`smelt run --dry-run` and `smelt rebuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
 
-`smelt backbuild --dry-run` additionally reflects the **chunking** a real backbuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real backbuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
+`smelt rebuild --dry-run` additionally reflects the **chunking** a real rebuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real rebuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
 
 Division of labour with [`smelt explain <model> --show-sql`](#smelt-explain): `--show-sql` is the no-window, single-model plan-inspection surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would **this invocation** do" surface — real window, real selection, real chunking.
 
 ### Forward propagation with `--since-upstream`
 
-Every `refresh: incremental` model with a declared `grain:` derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (`smelt explain <model>` prints it). `--since-upstream` composes those clamps into a propagation graph and walks it forward from **caller-declared** per-source deltas: for each `--source <address> --landed <start>..<end>` pair, the delta reflects through every downstream edge, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. The dirty set is printed before anything runs, then `smelt` runs exactly those `(model, region)` pairs — never a partition outside the propagated set.
+Every `refresh: incremental` model with a declared `grain:` derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (`smelt explain <model>` prints it). `--since-upstream` composes those clamps into a propagation graph and walks it forward from each source's delta, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. A source's delta comes from a paired `--source <address> --landed <start>..<end>`, from a persisted per-source watermark when `--landed` is omitted, refined live wherever a recorded observed-delta exists — the CLI never requires an operator to restate what a prior run already covered. Keyed dirt additionally resolves the affected key *values* live, off the group-grain sidecar diff, rather than trusting only a caller-fed seed. The dirty set is printed before anything runs, then `smelt` runs exactly those `(model, region)` pairs — never a partition outside the propagated set.
 
-`--source` and `--landed` are repeatable and pair up positionally: the first `--source` pairs with the first `--landed`, and so on. A source named without a matching `--landed` interval contributes nothing for that invocation — there is no implicit whole-table fallback and no automatic discovery of what changed. The runner (or an external poller that watches the real upstream systems) is responsible for telling `smelt` what landed; a cron tick is only the trigger to ask.
+A downstream model with a key-addressed inbound edge dispatches the derived repair cell directly — the key-addressed route, not the ordinary whole-region route — and several key-addressed edges into one model compose in the same tick. If any one of a model's inbound edges is not itself key-addressed (a plain declared source, or a model edge that resolved no cell), the whole model widens to the ordinary route instead of risking a silently dropped component; the run report names this as a `dispatch_widened` downgrade rather than staying silent about it.
+
+`--source` and `--landed` are repeatable. A `--landed` value pairs one of two ways: bare `<start>..<end>` pairs positionally (the first `--source` with the first `--landed`, and so on — requires equal counts), or address-qualified `<address>=<start>..<end>` pairs by address, with no positional constraint. The two spellings must not be mixed in one invocation. A `--source` with no paired `--landed` resolves its delta from a persisted **watermark** — the point a prior completed run already propagated that source through (a field on the same per-source landed-delta record, written once every model consuming the source finishes a run with a window end) — as the span `watermark → now`, refined live wherever a recorded observed-delta exists. A `--source` with neither a paired `--landed` nor a persisted watermark fails the run with a named error identifying the source and the missing watermark — there is no implicit whole-table fallback and no silent skip. The runner (or an external poller that watches the real upstream systems) is responsible for telling `smelt` what landed for a source no prior run has covered; a cron tick is only the trigger to ask.
 
 An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
 
@@ -336,16 +338,16 @@ smelt run --since-upstream \
 
 ---
 
-## smelt backbuild
+## smelt rebuild
 
 Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.
 
-`smelt backbuild` handles both `grain: partition` and `grain: key` incremental models uniformly. For `grain: partition` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: incremental` + `grain: key` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
+`smelt rebuild` handles both `grain: partition` and `grain: key` incremental models uniformly. For `grain: partition` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: incremental` + `grain: key` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
 
 **Usage:**
 
 ```
-smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
+smelt rebuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 ```
 
 **Arguments:**
@@ -373,18 +375,94 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 **Examples:**
 
 ```bash
-# Backbuild a model and all its upstreams for January (canonical path form)
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
+# Rebuild a model and all its upstreams for January (canonical path form)
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
 
 # Same using scope shorthand (equivalent when scope is marts)
-smelt --scope marts backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
+smelt --scope marts rebuild +daily_revenue --start 2026-01-01 --end 2026-02-01
 
 # Preview the maintenance statements — one block per auto-derived chunk —
 # without executing anything
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
 
-# Backbuild with per-partition execution
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
+# Rebuild with per-partition execution
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
+```
+
+---
+
+## smelt migrate
+
+Migrate a deployed table after its model's SQL definition changed. Disjoint from
+[`smelt rebuild`](#smelt-rebuild): `rebuild` re-runs a model's *data* over a time range under its
+current, unchanged definition; `migrate` moves a deployed table from the *old* definition to the
+*new* one, in place where a targeted script can prove equivalence to a full rebuild (see
+[Backbuild Synthesis](../guide/backbuild-synthesis.md) for how the plan is derived).
+
+**Usage:**
+
+```
+smelt migrate <MODEL> [--apply] [--json]
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|--------------|
+| `<MODEL>` | yes | Model to derive a migration plan for. Bare names are subject to scope resolution; see [Argument resolution and `--scope`](#argument-resolution-and-scope). |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool | `false` | Execute the plan most recently printed and recorded by a plan-mode call. Refuses (exit `3`) if the freshly re-derived plan's hash no longer matches the recorded one, or if the approved plan itself refuses to execute. |
+| `--json` | bool | `false` | Emit the plan as machine-readable JSON instead of the human-readable report (CI mode). |
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | Target environment from smelt.yml — the deployed-schema snapshot the diff's "before" side is read from is recorded per target |
+| `--database` | path | _(from config)_ | DuckDB database file path override — only opened by `--apply` on a matching hash |
+
+**What a plan step does:** derives the migration plan (diff the model's current SQL against its
+recorded deployed definition, classify each output column group into a verdict — eclipsed,
+backfill in place, re-derive, or skeleton change — and pick a technique per group), prints it, and
+records its **plan hash**. Nothing executes. A plan hash covers the plan's content — verdicts,
+techniques, and the input facts they were derived from — so approving a plan approves the exact
+statements `--apply` would run, never a stale description.
+
+**The approval contract:** `--apply` executes only the plan whose hash matches what plan mode most
+recently recorded. If the model's SQL or any input fact the plan depends on has changed since, the
+freshly re-derived plan's hash no longer matches, and `--apply` refuses — printing the new plan
+instead of running anything. There is no separate "approve" step: printing a plan *is* recording
+it, and reviewing that printed output before re-running with `--apply` is the approval. The
+approval store lives at `.smelt/targets/<target>/migration-approvals.json`, one entry per model.
+
+**Execution, once approved:** each column group's **first presented candidate** executes as one
+transactional statement group, in plan order. Admission is checked over every group before
+anything executes — a plan containing a skeleton-change group, a group with no admissible
+candidate, or a destructive (column-drop) candidate executes nothing and exits `3`, naming the
+refusing group; the honest route for that plan is `smelt build --full-refresh` or `smelt rebuild`.
+On success, `--apply` re-records the deployed definition, so the next plan step reports eclipsed.
+
+**Resume:** an interrupted `--apply` resumes on re-invocation. Progress is recorded **per column
+group** in the approval store — a group already applied under the currently-approved hash is
+skipped, and the remaining groups in plan order execute. Re-invoking once every group has applied
+executes nothing and reports "already applied", exiting `0`.
+
+**Exit codes** (see [Exit codes](#exit-codes)): `0` when there is no definition delta, the delta is
+eclipsed-only, or `--apply` executed (or found already-applied) every group; `3` when a non-trivial
+plan is derived and unapproved, when `--apply` finds the recorded hash stale, or when an approved
+`--apply` refuses to execute; `2` for the usual usage/config errors.
+
+**Examples:**
+
+```console
+# Print the migration plan for a changed model — derives, prints, records the hash
+$ smelt migrate marts.daily_revenue
+
+# Review the plan, then approve and execute it
+$ smelt migrate marts.daily_revenue --apply
+
+# CI gate: fail the pipeline while a migration is pending and unapproved
+$ smelt migrate marts.daily_revenue --json
 ```
 
 ---
@@ -1130,11 +1208,23 @@ smelt explain [MODEL_NAME] [OPTIONS]
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
-With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
-the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
-derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
+With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**, led by a
+one-line **delta-signature headline**: what the model emits (`keyed upsert over [...]`,
+`append-only within a window`, or `general change` naming what degraded it), how that shape is
+addressed (`key-addressed`, `window-addressed by <axis>`, or `whole-table-addressed`), the
+derived `grain` label, and the derived **run shape** — `window-forward` or `snapshot-reconcile`
+for `grain: key`, the window sweep over the partition axis for `grain: partition`. A model whose
+shape isn't derivable at all prints no headline line. Immediately after the headline, before
+anything else, the report prints every admission **refusal** — `<DiagnosticCode>: <reason>`
+per refusal, or `Refusals: (none)` — so you see what will be refused before the plan body.
+Then: every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell
+routes through the
+[reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived
+per-source scan clamps, each source's partition-locality verdict, a model-level **Guarantees**
+ledger (one row per output column: its group, its effective equivalence contract or —
+for a volatile column — its determinism exemption, and its derived settle bound, `not derived`
+when no key-temporal-locality slice was established), the
+model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
 
@@ -1267,6 +1357,10 @@ smelt explain daily_events --show-sql --technique keyed_fold
 
 ```text
 $ smelt explain daily_events
+emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
+
+Refusals: (none)
+
 Maintenance plan: daily_events
 
 Cells (2):
@@ -1283,7 +1377,8 @@ Cells (2):
       locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
       scan clamps: (none)
 
-Refusals: (none)
+Guarantees:
+  - event_count (group {event_count}): default, settle: not derived
 
 Relation contract:
   clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day

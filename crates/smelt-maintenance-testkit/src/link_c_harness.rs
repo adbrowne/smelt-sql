@@ -380,6 +380,13 @@ impl Backend for RecordingBackendHandle {
 /// mutation (append/update staged by the caller) is picked up — the whole point
 /// of the run-schedule driver (design §3b): the source must be able to change
 /// between runs, not be fully pre-populated up front.
+///
+/// `Clone` (all fields are cheap: two `PathBuf`s and an `Arc<Config>`) so a
+/// residency-testing driver can hold a local, reassignable handle —
+/// [`LinkCProject::fresh_clone`] returns a new instance rather than mutating
+/// this one in place (`docs/outcomes/20260816-state-residency/
+/// phases/08-plan.md`).
+#[derive(Clone)]
 pub struct LinkCProject {
     pub project_dir: PathBuf,
     pub db_path: PathBuf,
@@ -544,6 +551,31 @@ impl LinkCProject {
     /// own read-back / oracle comparison after a run.
     pub fn connect(&self) -> Result<duckdb::Connection> {
         Ok(duckdb::Connection::open(&self.db_path)?)
+    }
+
+    /// Clone this project's `models/` directory and `smelt.yml` into `dest`
+    /// — deliberately never `.smelt/` — reusing the SAME `db_path` (the
+    /// warehouse is unaffected by a project-directory clone;
+    /// `docs/outcomes/20260816-state-residency/phases/08-plan.md`: "same
+    /// warehouse `db_path`"). The state-deletion conformance leg's
+    /// `FreshClone` residency op: unlike an in-place `.smelt/` deletion, this
+    /// also changes the project's absolute path, catching anything a caller
+    /// keys on that path (interval-store lookups, model-hash keying, legacy-
+    /// file import) rather than on `.smelt/`'s mere presence.
+    pub fn fresh_clone(&self, dest: &Path) -> Result<LinkCProject> {
+        let models_src = self.project_dir.join("models");
+        let models_dest = dest.join("models");
+        copy_dir_recursive(&models_src, &models_dest).map_err(|e| {
+            anyhow::anyhow!(
+                "fresh_clone: copy models/ from {:?} to {:?}: {e}",
+                models_src,
+                models_dest
+            )
+        })?;
+        std::fs::copy(self.project_dir.join("smelt.yml"), dest.join("smelt.yml"))
+            .map_err(|e| anyhow::anyhow!("fresh_clone: copy smelt.yml into {:?}: {e}", dest))?;
+
+        LinkCProject::load(dest.to_path_buf(), self.db_path.clone())
     }
 
     /// Open a fresh [`DuckDbBackend`] against the harness's DuckDB file, as a
@@ -716,5 +748,89 @@ pub fn base_request(target: &str) -> ExecuteRequest {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
+    }
+}
+
+/// Recursively copy every file/subdirectory under `src` into `dest`
+/// (creating `dest` and any nested directories as needed) — [`LinkCProject::
+/// fresh_clone`]'s `models/` copy. `std::fs` has no built-in recursive copy;
+/// this is the plain directory-walk implementation.
+fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let dest_path = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::recipe::{arb_recipe, RecipePool};
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    /// `fresh_clone_copies_models_but_not_state` (`docs/outcomes/
+    /// 20260816-state-residency/phases/08-plan.md` test 6): the clone helper
+    /// carries `models/` (including nested `models/sources/`) and
+    /// `smelt.yml`, reuses the same `db_path`, and leaves `.smelt/` behind —
+    /// the residency guarantee [`LinkCProject::fresh_clone`] exists to
+    /// uphold.
+    #[test]
+    fn fresh_clone_copies_models_but_not_state() {
+        let mut runner = TestRunner::deterministic();
+        let recipe = arb_recipe(RecipePool::partition_append_only())
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("db.duckdb");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let project = crate::render::stage(&recipe, &project_dir, &db_path).expect("stage recipe");
+
+        // Simulate a prior run's `.smelt/` bookkeeping.
+        std::fs::create_dir_all(project.project_dir.join(".smelt/targets/dev"))
+            .expect("create .smelt dir");
+        std::fs::write(project.project_dir.join(".smelt/meta.json"), "{}")
+            .expect("write state file");
+
+        let dest = tmp.path().join("clone");
+        let cloned = project.fresh_clone(&dest).expect("fresh clone");
+
+        assert!(
+            cloned
+                .project_dir
+                .join(format!("models/{}.sql", recipe.model_name))
+                .exists(),
+            "fresh clone must carry the model file"
+        );
+        assert!(
+            cloned
+                .project_dir
+                .join(format!("models/sources/{}.yml", recipe.source.name))
+                .exists(),
+            "fresh clone must carry the nested models/sources/ source declaration"
+        );
+        assert!(
+            cloned.project_dir.join("smelt.yml").exists(),
+            "fresh clone must carry smelt.yml"
+        );
+        assert!(
+            !cloned.project_dir.join(".smelt").exists(),
+            "fresh clone must NOT carry .smelt/ — that is the whole point of the op"
+        );
+        assert_eq!(
+            cloned.db_path, project.db_path,
+            "fresh clone must reuse the same warehouse db_path"
+        );
     }
 }

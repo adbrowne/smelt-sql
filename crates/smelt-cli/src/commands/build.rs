@@ -158,6 +158,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let request = ExecuteRequest {
@@ -181,10 +182,12 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let run_id = generate_run_id();
     let config_arc = Arc::new(config);
+    let state_mode = config_arc.state.mode;
     let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
     let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
     let reporter = CliReporter::new(args.verbose, false, args.show_results);
@@ -207,7 +210,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
-            print_failure_summary(&project_dir, &args.target, &run_id);
+            print_failure_summary(&project_dir, &args.target, &run_id, state_mode);
             return Err(e);
         }
     };
@@ -370,6 +373,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let mut graph = DependencyGraph::build(models.clone(), None)
@@ -414,6 +418,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

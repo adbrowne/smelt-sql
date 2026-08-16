@@ -107,8 +107,11 @@ When a model is materialized by `smelt run` or `smelt build`, smelt writes the d
 - `deployment_timestamp`: ISO 8601 timestamp
 - `model_hash`: SHA-256 of the model SQL at deploy time
 - `columns`: Array of `{name, data_type, nullable}` objects
+- `definition_sql`: The model's raw SQL text at deploy time — the definition the stored table was
+  last maintained under (`definition_deltas.md` §Detection). Absent from a snapshot written before
+  this field existed, which reads back as "no recorded definition" rather than a guess.
 
-If `.smelt/schemas/` does not exist, `smelt diff` reports all models as `new`.
+With no stored snapshot for a model — `.smelt/schemas/` never written, a snapshot deleted, or excluded under `state.mode: stateless` — `smelt diff` reports that model `new` and a migration proceeds as a first deployment; smelt never refuses and never infers a migration from an absent snapshot (the absent-state behaviour `state.md` §"The optionality rule" requires: degrade-and-say-so). Under `stateless`, no snapshot is ever written, so every run sees every model as `new` — this changes only what `smelt diff` can *tell* the operator, never what the deployed table equals.
 
 ### Stale schema cleanup
 
@@ -142,7 +145,7 @@ The following change types are detected:
 | Change map key type | **Always blocked** — requires `--allow-full-refresh` |
 | Widen map value type | **Safe** if value widening is safe |
 
-**These outcomes are the pre-plan behaviours.** The leave-NULL (`default:`/`backfill:`-driven ADD/UPDATE) and full-refresh outcomes above describe schema evolution absent a derived maintenance plan (`incremental_models.md`) — i.e. today's classification, and the classification for any model outside a maintenance plan's scope. When a model *is* maintained under a plan, an added field is instead classified by the plan's definition-change trigger (`definition_deltas.md` §"The verdict per column group"): a re-derivable field (`PureBackfill` or `UpstreamRederive`) auto-backfills via a column-scoped `UPDATE` or `MERGE` over the field's own mutation-sensitivity group, with no `default:`/`backfill:` declaration or `--allow-full-refresh` needed, and the group converges with its siblings once its processed-input vector catches up (`definition_deltas.md` §"Frontier semantics"). A field added in a skeleton position (identity/grouping/dedup/ordering) is a grain change and is refused outright as a column backfill — diagnostic `MaintenanceSkeletonColumnAdded` — never silently downgraded to a full refresh. This spec continues to own the DDL execution mechanics (the actual `ALTER TABLE`/`UPDATE`/`MERGE` statements, type widening, struct/array/map rules) unchanged; the maintenance plan owns only which columns auto-backfill and which grain changes are refused.
+**These outcomes are the pre-plan behaviours.** The leave-NULL (`default:`/`backfill:`-driven ADD/UPDATE) and full-refresh outcomes above describe schema evolution absent a derived maintenance plan (`incremental_models.md`) — i.e. today's classification, and the classification for any model outside a maintenance plan's scope. When a model *is* maintained under a plan, an added field is instead classified by the plan's definition-change trigger (`definition_deltas.md` §"The verdict per column group"): a re-derivable field (`PureBackfill` or `UpstreamRederive`) auto-backfills via a column-scoped `UPDATE` or `MERGE` over the field's own mutation-sensitivity group, with no `default:`/`backfill:` declaration or `--allow-full-refresh` needed, and the group converges with its siblings once its processed-input vector catches up (`definition_deltas.md` §"Frontier semantics"). A field added in a skeleton position (identity/grouping/dedup/ordering) is a grain change and is refused outright as a column backfill — diagnostic `MaintenanceSkeletonChanged` — never silently downgraded to a full refresh. This spec continues to own the DDL execution mechanics (the actual `ALTER TABLE`/`UPDATE`/`MERGE` statements, type widening, struct/array/map rules) unchanged; the maintenance plan owns only which columns auto-backfill and which grain changes are refused.
 
 ### NOT NULL column-add reclassification
 
@@ -195,6 +198,24 @@ Not all ALTER TABLE operations are supported on all backends:
 For Spark + Parquet, most changes that require DDL result in `FullRefresh`. For Spark + Delta, complex changes use a `TableRewrite` strategy (CREATE TABLE AS SELECT + DROP + RENAME).
 
 DuckDB uses `struct_pack()` expressions to rewrite struct columns during ALTER TABLE for nested type changes and struct field additions or removals.
+
+### Routing on a maintained model
+
+On an incremental (maintained) model, a detected schema change is also a definition delta
+(`definition_deltas.md` §"Boundary with `schema_evolution.md`"), and `definition_deltas.md`
+§"The atomicity rule" governs which of three routes the run takes — never a standalone `ALTER
+TABLE` followed by a separately-dispatched backfill `UPDATE`, on any backend or strategy:
+
+- `schema_evolution.strategy: alter_and_backfill` (the default) on a backend with transactional
+  DDL takes the `AlterTable` action above, with the column's backfill folded into the same
+  statement group.
+- `schema_evolution.strategy: full_refresh` always rebuilds the table from the new definition on
+  a detected change — the declared strategy is the consent to rebuild, so the model is never left
+  on its old definition the way skipping migration entirely would leave it.
+- A backend without transactional DDL takes the same rebuild route when the run passes
+  `--allow-full-refresh`, and otherwise refuses the run with an error naming that flag (or
+  `smelt run --full-refresh <model>`) as the recovery — nothing is written, so the next
+  invocation re-derives the identical pending change.
 
 ### DuckDB ALTER TABLE for structs
 

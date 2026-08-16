@@ -547,6 +547,7 @@ pub fn resolve_incremental_strategy(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_default: IncrementalStrategy,
+    dialect: SqlDialect,
 ) -> IncrementalStrategy {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -567,6 +568,13 @@ pub fn resolve_incremental_strategy(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — this resolver only ever reads a `DeleteInsert`
+        // technique off the creation cell (see the match below), a
+        // technique no availability downgrade touches, so this is a
+        // no-op-today mechanism swap, same rationale as the `None`/`&[]`
+        // postures above.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return backend_default;
     };
@@ -783,6 +791,7 @@ pub fn resolve_cell_technique_with_write_pin(
 /// mapped here to a real `Err` — the fail-loud discipline (root
 /// `CLAUDE.md`) forbids silently falling back to region recompute for a
 /// pin the derived plan does not admit.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -791,6 +800,7 @@ pub fn resolve_live_column_scoped_cell(
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -817,6 +827,10 @@ pub fn resolve_live_column_scoped_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -994,13 +1008,16 @@ pub fn resolve_live_column_scoped_cell(
 /// [`resolve_live_membership_recompute_cell`] above (which only ever
 /// inspect `NewData`/`UpstreamMutation` cells).
 ///
-/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` is the
-/// one caller with real access to the deployed-schema snapshot the runtime
-/// `schema_evolution` module already reads/writes
-/// (`crate::schema_evolution::infer_deployed_columns`/
+/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` reads
+/// the deployed-schema snapshot directly via the runtime `schema_evolution`
+/// module (`crate::schema_evolution::infer_deployed_columns`/
 /// `save_deployed_schema`) — `derive_model_maintenance_plan` itself does no
-/// I/O (Salsa-purity rule). An empty slice (no known deployed schema) derives
-/// no trigger at all, same as `smelt-db`'s own diagnostic path.
+/// I/O (Salsa-purity rule). `smelt-db`'s own callers (the `maintenance_plan`
+/// Salsa query, `smelt explain`) now read the same kind of snapshot too, via
+/// the `ProjectInput::deployed_columns` Salsa input populated once at the
+/// workspace-loading edge (`workspace_ingest::read_deployed_columns`) rather
+/// than this runtime-side read. An empty slice (no known deployed schema)
+/// derives no trigger at all, in either path.
 ///
 /// Returns the admitted cell plus its ready-to-execute `(column,
 /// expression)` assignment pairs — the added columns' own defining
@@ -1021,6 +1038,7 @@ pub fn resolve_live_in_place_update_cell(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     deployed_column_names: &[String],
+    dialect: SqlDialect,
 ) -> Option<(PlanCell, Vec<(String, String)>)> {
     if deployed_column_names.is_empty() {
         return None;
@@ -1035,6 +1053,10 @@ pub fn resolve_live_in_place_update_cell(
         &[],
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     )?;
     let cell = result
         .plan
@@ -1149,6 +1171,7 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -1163,6 +1186,10 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -1567,6 +1594,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -2073,20 +2101,26 @@ pub type LiveKeyAddressedModelEdgeCell = (
     RepairWrite,
 );
 
-/// Resolve a `Technique::PerGroupRecompute` cell derived over a
+/// Resolve **every** `Technique::PerGroupRecompute` cell derived over a
 /// **key-addressed model edge** (`docs/specs/incremental_models.md`
 /// §"Upstream model edges") — the sibling of
-/// [`resolve_live_per_group_recompute_cell`] for a cell whose bounded read is
+/// [`resolve_live_per_group_recompute_cell`] for cells whose bounded read is
 /// a `KeyScope` (an upstream's own affected key set) rather than a
 /// `ScanClamp` over a declared source. The plan is derived exactly once here
 /// via [`smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges`]
 /// (maintenance-plan purity, root `CLAUDE.md`) — `model_edges` must be the
 /// SAME edge list (with each upstream's own derived `output_shape`) that
-/// produced the cell this run will execute.
+/// produced the cells this run will execute.
 ///
-/// Two fail-loud legs run BEFORE any backend call
+/// Lifted from a single-cell resolver to a plural one
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/04-plan.md`):
+/// a model reading several key-addressed upstreams gets a cell PER covered
+/// edge, so the run loop can dispatch all of them in one tick instead of
+/// only the first.
+///
+/// Two fail-loud legs run BEFORE any backend call, per cell
 /// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`):
-/// - a non-DuckDB target dialect — the group-grain sidecar diff this cell's
+/// - a non-DuckDB target dialect — the group-grain sidecar diff a cell's
 ///   execution needs is DuckDB-only, matching every other sidecar consumer
 ///   in this module;
 /// - a `key_scope.keys` column the upstream relation does not actually
@@ -2095,7 +2129,7 @@ pub type LiveKeyAddressedModelEdgeCell = (
 ///   names), never against the downstream's own guess. A mismatch (the
 ///   downstream renamed the key column it read) is refused by name rather
 ///   than silently querying a column the upstream table does not have.
-pub fn resolve_live_key_addressed_model_edge_cell(
+pub fn resolve_live_key_addressed_model_edge_cells(
     sql: &str,
     table: &str,
     metadata: &smelt_core::ModelMetadata,
@@ -2103,7 +2137,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     dialect: SqlDialect,
-) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
+) -> Result<Vec<LiveKeyAddressedModelEdgeCell>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql,
         table,
@@ -2115,10 +2149,12 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
+    let mut resolved = Vec::new();
     for cell in &result.plan.cells {
         if cell.technique != Technique::PerGroupRecompute {
             continue;
@@ -2216,16 +2252,41 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             FingerprintProjection::Columns(cols) => cols.into_iter().collect(),
             FingerprintProjection::FullRow { .. } => upstream_keys.clone(),
         };
-        return Ok(Some((
+        resolved.push((
             edge.name.clone(),
             cell.clone(),
             key_scope,
             upstream_keys.clone(),
             digest_columns,
             write,
-        )));
+        ));
     }
-    Ok(None)
+    Ok(resolved)
+}
+
+/// Delegating wrapper over [`resolve_live_key_addressed_model_edge_cells`]
+/// (first resolved cell) — kept for the pre-phase-4 callers/tests that only
+/// ever needed a single edge's cell.
+pub fn resolve_live_key_addressed_model_edge_cell(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    dialect: SqlDialect,
+) -> Result<Option<LiveKeyAddressedModelEdgeCell>> {
+    Ok(resolve_live_key_addressed_model_edge_cells(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        model_edges,
+        dialect,
+    )?
+    .into_iter()
+    .next())
 }
 
 /// The affected-key relation a key-addressed model-edge cell reads
@@ -2238,8 +2299,19 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// already refused a non-DuckDB dialect before any backend call is reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
-/// changed upstream keys — the caller reports a no-op rather than executing
-/// an empty-but-real write.
+/// changed upstream keys AND `restriction_keys` is empty — the caller
+/// reports a no-op rather than executing an empty-but-real write.
+///
+/// `restriction_keys` is the propagated keyed-restriction channel's own
+/// resolved values for this edge (`ExecuteRequest::keyed_restrictions`,
+/// `docs/specs/incremental_models.md` §"Restrictions compose by union") —
+/// **unioned**, never intersected, with the sidecar's own `changed_keys`
+/// before the emitter is called: the sidecar refresh commits in the same
+/// transaction as the write, so narrowing the repaired set would advance
+/// the comparandum past keys that were never consumed. Set arithmetic on
+/// the emitter's inputs, not a second statement author — the emitter stays
+/// the single owner of the affected-keys SELECT
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/05-plan.md`).
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_key_addressed_affected_keys(
     backend: &dyn Backend,
@@ -2251,8 +2323,9 @@ pub async fn resolve_key_addressed_affected_keys(
     digest_columns: &[String],
     downstream_keys: &[String],
     model_sql: &str,
+    restriction_keys: &[String],
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
-    let changed_keys = diff_repair_group_sidecar_changed_keys(
+    let sidecar_changed_keys = diff_repair_group_sidecar_changed_keys(
         backend,
         schema,
         upstream_source_address,
@@ -2263,6 +2336,7 @@ pub async fn resolve_key_addressed_affected_keys(
         model_sql,
     )
     .await?;
+    let changed_keys = union_affected_keys(sidecar_changed_keys, restriction_keys);
     let dialect = maintenance_dialect(backend.dialect());
     let affected_keys_select =
         smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
@@ -2273,6 +2347,25 @@ pub async fn resolve_key_addressed_affected_keys(
             dialect,
         );
     Ok((changed_keys, affected_keys_select))
+}
+
+/// The union arithmetic §"Restrictions compose by union" pins: `sidecar_changed_keys`
+/// (the group-grain sidecar diff's own resolved set) unioned with `restriction_keys`
+/// (the propagated keyed-restriction channel), sorted and deduplicated. Never an
+/// intersection — an empty `restriction_keys` leaves `sidecar_changed_keys`
+/// unchanged (mod sort/dedup), which is already `resolve_key_addressed_affected_keys`'s
+/// pre-phase-5 behaviour (`diff_repair_group_sidecar_changed_keys` itself never
+/// returns keys out of order or duplicated, so this is a true no-op for the
+/// empty-restriction case). Pure so the union rule is unit-testable without a
+/// backend.
+fn union_affected_keys(
+    mut sidecar_changed_keys: Vec<String>,
+    restriction_keys: &[String],
+) -> Vec<String> {
+    sidecar_changed_keys.extend(restriction_keys.iter().cloned());
+    sidecar_changed_keys.sort();
+    sidecar_changed_keys.dedup();
+    sidecar_changed_keys
 }
 
 /// Execute a live key-addressed model-edge cell
@@ -2288,11 +2381,12 @@ pub async fn resolve_key_addressed_affected_keys(
 /// ([`RepairSidecarRefresh`]), so a failed write never leaves the sidecar
 /// advanced past a change it did not actually consume.
 ///
-/// An empty changed-key set is a legitimate no-op: this returns
-/// `Ok(None)` rather than executing an empty-but-real write, matching
-/// [`emit_key_addressed_affected_keys_select`]'s own well-typed-empty
-/// convention (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md`
-/// task 5).
+/// An empty union of the sidecar's changed keys and `restriction_keys` is a
+/// legitimate no-op: this returns `Ok(None)` rather than executing an
+/// empty-but-real write, matching [`emit_key_addressed_affected_keys_select`]'s
+/// own well-typed-empty convention
+/// (`docs/outcomes/20260809-output-delta-typing/phases/07-plan.md` task 5).
+/// `restriction_keys` — see [`resolve_key_addressed_affected_keys`].
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_key_addressed_model_edge_cell(
     backend: &dyn Backend,
@@ -2307,6 +2401,7 @@ pub async fn execute_key_addressed_model_edge_cell(
     compiled_model_sql: &str,
     write: &RepairWrite,
     retry: &crate::execute::RetryPolicy<'_>,
+    restriction_keys: &[String],
 ) -> Result<Option<ExecutionResult>> {
     let full_table = format!("{schema}.{table}");
     let (changed_keys, affected_keys_select) = resolve_key_addressed_affected_keys(
@@ -2319,6 +2414,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         digest_columns,
         downstream_keys,
         clean_model_sql,
+        restriction_keys,
     )
     .await
     .map_err(|e| {
@@ -2638,6 +2734,36 @@ pub async fn read_observed_delta_changed_keys(
     window_start: &str,
     window_end: &str,
 ) -> std::result::Result<Option<Vec<String>>, BackendError> {
+    Ok(
+        read_observed_delta(backend, schema, model, window_start, window_end)
+            .await?
+            .map(|od| od.changed_keys),
+    )
+}
+
+/// Read one `(model, window)`'s recorded observed delta back off the
+/// warehouse — the live-read counterpart of
+/// [`ddl_duckdb::generate_observed_delta_upsert_sql`], decoding BOTH
+/// `changed_keys` and `partitions` (unlike
+/// [`read_observed_delta_changed_keys`], which only ever needed the former).
+/// `None` = no row was ever recorded for this window (the "never recorded"
+/// case — the widen-never-narrow fallback's trigger); `Some` — even with
+/// both vectors empty — means a conditional write ran and recorded its
+/// (possibly empty) changed set for that exact window
+/// (`incremental_models.md` §"The graph layer" — "Empty and absent are
+/// distinct").
+///
+/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
+/// this module — a missing delta on the read side is always a legal
+/// fallback trigger, so a non-DuckDB backend reads back `None` rather than
+/// erroring.
+pub async fn read_observed_delta(
+    backend: &dyn Backend,
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> std::result::Result<Option<smelt_state::ddl_duckdb::ObservedDelta>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Ok(None);
     }
@@ -2652,30 +2778,41 @@ pub async fn read_observed_delta_changed_keys(
         return Ok(None);
     }
 
-    let mut keys = Vec::new();
-    for batch in &batches {
-        let Some(col) = batch.column_by_name("changed_keys") else {
-            continue;
-        };
-        let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
-            continue;
-        };
-        for i in 0..list.len() {
-            if list.is_null(i) {
-                continue;
-            }
-            let values = list.value(i);
-            let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
+    fn decode_string_list_column(
+        batches: &[arrow::array::RecordBatch],
+        column_name: &str,
+    ) -> Vec<String> {
+        let mut values = Vec::new();
+        for batch in batches {
+            let Some(col) = batch.column_by_name(column_name) else {
                 continue;
             };
-            for j in 0..strings.len() {
-                if !strings.is_null(j) {
-                    keys.push(strings.value(j).to_string());
+            let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
+                continue;
+            };
+            for i in 0..list.len() {
+                if list.is_null(i) {
+                    continue;
+                }
+                let inner = list.value(i);
+                let Some(strings) = inner.as_any().downcast_ref::<arrow::array::StringArray>()
+                else {
+                    continue;
+                };
+                for j in 0..strings.len() {
+                    if !strings.is_null(j) {
+                        values.push(strings.value(j).to_string());
+                    }
                 }
             }
         }
+        values
     }
-    Ok(Some(keys))
+
+    Ok(Some(smelt_state::ddl_duckdb::ObservedDelta {
+        changed_keys: decode_string_list_column(&batches, "changed_keys"),
+        partitions: decode_string_list_column(&batches, "partitions"),
+    }))
 }
 
 // ── F3: fingerprint sidecar — synthesized external change feed ─────────
@@ -3352,6 +3489,57 @@ pub async fn execute_delete_insert_with_delta_restriction(
     Ok(group)
 }
 
+/// Fuse an ordinary DuckDB `DeleteInsert` region recompute's own write with
+/// the frontier reset it must also record, in ONE backend transaction
+/// (state-residency phase 7, `docs/specs/incremental_models.md` §"The
+/// frontier record (reconciliation ledger)"). `group` is the SAME
+/// [`StatementGroup`] the caller already built via [`emit_delete_insert`]
+/// for its own run report — statement-emission single ownership means this
+/// function never authors DELETE/INSERT text of its own, only the
+/// frontier's ensure/reset/insert SQL from `smelt_state::ddl_duckdb`, which
+/// it hands to [`Backend::execute_write_and_reset_frontier`] alongside
+/// `group`.
+///
+/// One frontier row per call — one per recomputed batch region, watermarked
+/// to `region_end` — rather than the whole-run-range record the after-the-
+/// loop path writes; `generate_frontier_reset_delete_sql`'s region-
+/// intersecting `DELETE` keeps these finer per-batch rows collapsible under
+/// a later coarser reset. DuckDB-only: `Backend::execute_write_and_reset_
+/// frontier`'s default (non-atomic) fallback only exists for a dialect
+/// with no ledger builder, which this call site (`execute.rs`'s ordinary
+/// DuckDB `DeleteInsert` branch) never reaches.
+pub async fn execute_region_recompute_with_frontier_reset(
+    backend: &dyn Backend,
+    schema: &str,
+    group: &StatementGroup,
+    model_name: &str,
+    region_start: &str,
+    region_end: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> std::result::Result<(), BackendError> {
+    let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+    let reset_delete_sql = smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+        schema,
+        model_name,
+        "{*}",
+        region_start,
+        region_end,
+    );
+    let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+        schema,
+        model_name,
+        "{*}",
+        "self",
+        region_end,
+        region_start,
+        region_end,
+    );
+    crate::execute::retry_backend_call(retry, || {
+        backend.execute_write_and_reset_frontier(&ensure_sql, group, &reset_delete_sql, &insert_sql)
+    })
+    .await
+}
+
 /// The facts [`build_delete_insert_group_dispatched`]/
 /// [`execute_delete_insert_with_delta_restriction`] need to attempt T3 delta
 /// restriction for a model-edge-sourced creation cell, resolved by
@@ -3424,6 +3612,13 @@ pub fn resolve_live_delta_restriction_facts(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        // Not backend-aware at this call site (`docs/outcomes/
+        // 20260816-state-residency/phases/09-plan.md` task 5 audit): this
+        // resolver only reads the model-edge creation cell's closure/
+        // row-identity facts (`restrict_column` below), never its
+        // technique — availability resolution never changes either, so
+        // there is nothing for a real dialect to change here yet.
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),
@@ -3729,6 +3924,57 @@ mod tests {
     #[test]
     fn driving_steps_rejects_empty_window() {
         assert!(driving_steps("2024-01-05", "2024-01-01", &Granularity::Day).is_err());
+    }
+
+    // ── phase 5: restriction/sidecar union (`docs/outcomes/
+    // 20260816-scheduler-delta-signatures/phases/05-plan.md` tests 3-4) ──
+
+    /// Regression pin: an empty restriction leaves the sidecar's own
+    /// resolved key set unchanged (mod sort/dedup, which
+    /// `diff_repair_group_sidecar_changed_keys` already produces) —
+    /// byte-identical to `resolve_key_addressed_affected_keys`'s pre-phase-5
+    /// behaviour.
+    #[test]
+    fn empty_restriction_leaves_discovery_unchanged() {
+        let sidecar = vec!["k1".to_string(), "k3".to_string()];
+        assert_eq!(union_affected_keys(sidecar.clone(), &[]), sidecar);
+    }
+
+    /// §"Restrictions compose by union": a restriction key absent from the
+    /// sidecar's own diff still ends up in the resolved set (union, not
+    /// intersection), sorted and deduplicated.
+    #[test]
+    fn restriction_unions_with_sidecar_keys_never_intersects() {
+        let sidecar = vec!["k1".to_string()];
+        let restriction = vec!["k2".to_string()];
+        assert_eq!(
+            union_affected_keys(sidecar, &restriction),
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+    }
+
+    /// A restriction key that already appears in the sidecar's own diff is
+    /// deduplicated, not doubled.
+    #[test]
+    fn restriction_union_deduplicates_overlapping_keys() {
+        let sidecar = vec!["k1".to_string(), "k2".to_string()];
+        let restriction = vec!["k2".to_string(), "k1".to_string()];
+        assert_eq!(
+            union_affected_keys(sidecar, &restriction),
+            vec!["k1".to_string(), "k2".to_string()]
+        );
+    }
+
+    /// The sidecar reporting zero changed keys is not itself a no-op signal
+    /// when a restriction is present — the union is non-empty, so
+    /// `resolve_key_addressed_affected_keys`'s caller must still dispatch
+    /// rather than short-circuit to `Ok(None)`.
+    #[test]
+    fn restriction_alone_yields_a_non_empty_union_when_sidecar_is_empty() {
+        assert_eq!(
+            union_affected_keys(Vec::new(), &["k2".to_string()]),
+            vec!["k2".to_string()]
+        );
     }
 
     /// The plain unconditional matched arm — the pre-Phase-C6 default for
@@ -4225,6 +4471,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 
@@ -4249,6 +4496,7 @@ mod tests {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 

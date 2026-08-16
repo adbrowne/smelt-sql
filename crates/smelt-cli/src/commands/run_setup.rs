@@ -164,8 +164,9 @@ pub(super) fn compute_auto_time_range(
     project_dir: &Path,
     target: &str,
     graph: &DependencyGraph,
+    state_mode: smelt_core::config::StateMode,
 ) -> Option<(String, String)> {
-    let file_store = FileStore::new(project_dir, target);
+    let file_store = FileStore::new(project_dir, target, state_mode);
     let interval_store = match file_store.load_intervals() {
         Ok(store) => store,
         Err(e) => {
@@ -246,6 +247,7 @@ pub(super) fn build_execute_salsa_db(
     models: &[ModelFile],
     project_dir: &Path,
     target: &str,
+    state_mode: smelt_core::config::StateMode,
 ) -> Result<smelt_db::Database> {
     let raw_sql_models = discovery
         .discover_models()
@@ -271,5 +273,11 @@ pub(super) fn build_execute_salsa_db(
     }
     let mut salsa_db = init_db(project_dir, &all_files);
     salsa_db.set_active_target(Some(std::sync::Arc::from(target)));
+    // Re-populate the deployed-columns Salsa input for the real (possibly
+    // `--target`-overridden) target — `init_db` populated it for the
+    // config-file default target only.
+    let columns =
+        smelt_db::workspace_ingest::read_deployed_columns(project_dir, target, state_mode);
+    salsa_db.set_project_deployed_columns(project_dir, columns);
     Ok(salsa_db)
 }

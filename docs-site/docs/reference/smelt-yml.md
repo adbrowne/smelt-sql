@@ -15,6 +15,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
 | `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
 | `probes` | object | no | `{cadence: per_run}` | Project-wide dispatch cadence for declared-fact probes (see [Probes Configuration](#probes-configuration)) |
+| `state` | object | no | `{mode: stateless}` | Opt-in observability-state posture (see [State Configuration](#state-configuration)) |
 
 ---
 
@@ -367,6 +368,43 @@ a run will check before running it; see [`smelt explain`](smelt-explain.md#probe
 manifest's [`probes` field](state.md#run-manifest) for where a probe's outcome is recorded.
 
 ---
+
+## State Configuration
+
+`state:` declares how much *observability* state — run history, interval coverage, landed-delta
+records, schema snapshots, environment/snapshot reuse — a project persists to `.smelt/`. It has
+no effect on *correctness* state (the reconciliation ledger and frontier a `grain: key` model's
+merge relies on): that lives in the warehouse, transactional with the write it accompanies,
+whenever the plan needs it, regardless of `state.mode`. See [State & Recovery — The
+reconciliation ledger](state.md#the-reconciliation-ledger-lives-in-the-warehouse) for the correctness/observability
+split, and [Production Deployment](../guide/deployment.md#smelt-state-layout) for the on-disk
+layout `state.mode` controls.
+
+```yaml
+state:
+  mode: intervals   # default: stateless
+```
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | no | `stateless` | `stateless`, `intervals`, or `environments` — see below. |
+
+The three modes form a capability lattice, each a superset of the one before it
+(`environments ⊇ intervals ⊇ stateless`); a model may narrow its own posture below the
+project's but never widen it.
+
+- **`stateless`** (default) — no `.smelt/` state store is created. `smelt status`/`smelt
+  history` have nothing to read, `--resume` refuses by name (no manifest to resume from), and
+  forward propagation (`--since-upstream`) falls back to a full recompute of the selection
+  (no persisted landed-delta record to compute a dirty set from). A run still succeeds and
+  every maintained table is still correct — only what smelt can *tell you* or how *cheaply* it
+  can run degrades, never what a table equals.
+- **`intervals`** — persists run manifests/reports, interval coverage, landed deltas, deployed
+  schema snapshots, source postures, and frozen-band baselines under `.smelt/`, enabling
+  `smelt status`, `smelt history`, `--resume`, forward propagation, and schema-evolution
+  diffing. Fingerprint-keyed reuse snapshots (`snapshots.json`) are not persisted.
+- **`environments`** — everything `intervals` persists, plus fingerprint-keyed reuse snapshots
+  and environment addressing, for virtual-environment workflows.
 
 ## Validation Rules
 

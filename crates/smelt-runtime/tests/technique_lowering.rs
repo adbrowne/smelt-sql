@@ -119,6 +119,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             skeleton_source_closure: None,
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
+            recompute_fallback: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -427,6 +428,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         skeleton_source_closure: None,
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
+        recompute_fallback: None,
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -1180,6 +1182,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -1530,21 +1533,24 @@ fn once_write_renders_coalesce_target_first() {
     );
 }
 
-/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): the snapshot-reconcile
-/// run shape's `MERGE` — a whole-source `USING` select (no window predicate
-/// injected into `delta_sql`, unlike the window-forward per-partition
-/// driver), plain-overwrite columns assign `delta.<col>` unconditionally
-/// (incoming row wins, no target comparison), and — critically — no
-/// `DELETE` of departed keys: a key present in the target but absent from
-/// the incoming scan is retained unchanged
-/// (`docs/specs/incremental_shapes.md` §"The two run shapes").
+/// `docs/outcomes/20260816-keyed-grain-residue-v2` phase 1: the
+/// snapshot-reconcile run shape's lowered group — a whole-source `USING`
+/// select (no window predicate injected into `delta_sql`, unlike the
+/// window-forward per-partition driver), plain-overwrite columns assign
+/// `delta.<col>` unconditionally (incoming row wins, no target comparison),
+/// and — critically — the SECOND statement is the anti-join `DELETE` over
+/// the same scan SELECT the `MERGE` uses, so a key present in the target
+/// but absent from the incoming scan is deleted, not retained
+/// (`docs/specs/incremental_shapes.md` §"Departed keys and deletion";
+/// supersedes the prior "must never delete a departed key" pin, retired
+/// with the decision track, PR #167).
 #[test]
-fn snapshot_reconcile_merges_whole_source_no_window() {
+fn snapshot_reconcile_deletes_departed_key() {
     use smelt_core::config::TimeseriesConfig;
     use smelt_logical::{
         AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
     };
-    use smelt_runtime::cumulative::build_cumulative_merge_sql;
+    use smelt_runtime::cumulative::build_snapshot_reconcile_group;
 
     let classification = CumulativeClassification {
         unique_key: vec!["id".to_string()],
@@ -1565,31 +1571,98 @@ fn snapshot_reconcile_merges_whole_source_no_window() {
     let delta_sql =
         "SELECT id, ANY_VALUE(current_val) AS current_val FROM main.sources_dim GROUP BY id";
 
-    let sql = build_cumulative_merge_sql(
+    let group = build_snapshot_reconcile_group(
         "main",
         "snapshot_dim",
         delta_sql,
         &classification,
-        None,
         &unconditional(),
     );
 
     assert!(
-        sql.contains(&format!("USING ({delta_sql}) AS delta")),
+        group.transactional,
+        "the MERGE + departed-key DELETE must run as one transaction"
+    );
+    assert_eq!(group.statements.len(), 2);
+
+    let merge_sql = &group.statements[0].sql;
+    assert!(
+        merge_sql.contains(&format!("USING ({delta_sql}) AS delta")),
         "expected the whole-source select verbatim as the USING clause, no window predicate: \
-         {sql}"
+         {merge_sql}"
     );
     assert!(
-        sql.contains("current_val = delta.current_val"),
-        "expected the plain-overwrite family's unconditional incoming-row-wins assignment: {sql}"
+        merge_sql.contains("current_val = delta.current_val"),
+        "expected the plain-overwrite family's unconditional incoming-row-wins assignment: \
+         {merge_sql}"
     );
     assert!(
-        !sql.to_uppercase().contains("DELETE"),
-        "snapshot-reconcile must never delete a departed key — retained unchanged: {sql}"
+        merge_sql.contains("WHEN NOT MATCHED THEN INSERT *"),
+        "expected the ordinary unmatched-insert arm: {merge_sql}"
     );
-    assert!(
-        sql.contains("WHEN NOT MATCHED THEN INSERT *"),
-        "expected the ordinary unmatched-insert arm: {sql}"
+
+    let delete_sql = &group.statements[1].sql;
+    assert_eq!(
+        delete_sql,
+        &format!(
+            "DELETE FROM main.snapshot_dim WHERE NOT EXISTS (SELECT 1 FROM ({delta_sql}) AS s \
+             WHERE main.snapshot_dim.id = s.id)"
+        ),
+        "expected the anti-join DELETE over the same scan SELECT the MERGE uses"
+    );
+}
+
+/// Maintenance-plan purity / statement-parity leg for the snapshot-reconcile
+/// family: the group the executor would hand to the backend
+/// (`build_snapshot_reconcile_group`) is byte-identical to a direct call to
+/// the single-owner emitter (`emit_snapshot_reconcile`) — the runtime layer
+/// only renders combiner expressions and assembles arguments, it never
+/// re-authors the statement text.
+#[test]
+fn snapshot_reconcile_statements_come_from_the_emitter() {
+    use smelt_core::config::TimeseriesConfig;
+    use smelt_logical::maintenance::emit::{emit_snapshot_reconcile, MaintenanceDialect};
+    use smelt_logical::{
+        AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
+    };
+    use smelt_runtime::cumulative::build_snapshot_reconcile_group;
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "current_val".to_string(),
+            per_partition_agg: "ANY_VALUE".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::PlainOverwrite,
+            state: None,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.dim".to_string(),
+            timeseries: None::<TimeseriesConfig>,
+        },
+    };
+    let delta_sql =
+        "SELECT id, ANY_VALUE(current_val) AS current_val FROM main.sources_dim GROUP BY id";
+
+    let group = build_snapshot_reconcile_group(
+        "main",
+        "snapshot_dim",
+        delta_sql,
+        &classification,
+        &unconditional(),
+    );
+
+    let expected = emit_snapshot_reconcile(
+        "main.snapshot_dim",
+        &["id".to_string()],
+        &[("current_val".to_string(), "delta.current_val".to_string())],
+        delta_sql,
+        &unconditional(),
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(
+        group, expected,
+        "build_snapshot_reconcile_group must be byte-identical to a direct emitter call"
     );
 }
 
@@ -1639,7 +1712,7 @@ mod column_scoped_merge_e2e {
     }
 
     /// Copy `examples/timeseries` into a scratch directory so the run's
-    /// `.smelt/` state (`FileStore::new(project_dir, target)`) never lands
+    /// `.smelt/` state (`FileStore::new(project_dir, target, mode)`) never lands
     /// inside the checked-in example.
     fn copy_dir_recursive(src: &Path, dst: &Path) {
         std::fs::create_dir_all(dst).expect("create dst dir");
@@ -1706,6 +1779,7 @@ mod column_scoped_merge_e2e {
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2026,6 +2100,7 @@ mod keyed_membership_recompute_e2e {
             &sources,
             &explicitly_mutable,
             &[],
+            smelt_dialect::SqlDialect::DuckDB,
         )
         .expect("resolver must not error")
         .expect("a live membership-recompute cell must resolve for raw.users");
@@ -2143,6 +2218,7 @@ mod keyed_membership_recompute_e2e {
             retry_backoff_ms: None,
             resume: false,
             technique_overrides: vec![],
+            keyed_restrictions: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2671,6 +2747,7 @@ mod write_pattern_registry_pin {
                 skeleton_source_closure: None,
                 fingerprint_projections: std::collections::BTreeMap::new(),
                 key_scope: None,
+                recompute_fallback: None,
             }],
             refusals: vec![],
             key_locality: None,
@@ -4017,6 +4094,7 @@ mod in_place_update_lowering {
             skeleton_source_closure: None,
             fingerprint_projections: Default::default(),
             key_scope: None,
+            recompute_fallback: None,
         }
     }
 

@@ -4223,6 +4223,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
+ "chrono",
  "duckdb",
  "line-index",
  "marked-yaml",
@@ -4237,6 +4238,7 @@ dependencies = [
  "smelt-logical",
  "smelt-parser",
  "smelt-runtime",
+ "smelt-state",
  "smelt-types",
  "tempfile",
  "tracing",
@@ -4275,6 +4277,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_yaml",
+ "sha2 0.10.9",
  "smelt-core",
  "smelt-parser",
  "smelt-types",
@@ -4286,6 +4289,7 @@ name = "smelt-lsp"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "line-index",
  "lsp-types",
  "pyo3",
@@ -4296,6 +4300,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-parser",
+ "smelt-state",
  "smelt-types",
  "tempfile",
  "tokio",
@@ -4416,6 +4421,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smelt-core",
  "smelt-dialect",
  "smelt-maintenance-testkit",
  "smelt-types",

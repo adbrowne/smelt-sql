@@ -462,6 +462,7 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     }
 }
 
@@ -1152,6 +1153,7 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        smelt_logical::maintenance::availability::StateAvailability::all(),
     )
     .expect("device_avg_amount must derive a maintenance plan");
     let cell = plan_result
@@ -1653,6 +1655,7 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     }
 }
 
@@ -2404,6 +2407,7 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     // Run 1: creation — nothing to fold yet.
@@ -4266,6 +4270,8 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
         &backend,
         &smelt_runtime::probes::ProbePolicy::per_run(),
         &probes,
+        &smelt_runtime::reporter::NoOpReporter,
+        "run-1",
     )
     .await
     .expect_err("the mismatched closed-partition fingerprint must fail loud");

@@ -14,6 +14,29 @@ use smelt_cli::{
 };
 use smelt_core::graph::DependencyGraph;
 
+/// The real target backend name for `canonical`'s resolved target
+/// (`docs/specs/state.md` §"The degradation contract") — mirrors
+/// `commands::explain::explain_maintenance_plan`'s own `dialect_name`
+/// resolution so this test helper exercises the same backend-aware plan a
+/// real `smelt explain` invocation would derive.
+fn dialect_name_for(
+    config: &Config,
+    canonical: &str,
+    metadata: Option<&smelt_core::ModelMetadata>,
+) -> &'static str {
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
+    let target = config.get_target(canonical, metadata, &default_target);
+    match config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+    {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    }
+}
+
 /// Run the real discovery + Salsa pipeline for `project_dir` and return the
 /// built maintenance-plan report for `model_name`, mirroring
 /// `commands::explain::explain_maintenance_plan`'s own resolution sequence
@@ -63,7 +86,8 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
         .source_file(&model.path)
         .expect("model file not registered");
 
-    let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
+    let dialect_name = dialect_name_for(&config, &canonical, model.metadata.as_deref());
+    let result = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name)?;
 
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(&canonical);
@@ -195,6 +219,54 @@ fn explain_prints_cells_clamps_locality() {
         "expected the admissible write-pattern registry listing, leading with `region` (the \
          only structural fact this cell's declared facts satisfy first in registry order): \
          {report}"
+    );
+}
+
+/// The delta-signature headline (`docs/specs/incremental_models.md` §Surface
+/// "CLI" **Headline**, phase 9 of
+/// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`) must be
+/// the report's first non-empty line, ahead of `Maintenance plan:` — and
+/// must name the grain label and derived run shape for `daily_events`
+/// (`grain: partition` with a declared `timeseries:` axis, so the run shape
+/// is the window sweep over `event_date`).
+#[test]
+fn explain_headline_is_the_first_line() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+
+    let first_line = report
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .expect("report has a first non-empty line");
+    assert!(
+        first_line.starts_with("emits:"),
+        "expected the delta-signature headline as the first line: {first_line:?}"
+    );
+    assert!(
+        first_line.contains("grain: partition"),
+        "expected the grain label in the headline: {first_line:?}"
+    );
+    assert!(
+        first_line.contains("run shape: window sweep over event_date"),
+        "expected the derived run shape naming the partition axis: {first_line:?}"
+    );
+
+    let maintenance_plan_line_idx = report
+        .lines()
+        .position(|l| l.starts_with("Maintenance plan:"))
+        .expect("report still has the Maintenance plan: line");
+    let headline_idx = report
+        .lines()
+        .position(|l| l == first_line)
+        .expect("headline line found");
+    assert!(
+        headline_idx < maintenance_plan_line_idx,
+        "the headline must print before `Maintenance plan:`: {report}"
     );
 }
 
@@ -696,13 +768,20 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         skeleton_source_closure: None,
         fingerprint_projections: Default::default(),
         key_scope: None,
+        recompute_fallback: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
+            cells: vec![cell.clone()],
+            refusals: vec![],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
             cells: vec![cell],
             refusals: vec![],
             key_locality: None,
         },
+        state_downgrades: vec![],
         column_groups: vec![ColumnGroup {
             columns: vec!["max_val".to_string()],
             mutation_sensitivity: Default::default(),
@@ -710,6 +789,9 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
+        column_determinism: Vec::new(),
     };
     let report = build_maintenance_plan_report(
         "non_repair_fixture",
@@ -745,6 +827,314 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
     assert!(
         !report.contains("write mechanism: diff_patch"),
         "a non-repair cell must print no repair stanza: {report}"
+    );
+}
+
+/// `MaintenanceStateDowngraded` (`docs/specs/state.md` §"The degradation
+/// contract"): a downgraded cell prints BOTH its executed technique (the
+/// resolved plan's own `technique:` line) and the ideal one it would run
+/// with the missing structure available — the counterfactual `smelt
+/// explain` promises to keep printable even though it never runs.
+#[test]
+fn explain_prints_a_downgraded_cell_with_both_techniques() {
+    use std::collections::BTreeSet;
+
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::maintenance::availability::{StateDowngrade, StateStructure};
+    use smelt_logical::maintenance::{
+        ColumnGroup, Corner, MaintenancePlan, PartitionLocal, PlanCell, RecomputeFallback,
+        RowIdentity, RowIdentityVerdict, ScanClamp, Technique, Trigger,
+    };
+
+    let trigger = Trigger::NewData {
+        source: "events".to_string(),
+    };
+    let ideal_cell = PlanCell {
+        group: "{total}".to_string(),
+        trigger: trigger.clone(),
+        corner: Corner::FoldDelta,
+        technique: Technique::KeyedFold,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["user_id".to_string()]),
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+        key_scope: None,
+        recompute_fallback: Some(RecomputeFallback {
+            technique: Technique::PerGroupRecompute,
+            scans: vec![ScanClamp {
+                source: "events".to_string(),
+                column: "event_time".to_string(),
+                before: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+                after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+            }],
+            key_scope: None,
+        }),
+    };
+    let mut resolved_cell = ideal_cell.clone();
+    resolved_cell.technique = Technique::PerGroupRecompute;
+    resolved_cell.recompute_fallback = None;
+
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![resolved_cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
+            cells: vec![ideal_cell],
+            refusals: vec![],
+            key_locality: None,
+        },
+        state_downgrades: vec![StateDowngrade {
+            cell_group: "{total}".to_string(),
+            trigger: format!("{trigger:?}"),
+            ideal_technique: Technique::KeyedFold,
+            resolved_technique: Technique::PerGroupRecompute,
+            missing_structure: StateStructure::ReconciliationLedger,
+            why: "no reconciliation ledger on this backend; downgraded to the per-group \
+                  recompute fallback"
+                .to_string(),
+        }],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["total".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+        state_columns: vec![],
+        own_output_delta: vec![],
+        run_shape: None,
+        column_determinism: Vec::new(),
+    };
+
+    let report = build_maintenance_plan_report(
+        "downgraded_fixture",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    assert!(
+        report.contains("technique: PerGroupRecompute"),
+        "expected the resolved (executed) technique to print: {report}"
+    );
+    assert!(
+        report.contains("state downgrade: PerGroupRecompute (ideal: KeyedFold"),
+        "expected the ideal technique alongside the executed one: {report}"
+    );
+    assert!(
+        report.contains("ReconciliationLedger"),
+        "expected the missing structure named: {report}"
+    );
+}
+
+// =============================================================================
+// Backend-aware downgrade visibility (`docs/outcomes/20260816-state-residency/
+// outcome.md` phase 9): `smelt explain` resolves the model's REAL target
+// dialect into `StateAvailability` instead of `all()`, so a Spark-targeted
+// keyed-fold model's `MaintenanceStateDowngraded` cell is actually visible.
+// =============================================================================
+
+/// Stage [`smelt_maintenance_testkit::dag::keyed_chain_dag`]'s clockless
+/// keyed chain (`dag_kchain_a` → `dag_kchain_b`, the latter a `KeyedFold`
+/// needing the reconciliation ledger) via the ordinary DuckDB [`stage_dag`],
+/// then overwrite `smelt.yml` with a `dialect`-targeted one
+/// ([`smelt_maintenance_testkit::render::render_smelt_yml_for`]). `smelt
+/// explain` never connects to a backend (`docs/specs/cli.md` §"`smelt
+/// explain <model>` maintenance-plan report"), so a Spark target with no
+/// live connection is safe to stage here — only the declared `type:` needs
+/// to be real.
+fn stage_keyed_chain_project_for(
+    tmp: &tempfile::TempDir,
+    target: smelt_maintenance_testkit::recipe::ConformanceTarget,
+) -> std::path::PathBuf {
+    use smelt_maintenance_testkit::dag::{keyed_chain_dag, stage_dag};
+    use smelt_maintenance_testkit::render::render_smelt_yml_for;
+
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    let dag = keyed_chain_dag();
+    stage_dag(&dag, &project_dir, &db_path).expect("stage keyed chain dag");
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        render_smelt_yml_for(target, &db_path),
+    )
+    .expect("overwrite smelt.yml with the target dialect");
+    project_dir
+}
+
+/// `dag_kchain_b`'s `KeyedFold` cell needs the reconciliation ledger
+/// (`docs/specs/state.md` §"The degradation contract") — under a
+/// Spark-only target (`state_availability_for("spark")` == `none()`,
+/// pinned above) it must downgrade, and `smelt explain` must actually show
+/// that: this was the whole point of the phase, since every derivation path
+/// `smelt explain` reached passed `StateAvailability::all()` before this
+/// fix, so a real Spark project printed no downgrade line at all.
+#[test]
+fn spark_target_model_explains_state_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::SparkDelta,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("state downgrade:"),
+        "a Spark-only target has no reconciliation ledger — the KeyedFold cell must print a \
+         state downgrade line: {report}"
+    );
+}
+
+/// Same model, same clockless keyed-fold shape, under a `duckdb` target —
+/// DuckDB carries the reconciliation ledger, so no downgrade must print.
+/// Guards against the fix over-firing (e.g. always resolving `none()`
+/// regardless of dialect).
+#[test]
+fn duckdb_target_model_explains_no_state_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::DuckDb,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        !report.contains("state downgrade:"),
+        "a duckdb target has the reconciliation ledger — no cell should downgrade: {report}"
+    );
+}
+
+/// `--json`'s `state_downgrades` array must mirror the text report: non-empty
+/// for the Spark target, empty for DuckDB (`docs/specs/cli.md` §"`smelt
+/// explain --json` output schema").
+#[test]
+fn explain_json_carries_state_downgrades() {
+    use smelt_cli::explain::build_maintenance_plan_json;
+    use smelt_maintenance_testkit::recipe::ConformanceTarget;
+
+    for (target, expect_downgrade) in [
+        (ConformanceTarget::SparkDelta, true),
+        (ConformanceTarget::DuckDb, false),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = stage_keyed_chain_project_for(&tmp, target);
+        let project_dir = find_project_root(&project_dir).expect("find project root");
+        let config = Config::load(&project_dir).expect("load smelt.yml");
+
+        let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let models = discovery.discover_models().expect("discover models");
+        let db = init_db(&project_dir, &models);
+        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let model = models
+            .iter()
+            .find(|m| m.canonical_path() == "dag_kchain_b")
+            .expect("dag_kchain_b discovered");
+        let file = db
+            .source_file(&model.path)
+            .expect("model file not registered");
+
+        let dialect_name = dialect_name_for(&config, "dag_kchain_b", model.metadata.as_deref());
+        let result = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name)
+            .expect("dag_kchain_b has a maintenance plan");
+
+        let statements: Vec<smelt_cli::explain::CellStatements> = Vec::new();
+        let diagnostics_cells: Vec<smelt_cli::explain::PlanCellDiagnostics> = Vec::new();
+        let empty_properties = smelt_runtime::diagnostics::PropertySet {
+            columns: vec![],
+            grain: Default::default(),
+            functional_dependencies: vec![],
+            determinism: vec![],
+            comparability: vec![],
+            discriminants: vec![],
+            literal_columns: vec![],
+            has_set_op_barrier: false,
+            has_fan_out_join: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            source_bounds: Default::default(),
+        };
+        let json = build_maintenance_plan_json(
+            "dag_kchain_b",
+            &[],
+            &statements,
+            smelt_cli::explain::RelationContractView::from_facts(None, None),
+            vec![],
+            &diagnostics_cells,
+            empty_properties,
+            vec![],
+            vec![],
+            smelt_core::config::ProbeCadence::PerRun,
+            &[],
+            None,
+            &result.state_downgrades,
+            None,
+            vec![],
+            vec![],
+        );
+
+        if expect_downgrade {
+            assert!(
+                !json.state_downgrades.is_empty(),
+                "{target:?}: expected a non-empty state_downgrades array"
+            );
+        } else {
+            assert!(
+                json.state_downgrades.is_empty(),
+                "{target:?}: expected an empty state_downgrades array, got {:?}",
+                json.state_downgrades
+            );
+        }
+    }
+}
+
+/// The edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`,
+/// reached unconditionally by `smelt_db::maintenance_plan_report` — model
+/// edges are just an empty list for a model with none) must resolve the SAME
+/// real availability as the non-edge case: `dag_kchain_b` has exactly one
+/// inbound maintained-model edge (`dag_kchain_a`), so this pins that having
+/// an edge does not silently drop the downgrade the edge-less case already
+/// proved above.
+#[test]
+fn explain_graph_path_resolves_real_availability() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::SparkDelta,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("dag_kchain_a (model)"),
+        "sanity: dag_kchain_b must have an inbound model edge for this test to be meaningful: \
+         {report}"
+    );
+    assert!(
+        report.contains("state downgrade:"),
+        "the edge-aware derivation path must still surface the downgrade for a model with an \
+         inbound maintained-model edge: {report}"
     );
 }
 
@@ -999,5 +1389,274 @@ fn explain_key_addressed_cell_prints_upstream_sidecar_discovery() {
         ),
         "expected the upstream-sidecar discovery mechanism, not a declared-source posture: \
          {report}"
+    );
+}
+
+// =============================================================================
+// Per-column guarantee ledger + pre-execution refusal surfacing (phase 10 of
+// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
+// `docs/specs/incremental_models.md` §Surface "CLI").
+// =============================================================================
+
+/// `daily_events` (`grain: partition`, `examples/timeseries`) must print a
+/// `Guarantees:` block with one row per output column, each carrying the
+/// column's group, its effective contract, and a settle bound — never the
+/// bare `{:?}` of the underlying enums.
+#[test]
+fn explain_prints_per_column_guarantee_ledger() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events")
+        .expect("daily_events has a maintenance plan");
+
+    assert!(
+        report.contains("Guarantees:"),
+        "expected a Guarantees: block: {report}"
+    );
+    let guarantees_start = report.find("Guarantees:").unwrap();
+    let guarantees_block = &report[guarantees_start..];
+    assert!(
+        guarantees_block.contains("(group ") && guarantees_block.contains("settle:"),
+        "expected per-column rows naming the owning group and a settle bound: {report}"
+    );
+}
+
+/// A refusing model's refusal block must print immediately after the
+/// delta-signature headline and before `Maintenance plan:` — an operator
+/// sees what will be refused before the plan body, not buried at the bottom.
+#[test]
+fn explain_surfaces_refusals_before_the_plan() {
+    use std::collections::BTreeSet;
+
+    use smelt_cli::explain::RelationContractView;
+    use smelt_db::queries::maintenance::MaintenancePlanResult;
+    use smelt_logical::analysis::output_delta::OutputDelta;
+    use smelt_logical::maintenance::{ColumnGroup, MaintenancePlan, Refusal};
+
+    let result = MaintenancePlanResult {
+        plan: MaintenancePlan {
+            cells: vec![],
+            refusals: vec![Refusal::ScanUnbounded {
+                source: "sources.raw.events".to_string(),
+                why: "no clocked column".to_string(),
+            }],
+            key_locality: None,
+        },
+        ideal_plan: MaintenancePlan {
+            cells: vec![],
+            refusals: vec![],
+            key_locality: None,
+        },
+        state_downgrades: vec![],
+        column_groups: vec![ColumnGroup {
+            columns: vec!["amount".to_string()],
+            mutation_sensitivity: Default::default(),
+            membership_sensitivity: BTreeSet::new(),
+        }],
+        degenerate: vec![],
+        state_columns: vec![],
+        own_output_delta: vec![(
+            "{amount}".to_string(),
+            OutputDelta::KeyedUpsert {
+                keys: vec!["id".to_string()],
+            },
+        )],
+        run_shape: None,
+        column_determinism: Vec::new(),
+    };
+    let report = build_maintenance_plan_report(
+        "refusing_fixture",
+        &result,
+        &RelationContractView::from_facts(None, None),
+        &[],
+        &[],
+        None,
+        None,
+        &[],
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    let headline_idx = report
+        .lines()
+        .position(|l| l.starts_with("emits:"))
+        .expect("headline present");
+    let refusals_idx = report
+        .lines()
+        .position(|l| l.starts_with("Refusals ("))
+        .expect("refusals block present");
+    let plan_idx = report
+        .lines()
+        .position(|l| l.starts_with("Maintenance plan:"))
+        .expect("Maintenance plan: line present");
+    assert!(
+        headline_idx < refusals_idx && refusals_idx < plan_idx,
+        "expected headline < refusals < Maintenance plan: {report}"
+    );
+    assert!(
+        report.contains(
+            "MaintenanceScanUnbounded: scan over 'sources.raw.events' cannot be \
+                          partition-bounded: no clocked column"
+        ),
+        "expected the rendered refusal, never `{{:?}}` of the enum: {report}"
+    );
+}
+
+/// `--json`'s `guarantees`/`refusals` arrays must carry the SAME field
+/// values the text report's `Guarantees:`/`Refusals:` blocks render — both
+/// read `smelt_logical::maintenance::ledger`'s single-owner derivation.
+#[test]
+fn explain_json_guarantees_match_text() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    let project_dir = find_project_root(&project_dir).expect("find project root");
+    let config = Config::load(&project_dir).expect("load smelt.yml");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, None);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), "daily_events")
+        .expect("resolve daily_events");
+    let model = models
+        .iter()
+        .find(|m| m.canonical_path() == canonical)
+        .expect("daily_events discovered");
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+    let dialect_name = dialect_name_for(&config, &canonical, model.metadata.as_deref());
+    let result =
+        smelt_db::maintenance_plan_report(&db, ws, file, dialect_name).expect("plan result");
+
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let graph = DependencyGraph::build(models.clone(), None).expect("build graph");
+    let upstream = graph.get_upstream(&canonical);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+    let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
+
+    let report = build_maintenance_plan_report(
+        &canonical,
+        &result,
+        &own_contract,
+        &edges,
+        &[],
+        None,
+        contract_cfg,
+        &source_infos,
+        &[],
+        smelt_core::config::ProbeCadence::PerRun,
+        &[],
+    )
+    .expect("build_maintenance_plan_report");
+
+    let guarantees = smelt_cli::explain::explain_guarantees_json(&result, contract_cfg);
+    assert!(
+        !guarantees.is_empty(),
+        "expected at least one guarantee row"
+    );
+    for g in &guarantees {
+        let label = g
+            .contract
+            .clone()
+            .or_else(|| g.determinism_exemption.clone())
+            .expect("exactly one of contract/determinism_exemption is set");
+        let expected_line = format!(
+            "  - {} (group {}): {}, settle: {}",
+            g.column, g.group, label, g.settle
+        );
+        assert!(
+            report.contains(&expected_line),
+            "expected text line {expected_line:?} in report: {report}"
+        );
+    }
+
+    let refusals = smelt_cli::explain::explain_refusals_json(&result);
+    assert!(refusals.is_empty(), "daily_events is admitted, no refusals");
+}
+
+/// `smelt explain <model>`'s refusal block names `MaintenanceSkeletonChanged`
+/// for a GROUP BY key addition against a deployed-schema snapshot recorded
+/// under a *prior* definition — the pre-run surfacing this outcome's phase 9
+/// wires (`docs/specs/definition_deltas.md` §Detection): the deployed column
+/// names now come from the real `ProjectInput::deployed_columns` Salsa
+/// input, populated by `init_db` at workspace-loading time, not a hardcoded
+/// `&[]`.
+#[test]
+fn explain_refusal_block_names_skeleton_change() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+
+    let yml = "name: skeleton_fixture\n\
+               version: 1\n\
+               paths:\n  - models\n\
+               targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+               default_materialization: view\n\
+               state:\n  mode: intervals\n";
+    std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
+
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/events.yml"),
+        "description: events\ncolumns:\n- name: device_id\n  type: VARCHAR\n- name: user_id\n  type: VARCHAR\nmutation_profile:\n  kind: append_only\n",
+    )
+    .unwrap();
+
+    let model_sql = "---\n\
+                      materialization: table\n\
+                      refresh: incremental\n\
+                      grain: key\n\
+                      ---\n\
+                      SELECT device_id, user_id, COUNT(*) AS n \
+                      FROM smelt.sources.events GROUP BY device_id, user_id\n";
+    std::fs::write(tmp.path().join("models/device_user_counts.sql"), model_sql).unwrap();
+
+    // The deployed schema BEFORE the edit — only `device_id` was grouped by.
+    let store = smelt_state::file_store::FileStore::new(
+        tmp.path(),
+        "dev",
+        smelt_core::config::StateMode::Intervals,
+    );
+    store
+        .save_schema(&smelt_state::schema_tracking::DeployedSchema {
+            model: "device_user_counts".to_string(),
+            version: 1,
+            deployed_at: chrono::Utc::now(),
+            model_hash: "fixture-hash".to_string(),
+            columns: vec![
+                smelt_state::schema_tracking::DeployedColumn {
+                    name: "device_id".to_string(),
+                    data_type: "VARCHAR".to_string(),
+                    nullable: false,
+                },
+                smelt_state::schema_tracking::DeployedColumn {
+                    name: "n".to_string(),
+                    data_type: "BIGINT".to_string(),
+                    nullable: false,
+                },
+            ],
+            definition_sql: String::new(),
+        })
+        .expect("save deployed schema");
+
+    let report = build_report_for(tmp.path(), "device_user_counts")
+        .expect("device_user_counts is an incremental model with a maintenance plan");
+
+    assert!(
+        report.contains("MaintenanceSkeletonChanged"),
+        "expected the refusal block to name MaintenanceSkeletonChanged: {report}"
     );
 }

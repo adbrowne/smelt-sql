@@ -336,28 +336,38 @@ pub fn build_model_diagnostics_response(
     let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
     let bound_ctx = build_bound_context(name, graph, config);
 
-    let ws = smelt_db::Workspace::try_get(db);
-    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
-        match (ws, db.source_file(&model.path)) {
-            (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
-                .map(|result| result.plan.cells)
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
     let target = config.get_target(name, model.metadata.as_deref(), &default_target);
     let schema = config
         .targets
         .get(&target)
         .map(|t| t.schema.clone())
         .unwrap_or_else(|| "main".to_string());
-    let dialect = config
+    let backend_type = config
         .targets
         .get(&target)
-        .and_then(|t| t.backend_type().ok())
+        .and_then(|t| t.backend_type().ok());
+    let dialect = backend_type
         .map(backend_type_to_maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+    // Real target backend (`docs/specs/state.md` §"The degradation
+    // contract"): a Spark-targeted model's `plan_cells` reflect what that
+    // backend can actually execute, not the DuckDB-optimistic ideal —
+    // `smelt-cli::commands::explain`'s own `dialect_name` resolution.
+    let dialect_name = match backend_type {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    };
+
+    let ws = smelt_db::Workspace::try_get(db);
+    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
+        match (ws, db.source_file(&model.path)) {
+            (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file, dialect_name)
+                .map(|result| result.plan.cells)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
 
     let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets);
     if let Some(ws) = ws {

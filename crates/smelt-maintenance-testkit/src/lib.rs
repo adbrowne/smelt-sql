@@ -62,6 +62,30 @@
 //!   against (`docs/plans/20260712-generative-maintenance-conformance.md`
 //!   Phase 8).
 
+/// The real target backend name for `config`'s first declared target
+/// (`smelt.yml` `targets.*.type`, lower-cased to the vocabulary
+/// [`smelt_db::queries::maintenance::state_availability_for`] matches) —
+/// the same "first declared target" convention
+/// `smelt-cli::commands::explain` uses for an offline, no-model-override
+/// resolution. Every staged conformance project this crate builds declares
+/// exactly one target, so [`verdict::classify`]/[`dag::classify_node`] see
+/// the SAME plan a live run against that project's declared backend would
+/// (`docs/specs/state.md` §"The degradation contract") rather than the
+/// DuckDB-optimistic ideal every call site assumed before backend-aware
+/// resolution landed.
+pub fn dialect_name_for_config(config: &smelt_core::config::Config) -> &'static str {
+    match config
+        .targets
+        .values()
+        .next()
+        .and_then(|t| t.backend_type().ok())
+    {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    }
+}
+
 pub mod dag;
 pub mod feed;
 pub mod link_c_harness;

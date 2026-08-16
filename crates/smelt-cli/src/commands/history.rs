@@ -27,7 +27,7 @@ pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
 
-    let file_store = FileStore::new(&project_dir, &args.target);
+    let file_store = FileStore::new(&project_dir, &args.target, config.state.mode);
     let manifests = file_store
         .load_runs(Some(args.limit))
         .with_context(|| "Failed to load run history")?;

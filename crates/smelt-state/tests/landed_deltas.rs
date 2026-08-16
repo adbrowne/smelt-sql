@@ -98,3 +98,29 @@ fn mutable_snapshot_delta_is_whole_table() {
     assert_eq!(unclocked_delta, LandedDelta::WholeTable);
     assert!(store.get("sources.lookup_table").is_none());
 }
+
+/// The per-source watermark (`docs/specs/run_state.md` §"Per-source
+/// watermark") serialises alongside the landed-interval coverage and never
+/// regresses: an earlier `to` passed to `advance_watermark` is a no-op.
+#[test]
+fn watermark_field_roundtrips_and_never_regresses() {
+    let mut store = LandedDeltaStore::default();
+    assert_eq!(store.watermark("sources.orders"), None);
+
+    store.advance_watermark("sources.orders", "2026-01-10");
+    assert_eq!(store.watermark("sources.orders"), Some("2026-01-10"));
+
+    store.advance_watermark("sources.orders", "2026-01-05");
+    assert_eq!(
+        store.watermark("sources.orders"),
+        Some("2026-01-10"),
+        "an earlier watermark must never regress the recorded one"
+    );
+
+    store.advance_watermark("sources.orders", "2026-01-20");
+    assert_eq!(store.watermark("sources.orders"), Some("2026-01-20"));
+
+    let json = serde_json::to_string(&store).expect("serialize");
+    let reloaded: LandedDeltaStore = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(reloaded.watermark("sources.orders"), Some("2026-01-20"));
+}

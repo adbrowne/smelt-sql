@@ -213,7 +213,7 @@ fn assemble_diagnostics_independently(
     let file = db.source_file(&model.path).expect("model file registered");
 
     let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
-        smelt_db::maintenance_plan_report(&db, ws, file)
+        smelt_db::maintenance_plan_report(&db, ws, file, "duckdb")
             .map(|result| result.plan.cells)
             .unwrap_or_default();
 

@@ -26,6 +26,7 @@
 
 pub mod deferral;
 pub mod frozen_horizon;
+pub mod state_requirements;
 
 use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency};
 

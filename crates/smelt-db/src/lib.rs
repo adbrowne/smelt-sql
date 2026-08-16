@@ -380,6 +380,15 @@ pub struct ProjectInput {
     /// the file changes on disk, keeping Salsa's change detection valid.
     #[returns(ref)]
     pub smelt_yml_text: String,
+    /// Deployed column names per model, read once at the workspace-loading
+    /// edge (`workspace_ingest::read_deployed_columns`) from the effective
+    /// target's `.smelt/targets/<target>/schemas/<model>.json` snapshots —
+    /// never inside an analysis query (Salsa purity rule). A model absent
+    /// from this list has no recorded deployed schema and derives no
+    /// definition-change trigger (fail-closed, never a guess). Deterministically
+    /// sorted by model name. `docs/specs/definition_deltas.md` §Detection.
+    #[returns(ref)]
+    pub deployed_columns: Vec<(String, Vec<String>)>,
 }
 
 /// Workspace-level singleton input tracking the full set of files and projects.
@@ -498,7 +507,8 @@ impl Database {
                 project
             }
             None => {
-                let project = ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text);
+                let project =
+                    ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text, Vec::new());
                 self.projects.write().unwrap().insert(root, project);
                 project
             }
@@ -513,6 +523,25 @@ impl Database {
         let project = self.projects.read().unwrap().get(root).copied();
         if let Some(project) = project {
             project.set_smelt_yml_text(self).to(smelt_yml_text);
+        }
+    }
+
+    /// Update the deployed-column-names input for an already-registered
+    /// project. The only mutation point for `ProjectInput::deployed_columns`
+    /// — called once at workspace-loading time
+    /// (`workspace_ingest::read_deployed_columns`) and again whenever a
+    /// `--target` override changes the effective target after ingest, or a
+    /// run rewrites a schema snapshot (LSP watch-glob refresh). A no-op if
+    /// `root` has no registered `ProjectInput` yet.
+    pub fn set_project_deployed_columns(
+        &mut self,
+        root: &Path,
+        columns: Vec<(String, Vec<String>)>,
+    ) {
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        let project = self.projects.read().unwrap().get(root).copied();
+        if let Some(project) = project {
+            project.set_deployed_columns(self).to(columns);
         }
     }
 
@@ -1312,7 +1341,13 @@ fn ref_model_source_facts(
         return None;
     }
     let file = resolved.source_file?;
-    let result = maintenance_plan_report(db, workspace, file)?;
+    // "duckdb" (⇒ `StateAvailability::all()`) here, not the downstream
+    // caller's real target: this recursion only reads the upstream's
+    // `key_locality` verdict, which availability resolution never prunes
+    // (locality is a plan-shape fact, not a technique/downgrade one) — no
+    // backend target is threaded through this Salsa-purity-bound recursion
+    // to begin with, so there is nothing more real to pass.
+    let result = maintenance_plan_report(db, workspace, file, "duckdb")?;
     let locality = result.plan.key_locality.as_ref()?;
     let granularity = ref_timeseries_config(
         db,
@@ -1511,6 +1546,47 @@ pub fn model_edges_for(
         .collect()
 }
 
+/// This model's own per-column-group output-delta verdicts
+/// (`docs/specs/incremental_models.md` §Surface "CLI" — the delta-signature
+/// headline needs the per-group verdicts themselves, not only the reduced
+/// scalar `ModelEdge::output_shape` folds via `OutputDelta::meet`). Extracted
+/// from `ref_model_edge`'s own `output_shape` derivation so both call sites
+/// — `ref_model_edge` (resolving an UPSTREAM edge's shape) and
+/// `maintenance_plan_report` (resolving the model being explained's OWN
+/// shape) — read the SAME fold rather than two independently-assembled
+/// copies. `project` is the caller's already-resolved project (`None` when
+/// `file` resolves outside any known project).
+fn own_output_delta_verdicts(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    sql: &str,
+    meta: &smelt_core::ModelMetadata,
+    model_verdicts: &std::collections::BTreeMap<
+        String,
+        smelt_logical::analysis::output_delta::OutputDeltaFacts,
+    >,
+) -> Vec<(
+    smelt_logical::maintenance::ColumnGroup,
+    smelt_logical::analysis::output_delta::OutputDelta,
+)> {
+    let sources = model_own_source_facts(db, workspace, project, sql);
+    let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
+    let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+        sql,
+        &declared_unique_key,
+        partition_col.as_deref(),
+    );
+    smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+        &sources,
+        &skeleton,
+        model_verdicts,
+    )
+}
+
 fn ref_model_edge(
     db: &dyn salsa::Database,
     workspace: Workspace,
@@ -1560,25 +1636,11 @@ fn ref_model_edge(
     // contributes no groups at all (e.g. an unclassifiable `SELECT *`
     // projection) rather than an optimistic guess.
     let project = find_project(db, workspace, file.project_root(db));
-    let sources = model_own_source_facts(db, workspace, project, &sql);
-    let declared_unique_key = meta.unique_key.clone().unwrap_or_default();
-    let partition_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
-        &sql,
-        &declared_unique_key,
-        partition_col.as_deref(),
-    );
     let output_shape =
-        smelt_logical::analysis::output_delta::derive_output_delta_with_model_verdicts(
-            &sql,
-            &smelt_logical::analysis::join_shape::JoinContext::new(),
-            &sources,
-            &skeleton,
-            model_verdicts,
-        )
-        .into_iter()
-        .map(|(_, shape)| shape)
-        .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
+        own_output_delta_verdicts(db, workspace, project, &sql, &meta, model_verdicts)
+            .into_iter()
+            .map(|(_, shape)| shape)
+            .reduce(smelt_logical::analysis::output_delta::OutputDelta::meet);
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
@@ -1677,6 +1739,8 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    let deployed_column_names = deployed_columns_for(db, project, &table);
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
@@ -1685,7 +1749,28 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        &deployed_column_names,
     ))
+}
+
+/// Look up `table`'s deployed column names from `project`'s
+/// `ProjectInput::deployed_columns` input (empty if `project` is `None` or
+/// `table` has no recorded deployed schema — fail-closed, never a guess).
+/// Shared by [`maintenance_plan`] and [`maintenance_plan_report`] so both
+/// consumers read the same edge-populated input the same way.
+fn deployed_columns_for(
+    db: &dyn salsa::Database,
+    project: Option<ProjectInput>,
+    table: &str,
+) -> Vec<String> {
+    project
+        .and_then(|p| {
+            p.deployed_columns(db)
+                .iter()
+                .find(|(name, _)| name == table)
+                .map(|(_, cols)| cols.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
@@ -1705,10 +1790,20 @@ pub fn maintenance_plan(
 /// re-implements admission, locality, or ledger logic. Returns `None` for a
 /// model with no maintenance plan (not `refresh: incremental`, or no
 /// shape-defining fact declared and no `grain:` to resolve).
+/// `dialect_name` is the model's real target backend name (`smelt.yml`
+/// `targets.*.type`, e.g. `"duckdb"`/`"spark"` — the same vocabulary
+/// [`crate::queries::maintenance::state_availability_for`] matches), so a
+/// `smelt explain` caller with a resolved target sees the SAME downgrade a
+/// live run against that backend would hit
+/// (`docs/specs/state.md` §"The degradation contract"). Pass `"duckdb"` for
+/// an offline/backend-agnostic caller — `state_availability_for("duckdb")`
+/// is `StateAvailability::all()`, the un-downgraded posture every call site
+/// used before this parameter existed.
 pub fn maintenance_plan_report(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
+    dialect_name: &str,
 ) -> Option<crate::queries::maintenance::MaintenancePlanResult> {
     let text = file.text(db);
     let Ok(FileMetadata::Single {
@@ -1818,6 +1913,15 @@ pub fn maintenance_plan_report(
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let source_referential_integrity =
         crate::queries::maintenance::build_source_referential_integrity(&source_refs);
+    let deployed_column_names = deployed_columns_for(db, project, &table);
+    // Primary derivation always uses `&[]` — same rationale as
+    // `queries::maintenance::maintenance_plan_diagnostics`'s own primary
+    // call: a real deployed-schema snapshot would surface
+    // `MaintenanceScanUnbounded`/other backfill-technique refusals for
+    // definition changes that `smelt build`/`smelt run` never actually
+    // routes through that technique (they take `schema_evolution.rs`'s
+    // simpler ALTER-with-NULL-default route instead), which would make
+    // `smelt explain`'s refusal block misleading about what a real run does.
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1827,12 +1931,42 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt explain`'s report path has no I/O access to the
-        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
-        // own call site for the same rationale.
         &[],
         &source_referential_integrity,
+        crate::queries::maintenance::state_availability_for(dialect_name),
     )?;
+    // Secondary derivation, real deployed-column-names input: consulted
+    // ONLY to detect a skeleton-position column add (a grain change), which
+    // no ordinary run route can ever apply atomically — see
+    // `queries::maintenance::maintenance_plan_diagnostics`'s own secondary
+    // derivation for the full rationale.
+    if !deployed_column_names.is_empty() {
+        if let Some(skeleton_refusal) =
+            crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
+                sql_body,
+                &table,
+                &metadata,
+                &sources,
+                &explicitly_mutable,
+                &model_edges,
+                driving_source_granularity,
+                &key_recurrences,
+                &deployed_column_names,
+                &source_referential_integrity,
+                crate::queries::maintenance::state_availability_for(dialect_name),
+            )
+            .and_then(|r| {
+                r.plan.refusals.into_iter().find(|r| {
+                    matches!(
+                        r,
+                        smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. }
+                    )
+                })
+            })
+        {
+            result.plan.refusals.push(skeleton_refusal);
+        }
+    }
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
     // row 9): only a `grain: key` model can carry state-bearing columns
@@ -1857,8 +1991,60 @@ pub fn maintenance_plan_report(
             &metadata.functional_dependencies,
         ) {
             result.state_columns = smelt_logical::state_column_summary(&classification);
+            // `incremental_shapes.md` §"The two run shapes (derived, never
+            // declared)": an unclocked driving source reconciles the whole
+            // keyed end-state every run; a clocked one advances
+            // window-forward. Read straight off the SAME classification
+            // `CumulativeClassification::is_snapshot_reconcile` already
+            // decides, never re-derived here.
+            result.run_shape = Some(if classification.is_snapshot_reconcile() {
+                smelt_logical::maintenance::signature::KeyedRunShape::SnapshotReconcile
+            } else {
+                smelt_logical::maintenance::signature::KeyedRunShape::WindowForward
+            });
         }
+    } else if resolved_grain == Some(smelt_core::config::Grain::Partition) {
+        // `grain: partition`'s run shape is the window sweep over the
+        // declared partition axis (`incremental_shapes.md` §"The two run
+        // shapes") — `None` when the model declares no `timeseries:`, since
+        // there is then no axis to sweep and nothing to derive.
+        result.run_shape = metadata.timeseries.as_ref().map(|t| {
+            smelt_logical::maintenance::signature::KeyedRunShape::PartitionSweep {
+                axis: t.partition_column.clone(),
+            }
+        });
     }
+
+    // This model's own delta-signature headline verdicts
+    // (`docs/specs/incremental_models.md` §Surface "CLI" — the delta-signature
+    // headline): the SAME per-group fold `ref_model_edge`'s `output_shape`
+    // reduces to a single scalar, kept per-group here so a mixed meet can
+    // name the group that forced a `General` widen. Reads the SAME
+    // cross-model verdict map `model_edges_for` folds for this file's own
+    // upstream edges above — recomputed here since `model_edges_for` does
+    // not return it.
+    let model_verdicts = smelt_logical::analysis::output_delta::derive_workspace_output_deltas(
+        &model_delta_inputs(db, workspace, file),
+    );
+    result.own_output_delta =
+        own_output_delta_verdicts(db, workspace, project, sql_body, &metadata, &model_verdicts)
+            .into_iter()
+            .map(|(group, shape)| (group.name(), shape))
+            .collect();
+
+    // Per-column determinism (`docs/specs/incremental_models.md` §"The
+    // determinism scope"), feeding the per-column guarantee ledger
+    // (`smelt_logical::maintenance::ledger::derive_guarantee_ledger`).
+    // `model_property_vector`'s own walk, offline (no join-shape context
+    // beyond the model's own SQL — the same `JoinContext::new()` baseline
+    // `derive_fold_spec` uses); an unclassifiable SQL body leaves this
+    // empty, never a fabricated `Clean` default.
+    result.column_determinism = smelt_logical::analysis::walk::model_property_vector(
+        sql_body,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.determinism)
+    .unwrap_or_default();
 
     Some(result)
 }
@@ -2339,6 +2525,60 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
+        // Contract-lattice state-requirements check (`docs/specs/state.md`
+        // §"Declarations stay fail-loud"): a declared contract point whose
+        // semantics require a state structure the effective posture or a
+        // declared backend cannot supply is refused fail-loud, distinct from
+        // the clock-admissibility checks above (which validate the
+        // declaration against the SQL, not against state availability). The
+        // effective posture is the model's own `state:` block if declared,
+        // else the project's (D-47 narrowing already validated separately,
+        // above). Single-owner rule: `smelt_logical::contract::
+        // state_requirements::validate_contract_state` decides which
+        // declarations need which structure; this wrapper only resolves the
+        // posture and backends and reports the result once per declaration
+        // even when multiple declared backends share the same refusal.
+        if let Some(contract) = &metadata.contract {
+            let project_mode = project
+                .map(|p| crate::queries::project::project_state_mode(db, p))
+                .unwrap_or_default();
+            let effective_mode = metadata
+                .state
+                .as_ref()
+                .map(|s| s.mode)
+                .unwrap_or(project_mode);
+            let backends = project
+                .and_then(|p| project_active_backends(db, p))
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| vec!["duckdb".to_string()]);
+            let mut reported = std::collections::BTreeSet::new();
+            for backend in &backends {
+                let availability = crate::queries::maintenance::state_availability_for_project(
+                    backend,
+                    effective_mode,
+                );
+                for refusal in smelt_logical::contract::state_requirements::validate_contract_state(
+                    contract,
+                    &availability,
+                ) {
+                    if !reported.insert(refusal.declaration.clone()) {
+                        continue;
+                    }
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "DeclaredContractRequiresState: {} — {}",
+                            refusal.declaration, refusal.why
+                        ),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::DeclaredContractRequiresState),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+
         // Declarative column test validation (`docs/specs/data_tests.md`
         // §"Fail-loud validation"). Two checks, run only when at least one
         // column declares a non-empty `tests` list:
@@ -2525,11 +2765,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
                 crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
                     (
-                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
+                        DiagnosticCode::MaintenanceSkeletonChanged,
                         format!(
                             "column '{column}' occupies a row-membership/identity (skeleton) \
                          position — a grain change, never a column backfill (EX-39, \
-                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                         docs/specs/definition_deltas.md §\"Skeleton changes are a new relation\")",
                         ),
                     )
                 }
@@ -2593,6 +2833,39 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for state_downgrade in &plan_diags.state_downgrades {
+            let d = &state_downgrade.downgrade;
+            let structure = match d.missing_structure {
+                smelt_logical::maintenance::availability::StateStructure::ReconciliationLedger => {
+                    "the reconciliation ledger"
+                }
+                smelt_logical::maintenance::availability::StateStructure::FrontierRecord => {
+                    "the frontier record"
+                }
+                smelt_logical::maintenance::availability::StateStructure::IntervalFrontier => {
+                    unreachable!(
+                        "no MaintenanceStateDowngraded is ever raised for the interval frontier \
+                         — no Technique depends on it, only a declared contract point"
+                    )
+                }
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "MaintenanceStateDowngraded: cell {} on backend '{}' requires {structure}, \
+                     which is unavailable — downgraded from {:?} to {:?}: {}",
+                    d.trigger,
+                    state_downgrade.backend,
+                    d.ideal_technique,
+                    d.resolved_technique,
+                    d.why
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceStateDowngraded),
                 data: None,
             })
             .accumulate(db);

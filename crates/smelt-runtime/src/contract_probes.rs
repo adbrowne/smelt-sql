@@ -38,6 +38,7 @@ use smelt_state::landed_deltas::LandedDeltaStore;
 use smelt_state::{ProbeRecord, ProbeRecordOutcome, SubsumedWindow};
 
 use crate::probes::{probe_violation_suffix, ProbeContext, ProbePolicy};
+use crate::reporter::RunReporter;
 
 /// The bare source-address convention `crate::source_probes` already uses:
 /// `sources.raw.events` becomes `raw.events`. Kept local to this module —
@@ -183,6 +184,8 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
     policy: &ProbePolicy,
     probes: &[DeclaredContractProbe],
     baselines: &FrozenBandBaselineStore,
+    reporter: &dyn RunReporter,
+    run_id: &str,
 ) -> Result<FrozenHorizonDispatchResult, BackendError> {
     let mut refreshed = Vec::new();
     let mut records = Vec::with_capacity(probes.len());
@@ -255,8 +258,18 @@ pub async fn dispatch_and_record_frozen_horizon_probes(
             records.push(ProbeRecord {
                 fact: probe.ctx.fact.clone(),
                 probe: probe.ctx.probe_code.clone(),
-                outcome: ProbeRecordOutcome::Dispatched,
+                outcome: ProbeRecordOutcome::BaselineEstablished,
             });
+            reporter.probe_advisory(
+                run_id,
+                &probe.ctx.model,
+                "ProbeBaselineUnavailable",
+                &format!(
+                    "no recorded frozen-band baseline for source '{}' ({}) — establishing a \
+                     baseline from this observation instead of verifying",
+                    probe.source_address, probe.ctx.cell
+                ),
+            );
             continue;
         }
 

@@ -7,14 +7,15 @@
 
 use smelt_core::config::{Granularity, TimeseriesConfig};
 use smelt_logical::analysis::decomposed_state::StateColumn;
+use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_bounded_domain_probe, emit_column_scoped_merge,
     emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
     emit_functional_dependency_probe, emit_in_place_update, emit_keyed_fold,
-    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, presentation_projection,
-    state_augmented_projection, AppendOnlyBaselinePartition, MaintenanceDialect,
-    PresentationRefusal, Region, StateAugmentRefusal,
+    emit_monotonicity_probe, emit_recurrence_bound_probe, emit_snapshot_reconcile,
+    emit_staged_candidate_conditional, emit_staged_candidate_conditional_recompute,
+    presentation_projection, state_augmented_projection, AppendOnlyBaselinePartition,
+    MaintenanceDialect, PresentationRefusal, Region, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -229,6 +230,121 @@ fn keyed_fold_with_delta_values_slice_carries_in_subquery_predicate() {
          AND target.first_seen_date IN (SELECT DISTINCT first_seen_date FROM (SELECT event_id, \
          MIN(event_date) AS first_seen_date FROM events GROUP BY 1) AS __locality_delta_values) \
          WHEN MATCHED THEN UPDATE SET  WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// `docs/outcomes/20260816-keyed-grain-residue-v2` phase 1: the
+/// snapshot-reconcile group pairs the ordinary keyed-fold `MERGE` with an
+/// anti-join `DELETE` for keys the incoming scan no longer carries — both
+/// statements transactional as one unit, the `MERGE` leg byte-identical to
+/// [`emit_keyed_fold`]'s own output.
+#[test]
+fn snapshot_reconcile_group_pairs_merge_with_departed_key_delete() {
+    let folds = vec![("current_val".to_string(), "delta.current_val".to_string())];
+    let delta_select = "SELECT id, ANY_VALUE(current_val) AS current_val FROM main.sources_dim \
+                         GROUP BY id";
+
+    let group = emit_snapshot_reconcile(
+        "main.snapshot_dim",
+        &["id".to_string()],
+        &folds,
+        delta_select,
+        &WriteSuppression::Unconditional {
+            why: "test".to_string(),
+        },
+        MaintenanceDialect::DuckDb,
+    );
+
+    let expected_merge = emit_keyed_fold(
+        "main.snapshot_dim",
+        &["id".to_string()],
+        &folds,
+        delta_select,
+        None,
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert!(
+        group.transactional,
+        "the MERGE + departed-key DELETE must run as one transaction"
+    );
+    assert_eq!(group.statements.len(), 2);
+    assert_eq!(
+        group.statements[0], expected_merge.statements[0],
+        "the MERGE leg must be byte-identical to emit_keyed_fold's own output"
+    );
+    assert_eq!(
+        group.statements[1].sql,
+        format!(
+            "DELETE FROM main.snapshot_dim WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS \
+             s WHERE main.snapshot_dim.id = s.id)"
+        )
+    );
+}
+
+/// A two-column `unique_key` renders an `AND`-joined anti-join predicate,
+/// mirroring [`emit_keyed_fold`]'s own composite-key `ON` clause.
+#[test]
+fn snapshot_reconcile_departed_delete_uses_composite_key_conjunction() {
+    let folds = vec![("current_val".to_string(), "delta.current_val".to_string())];
+    let delta_select = "SELECT device_id, user_id, ANY_VALUE(current_val) AS current_val FROM \
+                         main.sources_dim GROUP BY 1, 2";
+
+    let group = emit_snapshot_reconcile(
+        "main.snapshot_dim",
+        &["device_id".to_string(), "user_id".to_string()],
+        &folds,
+        delta_select,
+        &WriteSuppression::Unconditional {
+            why: "test".to_string(),
+        },
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(
+        group.statements[1].sql,
+        format!(
+            "DELETE FROM main.snapshot_dim WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS \
+             s WHERE main.snapshot_dim.device_id = s.device_id AND main.snapshot_dim.user_id = \
+             s.user_id)"
+        )
+    );
+}
+
+/// The write-suppressed dispatch (`WriteSuppression::Suppressed`, matching
+/// [`emit_keyed_fold_suppressed`]'s matched-arm guard) still carries the
+/// same departed-key `DELETE` leg — suppression elides no-op *updates*,
+/// never deletions.
+#[test]
+fn snapshot_reconcile_group_suppressed_variant_keeps_the_delete_leg() {
+    let folds = vec![("current_val".to_string(), "delta.current_val".to_string())];
+    let delta_select = "SELECT id, ANY_VALUE(current_val) AS current_val FROM main.sources_dim \
+                         GROUP BY id";
+
+    let group = emit_snapshot_reconcile(
+        "main.snapshot_dim",
+        &["id".to_string()],
+        &folds,
+        delta_select,
+        &WriteSuppression::Suppressed {
+            compared_columns: vec!["current_val".to_string()],
+        },
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(group.statements.len(), 2);
+    assert!(
+        group.statements[0].sql.contains("IS DISTINCT FROM"),
+        "expected the suppressed matched-arm guard on the MERGE leg: {}",
+        group.statements[0].sql
+    );
+    assert_eq!(
+        group.statements[1].sql,
+        format!(
+            "DELETE FROM main.snapshot_dim WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS \
+             s WHERE main.snapshot_dim.id = s.id)"
+        ),
+        "the departed-key DELETE leg must be unaffected by write suppression"
     );
 }
 

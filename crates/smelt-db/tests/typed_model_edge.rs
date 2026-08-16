@@ -226,7 +226,7 @@ SELECT user_id, n FROM smelt.keyed_upstream
         .map(|(f, _)| *f)
         .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
 
-    let plan = smelt_db::maintenance_plan_report(&db, ws, file)
+    let plan = smelt_db::maintenance_plan_report(&db, ws, file, "duckdb")
         .unwrap_or_else(|| panic!("gold_events has no maintenance plan"));
 
     assert!(

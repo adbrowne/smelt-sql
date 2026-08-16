@@ -202,6 +202,7 @@ mod tests {
             std::path::PathBuf::from("."),
             String::new(),
             String::new(),
+            Vec::new(),
         );
         let ws = crate::Workspace::new(&db, vec![file], vec![project], vec![], None);
         crate::file_diagnostics(&db, ws, file)

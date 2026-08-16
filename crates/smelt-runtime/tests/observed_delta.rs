@@ -491,3 +491,82 @@ async fn partitioned_window_records_touched_partitions() {
         "recorded partitions must hold exactly the touched partitions, got: {partitions:?}"
     );
 }
+
+/// Phase 6 (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`):
+/// `maintenance_driver::read_observed_delta` is the live-read counterpart of
+/// the write side this suite otherwise exercises — a fully-suppressed run's
+/// recorded row decodes as `Some(ObservedDelta)` with `is_empty()` true (not
+/// `None`), while an unrecorded window decodes as `None`, mirroring
+/// `ObservedDelta`'s own "empty and absent are distinct" doc comment.
+#[tokio::test]
+async fn read_observed_delta_distinguishes_absent_from_present_empty() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["tier"]);
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let w = window();
+
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &w,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("fully-suppressed merge succeeds");
+
+    let present = smelt_runtime::maintenance_driver::read_observed_delta(
+        &backend,
+        "main",
+        "dim_users",
+        &w.start,
+        &w.end,
+    )
+    .await
+    .expect("read succeeds");
+    let present = present.expect("a row was recorded for this window");
+    assert!(
+        present.is_empty(),
+        "a fully-suppressed run must record present-and-empty, not present-and-non-empty: \
+         {present:?}"
+    );
+
+    let absent = smelt_runtime::maintenance_driver::read_observed_delta(
+        &backend,
+        "main",
+        "dim_users",
+        "2099-01-01",
+        "2099-01-02",
+    )
+    .await
+    .expect("read succeeds");
+    assert!(
+        absent.is_none(),
+        "an unrecorded window must decode as absent (None), not present-and-empty: {absent:?}"
+    );
+}

@@ -53,6 +53,18 @@ pub struct KeyedOracleRow {
 /// still-present one) — this is the documented adjustment itself, not a
 /// blanket tolerance: every key not covered by the current oracle evaluation
 /// is retained exactly once, nothing else is forgiven.
+///
+/// **No longer the default-point comparator.** Posture-derived deletion
+/// (`docs/outcomes/20260816-keyed-grain-residue-v2` phase 1;
+/// `incremental_shapes.md` §"Departed keys and deletion") means the
+/// *default* contract point deletes a departed key rather than retaining
+/// it — the unadjusted full-scan oracle is the right comparator there
+/// (`crates/smelt-cli/tests/maintenance_conformance/gate.rs::
+/// snapshot_reconcile_plain_overwrite_settles_after_key_departure`). This
+/// function is retained as pure data because it is exactly the quotient
+/// transform the `retain_departed` contract-lattice point (a DECLARED
+/// relaxation, phase 2 of the same outcome) needs as its oracle — but no
+/// default-point comparison in this crate calls it any more.
 pub fn keyed_end_state_with_retained_departed_keys(
     oracle_rows: &[KeyedOracleRow],
     retained_departed_keys: &[KeyedOracleRow],

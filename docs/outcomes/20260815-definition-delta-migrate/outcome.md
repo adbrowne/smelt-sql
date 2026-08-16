@@ -1,7 +1,8 @@
 # Outcome: Wire the definition-delta synthesis layer (plan-and-approve migration)
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** superseded
+**Superseded by:** the delta-signature closure programme — `docs/handoffs/2026-08-16-delta-signature-closure-programme.md`. This outcome will never be run as written; its content remains reusable by the successor outcomes named there.
 **Source:** `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
 `docs/specs/incremental_shapes.md`

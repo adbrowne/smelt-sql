@@ -228,6 +228,7 @@ async fn self_referential_backfill_converges_to_sequential_running_balance() {
         retry_backoff_ms: None,
         resume: false,
         technique_overrides: vec![],
+        keyed_restrictions: std::collections::BTreeMap::new(),
     };
 
     let outcome = execute_project(

@@ -1,3 +1,7 @@
+emits: general change, whole-table-addressed (expression has no column reference to attribute an output-delta shape to (a constant literal, COUNT(*), or an opaque function call), forced by column group {event_count}), grain: partition, run shape: window sweep over event_date
+
+Refusals: (none)
+
 Maintenance plan: daily_events
 
 Cells (2):
@@ -22,7 +26,8 @@ Cells (2):
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
 
-Refusals: (none)
+Guarantees:
+  - event_count (group {event_count}): default, settle: not derived
 
 Relation contract:
   clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day

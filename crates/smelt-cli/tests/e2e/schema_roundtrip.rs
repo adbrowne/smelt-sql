@@ -24,6 +24,8 @@ version: 1
 paths:
   - models
   - seeds
+state:
+  mode: intervals
 targets:
   dev:
     type: duckdb
@@ -179,6 +181,8 @@ version: 1
 paths:
   - models
   - seeds
+state:
+  mode: intervals
 targets:
   dev:
     type: duckdb

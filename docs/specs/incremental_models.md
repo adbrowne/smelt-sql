@@ -416,14 +416,29 @@ contract:
     `emits: keyed upsert over [order_id], key-addressed`; for a composed model, the same with
     its locality slice bound appended (the worked example below); for a partition-grain model,
     `emits: append-only within a window, window-addressed by order_date` — with the derived
-    `grain` label alongside as the friendly name.
-  - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, the
-    effective contract point, and the **per-column guarantee ledger** — the printed summary
-    of what each output column is guaranteed (its equivalence contract and its **settle
+    `grain` label alongside as the friendly name, and the model's derived **run shape** named
+    alongside the grain label: for `grain: key`, window-forward or snapshot-reconcile
+    (`incremental_shapes.md` §"The two run shapes (derived, never declared)"); for `grain:
+    partition`, the window sweep over the partition axis. A model whose run shape is not
+    derivable prints no run-shape clause rather than a guessed one (the §"Delta signatures"
+    never-fabricate rule). A model whose emitted shape degrades to `general` prints `emits:
+    general change, whole-table-addressed`, naming the degrading construct — matching the
+    widen-never-narrow default this section states for an underivable signature.
+  - **Refusals**: every derived refusal, printed immediately after the headline, before the
+    plan body — an operator sees what will be refused before executing anything. Each refusal
+    names its diagnostic code and its rendered reason (`<DiagnosticCode>: <reason>`, never the
+    bare debug form of the underlying enum). A model with no refusals prints an explicit
+    empty marker rather than nothing.
+  - **Per cell**: the cells with their addressing, scan clamps, locality verdicts, and the
+    effective contract point.
+  - **Guarantees** (model-level, not per-cell): the **per-column guarantee ledger** — one row
+    per output column naming its column group, what it is guaranteed (its effective
+    equivalence contract point, or, for a volatile column, its determinism exemption in place
+    of that contract, §"The equivalence invariant" determinism scope), and its **settle
     bound** — the derived interval after which a written slice provably receives no further
-    changes, so consumers may treat it as final; a volatile column prints its determinism
-    exemption in place of an equivalence contract, §"The equivalence invariant" determinism
-    scope).
+    changes, so consumers may treat it as final. A column whose settle bound is not derivable
+    (no established key-temporal-locality slice) prints an explicit "not derived" marker
+    rather than a fabricated or zero interval.
   - **Per inbound edge**: the derived **delta-signature shape** — `append-only within
     window`, `keyed upsert`, or `general` — the shape of change that edge's own upstream
     emits (§"Delta signatures"; a source edge is typed by its declared mutation profile, a
@@ -447,15 +462,25 @@ contract:
   - **`--show-sql`**: additionally prints each cell's emitted maintenance statements — the
     same emitters' output a run executes (§"Statement emission (single owner)"; flag surface
     in `cli.md`).
-- `smelt run --since-upstream --source <address> --landed <start>..<end>` (`--source`/`--landed`
-  repeatable, one pair per source) — **forward propagation**: the caller declares what landed
-  for each source since it last propagated; the graph reflects those per-source deltas through
-  the edges and runs exactly the propagated per-edge regions with their trigger cells (§"The
-  graph layer"). `--source` accepts a declared source or an upstream maintained model (a
-  model's landed delta is the output window a completed run wrote). No per-invocation delta is
-  computed automatically — a source named without a matching `--landed` propagates nothing.
-  Opt-in; the intended default posture once trusted. Prints the **dirty set** — the per-model
-  regions propagation says must run (§"The graph layer") — before acting.
+- `smelt run --since-upstream --source <address> [--landed <start>..<end>]` (`--source`
+  repeatable, `--landed` repeatable and optional per source) — **forward propagation**: the
+  caller declares what landed for each source since it last propagated, or omits `--landed`
+  for a source with a persisted watermark (`run_state.md` §"Per-source watermark") to have
+  smelt treat `watermark → now` as that source's landed delta, refined live by the recorded
+  observed-delta table where a record exists (model upstreams); the graph reflects
+  those per-source deltas through the edges and runs exactly the propagated per-edge regions
+  with their trigger cells (§"The graph layer"). `--source` accepts a declared source or an
+  upstream maintained model (a model's landed delta is the output window a completed run
+  wrote). A `--landed` value is spelled either bare `<start>..<end>`, paired positionally with
+  the `--source` at the same index (equal counts required), or address-qualified
+  `<address>=<start>..<end>`, pairing by address with no positional constraint; the two
+  spellings must not be mixed in one invocation. A `--source` with no paired `--landed`
+  resolves from its watermark. A source named with neither a matching `--landed` nor a
+  persisted watermark makes the run fail with a named error identifying that source and the
+  missing watermark (pointing at `--landed`) — never a silent per-source skip that would
+  quietly under-propagate, and never an implicit full-table fallback. Opt-in; the intended
+  default posture once trusted. Prints the **dirty set** — the per-model regions propagation
+  says must run (§"The graph layer") — before acting.
 - `smelt run --auto` — process only the intervals the run-state interval ledger
   (`run_state.md`) does not yet cover for the selected models; the keyed grain's staleness
   interaction is `incremental_shapes.md` §"Interaction with `--auto` / staleness".
@@ -489,10 +514,14 @@ contract:
 ladder that governs `smelt bakeoff`'s measurement targets resolves the technique a live run
 uses, and admission still binds.
 
-**Run flags.** smelt does not currently discover what is new on its own: every run is told
-its window — directly via the event-time flags, via `--landed`, or via the interval ledger
-(`--auto`); automatic watermark discovery is §Future Extensions. Which flags a model takes
-follows from its derived run shape:
+**Run flags.** Every run is told its window — directly via the event-time flags, via
+`--landed`, or via the interval ledger (`--auto`). `--landed` becomes optional per source once
+a persisted watermark exists for it (`run_state.md` §"Per-source watermark"): `smelt run
+--since-upstream` with no `--landed` for a source propagates `watermark → now` as its landed
+delta, refined live by the recorded observed-delta table where a record exists; an explicit
+`--landed` always overrides. Automatic
+**snapshot diffing** of an external source with no watermark and no native delta feed remains
+§Future Extensions. Which flags a model takes follows from its derived run shape:
 
 ```
 smelt run     --event-time-start <ISO-8601> --event-time-end <ISO-8601> [selectors]   # partition grain; keyed window-forward
@@ -538,7 +567,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 | `MaintenanceRepairKeysNotDiscoverable` | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set; names the changed input and why the delta yields no key set (§"The repair family"). |
 | `MaintenanceRepairSliceUnbounded` | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked; names the source and the unbounded reach (§"The repair family"). |
 
-`MaintenanceSkeletonColumnAdded` — a definition delta adding or changing a field in a skeleton
+`MaintenanceSkeletonChanged` — a definition delta adding or changing a field in a skeleton
 position — is owned by `definition_deltas.md` §Surface.
 
 **Contract-lattice codes.**
@@ -792,11 +821,20 @@ maintenance scan the clamp bounds), and the next run compares it against the sou
 state. A frozen-band partition whose row count increased, or that is new since the baseline,
 is a genuine late arrival, and the probe raises `ContractLateArrivalOutsideHorizon`, naming
 the partition, the added row count, and `H` — closing the one accepted silent-data behaviour
-of the default point for every model that opts in. The first run has nothing to compare
-against, so it only establishes the baseline. Count comparison is sound only where the source
-is `append_only` (row counts non-decreasing); declaring `frozen_horizon` on a model whose
-driving source has any other declared mutation profile is refused at declaration time
-(`ContractFrozenHorizonInvalid`, naming the posture) rather than probed blind.
+of the default point for every model that opts in. An absent baseline — the first run, a
+deleted `.smelt/`, or a posture that excludes it (`state.mode: stateless`) — degrades the
+probe to baseline-establish-only, reported `ProbeBaselineUnavailable` (`state.md` §"Diagnostics");
+`ContractLateArrivalOutsideHorizon` cannot fire without a baseline to compare against. This
+split — `frozen_horizon` degrades where `contract.deferral` (below) refuses — follows directly
+from `state.md` §"The optionality rule": the frozen-band baseline is an **observability**
+structure (§"The state-structure inventory"), so its absence only narrows what the probe can
+verify, never what the maintained table equals, whereas `contract.deferral`'s lag is measured
+from the reconciliation ledger — a **correctness** structure whose absence no posture can
+license working around (`DeclaredContractRequiresState`, `state.md` §"Diagnostics"). Count comparison is sound
+only where the source is `append_only` (row counts non-decreasing); declaring `frozen_horizon`
+on a model whose driving source has any other declared mutation profile is refused at
+declaration time (`ContractFrozenHorizonInvalid`, naming the posture) rather than probed
+blind.
 
 **Deferral (`D`).** The oracle bounds the lag between the landed and processed sets (§"The
 equivalence invariant", landed vs processed): at every scheduled evaluation, every input in
@@ -1306,6 +1344,18 @@ containing its footprint. A definition delta is a fold-family operation on this 
 instantiates the affected groups' entries at `S = ∅` over every existing region
 (`definition_deltas.md` §"Frontier semantics").
 
+The record is engine-resident, graded by algebra into two backend tables: additive delta
+identities in `_smelt_ledger`, idempotent frontier watermarks in `_smelt_frontier`. A region
+recompute's reset (delete every intersecting `(region, group)` row, insert the input state the
+recompute read) commits in the same backend transaction as the recompute's own write, on a
+backend with a ledger builder (DuckDB today). The record is written per **recomputed batch
+region** — a run's window is partitioned into batches, and each batch's reset writes its own
+region's row inside that batch's own write transaction, rather than one row for the run's whole
+window; the region-intersecting delete keeps these finer per-batch rows collapsible under a
+later coarser reset. Never `.smelt/`-resident — that residency belongs to run-state
+observability, not this correctness structure (`run_state.md` §"Relationship to the
+reconciliation ledger"; `state.md` §"The residency rule").
+
 ### The graph layer
 
 **Edges.** A dependency edge is `downstream reads upstream` under the downstream cell's
@@ -1328,12 +1378,36 @@ projected through a consumer degrades to the coarsest component that consumer ca
 (whole-model dirt), never to nothing.
 
 **Keyed dirt-sets and the narrowed refusal.** A keyed node without an admitted time axis is
-not categorically refused. Where its delta signature is `keyed upsert` over key set `k`, the
-edge is key-addressed and propagates a **keyed dirt-set** — the affected-key set a changed
-input's delta resolves to (`model_properties.md` §"Affected-key discovery") — instead of an
-interval. The `MaintenanceGraphUnsupportedNode` refusal below fires only where the node's
-delta signature degrades all the way to `general`, and its message names the operator that
-degraded the type.
+not categorically refused. Where its delta signature is `keyed upsert` (the `KeyedUpsert`
+output-delta verdict, `model_properties.md` §"Output-delta shape") over key set `k`, the edge
+is key-addressed and propagates a **keyed dirt-set** carrying the **affected key values** —
+not only the key columns and provenance — resolved by `model_properties.md` §"Affected-key
+discovery", instead of an interval. Propagation stays a **pure function**: key values enter it
+as *seed* input exactly as landed intervals do — the caller resolves them once (the group-grain
+fingerprint-sidecar diff over the upstream's own output table, below, "Upstream model edges")
+and passes them in; propagation composes them through edges by projecting the upstream's key
+columns onto each consumer's own key scope. The sidecar partition identity resolving one seed is
+per `(upstream, consumer)` — each consumer hashes its own digest projection of the upstream's
+rows — so an upstream's seed is the **union** of every one of its consumers' own diffs: never
+one consumer's diff taken as the whole, never an intersection. Same widen-never-narrow reasoning
+as §"Restrictions compose by union".
+
+**Composition rules.** A keyed component into a keyed consumer whose key scope the projection
+resolves stays key-valued; one whose keys cannot be resolved through the consumer's grain
+widens to whole-model dirt for that consumer — never nothing, never a silent key drop. The
+`MaintenanceRepairKeysNotDiscoverable` refusal, below, continues to govern the *cell*; this
+rule governs the *dirt*.
+
+**Unresolved seeds.** A keyed edge whose values were not resolvable (a non-DuckDB target, or
+no sidecar) propagates the **symbolic form** — key columns and provenance, no values — and
+widens at dispatch (§"Dispatch — from propagated components to run units"): the honest
+degradation, not an empty key set. Empty-and-resolved (nothing changed) and unresolved are
+distinct, the same way an empty observed delta and an absent one are (§"Observed deltas on
+model edges").
+
+The `MaintenanceGraphUnsupportedNode` refusal below fires only where the node's delta signature
+degrades all the way to `general` (the `General` verdict), and its message names the operator
+that degraded the type.
 
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
@@ -1454,6 +1528,43 @@ time-partitioned keyed output: it is a clocked node whose edges use its declared
 and whose outbound dirt is the key→partition projection of what its runs changed — exact under
 locality routes 1–2, widened backward by `r` plus margins under route 3
 (`incremental_shapes.md` §"Key temporal locality (the time-partitioned output)").
+
+### Dispatch — from propagated components to run units
+
+The run loop's currency is the **typed component vector** on each edge (§"The graph layer"
+"Typed edges"), not day-intervals. A propagation result yields, per `(model, upstream)` edge,
+a set of **run units**: one per component, each carrying the component's addressing (window /
+keyed / whole-model) and its restriction (interval set, key set, or "everything").
+
+**Dispatch is keyed by the component's addressing, never by the downstream model's grain.** A
+`Keyed` component dispatches the derived key-addressed repair cell (`Technique::PerGroupRecompute`,
+§"The graph layer" "Upstream model edges") whatever the downstream's `grain` is — a
+`grain: partition` downstream of a clockless `keyed upsert` upstream is the named example: the
+key-addressed edge dispatches its `PerGroupRecompute` cell exactly as it would into a
+`grain: key` downstream. Routing a key-addressed component through the ordinary whole-model run
+route is correct-but-not-incremental and is a defect against this paragraph, not an acceptable
+fallback.
+
+**Widen-never-narrow at dispatch.** A component whose cell cannot be derived degrades to the
+coarsest run unit the consumer can act on and *says so* — an explain-visible downgrade,
+never to nothing and never silently. Two distinct causes produce this degradation and both stay
+visible: a state-availability shortfall (`state.md` §"The degradation contract",
+`MaintenanceStateDowngraded`) and an unresolved or under-typed component (the unresolved-seed
+case, above, or a delta signature that itself degraded to `general`,
+§"Delta signatures").
+
+A model receiving several components in one tick dispatches each; per-edge dirt keying
+(§Design "Per-edge dirt keys trigger cells") is unchanged — components refine it, they do not
+replace it.
+
+**Restrictions compose by union.** A key-addressed run unit's read restriction is the **union**
+of (a) the keyed component's propagated key values and (b) the values the cell's own affected-key
+discovery resolves (§"Upstream model edges" — the group-grain fingerprint sidecar diff over the
+upstream's own output table) — never an intersection. The sidecar refresh commits in the same
+backend transaction as the cell's write, so narrowing the repaired set to only the values both
+sides agree on would advance the comparandum past keys that were never actually consumed —
+wrong-and-quiet. A propagated component whose values are unresolved (§"Unresolved seeds")
+contributes no keys to the union and never narrows it; it widens at dispatch by the rule above.
 
 ### Shape profiles
 
@@ -1630,6 +1741,45 @@ Every capability gets exactly one home, without a mechanical consumer-count rule
 invariant, signatures, ladder, plan, and graph layer live here because every profile cites
 them as its contract.
 
+**Dispatch is typed by addressing, not by model grain.** Rejected: the per-grain run branch —
+routing a key-addressed component only when the *downstream* model's own grain is `key` —
+which is why the key-addressed route was unreachable from a `grain: partition` downstream even
+though the component itself was already correctly typed `Keyed`. Addressing is a property of
+the *component* (§"The graph layer" "Typed edges"), not of the model it lands on; dispatch
+reads that property directly (§"Dispatch — from propagated components to run units").
+(`docs/handoffs/2026-08-16-delta-signature-closure-programme.md`.)
+
+**Key values seed propagation; propagation stays pure.** Rejected: resolving keys inside
+propagation via backend I/O — a pure derivation function performing a database read breaks the
+Salsa purity invariant (`architecture.md` §"Salsa purity rule (analysis)") and the graph
+layer's own status as a pure composition. Rejected also: keeping dirt symbolic (key columns
+only) and resolving values only at run time — the scheduler then cannot size, dedupe, or skip a
+key-addressed run unit before dispatch, since it does not yet know which keys are affected. Key
+values are resolved once, by the caller, from the group-grain fingerprint-sidecar diff
+(§"The graph layer" "Upstream model edges"), and passed into propagation as a seed input exactly
+as a landed interval already is.
+(`docs/handoffs/2026-08-16-delta-signature-closure-programme.md`.)
+
+**The watermark is a field on the landed-delta family, not a new one.** Rejected: a new
+correctness-classified state family for the watermark — correctness structures must be
+backend-resident and transactional with the write they describe (`state.md` §"The residency
+rule"), and a watermark that *gated* forward propagation's inputs rather than merely recording
+them would make forward propagation require state to run at all, contradicting the optionality
+rule (`state.md` §"The optionality rule"): observability's absence must degrade, never block.
+Filing it as a field on the existing landed-delta record keeps it observability-classified,
+`state.mode: stateless`-optional, and subject to the same degrade-or-refuse contract every
+other absent observability structure already has (`run_state.md` §"Per-source watermark") —
+with the **refuse leg** chosen for absence: the coarser behaviour would be recomputing
+everything downstream of the source, an unbounded cost the operator never asked for, so
+absence withdraws only the convenience of omitting `--landed`, never substitutes a full
+recompute. Granularity is **per source, not per `(source, consumer)`**: the watermark
+advances only on a run that completed every consumer of the source, so a selective run stalls
+it rather than silently dropping a span for the unselected consumers. Rejected for now: a
+per-`(source, consumer)` watermark, which would un-stall selective runs at the cost of a
+consumer-keyed record family and per-consumer read composition — deferred until
+selective-run stalling is a demonstrated pain, not a hypothetical one.
+(`docs/handoffs/2026-08-16-delta-signature-closure-programme.md`.)
+
 **Rejected alternatives, briefly.** A `strategy:` sub-knob (the invisible-contract footgun); a
 dedicated `smelt-maintenance` crate (the derivation needs the tightest coupling to the sibling
 classifiers; the module boundary is kept extraction-mechanical instead); qualifying the output
@@ -1804,27 +1954,34 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   emitter, or `ContractRetainDepartedInvalid` diagnostic. Today every keyed model behaves as
   if `retain_departed` were silently declared (decision record:
   `docs/research/20260816-open-questions-triage.md`).
-- **The determinism scope is unimplemented.** The runtime still compile-time-pins
-  `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed models, instead of
-  running them as-is; the conformance oracle's comparison and the recompute-equality
-  technique gates do not yet consult the per-column determinism verdict, and `smelt explain`
-  does not print the determinism exemption in the per-column guarantee ledger (decision
-  record: `docs/research/20260816-open-questions-triage.md`).
-- **The scheduler does not yet consume delta signatures end to end.** Signatures shape
-  admission and are printed, but the DAG scheduler's currency for "what needs re-running" is
-  still whole day-intervals: a clockless `keyed upsert` upstream feeding a `grain: partition`
-  downstream derives a key-addressed repair cell the run loop never dispatches (the result is
-  correct but not incremental — that route is wired only inside the `grain: key` run branch,
-  so such an upstream instead maintains its downstream via the ordinary run route); keyed
-  dirt-sets carry key columns and provenance, not affected key *values* (value-level discovery
-  stays with the run-time mechanism); and cross-model runs require the operator to state what
-  landed upstream on the command line, because no per-source watermark is persisted. Tracked:
+- **The determinism scope's runtime half is unimplemented.** The runtime still
+  compile-time-pins `NOW()`/`CURRENT_*` in partition-grain models and rejects them in keyed
+  models, instead of running them as-is; the conformance oracle's comparison and the
+  recompute-equality technique gates do not yet consult the per-column determinism verdict
+  (decision record: `docs/research/20260816-open-questions-triage.md`). `smelt explain`'s
+  per-column guarantee ledger does print the determinism exemption, per the derived verdict
+  the walk already produces.
+- **Delta signatures are the dispatch currency for key-addressed model edges, not yet for
+  everything the scheduler runs.** Key-addressed model edges dispatch outside the `grain: key`
+  branch, composed: a clockless `keyed upsert` upstream feeding a `grain: partition` downstream
+  runs the repair family's `PerGroupRecompute` cell, not the ordinary route, and several
+  key-addressed edges into one downstream compose — each dispatches in the same tick rather than
+  only the first. The graph layer's keyed channel carries resolved key *values*, not just key
+  columns and provenance (§"Keyed dirt-sets and the narrowed refusal"), resolved live off the
+  group-grain sidecar at plan time — no caller-fed seed is required. Cross-model runs no longer
+  require the operator to state what landed upstream on the command line for a source a prior run
+  already covered — the per-source watermark (`run_state.md` §"Per-source watermark") is now
+  written and read — but `--landed` stays required for a source no completed run has yet covered
+  (no watermark to resolve from). Three residues remain: (a) an inbound input that is not itself
+  key-addressed (a declared source, or a model edge that resolved no cell) widens to the ordinary
+  route with a reported `dispatch_widened` downgrade rather than risking a silently dropped
+  component; (b) a non-keyed-grain downstream of an admitted keyed edge still widens to
+  whole-table currency in the graph layer's propagation once its own upstream is visited, so
+  interval currency survives below the dispatch seam; (c) `change_feed`/`UpstreamMutation` folds
+  and per-cell `deferral` scheduling are untouched by this dispatch path, each tracked by its own
+  bullet below. Tracked: `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
-- **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
-  the signature the first line; today's output leads with grain), nor the per-column guarantee
-  summary or derived run shape. Tracked:
-  `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
 - **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
   but needs per-cell frontier addressing, which the frontier record tracks only per-region
   today (a state-shape change, not a lattice-point change). Tracked:
@@ -1842,10 +1999,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `technique: suppress` on a refusing cell silently falls back to full recompute instead of
   refusing; `smelt explain` also misses this case. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded
-  delta table live; backward resolution consumes none; the keyed-fold and staged-candidate
-  write families record nothing; the settle-bound × observed-delta composition has no live
-  "delta empty" leg. Tracked:
+- **Observed-delta consumption is partial**: backward resolution consumes none; the
+  keyed-fold and staged-candidate write families record nothing. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **No execution technique keys off a maintained-model creation cell** — the propagated
   region materializes via the ordinary run loop, not a per-cell technique. Tracked:
@@ -1856,37 +2011,46 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `scan_bounds.on_violation: warn` parse but are not consumed (every refusal is an Error);
   the cost model between two admissible techniques is unbuilt; `AppendOnly` sources get no
   `UpstreamMutation` cell. Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **The frontier reset is not yet fused with every write path that recomputes a region.** The
+  ordinary DuckDB `DeleteInsert` batch, on an already-existing target, fuses its frontier reset
+  with its own write in one transaction. Three sibling write paths still write their frontier
+  record after the model write completes, in a separate (non-fused) transaction: the first-run
+  `CREATE TABLE AS` bootstrap materialization (no existing target to fuse against), the
+  delta-restricted recompute, and the column-scoped-merge / in-place-update techniques. Tracked:
+  `docs/outcomes/20260816-state-residency/outcome.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
   poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
   assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonColumnAdded` is reachable (unit coverage, and via `smelt-runtime`'s
-  maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
-  but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
-  diagnostics/`smelt explain` path always derives an empty trigger set);
+  `MaintenanceSkeletonChanged` is reachable both via `smelt-runtime`'s maintenance driver at run
+  time and, ahead of a run, via `smelt-db`'s own Salsa query against the
+  `ProjectInput::deployed_columns` input (`definition_deltas.md` §Detection), so the LSP and
+  `smelt explain` both surface it before a run or `smelt migrate` invocation;
   column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
   is declared surface but propagation is day-ordinal; the built grain-alignment check
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
   Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
-- **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
-  cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
-  the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
-  recompute family, explain-visible). A Spark-dialect ledger builder is deliberately deferred
-  until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
-  recorded downgrade is the intended behaviour, not a stopgap (decision record:
+- **The ledger/frontier warehouse substrate is DuckDB-only** — an additive-graded cell (or a
+  region recompute needing a frontier reset) on another backend downgrades to the recompute
+  family with a recorded, explain-visible `MaintenanceStateDowngraded` (`state.md` §"The
+  degradation contract") rather than realising the technique it would get on DuckDB. A
+  Spark-dialect ledger/frontier builder is deliberately deferred until a real Spark-targeted
+  incremental workload demands one — on a ledger-less backend the recorded downgrade is the
+  intended behaviour, not a stopgap (decision record:
   `docs/research/20260816-open-questions-triage.md`).
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
-  key-level dirt representation exists (intervals are the graph's only currency); the
+  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; the
   `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
   self-referential model and a bare-keyed model with readers each refuse the whole-workspace
   graph); no `--select` scoping exists.
-- **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
-  landed deltas on the command line; no persisted per-source watermark or automatic diffing
-  is consumed (§Future Extensions).
+- **Automatic snapshot diffing for `--since-upstream` remains future work.** `--landed` is
+  optional once a persisted watermark exists for a source (`run_state.md` §"Per-source
+  watermark"); the residue is an external source with no native delta feed and no prior smelt
+  run over it — its delta must still be declared explicitly, since there is nothing yet to diff
+  against (§Future Extensions).
 - **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key
   footprint chaining across history;
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
@@ -1966,15 +2130,6 @@ none of it may be relied on or implemented against until it graduates into
   classifier grammar (expressions over `LEAD`, post-window delete filtering), the fail-loud
   diagnostics for near-misses, and the `model_properties.md` walk vocabulary for window
   functions. Full sketch: `docs/research/20260723-scd2-succession-pattern.md`.
-- **Automatic, watermark-diffed `--since-upstream`.** Today the caller supplies each source's
-  landed delta explicitly (§Surface "CLI"). A future extension persists a per-source "last
-  propagated through" watermark in `smelt-state` and diffs it against the source's current
-  `covered_intervals`, so a bare `--since-upstream` discovers its own delta. This still does
-  not solve a never-modeled raw source's freshness (no `covered_intervals` exists for data
-  smelt never landed) — live backend freshness querying stays out of scope. The explicit and
-  automatic forms are not exclusive: the automatic form computes the same `--landed`
-  intervals the explicit form takes directly, layering on top without changing the graph
-  layer or CLI.
 - **An observer / prefix-consistency contract for non-replayable combinations.** Per-column
   admission refuses folding state *observations* into fold-family columns because no
   executable full-refresh oracle exists (§"The equivalence invariant";

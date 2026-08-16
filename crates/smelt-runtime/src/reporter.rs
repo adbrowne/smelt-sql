@@ -16,11 +16,11 @@ use smelt_logical::maintenance::emit::StatementGroup;
 
 /// Which chunk of a chunked range a [`StatementGroup`] belongs to, when the
 /// batch-safety classification (or an explicit `--batch-size`/`--per-partition`)
-/// splits a run/backbuild range into more than one window. `index` is 0-based;
+/// splits a run/rebuild range into more than one window. `index` is 0-based;
 /// `total` is the count of chunks for this model; `start`/`end` are the
 /// `[start, end)` window this chunk covers, formatted as `YYYY-MM-DD`. A
 /// single-chunk range still carries a `ChunkInfo` with `total == 1` — consumers
-/// decide whether to render a boundary line (`smelt backbuild --dry-run` prints
+/// decide whether to render a boundary line (`smelt rebuild --dry-run` prints
 /// one only when `total > 1`, `docs/specs/cli.md` §"`--dry-run` prints the
 /// maintenance statements").
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ pub trait RunReporter: Send + Sync {
     /// dry-run), for every maintained (non-`full`) technique this runtime lowers
     /// to a `StatementGroup`. `chunk` names which window of a chunked range this
     /// group covers (`None` when the technique is not region-chunked, e.g. a
-    /// keyed fold). Default: no-op; `smelt run`/`smelt backbuild --dry-run` and
+    /// keyed fold). Default: no-op; `smelt run`/`smelt rebuild --dry-run` and
     /// statement-parity tests are the consumers.
     fn maintenance_statements(
         &self,
@@ -143,6 +143,26 @@ pub trait RunReporter: Send + Sync {
         _error: &str,
     ) {
     }
+
+    /// A probe found no recorded baseline to compare against and
+    /// established one from the current observation instead of verifying —
+    /// the "reported, not silent" half of absent-state degradation
+    /// (`docs/specs/state.md` §"The optionality rule"). `code` is the
+    /// advisory diagnostic (`ProbeBaselineUnavailable`); `message` names the
+    /// source/model and why the baseline was absent. Called regardless of
+    /// `state.mode` — degradation must be reported even under `stateless`,
+    /// where no manifest is ever written. Default: no-op; `smelt run`'s
+    /// warning-line output is the consumer.
+    fn probe_advisory(&self, _run_id: &str, _model: &str, _code: &str, _message: &str) {}
+
+    /// A key-addressed dispatch widened to the model's ordinary run route
+    /// instead of composing every resolved key-addressed cell
+    /// (`docs/specs/incremental_models.md` §"Widen-never-narrow at
+    /// dispatch") — the visible leg of that rule for the non-keyed
+    /// coverage-gate site: `reason` names the uncovered inbound input(s)
+    /// that forced the widening. Default: no-op; `smelt run`/`smelt
+    /// build`'s warning-line output is the consumer.
+    fn dispatch_widened(&self, _run_id: &str, _model: &str, _reason: &str) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

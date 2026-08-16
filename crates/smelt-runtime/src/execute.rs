@@ -31,7 +31,6 @@ use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
-use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
@@ -148,6 +147,13 @@ enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
+    ProbeAdvisory {
+        code: String,
+        message: String,
+    },
+    DispatchWidened {
+        reason: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -228,6 +234,12 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
+                ReporterEvent::ProbeAdvisory { code, message } => {
+                    reporter.probe_advisory(run_id, model, code, message)
+                }
+                ReporterEvent::DispatchWidened { reason } => {
+                    reporter.dispatch_widened(run_id, model, reason)
+                }
             }
         }
     }
@@ -310,6 +322,19 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
+        });
+    }
+
+    fn probe_advisory(&self, _run_id: &str, _model: &str, code: &str, message: &str) {
+        self.push(ReporterEvent::ProbeAdvisory {
+            code: code.to_string(),
+            message: message.to_string(),
+        });
+    }
+
+    fn dispatch_widened(&self, _run_id: &str, _model: &str, reason: &str) {
+        self.push(ReporterEvent::DispatchWidened {
+            reason: reason.to_string(),
         });
     }
 }
@@ -1083,7 +1108,79 @@ pub async fn execute_project(
         HashMap::new()
     };
 
-    let file_store = FileStore::new(project_dir, &request.target);
+    let file_store = FileStore::new(project_dir, &request.target, config.state.mode);
+
+    // One-time legacy reconciliation-ledger import (state residency phase
+    // 4, `docs/specs/run_state.md` §"Relationship to the reconciliation
+    // ledger"): a `.smelt/targets/<target>/reconciliation.json` left by a
+    // pre-residency binary holds both gradings' per-`(model, group,
+    // region)` entries — the idempotent frontier grading imports into
+    // `_smelt_frontier`, the additive delta-identity grading (from a binary
+    // old enough to predate MP12's own engine-residency move) imports into
+    // `_smelt_ledger`. On a ledger-capable (DuckDB) backend both import and
+    // the legacy file is removed; on any other dialect (no ledger/frontier
+    // builder exists yet) `take_legacy_reconciliation_store` is not even
+    // called, so the file is left untouched for a future run against a
+    // ledger-capable target.
+    if let Some(backend) = backends.get(&request.target) {
+        if backend.dialect() == smelt_backend::SqlDialect::DuckDB {
+            if let Some(legacy) = file_store.take_legacy_reconciliation_store()? {
+                let schema = &config.targets[&request.target].schema;
+                let frontier_ensure_sql =
+                    smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+                let ledger_ensure_sql = smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema);
+                backend.execute_sql(&frontier_ensure_sql).await?;
+                backend.execute_sql(&ledger_ensure_sql).await?;
+                for (model_name, ledger) in &legacy.models {
+                    for record in &ledger.records {
+                        match &record.entry.processed {
+                            smelt_state::reconciliation::Processed::Frontier(watermarks) => {
+                                let reset_delete_sql =
+                                    smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+                                        schema,
+                                        model_name,
+                                        &record.group,
+                                        &record.region.start,
+                                        &record.region.end,
+                                    );
+                                backend.execute_sql(&reset_delete_sql).await?;
+                                for (input, delta_id) in watermarks {
+                                    let insert_sql =
+                                        smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+                                            schema,
+                                            model_name,
+                                            &record.group,
+                                            input,
+                                            delta_id,
+                                            &record.region.start,
+                                            &record.region.end,
+                                        );
+                                    backend.execute_sql(&insert_sql).await?;
+                                }
+                            }
+                            smelt_state::reconciliation::Processed::DeltaIdentities(identities) => {
+                                for (input, delta_ids) in identities {
+                                    for delta_id in delta_ids {
+                                        let insert_sql =
+                                            smelt_state::ddl_duckdb::generate_ledger_insert_sql(
+                                                schema,
+                                                model_name,
+                                                &record.group,
+                                                input,
+                                                delta_id,
+                                                &record.region.start,
+                                                &record.region.end,
+                                            );
+                                        backend.execute_sql(&insert_sql).await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Models declaring `contract.deferral` at model granularity
     // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
@@ -1155,6 +1252,22 @@ pub async fn execute_project(
     // latest run succeeded cleanly, or no manifest exists at all) is a hard
     // error, never a silent full run, so a typo'd `--resume` on a clean
     // project can't be mistaken for "nothing needed doing".
+    // `stateless` never writes a run manifest (`docs/specs/state.md`
+    // §"`state.mode` and what each posture provides": "`.smelt/` need not
+    // exist"), so `--resume` can never find a prior run to resume from —
+    // refuse by name, before the manifest scan below, rather than falling
+    // through to the generic "no partially-failed run" error that would
+    // otherwise fire (which reads as "your last run succeeded", not "this
+    // posture keeps no history").
+    if request.resume && config.state.mode == smelt_core::config::StateMode::Stateless {
+        anyhow::bail!(
+            "--resume: target '{}' has state.mode: stateless, so no run manifest exists to \
+             resume from — no `.smelt/` history is kept under this posture. Set state.mode to \
+             `intervals` or `environments`, or run without --resume.",
+            request.target
+        );
+    }
+
     let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
     let resume_manifest: Option<RunManifest> = if request.resume {
         let latest_candidate = file_store
@@ -1577,6 +1690,7 @@ pub async fn execute_project(
                     metadata,
                     &in_place_sources,
                     &deployed_column_names,
+                    backend.dialect(),
                 )
             })
         } else {
@@ -1593,110 +1707,154 @@ pub async fn execute_project(
         // and executed as part of the migration's own `StatementGroup`
         // below — the standalone dispatch after this gate must skip these
         // (idempotency: never re-run the same backfill twice).
-        let mut migration_backfilled_columns: Vec<String> = Vec::new();
+        // Set when the migration gate below folds the `InPlaceUpdate` cell's
+        // backfill into its own `StatementGroup` — used only for the
+        // strategy label reported downstream. There is no longer a
+        // standalone fallback dispatch: `docs/specs/definition_deltas.md`
+        // §"The atomicity rule" forbids a separately-dispatched backfill on
+        // any backend or strategy, so a pending column add either goes
+        // through the atomic migration group below, or the run is routed to
+        // a full rebuild / refused before anything is written.
+        let mut used_in_place_update = false;
         if plan.incremental.is_some() {
             let evolution_strategy = plan
                 .model_file
                 .metadata
                 .as_deref()
                 .and_then(|m| m.schema_evolution.as_ref())
-                .map(|se| &se.strategy);
-            let use_alter = !matches!(
-                evolution_strategy,
-                Some(smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh)
-            );
+                .map(|se| se.strategy.clone())
+                .unwrap_or_default();
 
-            if use_alter {
-                if let Ok(true) = backend
-                    .table_exists(schema, &plan.model_file.db_name_owned())
-                    .await
-                {
-                    let inferred_columns = {
-                        let db_guard = db.lock().await;
-                        infer_deployed_columns(&db_guard, &plan.model_file)
-                    };
-                    if !inferred_columns.is_empty() {
-                        let db_table_name = plan.model_file.db_name_owned();
-                        let (column_defaults, mut backfill_exprs) =
-                            extract_evolution_maps(plan.model_file.metadata.as_deref());
-                        // Fold the derived `InPlaceUpdate` cell's own
-                        // backfill assignments into the SAME map the
-                        // declared `backfill:` directive mechanism already
-                        // uses — `check_and_migrate`/`plan_migration_for_
-                        // backend` (`schema_tracking.rs`) emits the
-                        // `ADD COLUMN` and its `UPDATE ... SET` into ONE
-                        // `StatementGroup`, so routing the derived
-                        // assignment through this map makes it atomic with
-                        // the migration for free, reusing the existing
-                        // atomic mechanism rather than re-authoring it.
-                        // A user's explicit `default:`/`backfill:`
-                        // directive always wins (checked first) — the
-                        // derived assignment only fills a gap the user
-                        // left undeclared.
-                        if let Some((_cell, assignments)) = &in_place_update_cell {
-                            for (col, expr) in assignments {
-                                if !column_defaults.contains_key(col)
-                                    && !backfill_exprs.contains_key(col)
-                                {
-                                    backfill_exprs.insert(col.clone(), expr.clone());
-                                }
-                            }
+            if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                let inferred_columns = {
+                    let db_guard = db.lock().await;
+                    infer_deployed_columns(&db_guard, &plan.model_file)
+                };
+                if !inferred_columns.is_empty() {
+                    let db_table_name = plan.model_file.db_name_owned();
+
+                    // Whether this run has a schema change pending for this
+                    // model — decided from the deployed-schema snapshot
+                    // BEFORE anything is written, so the atomicity route
+                    // below (`docs/specs/definition_deltas.md` §"The
+                    // atomicity rule") never fires on an ordinary run with
+                    // no definition change.
+                    let has_pending_column_add = file_store
+                        .load_schema(&db_table_name)
+                        .ok()
+                        .flatten()
+                        .map(|deployed| {
+                            !smelt_state::schema_tracking::diff_schemas(
+                                &deployed.columns,
+                                &inferred_columns,
+                            )
+                            .is_empty()
+                        })
+                        .unwrap_or(false);
+
+                    let route = crate::schema_evolution::resolve_definition_change_route(
+                        &evolution_strategy,
+                        backend.capabilities().supports_transactional_ddl,
+                        has_pending_column_add,
+                        request.allow_full_refresh,
+                    );
+
+                    match route {
+                        crate::schema_evolution::DefinitionChangeRoute::Refuse { message } => {
+                            return Err(anyhow::anyhow!(message));
                         }
-                        let target_config = config
-                            .targets
-                            .get(model_target)
-                            .expect("target config must exist");
-                        let table_format = config.get_format(
-                            &plan.name,
-                            plan.model_file.metadata.as_deref(),
-                            target_config,
-                        );
-                        let ddl_backend =
-                            ddl_backend_for_dialect(backend.dialect(), table_format, None);
-                        let schema_evolution_retry =
-                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                        match check_and_migrate(
-                            backend,
-                            file_store,
-                            &db_table_name,
-                            &plan.sql,
-                            schema,
-                            &inferred_columns,
-                            request.allow_column_removal,
-                            request.allow_full_refresh,
-                            request.dry_run,
-                            &column_defaults,
-                            &backfill_exprs,
-                            Some(&ddl_backend),
-                            &schema_evolution_retry,
-                        )
-                        .await
-                        {
-                            Ok(result) => {
-                                if let SchemaEvolutionResult::Migrated {
-                                    backfilled_columns,
-                                    ..
-                                } = &result
-                                {
-                                    migration_backfilled_columns = backfilled_columns.clone();
-                                }
-                                match crate::safety::should_force_full_refresh(
-                                    &result,
-                                    &plan.name,
-                                    request.allow_column_removal,
-                                    request.allow_full_refresh,
-                                ) {
-                                    Ok(should_refresh) => force_full_refresh = should_refresh,
-                                    Err(e) => {
-                                        return Err(e);
+                        crate::schema_evolution::DefinitionChangeRoute::FullRebuild => {
+                            force_full_refresh = true;
+                        }
+                        crate::schema_evolution::DefinitionChangeRoute::AtomicGroup => {
+                            let (column_defaults, mut backfill_exprs) =
+                                extract_evolution_maps(plan.model_file.metadata.as_deref());
+                            // Fold the derived `InPlaceUpdate` cell's own
+                            // backfill assignments into the SAME map the
+                            // declared `backfill:` directive mechanism already
+                            // uses — `check_and_migrate`/`plan_migration_for_
+                            // backend` (`schema_tracking.rs`) emits the
+                            // `ADD COLUMN` and its `UPDATE ... SET` into ONE
+                            // `StatementGroup`, so routing the derived
+                            // assignment through this map makes it atomic with
+                            // the migration for free, reusing the existing
+                            // atomic mechanism rather than re-authoring it.
+                            // A user's explicit `default:`/`backfill:`
+                            // directive always wins (checked first) — the
+                            // derived assignment only fills a gap the user
+                            // left undeclared.
+                            if let Some((_cell, assignments)) = &in_place_update_cell {
+                                for (col, expr) in assignments {
+                                    if !column_defaults.contains_key(col)
+                                        && !backfill_exprs.contains_key(col)
+                                    {
+                                        backfill_exprs.insert(col.clone(), expr.clone());
                                     }
                                 }
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Schema evolution check failed: {}. Continuing with incremental.",
-                                    e
-                                );
+                            let target_config = config
+                                .targets
+                                .get(model_target)
+                                .expect("target config must exist");
+                            let table_format = config.get_format(
+                                &plan.name,
+                                plan.model_file.metadata.as_deref(),
+                                target_config,
+                            );
+                            let ddl_backend =
+                                ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                            let schema_evolution_retry =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            match check_and_migrate(
+                                backend,
+                                file_store,
+                                &db_table_name,
+                                &plan.sql,
+                                schema,
+                                &inferred_columns,
+                                request.allow_column_removal,
+                                request.allow_full_refresh,
+                                request.dry_run,
+                                &column_defaults,
+                                &backfill_exprs,
+                                Some(&ddl_backend),
+                                &schema_evolution_retry,
+                            )
+                            .await
+                            {
+                                Ok(result) => {
+                                    if let SchemaEvolutionResult::Migrated {
+                                        backfilled_columns,
+                                        ..
+                                    } = &result
+                                    {
+                                        if in_place_update_cell.is_some()
+                                            && !backfilled_columns.is_empty()
+                                        {
+                                            used_in_place_update = true;
+                                        }
+                                    }
+                                    match crate::safety::should_force_full_refresh(
+                                        &result,
+                                        &plan.name,
+                                        request.allow_column_removal,
+                                        request.allow_full_refresh,
+                                    ) {
+                                        Ok(should_refresh) => force_full_refresh = should_refresh,
+                                        Err(e) => {
+                                            return Err(e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Schema evolution check failed: {}. Continuing with incremental.",
+                                        e
+                                    );
+                                }
                             }
                         }
                     }
@@ -1704,50 +1862,57 @@ pub async fn execute_project(
             }
         }
 
-        // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
-        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
-        // Runs once per incremental model per run, common to both the keyed
-        // and non-keyed branches below — a one-time migration-style
-        // backfill over the model's existing rows, orthogonal to whichever
-        // window/creation/mutation technique the rest of this run
-        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
-        // above, before the migration gate ran — reused here, never
-        // re-derived. Any column the migration gate already folded into
-        // its own `StatementGroup` (`migration_backfilled_columns`) is
-        // skipped — dispatching it again here would be a redundant,
-        // non-atomic re-run of a backfill that already committed
-        // atomically with its `ADD COLUMN`
-        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
-        // standalone path remains the ONLY route when the migration gate
-        // did not run at all this run (e.g. `schema_evolution: strategy:
-        // full_refresh` on the model, or the target table not yet
-        // existing) — see `docs/specs/incremental_models.md` §"Known
-        // Divergences" for that residual non-atomicity.
-        let mut used_in_place_update = false;
-        if let Some((_cell, assignments)) = &in_place_update_cell {
-            let remaining: Vec<(String, String)> = assignments
-                .iter()
-                .filter(|(col, _)| !migration_backfilled_columns.iter().any(|c| c == col))
-                .cloned()
-                .collect();
-            if remaining.len() != assignments.len() {
-                used_in_place_update = true; // some/all columns already backfilled atomically above
-            }
-            if !remaining.is_empty() {
-                let retry_policy =
-                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                crate::maintenance_driver::execute_in_place_update(
-                    backend,
-                    schema,
-                    &plan.model_file.db_name_owned(),
-                    &remaining,
-                    &retry_policy,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-                used_in_place_update = true;
-            }
-        }
+        // Shared key-addressed model-edge resolution — hoisted above the
+        // `plan_is_keyed` gate (phase 2,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 02-plan.md`) so BOTH the keyed and non-keyed dispatch sites below
+        // read the SAME resolved cell rather than re-deriving it
+        // (maintenance-plan purity, `CLAUDE.md` §"Maintenance-plan
+        // purity"). `docs/specs/incremental_models.md` §"Dispatch — from
+        // propagated components to run units": dispatch is keyed by the
+        // component's own addressing, never by the downstream model's
+        // `grain` — this is what makes a `KeyedUpsert` upstream's cell
+        // reachable for a `grain: partition` downstream, not just a
+        // `grain: key` one. `table_exists_before_run` is captured BEFORE
+        // any of this model's own writes (the keyed branch's fold, or the
+        // non-keyed branch's incremental/full-refresh dispatch, may
+        // themselves create the table on a first run).
+        let db_table_name = plan.model_file.db_name_owned();
+        let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
+        let (maint_source_facts, explicitly_mutable) =
+            build_maint_source_facts(&plan.model_file, source_infos);
+        let table_exists_before_run = backend
+            .table_exists(schema, &db_table_name)
+            .await
+            .unwrap_or(false);
+        // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
+        // §"Upstream model edges"): an upstream maintained model whose own
+        // derived output-delta shape is `KeyedUpsert` folds via the repair
+        // family's own `Technique::PerGroupRecompute`, restricted to the
+        // upstream's affected key set rather than a source's `ScanClamp` —
+        // the sibling of `per_group_recompute_cell` (below, keyed-branch-
+        // local) for this model's upstream MODEL edges rather than its
+        // declared sources.
+        let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+        let key_addressed_edge_cells: Vec<crate::maintenance_driver::LiveKeyAddressedModelEdgeCell> =
+            if keyed_model_edges.is_empty() {
+                Vec::new()
+            } else {
+                match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells(
+                            &clean_sql_for_merge,
+                            &db_table_name,
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &keyed_model_edges,
+                            backend.dialect(),
+                        )?
+                    }
+                    None => Vec::new(),
+                }
+            };
 
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
@@ -1759,7 +1924,6 @@ pub async fn execute_project(
             .as_deref()
             .is_some_and(|m| m.is_keyed());
         if plan_is_keyed {
-            let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
 
@@ -1773,17 +1937,7 @@ pub async fn execute_project(
             // trigger; this owns the `UpstreamMutation` trigger, dispatched
             // ALONGSIDE it once a live cell resolves and the target table
             // already exists (never on the creation run — there is nothing
-            // to merge into yet). `table_exists_before_run` is captured
-            // BEFORE the fold below runs (which may itself create the
-            // table on a first run), mirroring the non-keyed branch's own
-            // "did the table exist before THIS run" capture.
-            let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
-            let (maint_source_facts, explicitly_mutable) =
-                build_maint_source_facts(&plan.model_file, source_infos);
-            let table_exists_before_run = backend
-                .table_exists(schema, &db_table_name)
-                .await
-                .unwrap_or(false);
+            // to merge into yet).
             let column_scoped_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                     &clean_sql_for_merge,
@@ -1793,6 +1947,7 @@ pub async fn execute_project(
                     &explicitly_mutable,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
+                    backend.dialect(),
                 )?,
                 None => None,
             };
@@ -1814,6 +1969,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         &request.technique_overrides,
+                        backend.dialect(),
                     )?
                 }
                 None => None,
@@ -1852,32 +2008,9 @@ pub async fn execute_project(
                 }
                 None => None,
             };
-            // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
-            // §"Upstream model edges"): an upstream maintained model whose own
-            // derived output-delta shape is `KeyedUpsert` folds via the repair
-            // family's own `Technique::PerGroupRecompute`, restricted to the
-            // upstream's affected key set rather than a source's `ScanClamp` —
-            // the sibling of `per_group_recompute_cell` above for this
-            // model's upstream MODEL edges rather than its declared sources.
-            let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
-            let key_addressed_edge_cell = if keyed_model_edges.is_empty() {
-                None
-            } else {
-                match plan.model_file.metadata.as_deref() {
-                    Some(metadata) => {
-                        crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
-                            &clean_sql_for_merge,
-                            &db_table_name,
-                            metadata,
-                            &maint_source_facts,
-                            &explicitly_mutable,
-                            &keyed_model_edges,
-                            backend.dialect(),
-                        )?
-                    }
-                    None => None,
-                }
-            };
+            // `key_addressed_edge_cells` is resolved ONCE, above the
+            // `plan_is_keyed` gate — read directly here, never re-derived
+            // (maintenance-plan purity).
 
             // Classify up front, regardless of window presence, so the
             // derived run shape (`docs/specs/incremental_shapes.md` §"The
@@ -1923,75 +2056,93 @@ pub async fn execute_project(
             // own create path is what materializes the table
             // (`table_exists_before_run` was captured before any of this
             // model's writes).
-            let exec_result = match key_addressed_edge_cell
-                .as_ref()
-                .filter(|_| table_exists_before_run)
-            {
-                Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) => {
-                    used_per_group_recompute = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
-                    );
-                    used_diff_patch = matches!(
-                        write,
-                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
-                    );
-                    let retry_policy =
-                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "keyed run path: model '{}' resolved a live key-addressed model-edge \
-                             cell on upstream '{edge_name}', but that upstream has no resolved \
-                             ModelFile — internal inconsistency",
-                            plan.name
+            let leading_key_addressed_cells = if table_exists_before_run {
+                key_addressed_edge_cells.split_first()
+            } else {
+                None
+            };
+            let exec_result = match leading_key_addressed_cells {
+                // Every key-addressed cell resolved above targets the SAME
+                // `db_table_name` (they all restrict a recompute over this
+                // model's own key grain) — dispatch each in turn and keep
+                // the LAST result's `row_count` (the table's own count after
+                // every write), never a sum across cells, which would
+                // double-count rows every earlier cell's write already
+                // covers (`docs/outcomes/20260816-scheduler-delta-signatures/
+                // phases/04-plan.md` task 5).
+                Some((first, rest)) => {
+                    async {
+                        let (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) =
+                            first;
+                        used_per_group_recompute |= matches!(
+                            write,
+                            crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                        );
+                        used_diff_patch |= matches!(
+                            write,
+                            crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                        );
+                        let retry_policy =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                        let mut result = dispatch_key_addressed_model_edge(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            &clean_sql_for_merge,
+                            model_by_addr,
+                            config,
+                            &request.target,
+                            &plan.name,
+                            edge_name,
+                            key_scope,
+                            upstream_keys,
+                            digest_columns,
+                            write,
+                            &retry_policy,
+                            restriction_keys_for(request, &plan.name, edge_name),
                         )
-                    })?;
-                    let upstream_target = config.get_target(
-                        edge_name,
-                        upstream_model.metadata.as_deref(),
-                        &request.target,
-                    );
-                    let upstream_schema = &config.targets[&upstream_target].schema;
-                    let upstream_table =
-                        format!("{upstream_schema}.{}", upstream_model.db_name_owned());
-                    let upstream_source_address = format!("smelt.models.{edge_name}");
-                    let compiled = compiler.compile_with_sql_and_ephemerals(
-                        &plan.model_file,
-                        schema,
-                        &clean_sql_for_merge,
-                        resolver,
-                    )?;
-                    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
-                        backend,
-                        schema,
-                        &db_table_name,
-                        &upstream_source_address,
-                        &upstream_table,
-                        upstream_keys,
-                        digest_columns,
-                        &key_scope.keys,
-                        &clean_sql_for_merge,
-                        &compiled.sql,
-                        write,
-                        &retry_policy,
-                    )
-                    .await
-                    {
-                        Ok(Some(result)) => Ok(result),
-                        Ok(None) => {
-                            let row_count = backend
-                                .get_row_count(schema, &db_table_name)
-                                .await
-                                .unwrap_or(0);
-                            Ok(smelt_backend::ExecutionResult {
-                                model_name: db_table_name.clone(),
-                                duration: StdDuration::default(),
-                                row_count,
-                                preview: None,
-                            })
+                        .await?;
+                        for (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) in
+                            rest
+                        {
+                            used_per_group_recompute |= matches!(
+                                write,
+                                crate::maintenance_driver::RepairWrite::TargetedDeleteInsert
+                            );
+                            used_diff_patch |= matches!(
+                                write,
+                                crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                            );
+                            let retry_policy =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            result = dispatch_key_addressed_model_edge(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                &plan.model_file,
+                                compiler,
+                                resolver,
+                                &clean_sql_for_merge,
+                                model_by_addr,
+                                config,
+                                &request.target,
+                                &plan.name,
+                                edge_name,
+                                key_scope,
+                                upstream_keys,
+                                digest_columns,
+                                write,
+                                &retry_policy,
+                                restriction_keys_for(request, &plan.name, edge_name),
+                            )
+                            .await?;
                         }
-                        Err(e) => Err(e),
+                        Ok(result)
                     }
+                    .await
                 }
                 None => match (start_date, end_date) {
                 (Some(s), Some(e)) => {
@@ -2588,12 +2739,165 @@ pub async fn execute_project(
                 check_results.extend(outcomes);
                 skip_set.extend(to_skip);
             }
+            record_first_deployment_definition(file_store, db, plan).await;
             return Ok(ModelOutcome::Completed(ModelSuccess {
                 manifest_entries,
                 check_results,
                 skip_set,
                 rows: total_rows,
             }));
+        }
+
+        // Non-keyed key-addressed model-edge dispatch (phase 2,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 02-plan.md`; lifted from a single-edge substitution gate to a
+        // coverage gate in phase 4,
+        // `docs/outcomes/20260816-scheduler-delta-signatures/phases/
+        // 04-plan.md`): a widen-never-narrow substitution of the resolved
+        // `key_addressed_edge_cells` — for the ordinary incremental/full-
+        // refresh route below, when this model's OWN driving trigger is not
+        // itself keyed (`docs/specs/incremental_models.md` §"Dispatch —
+        // from propagated components to run units": dispatch is keyed by
+        // the component's addressing, never by the downstream model's
+        // `grain`). Licensed when EVERY inbound ref of this model is a
+        // key-addressed model edge that resolved a cell — no declared
+        // source, no non-key-addressed model edge (a maintained-model ref
+        // that is not itself key-addressed, or one whose cell failed to
+        // resolve). A downstream with an uncovered input keeps the ordinary
+        // route rather than risking a silently dropped component, but the
+        // downgrade is reported (`dispatch_widened`) rather than silent
+        // (§"Widen-never-narrow at dispatch"). Never on the creation run —
+        // mirrors the keyed branch's own `table_exists_before_run` gate;
+        // there is nothing to repair yet.
+        if !plan_is_keyed && table_exists_before_run && !key_addressed_edge_cells.is_empty() {
+            let resolved_edge_names: HashSet<&str> = key_addressed_edge_cells
+                .iter()
+                .map(|(edge_name, ..)| edge_name.as_str())
+                .collect();
+            let mut uncovered_inputs: Vec<String> = Vec::new();
+            for r in &plan.model_file.refs {
+                let segs = r.smelt_ref.to_path();
+                if segs.first().map(|s| s.as_str()) == Some("sources") {
+                    uncovered_inputs.push(format!("source '{}'", segs.join(".")));
+                    continue;
+                }
+                let addr = segs.join(".");
+                if !resolved_edge_names.contains(addr.as_str()) {
+                    uncovered_inputs.push(format!("model edge '{addr}'"));
+                }
+            }
+            let coverage_gate = uncovered_inputs.is_empty();
+            if coverage_gate {
+                let compiler = compilers.get(model_target);
+                let resolver = &ephemeral_resolvers[model_target];
+                let mut used_diff_patch = false;
+                let mut exec_result: Option<smelt_backend::ExecutionResult> = None;
+                for (edge_name, _cell, key_scope, upstream_keys, digest_columns, write) in
+                    &key_addressed_edge_cells
+                {
+                    used_diff_patch |= matches!(
+                        write,
+                        crate::maintenance_driver::RepairWrite::DiffPatch { .. }
+                    );
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    exec_result = Some(
+                        dispatch_key_addressed_model_edge(
+                            backend,
+                            schema,
+                            &db_table_name,
+                            &plan.model_file,
+                            compiler,
+                            resolver,
+                            &clean_sql_for_merge,
+                            model_by_addr,
+                            config,
+                            &request.target,
+                            &plan.name,
+                            edge_name,
+                            key_scope,
+                            upstream_keys,
+                            digest_columns,
+                            write,
+                            &retry_policy,
+                            restriction_keys_for(request, &plan.name, edge_name),
+                        )
+                        .await?,
+                    );
+                }
+                let strategy_label = if used_diff_patch {
+                    "diff_patch".to_string()
+                } else {
+                    "per_group_recompute".to_string()
+                };
+                // `key_addressed_edge_cells` is non-empty (checked above),
+                // so the loop ran at least once.
+                total_rows = exec_result.map(|r| r.row_count).unwrap_or(0);
+                total_rows_overall += total_rows;
+                manifest_entries.insert(
+                    plan.name.clone(),
+                    ModelRunRecord {
+                        strategy: strategy_label,
+                        time_range: match (start_date, end_date) {
+                            (Some(s), Some(e)) => Some(TimeRangeRecord {
+                                start: s.format("%Y-%m-%d").to_string(),
+                                end: e.format("%Y-%m-%d").to_string(),
+                            }),
+                            _ => None,
+                        },
+                        partitions_updated: vec![],
+                        row_count: total_rows,
+                        duration_ms: model_start.elapsed().as_millis() as u64,
+                        batch_safety: Some("key_addressed".to_string()),
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
+                        // Mirrors the keyed branch's own key-addressed
+                        // arm: no declared-fact probes dispatch on this
+                        // route today.
+                        probes: Vec::new(),
+                        subsumed: None,
+                    },
+                );
+                reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
+                // ── Check seam A': non-keyed key-addressed arm ────────
+                if request.run_checks {
+                    let (outcomes, to_skip) = run_model_checks(
+                        &plan.name,
+                        checks_by_model,
+                        compilers,
+                        backends,
+                        target_assignments,
+                        ephemeral_resolvers,
+                        config.as_ref(),
+                        upstream_map,
+                        selected,
+                        reporter,
+                        run_id,
+                    )
+                    .await;
+                    check_results.extend(outcomes);
+                    skip_set.extend(to_skip);
+                }
+                record_first_deployment_definition(file_store, db, plan).await;
+                return Ok(ModelOutcome::Completed(ModelSuccess {
+                    manifest_entries,
+                    check_results,
+                    skip_set,
+                    rows: total_rows,
+                }));
+            } else {
+                reporter.dispatch_widened(
+                    run_id,
+                    &plan.name,
+                    &format!(
+                        "key-addressed dispatch widened to the ordinary route — uncovered \
+                         input(s): {}",
+                        uncovered_inputs.join(", ")
+                    ),
+                );
+            }
         }
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
@@ -2705,6 +3009,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         backend_default_strategy.clone(),
+                        backend.dialect(),
                     ),
                     None => backend_default_strategy,
                 };
@@ -2774,6 +3079,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
+                        backend.dialect(),
                     )?,
                     None => None,
                 };
@@ -2801,6 +3107,15 @@ pub async fn execute_project(
                 }
 
                 let mut used_column_scoped_merge = false;
+
+                // Count of batches this model's loop wrote via the fused
+                // region-recompute + frontier-reset path
+                // (`maintenance_driver::execute_region_recompute_with_
+                // frontier_reset`) — when every batch fused, the after-the-
+                // loop whole-range frontier record below is skipped rather
+                // than writing a redundant coarser row on top of the
+                // per-batch ones this loop already recorded.
+                let mut fused_batch_writes: usize = 0;
 
                 // Which physical corner (if any) THIS run's batches should
                 // dispatch through instead of the default
@@ -3064,6 +3379,8 @@ pub async fn execute_project(
                                     backend,
                                     &probe_policy_for_model(config, prior_runs, &plan.name),
                                     &source_probes,
+                                    reporter,
+                                    run_id,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3118,6 +3435,8 @@ pub async fn execute_project(
                                     &probe_policy_for_model(config, prior_runs, &plan.name),
                                     &contract_probes,
                                     &frozen_band_baselines,
+                                    reporter,
+                                    run_id,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3375,32 +3694,41 @@ pub async fn execute_project(
                             preview: None,
                         }
                     } else {
-                        // Observability: report the region DELETE+INSERT
-                        // group this batch is about to execute — the same
-                        // emitter call `Backend::delete_and_insert_transactional`
-                        // makes to build what it actually executes
+                        // Observability + fused-write eligibility: build the
+                        // region DELETE+INSERT group this batch is about to
+                        // execute — the same emitter call
+                        // `Backend::delete_and_insert_transactional` makes to
+                        // build what it actually executes
                         // (`docs/specs/incremental_models.md` §"Statement
                         // emission (single owner)"). Pure function, same
                         // inputs, so the reported text cannot drift from the
-                        // executed text.
+                        // executed text. On a DuckDB `DeleteInsert` target
+                        // that already exists, this SAME group is also what
+                        // gets executed below, fused with the frontier reset
+                        // in one transaction
+                        // (`maintenance_driver::execute_region_recompute_
+                        // with_frontier_reset`) — never rebuilt.
                         //
                         // `schema.table` is the correct fully-qualified name
                         // for every dialect this runtime path is exercised
                         // against today (DuckDB); a catalog-qualifying
                         // backend (Spark) would need its own qualified name
-                        // here, so the report is scoped to DuckDB until a
-                        // generic `Backend::qualified_table_name` exists —
-                        // Spark's *executed* text is still correct (its own
-                        // `delete_and_insert_transactional` override builds
-                        // it), only this runtime-side report is narrowed.
-                        if backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                        // here, so the report/fusion is scoped to DuckDB
+                        // until a generic `Backend::qualified_table_name`
+                        // exists — Spark's *executed* text is still correct
+                        // (its own `delete_and_insert_transactional`
+                        // override builds it), only this runtime-side path
+                        // is narrowed.
+                        let can_fuse_frontier_reset = backend.dialect()
+                            == smelt_backend::SqlDialect::DuckDB
                             && matches!(
                                 resolved_strategy,
                                 smelt_backend::IncrementalStrategy::DeleteInsert
-                            )
-                        {
-                            let table_name =
-                                format!("{schema}.{}", plan.model_file.db_name_owned());
+                            );
+
+                        let db_name = plan.model_file.db_name_owned();
+                        let ordinary_group = if can_fuse_frontier_reset {
+                            let table_name = format!("{schema}.{db_name}");
                             let region = smelt_logical::maintenance::emit::Region {
                                 start: format!("'{}'", partition.start.replace('\'', "''")),
                                 end: format!("'{}'", partition.end.replace('\'', "''")),
@@ -3424,27 +3752,69 @@ pub async fn execute_project(
                                 Some(&chunk),
                                 &group,
                             );
-                        }
-
-                        let strategy = MaterializationStrategy::Incremental {
-                            partition,
-                            strategy: resolved_strategy.clone(),
-                            unique_key: inc_plan.config.unique_key.clone(),
+                            Some(group)
+                        } else {
+                            None
                         };
 
-                        let db_name = plan.model_file.db_name_owned();
-                        retry_statement_group(request, run_id, &plan.name, reporter, || {
-                            backend.execute_model_incremental(
+                        // Fusion is licensed only when the target already
+                        // exists — an absent target is the bootstrap
+                        // `CREATE TABLE AS` case, which
+                        // `execute_model_incremental` still owns below and
+                        // whose frontier record stays the after-the-loop
+                        // whole-range write (`docs/specs/incremental_models.md`
+                        // §Known Divergences).
+                        let fuse_this_batch = can_fuse_frontier_reset
+                            && backend
+                                .table_exists(schema, &db_name)
+                                .await
+                                .unwrap_or(false);
+
+                        if fuse_this_batch {
+                            let group = ordinary_group
+                                .expect("built above whenever can_fuse_frontier_reset");
+                            crate::maintenance_driver::execute_region_recompute_with_frontier_reset(
+                                backend,
                                 schema,
-                                &db_name,
-                                &compiled.sql,
-                                Materialization::Table,
-                                strategy.clone(),
-                                false,
+                                &group,
+                                &plan.name,
+                                &partition.start,
+                                &partition.end,
+                                &retry_policy,
                             )
-                        })
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            fused_batch_writes += 1;
+                            let row_count = backend
+                                .get_row_count(schema, &db_name)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            smelt_backend::ExecutionResult {
+                                model_name: plan.name.clone(),
+                                duration: batch_start_time.elapsed(),
+                                row_count,
+                                preview: None,
+                            }
+                        } else {
+                            let strategy = MaterializationStrategy::Incremental {
+                                partition,
+                                strategy: resolved_strategy.clone(),
+                                unique_key: inc_plan.config.unique_key.clone(),
+                            };
+
+                            retry_statement_group(request, run_id, &plan.name, reporter, || {
+                                backend.execute_model_incremental(
+                                    schema,
+                                    &db_name,
+                                    &compiled.sql,
+                                    Materialization::Table,
+                                    strategy.clone(),
+                                    false,
+                                )
+                            })
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
                     };
 
                     total_rows += exec_result.row_count;
@@ -3595,17 +3965,32 @@ pub async fn execute_project(
                     }
                 }
 
-                // Reconciliation ledger: this batch loop performed a region
-                // recompute of `[start_str, end_str)` (DELETE the write
-                // window, INSERT its recompute — write window = output
-                // window; or, for a column-scoped MERGE cell, MERGE that
-                // SAME window's freshly-recomputed rows in by `unique_key` —
-                // the row VALUES are still a from-scratch recompute of the
-                // window, only the physical write op differs).
-                // `docs/specs/incremental_models.md` §"The reconciliation
-                // ledger": a region recompute resets every intersecting
-                // entry to exactly the input it read. This records the
-                // whole-row group `{*}` (matching
+                // Whole-range frontier record (reconciliation ledger,
+                // idempotent grading) — the after-the-loop fallback for
+                // whichever batches did NOT already fuse their own frontier
+                // reset into their write transaction above
+                // (`maintenance_driver::execute_region_recompute_with_
+                // frontier_reset`, the ordinary DuckDB `DeleteInsert` branch
+                // on an already-existing target). `fused_batch_writes ==
+                // inc_plan.batches.len()` means every batch this loop ran
+                // already recorded its own per-batch-region row there, so
+                // this coarser whole-`[start_str, end_str)` write is skipped
+                // entirely rather than laying a redundant record on top.
+                // Still runs, unfused, for: the bootstrap `CREATE TABLE AS`
+                // first materialization (no existing target to fuse
+                // against), the delta-restricted recompute
+                // (`execute_delete_insert_with_delta_restriction`), and the
+                // column-scoped-merge / in-place-update techniques
+                // (`docs/specs/incremental_models.md` §Known Divergences) —
+                // each of those already committed its own write above via a
+                // separate call, so this reset's own delete+insert commits
+                // atomically with itself, just not fused with that earlier
+                // write.
+                //
+                // `docs/specs/incremental_models.md` §"The frontier record
+                // (reconciliation ledger)": a region recompute resets every
+                // intersecting entry to exactly the input it read. This
+                // records the whole-row group `{*}` (matching
                 // `smelt_logical::maintenance::PlanCell::group`'s
                 // whole-row-trigger convention) read from a single nominal
                 // `self` input, watermarked to the region's own end. This
@@ -3614,20 +3999,62 @@ pub async fn execute_project(
                 // side by side. Per-cell (not whole-row) ledger grading for
                 // the column-scoped-merge technique is MP12's job
                 // (`incremental_models.md` §"The reconciliation ledger").
-                if !start_str.is_empty() && !end_str.is_empty() {
-                    // Same whole-store critical section rationale as the
-                    // interval store above — `reconciliation.json`.
-                    let _io_guard = state_io_lock.lock().await;
-                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
-                        let region = Region::new(start_str.clone(), end_str.clone());
-                        let mut read = std::collections::BTreeMap::new();
-                        read.insert("self".to_string(), end_str.clone());
-                        reconciliation.get_or_create(&plan.name).recompute_reset(
-                            &region,
+                //
+                // Engine-resident (`_smelt_frontier`), DuckDB-only — no
+                // frontier builder exists for another dialect yet (a Spark
+                // builder is out of scope for this outcome).
+                if !start_str.is_empty()
+                    && !end_str.is_empty()
+                    && fused_batch_writes < inc_plan.batches.len()
+                {
+                    if backend.dialect() == smelt_backend::SqlDialect::DuckDB {
+                        let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+                        let reset_delete_sql =
+                            smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+                                schema,
+                                &plan.name,
+                                "{*}",
+                                &start_str,
+                                &end_str,
+                            );
+                        let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+                            schema,
+                            &plan.name,
                             "{*}",
-                            Processed::Frontier(read),
+                            "self",
+                            &end_str,
+                            &start_str,
+                            &end_str,
                         );
-                        let _ = file_store.save_reconciliation_store(&reconciliation);
+                        let empty_write_group = smelt_logical::maintenance::emit::StatementGroup {
+                            statements: vec![],
+                            transactional: false,
+                        };
+                        backend
+                            .execute_write_and_reset_frontier(
+                                &ensure_sql,
+                                &empty_write_group,
+                                &reset_delete_sql,
+                                &insert_sql,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    } else {
+                        // Advisory, not user-facing here: the same fact is
+                        // now derived and reported ahead of the run as a
+                        // warning-severity `MaintenanceStateDowngraded`
+                        // diagnostic (`docs/specs/state.md` §"The
+                        // degradation contract",
+                        // `smelt_logical::maintenance::availability::
+                        // resolve_state_availability`) — this is only
+                        // internal instrumentation for the actual write
+                        // path that skips the record.
+                        tracing::debug!(
+                            model = %plan.name,
+                            dialect = %backend.dialect().name(),
+                            "no engine-resident frontier builder for this dialect; the region \
+                             recompute's frontier record is not recorded"
+                        );
                     }
                 }
 
@@ -3703,6 +4130,8 @@ pub async fn execute_project(
                                 backend,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
                                 &source_probes,
+                                reporter,
+                                run_id,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3863,31 +4292,7 @@ pub async fn execute_project(
         // (best-effort, like the full-refresh save) the first time an
         // incremental model executes successfully; `check_and_migrate`
         // takes over versioning from then on.
-        if plan.incremental.is_some() {
-            let db_table_name = plan.model_file.db_name_owned();
-            let already_stored = file_store
-                .load_schema(&db_table_name)
-                .ok()
-                .flatten()
-                .is_some();
-            if !already_stored {
-                let inferred_columns = {
-                    let db_guard = db.lock().await;
-                    crate::schema_evolution::infer_deployed_columns(&db_guard, &plan.model_file)
-                };
-                if !inferred_columns.is_empty() {
-                    if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                        file_store,
-                        &db_table_name,
-                        &plan.sql,
-                        &inferred_columns,
-                        None,
-                    ) {
-                        tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
-                    }
-                }
-            }
-        }
+        record_first_deployment_definition(file_store, db, plan).await;
 
         let model_duration = model_start.elapsed();
         reporter.model_completed(run_id, &plan.name, total_rows, model_duration);
@@ -4165,6 +4570,67 @@ pub async fn execute_project(
     if let Err(e) = file_store.save_run(&manifest) {
         tracing::warn!("Failed to save run manifest: {}", e);
     }
+
+    // Per-source watermark advance (`docs/specs/run_state.md` §"Per-source
+    // watermark"): a source's watermark advances only when every model
+    // consuming it (the SAME forward-propagation graph `--since-upstream`
+    // builds) completed this run — never a speculative advance. Window end
+    // = `request.end`; an unbounded window (`None`, e.g. a full non-temporal
+    // run) advances nothing, since there is no window end to advance to.
+    if let Some(window_end) = request.end.as_deref() {
+        let source_names: HashSet<String> = source_infos
+            .iter()
+            .map(|s| crate::propagation::bare_name(&s.address_segments))
+            .collect();
+        let mut consumers_by_source: std::collections::BTreeMap<String, HashSet<String>> =
+            std::collections::BTreeMap::new();
+        match crate::propagation::build_forward_graph(&all_models, source_infos) {
+            Ok(edges) => {
+                for edge in edges {
+                    if source_names.contains(&edge.upstream) {
+                        consumers_by_source
+                            .entry(edge.upstream)
+                            .or_default()
+                            .insert(edge.downstream);
+                    }
+                }
+            }
+            Err(e) => {
+                // A graph-build failure means coverage is unprovable: stall
+                // (no advance) is the safe direction, never a speculative one.
+                tracing::warn!(
+                    "watermark advance skipped for sources {:?}: propagation graph build \
+                     failed: {}",
+                    source_names,
+                    e
+                );
+            }
+        }
+        if !consumers_by_source.is_empty() {
+            let completed_models: HashSet<String> = manifest
+                .models
+                .iter()
+                .filter(|(_, record)| record.outcome == smelt_state::RunOutcomeKind::Success)
+                .map(|(name, _)| name.clone())
+                .collect();
+            let _io_guard = state_io_lock.lock().await;
+            if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
+                let advances = crate::watermark::watermark_advances(
+                    &consumers_by_source,
+                    &completed_models,
+                    window_end,
+                    &landed_deltas,
+                );
+                if !advances.is_empty() {
+                    for (source, to) in advances {
+                        landed_deltas.advance_watermark(&source, &to);
+                    }
+                    let _ = file_store.save_landed_deltas(&landed_deltas);
+                }
+            }
+        }
+    }
+
     if let Err(e) = write_run_report(file_store, &manifest) {
         tracing::warn!("Failed to write run report: {}", e);
     }
@@ -4201,6 +4667,57 @@ pub async fn execute_project(
     ))
 }
 
+/// First-deployment schema baseline for an incremental model (best-effort,
+/// like the full-refresh save it mirrors). `smelt migrate` needs a recorded
+/// `definition_sql` to diff against, so every route an incrementally
+/// maintained model can complete through — cumulative, key-addressed, and
+/// the ordinary windowed fall-through — must call this once. `!already_stored`
+/// is load-bearing, not an optimization: a windowed run under *changed* SQL
+/// must never overwrite the recorded definition, or the pending definition
+/// delta would vanish before `smelt migrate` could see it
+/// (`docs/specs/definition_deltas.md` §Detection).
+async fn record_first_deployment_definition(
+    file_store: &FileStore,
+    db: &Arc<tokio::sync::Mutex<smelt_db::Database>>,
+    plan: &ModelPlan,
+) {
+    // No `plan.incremental.is_some()` gate here (unlike the pre-phase-6
+    // single call site this helper replaced): `plan.incremental` is
+    // populated only for a `grain: partition` model with a resolved
+    // window-batch plan — a `grain: key` model (the cumulative arm) NEVER
+    // sets it, so gating on it here would silently skip every keyed model
+    // forever. Every call site already guarantees "this is a non-full-
+    // refresh maintenance route" by construction (the full-refresh branch
+    // saves its own baseline separately, earlier in the same per-model
+    // unit); `!already_stored` below is what actually prevents redundant
+    // work.
+    let db_table_name = plan.model_file.db_name_owned();
+    let already_stored = file_store
+        .load_schema(&db_table_name)
+        .ok()
+        .flatten()
+        .is_some();
+    if already_stored {
+        return;
+    }
+    let inferred_columns = {
+        let db_guard = db.lock().await;
+        crate::schema_evolution::infer_deployed_columns(&db_guard, &plan.model_file)
+    };
+    if inferred_columns.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::schema_evolution::save_deployed_schema(
+        file_store,
+        &db_table_name,
+        &plan.sql,
+        &inferred_columns,
+        None,
+    ) {
+        tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
+    }
+}
+
 /// Parse the run's `[start, end)` event-time window from the request. End is
 /// exclusive; both must be present together or neither. Extracted so the
 /// dry-run statement-emission branch and the real run resolve the window
@@ -4229,7 +4746,7 @@ fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Opti
 /// project-wide source-timeseries map — so both the dry-run statement-emission
 /// branch and the real run share the identical chunk decomposition
 /// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements":
-/// backbuild's per-chunk boundaries under `--dry-run` are the real chunks).
+/// rebuild's per-chunk boundaries under `--dry-run` are the real chunks).
 /// Returns the plans plus the total batch count (for `run_started`).
 #[allow(clippy::too_many_arguments)]
 fn build_model_plans(
@@ -4540,6 +5057,133 @@ fn maintenance_dialect_for_target(
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
 }
 
+/// Look up the propagated keyed-restriction values `request.keyed_restrictions`
+/// carries for `(model, edge_name)` (`ExecuteRequest::keyed_restrictions`,
+/// `docs/specs/incremental_models.md` §"Restrictions compose by union") — an
+/// empty slice when the request carries no such restriction, so a plain
+/// request (no `--since-upstream` restriction populated) resolves
+/// byte-identically to today's sidecar-only discovery.
+fn restriction_keys_for<'a>(
+    request: &'a ExecuteRequest,
+    model: &str,
+    edge_name: &str,
+) -> &'a [String] {
+    request
+        .keyed_restrictions
+        .get(model)
+        .and_then(|entries| entries.iter().find(|e| e.upstream == edge_name))
+        .map(|e| e.values.as_slice())
+        .unwrap_or(&[])
+}
+
+/// The upstream identity a key-addressed model-edge cell reads against
+/// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
+/// `smelt.models.<edge_name>` source address the sidecar partitions by, and
+/// the upstream's own schema-qualified physical table. Extracted so
+/// [`dispatch_key_addressed_model_edge`] and the plan-time keyed-seed
+/// resolver (`propagation_live::resolve_keyed_seeds`,
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`)
+/// compute the SAME identity a divergence between the two would otherwise
+/// silently miss the sidecar partition rather than fail loudly.
+pub(crate) fn model_edge_source_identity(
+    config: &smelt_core::config::Config,
+    default_target: &str,
+    model_addr: &str,
+    metadata: Option<&smelt_core::ModelMetadata>,
+    db_name: &str,
+) -> (String, String) {
+    let resolved_target = config.get_target(model_addr, metadata, default_target);
+    let schema = &config.targets[&resolved_target].schema;
+    let table = format!("{schema}.{db_name}");
+    let source_address = format!("smelt.models.{model_addr}");
+    (source_address, table)
+}
+
+/// Execute an already-resolved live key-addressed model-edge cell
+/// (`docs/specs/incremental_models.md` §"Upstream model edges") — shared by
+/// the `grain: key` run branch and the non-keyed dispatch site
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/02-plan.md`)
+/// so the SAME cell (resolved once, above the `plan_is_keyed` gate) drives
+/// whichever branch's own admission/substitution gate lets it dispatch —
+/// this function never re-derives the cell, only executes it
+/// (maintenance-plan purity, `CLAUDE.md` §"Maintenance-plan purity"). The
+/// caller is responsible for labeling its own manifest strategy from
+/// `write` (`Technique::PerGroupRecompute`'s two write legs,
+/// `RepairWrite::TargetedDeleteInsert` / `RepairWrite::DiffPatch`).
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_key_addressed_model_edge(
+    backend: &dyn smelt_backend::Backend,
+    schema: &str,
+    db_table_name: &str,
+    model_file: &smelt_core::ModelFile,
+    compiler: &crate::SqlCompiler,
+    resolver: &EphemeralResolver,
+    clean_sql_for_merge: &str,
+    model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+    config: &smelt_core::config::Config,
+    target: &str,
+    plan_name: &str,
+    edge_name: &str,
+    key_scope: &smelt_logical::maintenance::KeyScope,
+    upstream_keys: &[String],
+    digest_columns: &[String],
+    write: &crate::maintenance_driver::RepairWrite,
+    retry_policy: &RetryPolicy<'_>,
+    restriction_keys: &[String],
+) -> Result<smelt_backend::ExecutionResult> {
+    let upstream_model = model_by_addr.get(edge_name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "model '{}' resolved a live key-addressed model-edge cell on upstream '{edge_name}', \
+             but that upstream has no resolved ModelFile — internal inconsistency",
+            plan_name
+        )
+    })?;
+    let (upstream_source_address, upstream_table) = model_edge_source_identity(
+        config,
+        target,
+        edge_name,
+        upstream_model.metadata.as_deref(),
+        &upstream_model.db_name_owned(),
+    );
+    let compiled = compiler.compile_with_sql_and_ephemerals(
+        model_file,
+        schema,
+        clean_sql_for_merge,
+        resolver,
+    )?;
+    match crate::maintenance_driver::execute_key_addressed_model_edge_cell(
+        backend,
+        schema,
+        db_table_name,
+        &upstream_source_address,
+        &upstream_table,
+        upstream_keys,
+        digest_columns,
+        &key_scope.keys,
+        clean_sql_for_merge,
+        &compiled.sql,
+        write,
+        retry_policy,
+        restriction_keys,
+    )
+    .await?
+    {
+        Some(result) => Ok(result),
+        None => {
+            let row_count = backend
+                .get_row_count(schema, db_table_name)
+                .await
+                .unwrap_or(0);
+            Ok(smelt_backend::ExecutionResult {
+                model_name: db_table_name.to_string(),
+                duration: StdDuration::default(),
+                row_count,
+                preview: None,
+            })
+        }
+    }
+}
+
 /// Build `model_file`'s upstream **maintained-model** edge list
 /// (`docs/specs/incremental_models.md` §"Upstream model edges") — the input
 /// T3 delta restriction (`docs/plans/20260715-composed-axes-conditional-
@@ -4553,7 +5197,7 @@ fn maintenance_dialect_for_target(
 /// `refresh:` is not `incremental` (a `full`-mode or view upstream delivers
 /// no incremental delta) — contributes no edge either, never a spurious
 /// permissive whole-table synthesis.
-fn model_edges_for(
+pub(crate) fn model_edges_for(
     model_file: &smelt_core::ModelFile,
     model_by_addr: &HashMap<String, smelt_core::ModelFile>,
     source_infos: &[smelt_core::sources::SourceInfo],
@@ -4577,7 +5221,12 @@ fn model_edges_for(
         if segs.first().map(|s| s.as_str()) == Some("sources") {
             continue;
         }
-        let addr = segs.join(".");
+        // Strip a leading `models` breadcrumb the same way
+        // `crate::propagation::bare_name` does — a ref may spell a model
+        // address either `smelt.models.<addr>` or bare `smelt.<addr>`; both
+        // must resolve against `model_by_addr`'s own bare `canonical_path()`
+        // keys, never only the literal-prefixed spelling.
+        let addr = crate::propagation::bare_name(&segs);
         if !seen.insert(addr.clone()) {
             continue;
         }
@@ -4637,7 +5286,7 @@ fn model_edges_for(
 /// real execution loop's own inline construction exactly (same bare-name
 /// convention, same `mutation_profile.kind == Mutable` test) — factored out
 /// here so the two call sites cannot silently drift apart.
-fn build_maint_source_facts(
+pub(crate) fn build_maint_source_facts(
     model_file: &smelt_core::ModelFile,
     source_infos: &[smelt_core::sources::SourceInfo],
 ) -> (

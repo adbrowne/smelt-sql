@@ -6,8 +6,8 @@
 // own binaries so their `--test <name>` invocations keep working.
 #![allow(dead_code, unused_imports, unused_macros)]
 
+mod absent_schema_snapshot;
 mod address_collision;
-mod backbuild_cumulative_e2e;
 mod build_summary_visibility;
 mod cohort_count_acceptance;
 mod combined_generators_e2e;
@@ -32,6 +32,7 @@ mod meta_lists_e2e;
 mod meta_workspace_e2e;
 mod path_prefix_build;
 mod per_partition_equivalence;
+mod rebuild_cumulative_e2e;
 mod run_command_end_to_end;
 mod schema_evolution_incremental;
 mod schema_roundtrip;

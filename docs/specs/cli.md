@@ -22,7 +22,7 @@ owners: [andrew]
 | `smelt init [DIR]` | Non-interactively scaffold a minimal working project in `DIR` (default `.`) |
 | `smelt run` | Execute models in topological order |
 | `smelt build` | Seed then run (convenience wrapper) |
-| `smelt backbuild` | Rebuild a model and its upstreams over a time range |
+| `smelt rebuild` | Rebuild a model and its upstreams over a time range |
 | `smelt seed` | Load CSV seeds into the target database |
 | `smelt test` | Run unit tests against in-memory DuckDB |
 | `smelt check` | Run data-quality checks against built data in the configured target |
@@ -96,10 +96,13 @@ This is the normative exit-code contract for every `smelt` subcommand. Every oth
 | `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection (§"No-op rebuild output") — a build that ran nothing because there was nothing to do is not a failure. |
 | `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or `CheckTargetNotBuilt` (a check referencing a model not built in the target). |
 | `2` | Usage error. Malformed CLI arguments (clap-detected), an unresolvable or ambiguous selector/entity argument, a malformed or missing `smelt.yml`, or an unresolvable project/target. |
+| `3` | A non-trivial migration remains pending (`smelt migrate`, §`definition_deltas.md`) — unapproved, or approved but refused to execute (a skeleton-change group, a group with no admissible candidate, or a destructive candidate). The command ran correctly; the deploy changes what a table means and no approved, executable plan covers it. |
 
-Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly and *found* a problem in the data or models; `2` means the command could not run at all because its own inputs (flags, config, project structure) were invalid. An orchestrator should treat `1` as "investigate the pipeline" and `2` as "fix the invocation" — retrying a `2` without changing the command is never useful.
+Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly and *found* a problem in the data or models; `2` means the command could not run at all because its own inputs (flags, config, project structure) were invalid. An orchestrator should treat `1` as "investigate the pipeline" and `2` as "fix the invocation" — retrying a `2` without changing the command is never useful. `3` is its own, narrower state: the command ran correctly and nothing is wrong with the data, but a destructive-capable change is waiting on a human before anything runs — distinct from `1` because there is nothing to "fix" beyond reviewing and approving the plan.
 
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
+
+**`smelt migrate` specifics:** exits `0` when there is no definition delta or the delta is eclipsed-only (including a successful `--apply` that executed every group's statements, or found every group already applied, and re-recorded the deployed definition); exits `3` when a non-eclipsed plan is derived and unapproved, when `--apply` finds the recorded hash absent or stale for the freshly re-derived plan, or when an approved `--apply` refuses to execute (a skeleton-change group, a group with no admissible candidate, or a destructive candidate) — nothing runs in that case; exits `2` for the usual usage/config errors (see `definition_deltas.md` §Surface "`smelt migrate`").
 
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
 
@@ -206,6 +209,18 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
 "cost": "<one line>"}`.
 
+**Backend-aware state downgrade.** The plan derivation resolves against the model's real
+declared target backend (`smelt.yml` `targets.*.type`), not an assumed ideal — a cell whose
+technique needs a state structure the target backend does not carry (`state.md` §"The
+degradation contract") downgrades to its resolved fallback, and the report prints both: the
+executed technique (in the cell's own `technique:` line) plus a `state downgrade: <resolved>
+(ideal: <ideal>, missing <structure>) — <why>` line naming what would have run with the
+missing structure available. A cell that did not downgrade prints no such line. With `--json`,
+the per-model report gains an append-stable `state_downgrades` array (§Constraints item 5),
+one entry per downgraded cell: `{"cell_group": "...", "trigger": "...", "resolved_technique":
+"...", "ideal_technique": "...", "missing_structure": "...", "why": "..."}`; empty when no cell
+downgraded.
+
 **Effective contract.** Each cell's block additionally prints its effective contract lattice point
 (`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
 otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`
@@ -217,6 +232,28 @@ yet scheduled (`incremental_models.md` §Known Divergences). With `--json`, each
 `cells` array carries a `contract_point` object with the same information: `frozen_horizon` and/or
 `deferral` (plus `deferral_origin`: `"model"` or `"cell"`) when a relaxation applies; a default
 cell's `contract_point` is an empty object — absent relaxations are omitted, never rendered `null`.
+
+**Refusals.** Every derived refusal prints immediately after the headline, before the plan
+body — the report's pre-execution surface, so an operator sees what will be refused before
+executing anything. Each refusal names its diagnostic code and its rendered reason:
+`<DiagnosticCode>: <reason>`, never the bare debug form of the underlying refusal enum. A model
+with no refusals prints an explicit `Refusals: (none)` marker. With `--json`, the report gains a
+top-level `refusals` array (§Constraints item 5): `{"code": "<DiagnosticCode>", "message":
+"<reason>"}`; empty for an admitted model.
+
+**Guarantees.** The report also prints a model-level per-column guarantee ledger, one row per
+output column: the column's owning group, what it is guaranteed (its effective equivalence
+contract point — the same label the per-cell `contract:` line renders — or, for a column whose
+determinism verdict is not `Clean`, its determinism exemption in its place,
+`incremental_models.md` §"The equivalence invariant" determinism scope), and its derived
+**settle bound** — the interval after which a written slice provably receives no further
+changes. A column with no established key-temporal-locality slice prints `settle: not derived`
+rather than a fabricated or zero interval; route 2 (key-determined) locality prints `settle:
+never` — a real, honest value, not a large sentinel duration. With `--json`, the report gains a
+top-level `guarantees` array (§Constraints item 5): `{"column": "<col>", "group": "<group
+display name>", "contract": "<label>", "settle": "<label>"}` for a contract-guaranteed column, or
+the same shape with `determinism_exemption` in place of `contract` for a volatile one — exactly
+one of the two is present per row.
 
 ### `smelt bakeoff <model>` flags
 
@@ -333,11 +370,11 @@ A single `smelt build` performs these steps, in order:
 
 `--exclude` removes models from the working set after all `--select` expansions complete (`model_selection.md` §"Selection algorithm"). When the excluded selector carries an upstream `+` operator (`--exclude +model`), it removes the model **and its transitive upstreams**. If any removed upstream is still required by a model that remains in the working set, smelt refuses to run an inconsistent set: it emits a diagnostic naming the retained model and the missing upstream dependency rather than executing a model against an absent input. The user must either narrow the exclusion (drop the `+`) or also exclude the dependent model.
 
-### `smelt run` vs `smelt backbuild`
+### `smelt run` vs `smelt rebuild`
 
 `smelt run` executes the selected models for the requested time range. Incremental models receive a DELETE+INSERT for the given `[start, end)` window.
 
-`smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
+`smelt rebuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
 
 ### Failure summary
 
@@ -353,7 +390,7 @@ The hint is chosen from a coarse classification of the recorded error text into 
 
 ### `--dry-run` prints the maintenance statements
 
-`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation
+`smelt run --dry-run` and `smelt rebuild --dry-run` print, for every model the invocation
 would execute, the maintenance statements the run would execute — the output of the same pure
 emitters a real run consumes (`incremental_models.md` §"Statement emission (single owner)") — not
 merely the compiled SELECT body. Region literals are **real**: they come from the invocation's
@@ -361,10 +398,10 @@ resolved `--event-time-start`/`--event-time-end` window, never symbolic placehol
 Transactional groups are bracketed by `BEGIN`/`COMMIT` lines, exactly as in
 `smelt explain <model> --show-sql`.
 
-`smelt backbuild --dry-run` additionally reflects the chunking a real backbuild performs: when
+`smelt rebuild --dry-run` additionally reflects the chunking a real `rebuild` performs: when
 the batch-safety classification splits the range, statements print once per chunk, each chunk
 introduced by a boundary line naming its `[start, end)` window and its position
-(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real backbuild would execute them. An
+(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real `rebuild` would execute them. An
 auto-chunked backfill is thereby inspectable in full before it runs.
 
 `--dry-run` never executes a statement against the target. The division of labour with
@@ -507,7 +544,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 4. **`smelt test` runs on in-memory DuckDB.** Tests never touch the project's configured target database.
 5. **`smelt explain --json` schema is append-stable.** Fields may be added; existing fields must not be renamed or removed without a major version bump.
 6. **Exit codes are meaningful.** See §"Exit codes" for the full contract. Scripts should check exit codes, not stdout patterns.
-7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt backbuild` only.
+7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt rebuild` only.
 8. **`--show-plan` requires a positional model-file argument.** Absence is a hard error, not a fallback to project-wide mode.
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
 10. **All CLI output is canonical `smelt.<path>`.** Model lists, type signatures, diagnostics, `smelt explain --json` keys, log lines, and any other identifier-bearing output must use the full canonical path. `--scope` adjusts input parsing only.
@@ -579,7 +616,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics
   - `models.md` — materialization modes
-  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
+  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `rebuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
   - `schema_evolution.md` — `smelt diff` change classification
   - `testing.md` — `smelt test` and `smelt check` execution

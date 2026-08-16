@@ -54,6 +54,19 @@ fn check_workspace_no_diagnostics(example_dir: &str) {
             None => continue,
         };
         for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            // `MaintenanceStateDowngraded` (`docs/specs/state.md` §"The
+            // degradation contract") is an expected advisory, not a
+            // regression signal, for any example that declares a
+            // non-DuckDB active backend: no dialect but DuckDB ships an
+            // engine-resident frontier builder today (a Spark builder is
+            // explicitly out of scope, `docs/outcomes/20260816-state-
+            // residency/outcome.md` "Out of scope"), so every
+            // partition-grain incremental model's region-recompute cell
+            // downgrades there by design. Excluded from this zero-diagnostics
+            // gate; every other code still asserts zero.
+            if d.code == Some(smelt_db::DiagnosticCode::MaintenanceStateDowngraded) {
+                continue;
+            }
             all_issues.push(format!(
                 "[{:?}] {}: {}",
                 d.severity,
@@ -1714,6 +1727,19 @@ fn check_workspace_no_diagnostics_with_loaders(example_dir: &str) {
             None => continue,
         };
         for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            // `MaintenanceStateDowngraded` (`docs/specs/state.md` §"The
+            // degradation contract") is an expected advisory, not a
+            // regression signal, for any example that declares a
+            // non-DuckDB active backend: no dialect but DuckDB ships an
+            // engine-resident frontier builder today (a Spark builder is
+            // explicitly out of scope, `docs/outcomes/20260816-state-
+            // residency/outcome.md` "Out of scope"), so every
+            // partition-grain incremental model's region-recompute cell
+            // downgrades there by design. Excluded from this zero-diagnostics
+            // gate; every other code still asserts zero.
+            if d.code == Some(smelt_db::DiagnosticCode::MaintenanceStateDowngraded) {
+                continue;
+            }
             all_issues.push(format!(
                 "[{:?}] {}: {}",
                 d.severity,

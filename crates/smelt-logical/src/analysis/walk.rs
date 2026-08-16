@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 use smelt_parser::{ColumnRef, SelectStmt};
 
-use super::{item_alias, item_expr, resolve_scope_group_by, select_stmt_items, SelectItemKind};
+use super::{item_expr, resolve_scope_group_by, select_stmt_items, SelectItemKind};
 
 /// One segment of a node's nesting path, from the model's top scope down.
 /// The top scope itself has an empty path.
@@ -1957,10 +1957,12 @@ pub struct PropertyTransfer<'a> {
 }
 
 impl PropertyTransfer<'_> {
-    /// Map this scope's `GROUP BY` keys to their output-column names. Returns
-    /// `None` (fail-closed ⇒ unkeyed) when any grouping key is not a projected
-    /// output column (grouped by a non-projected expression), since such a key
-    /// cannot be named on the output relation.
+    /// Map this scope's `GROUP BY` keys to their output-column names. Each
+    /// key resolves via [`resolve_group_by_key_to_output`] — by the item's
+    /// own expression text, then by its output alias — the single shared
+    /// resolution route (`model_properties.md` §"Region row identity").
+    /// Returns `None` (fail-closed ⇒ unkeyed) when any grouping key resolves
+    /// to neither: it cannot be named on the output relation.
     fn group_by_output_keys(&self, sn: &SelectNode) -> Option<Vec<String>> {
         let items = select_stmt_items(&sn.select)?;
         let gb_keys = resolve_scope_group_by(&sn.select, &items);
@@ -1969,19 +1971,7 @@ impl PropertyTransfer<'_> {
         }
         let mut out = Vec::with_capacity(gb_keys.len());
         for key in &gb_keys {
-            let named = items.iter().find_map(|item| {
-                if item_expr(item).text().trim() == key {
-                    let alias = item_alias(item);
-                    Some(if alias.is_empty() {
-                        key.clone()
-                    } else {
-                        alias.to_string()
-                    })
-                } else {
-                    None
-                }
-            });
-            out.push(named?);
+            out.push(super::resolve_group_by_key_to_output(&items, key)?);
         }
         Some(out)
     }
@@ -3053,6 +3043,85 @@ mod tests {
                 .any(|fd| fd.key == vec!["customer_id".to_string()] && fd.determines == "total"),
             "the factory must carry customer_id → total; got {:?}",
             v.fds
+        );
+    }
+
+    #[test]
+    fn group_by_alias_resolves_to_output_key() {
+        // Grouping by a projected alias (`d`), not the raw expression text
+        // (`date_trunc(...)`), must still prove the grain — both engines
+        // accept this shape.
+        let v = vector_of(
+            "SELECT date_trunc('day', ts) AS d, user_id, COUNT(*) AS c \
+             FROM t GROUP BY d, user_id",
+        );
+        assert!(
+            v.grain.keys.iter().any(
+                |k| keyset(&k.iter().map(String::as_str).collect::<Vec<_>>())
+                    == keyset(&["d", "user_id"])
+            ),
+            "GROUP BY d, user_id (alias grouping) must prove [d, user_id]; got {:?}",
+            v.grain
+        );
+    }
+
+    #[test]
+    fn group_by_expression_text_still_resolves() {
+        // Regression: grouping by the raw expression text and by ordinal
+        // position must still prove the same key set as before.
+        let by_text = vector_of(
+            "SELECT date_trunc('day', ts) AS d, user_id, COUNT(*) AS c \
+             FROM t GROUP BY date_trunc('day', ts), user_id",
+        );
+        assert!(
+            by_text.grain.keys.iter().any(|k| keyset(
+                &k.iter().map(String::as_str).collect::<Vec<_>>()
+            ) == keyset(&["d", "user_id"])),
+            "GROUP BY by expression text must prove [d, user_id]; got {:?}",
+            by_text.grain
+        );
+
+        let by_ordinal = vector_of(
+            "SELECT date_trunc('day', ts) AS d, user_id, COUNT(*) AS c \
+             FROM t GROUP BY 1, 2",
+        );
+        assert!(
+            by_ordinal.grain.keys.iter().any(|k| keyset(
+                &k.iter().map(String::as_str).collect::<Vec<_>>()
+            ) == keyset(&["d", "user_id"])),
+            "GROUP BY 1, 2 (ordinal) must prove [d, user_id]; got {:?}",
+            by_ordinal.grain
+        );
+    }
+
+    #[test]
+    fn group_by_non_projected_key_still_fails_closed() {
+        // `region` is neither projected nor aliased in the output — the
+        // fail-closed leg must be untouched.
+        let v = vector_of("SELECT user_id, COUNT(*) AS c FROM t GROUP BY region, user_id");
+        assert!(
+            v.grain.keys.is_empty(),
+            "grouping by a non-projected column must fail closed to unkeyed; got {:?}",
+            v.grain
+        );
+    }
+
+    #[test]
+    fn group_by_alias_match_is_case_insensitive() {
+        // SQL identifiers are case-insensitive: GROUP BY D matches an alias
+        // declared as `d`. The expression-text leg keeps its exact
+        // comparison (covered by group_by_expression_text_still_resolves).
+        let v = vector_of(
+            "SELECT date_trunc('day', ts) AS d, user_id, COUNT(*) AS c \
+             FROM t GROUP BY D, user_id",
+        );
+        assert!(
+            v.grain.keys.iter().any(
+                |k| keyset(&k.iter().map(String::as_str).collect::<Vec<_>>())
+                    == keyset(&["d", "user_id"])
+            ),
+            "GROUP BY D must resolve case-insensitively to alias d; got {:?}",
+            v.grain
         );
     }
 

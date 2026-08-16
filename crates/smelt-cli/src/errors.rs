@@ -62,12 +62,23 @@ pub enum CliError {
     /// Distinct from a usage/config error: see [`exit_code_for`].
     #[error("{0}")]
     DetectedFailure(String),
+
+    /// `smelt migrate` derived a non-eclipsed plan with no matching approved
+    /// hash — a real migration is pending and unapproved, or `--apply` found
+    /// the recorded hash absent/stale. Maps to exit `3`
+    /// (`docs/specs/cli.md` §"Exit codes"): distinct from `1` (a detected
+    /// failure in the data) because nothing failed — the command ran
+    /// correctly and is reporting a durable "needs approval" state, not an
+    /// error to retry.
+    #[error("{0}")]
+    PendingMigration(String),
 }
 
 /// Classify a top-level command error into the exit code contract in
 /// `docs/specs/cli.md` §"Exit codes": `2` for usage/config errors (the
-/// command could not run at all because its own inputs were invalid), `1`
-/// for everything else (the command ran and found a problem).
+/// command could not run at all because its own inputs were invalid), `3`
+/// for a pending, unapproved migration (`smelt migrate`), `1` for everything
+/// else (the command ran and found a problem).
 ///
 /// `anyhow::Error::downcast_ref` searches the entire source chain (not just
 /// the outermost wrapper), so this classifies correctly even though every
@@ -81,6 +92,11 @@ pub fn exit_code_for(err: &anyhow::Error) -> u8 {
             .is_some()
     {
         2
+    } else if matches!(
+        err.downcast_ref::<CliError>(),
+        Some(CliError::PendingMigration(_))
+    ) {
+        3
     } else {
         1
     }

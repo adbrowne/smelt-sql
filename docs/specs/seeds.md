@@ -177,7 +177,7 @@ The seed phase of `smelt build` runs the same lifecycle before any model execute
 - **Ephemeral seed size limits.** A 100k-row CSV declared `materialization: ephemeral` would generate a `VALUES` literal of dangerous size. A future row-count threshold (warn, then error) is open; today's spec leaves the choice to the user.
 - **Tests on seed columns.** The shared YAML does not yet support `tests:`. Column-level tests on seed/source/model columns will land together when `testing.md` grows that surface (it currently covers only `smelt.test` declarations).
 - **`view` / `materialized_view` materialization for seeds.** Not supported in v1. Possible if a concrete need emerges; would lower as `CREATE VIEW … AS SELECT * FROM (VALUES …)` or backend-equivalent.
-- **Migration tooling.** No `smelt migrate` command exists. A bundled examples migration and a documentation note are the v1 story; a tool is a follow-up plan.
+- **Migration tooling.** `smelt migrate` (`definition_deltas.md` §Surface "`smelt migrate`") exists, but it migrates a *deployed table* after its model's SQL changes — it does not rewrite seed files or `smelt.yml` seed config. A seed-config migration assist remains a follow-up.
 
 ## References
 

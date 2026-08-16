@@ -80,6 +80,13 @@ const GUIDE_PATH: &str = concat!(
     "/../../docs-site/docs/guide/backbuild-synthesis.md"
 );
 
+const DEFINITION_DELTAS_SPEC_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/specs/definition_deltas.md"
+);
+
+const WORKSPACE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
 fn parse(sql: &str) -> smelt_parser::File {
     let parse = smelt_parser::parse(sql);
     smelt_parser::File::cast(parse.syntax()).expect("file")
@@ -872,5 +879,94 @@ fn registry_matches_guide_markers() {
     assert_eq!(
         registered, marked,
         "registry() ids and the guide's marked example ids must match exactly"
+    );
+}
+
+/// Expand one `{a,b,c}` brace-alternation group in `pattern` into every
+/// concrete alternative (`definition_deltas.md` §References uses this to
+/// list sibling files compactly, e.g.
+/// `crates/smelt-logical/src/backbuild/{mod,diff,classify}.rs`). A pattern
+/// with no brace group expands to itself.
+fn expand_braces(pattern: &str) -> Vec<String> {
+    let Some(open) = pattern.find('{') else {
+        return vec![pattern.to_string()];
+    };
+    let Some(close) = pattern[open..].find('}').map(|i| open + i) else {
+        return vec![pattern.to_string()];
+    };
+    let prefix = &pattern[..open];
+    let suffix = &pattern[close + 1..];
+    pattern[open + 1..close]
+        .split(',')
+        .map(|alt| format!("{prefix}{alt}{suffix}"))
+        .collect()
+}
+
+/// Every backtick-quoted, slash-containing path inside `definition_deltas.md`
+/// §References → Code / Tests must exist on disk — the doc-sync equivalent
+/// of `registry_matches_guide_markers` for the spec's own bookkeeping
+/// section, so a renamed or deleted module silently rots the §References
+/// list instead of failing a test.
+#[test]
+fn spec_references_are_live_paths() {
+    let doc = fs::read_to_string(DEFINITION_DELTAS_SPEC_PATH)
+        .unwrap_or_else(|e| panic!("read {DEFINITION_DELTAS_SPEC_PATH}: {e}"));
+
+    let references_start = doc
+        .find("\n## References")
+        .unwrap_or_else(|| panic!("no '## References' heading in {DEFINITION_DELTAS_SPEC_PATH}"));
+    let section = &doc[references_start..];
+    let section_end = section[1..]
+        .find("\n## ")
+        .map(|i| i + 1)
+        .unwrap_or(section.len());
+    let section = &section[..section_end];
+
+    let mut missing = Vec::new();
+    for bullet_label in ["**Code**", "**Tests**"] {
+        let bullet_start = section
+            .find(&format!("- {bullet_label}"))
+            .unwrap_or_else(|| {
+                panic!(
+                "no '- {bullet_label}' bullet under §References in {DEFINITION_DELTAS_SPEC_PATH}"
+            )
+            });
+        let bullet = &section[bullet_start..];
+        let bullet_end = bullet[bullet_label.len()..]
+            .find("\n- **")
+            .map(|i| i + bullet_label.len())
+            .unwrap_or(bullet.len());
+        let bullet = &bullet[..bullet_end];
+
+        let mut checked_any = false;
+        let mut rest = bullet;
+        while let Some(open) = rest.find('`') {
+            rest = &rest[open + 1..];
+            let Some(close) = rest.find('`') else {
+                break;
+            };
+            let span = &rest[..close];
+            rest = &rest[close + 1..];
+            if !span.contains('/') {
+                continue;
+            }
+            checked_any = true;
+            for candidate in expand_braces(span) {
+                let full = std::path::Path::new(WORKSPACE_ROOT).join(&candidate);
+                if !full.exists() {
+                    missing.push(format!("{bullet_label}: `{candidate}`"));
+                }
+            }
+        }
+        assert!(
+            checked_any,
+            "no slash-containing backtick path found in the '- {bullet_label}' bullet under \
+             §References in {DEFINITION_DELTAS_SPEC_PATH}"
+        );
+    }
+
+    assert!(
+        missing.is_empty(),
+        "definition_deltas.md §References names path(s) that don't exist on disk: {missing:?}"
     );
 }

@@ -43,3 +43,5 @@ tokio = { version = "1", features = ["full", "test-util"] }
 serde_json = "1.0"
 tower-lsp = "0.20"
 lsp-types = "0.94"
+smelt-state = { path = "../smelt-state" }
+chrono = "0.4"
