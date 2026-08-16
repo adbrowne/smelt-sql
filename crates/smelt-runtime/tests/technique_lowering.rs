@@ -1639,7 +1639,7 @@ mod column_scoped_merge_e2e {
     }
 
     /// Copy `examples/timeseries` into a scratch directory so the run's
-    /// `.smelt/` state (`FileStore::new(project_dir, target)`) never lands
+    /// `.smelt/` state (`FileStore::new(project_dir, target, mode)`) never lands
     /// inside the checked-in example.
     fn copy_dir_recursive(src: &Path, dst: &Path) {
         std::fs::create_dir_all(dst).expect("create dst dir");

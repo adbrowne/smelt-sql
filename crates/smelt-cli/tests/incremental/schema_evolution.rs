@@ -2,6 +2,7 @@
 //! incremental execution after schema migration.
 
 use super::*;
+use smelt_core::config::StateMode;
 use smelt_state::file_store::FileStore;
 use smelt_state::schema_tracking::{DeployedColumn, DeployedSchema};
 
@@ -88,7 +89,7 @@ async fn test_schema_evolution_add_column_then_continue_incremental() -> Result<
 #[tokio::test]
 async fn test_schema_diff_detection() -> Result<()> {
     let (dir, _backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Save initial schema
     let v1 = DeployedSchema {
@@ -146,7 +147,7 @@ async fn test_schema_diff_detection() -> Result<()> {
 #[tokio::test]
 async fn test_schema_first_deployment_no_diff() -> Result<()> {
     let (dir, _backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // No prior schema → first deployment
     let loaded = file_store.load_schema("brand_new_model")?;
@@ -233,7 +234,7 @@ fn extract_count(batch: &arrow::array::RecordBatch) -> i64 {
 #[tokio::test]
 async fn test_e2e_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create table with a struct column
     backend
@@ -330,7 +331,7 @@ async fn test_e2e_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_array_element_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create table with integer array
     backend
@@ -397,7 +398,7 @@ async fn test_e2e_array_element_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create a table (using DuckDB as execution backend, but testing with Spark DDL backend)
     backend
@@ -470,7 +471,7 @@ async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -536,7 +537,7 @@ async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_complex_type_schema_persistence() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create table with complex types
     backend
@@ -599,7 +600,7 @@ async fn test_e2e_complex_type_schema_persistence() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_nested_type_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create table with struct column containing INTEGER field
     backend
@@ -695,7 +696,7 @@ async fn test_e2e_nested_type_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -759,7 +760,7 @@ async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -825,7 +826,7 @@ async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_field_removal() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -922,7 +923,7 @@ async fn test_e2e_struct_field_removal() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -988,7 +989,7 @@ async fn test_e2e_map_value_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1067,7 +1068,7 @@ async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_nested_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1143,7 +1144,7 @@ async fn test_e2e_nested_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1240,7 +1241,7 @@ async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     // Create table with v1 schema and insert multiple rows
     backend
@@ -1391,7 +1392,7 @@ async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1472,7 +1473,7 @@ async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1548,7 +1549,7 @@ async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(
@@ -1627,7 +1628,7 @@ async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_type_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     backend
         .execute_sql(

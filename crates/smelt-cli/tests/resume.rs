@@ -17,7 +17,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_core::config::{Config, Materialization as CfgMaterialization, ModelConfig, Target};
+use smelt_core::config::{
+    Config, Materialization as CfgMaterialization, ModelConfig, StateConfig, StateMode, Target,
+};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_runtime::execute::{BackendFactory, BackendFuture};
@@ -67,7 +69,13 @@ fn make_config(db_path: &Path) -> Arc<Config> {
         models: HashMap::<String, ModelConfig>::new(),
         python: None,
         target: None,
-        state: Default::default(),
+        // `--resume` depends on a persisted run manifest — this test suite
+        // exercises that mechanism directly, so it needs a posture that
+        // writes it (`docs/specs/state.md` §"`state.mode` and what each
+        // posture provides"). The default `stateless` posture writes none.
+        state: StateConfig {
+            mode: StateMode::Environments,
+        },
         maintenance: None,
         probes: Default::default(),
     })
@@ -560,7 +568,7 @@ async fn resume_skips_previously_succeeded_models() {
     }
 
     // The manifest from the failed run records every model's outcome.
-    let file_store = FileStore::new(project_dir, "dev");
+    let file_store = FileStore::new(project_dir, "dev", StateMode::Environments);
     let runs_after_failure = file_store.load_runs(None).unwrap();
     assert_eq!(
         runs_after_failure.len(),
@@ -802,7 +810,7 @@ async fn resume_picks_up_cancelled_run() {
     }
 
     // The cancelled run's manifest must be persisted and incomplete.
-    let file_store = FileStore::new(project_dir, "dev");
+    let file_store = FileStore::new(project_dir, "dev", StateMode::Environments);
     let runs_after_cancel = file_store.load_runs(None).unwrap();
     assert_eq!(
         runs_after_cancel.len(),
@@ -905,7 +913,7 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
     // produce, without needing to build a real check fixture. An empty
     // `definition_hash` never matches the model's current compiled hash, so
     // this also exercises the "always safe to re-run" fallback.
-    let file_store = FileStore::new(project_dir, "dev");
+    let file_store = FileStore::new(project_dir, "dev", StateMode::Environments);
     let mut models = HashMap::new();
     models.insert(
         "solo".to_string(),

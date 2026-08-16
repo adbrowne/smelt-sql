@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use smelt_core::config::{Config, Materialization as CfgMaterialization, ModelConfig, Target};
+use smelt_core::config::{
+    Config, Materialization as CfgMaterialization, ModelConfig, StateMode, Target,
+};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_runtime::execute_project;
@@ -60,7 +62,13 @@ fn make_config(db_path: &Path) -> Arc<Config> {
         models: HashMap::<String, ModelConfig>::new(),
         python: None,
         target: None,
-        state: Default::default(),
+        // The run report is a `StateFamily::Report` observability write —
+        // this suite reads it back, so it needs a posture that writes it
+        // (`docs/specs/state.md` §"`state.mode` and what each posture
+        // provides"). The default `stateless` posture writes none.
+        state: smelt_core::config::StateConfig {
+            mode: StateMode::Environments,
+        },
         maintenance: None,
         probes: Default::default(),
     })
@@ -155,7 +163,7 @@ async fn report_written_on_success_and_on_failure() {
         .expect("run 1 must succeed");
     }
 
-    let file_store = FileStore::new(project_dir, "dev");
+    let file_store = FileStore::new(project_dir, "dev", StateMode::Environments);
     let report = file_store
         .load_report("run-success")
         .expect("load_report must not error")
@@ -271,6 +279,16 @@ fn scaffold(tmp: &TempDir) -> PathBuf {
         "smelt init should succeed.\nstderr: {}",
         String::from_utf8_lossy(&init_out.stderr)
     );
+    // `smelt init`'s template project defaults to `state.mode: stateless`
+    // (`docs/specs/state.md` §"`state.mode` and what each posture
+    // provides"), which writes no run report — this suite's callers
+    // (`failure_summary_lists_all_failed_models`) read the report back, so
+    // opt the scaffolded project into `intervals`.
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut smelt_yml =
+        std::fs::read_to_string(&smelt_yml_path).expect("scaffolded smelt.yml must exist");
+    smelt_yml.push_str("state:\n  mode: intervals\n");
+    std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
     project_dir
 }
 

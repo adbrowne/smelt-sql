@@ -136,7 +136,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .filter(|name| selected_names.contains(name.as_str()))
         .collect();
 
-    let file_store = FileStore::new(&project_dir, &args.target);
+    let file_store = FileStore::new(&project_dir, &args.target, config.state.mode);
 
     // Build model name → ModelFile lookup keyed by the canonical dot-path.
     let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();

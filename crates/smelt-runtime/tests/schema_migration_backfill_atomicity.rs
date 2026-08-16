@@ -40,7 +40,7 @@ use std::path::Path;
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_core::config::{Grain, Materialization, RefreshStrategy, TimeseriesConfig};
+use smelt_core::config::{Grain, Materialization, RefreshStrategy, StateMode, TimeseriesConfig};
 use smelt_core::{Granularity, ModelMetadata};
 use smelt_logical::maintenance::SourceFacts;
 use smelt_runtime::maintenance_driver::resolve_live_in_place_update_cell;
@@ -232,7 +232,7 @@ async fn derived_backfill_folds_into_migration_group_and_backfills_every_row() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("test.duckdb");
     let backend = setup_backend(&db_path).await;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
     save_old_schema(&file_store);
 
     let mut backfill_exprs: HashMap<String, String> = HashMap::new();
@@ -328,7 +328,7 @@ async fn failing_backfill_expression_rolls_back_the_whole_group_no_orphan_column
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("test.duckdb");
     let backend = setup_backend(&db_path).await;
-    let file_store = FileStore::new(dir.path(), "dev");
+    let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
     save_old_schema(&file_store);
 
     assert!(

@@ -3,6 +3,7 @@
 //! `(output-region × column-group)` entries, graded storage, and the two
 //! operations — fold-precondition + recompute-reset.
 
+use smelt_core::config::StateMode;
 use smelt_state::ddl_duckdb::{
     generate_ledger_exists_sql, generate_ledger_insert_sql, generate_ledger_table_ddl,
 };
@@ -176,7 +177,7 @@ fn entries_keyed_region_by_group() {
 #[test]
 fn reconciliation_store_roundtrips_through_file_store() {
     let dir = TempDir::new().unwrap();
-    let store = FileStore::new(dir.path(), "dev");
+    let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
     let mut reconciliation = store.load_reconciliation_store().unwrap();
     let region = Region::new("2026-01-01", "2026-01-10");
@@ -483,7 +484,7 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
         // (2) The runtime wrote a reconciliation-ledger entry per window at
         // the same call site it writes `IntervalStore` — real wiring, not a
         // hand-built ledger.
-        let file_store = FileStore::new(&project_dir, "dev");
+        let file_store = FileStore::new(&project_dir, "dev", StateMode::Environments);
         let reconciliation = file_store
             .load_reconciliation_store()
             .expect("load reconciliation store written by execute_project");

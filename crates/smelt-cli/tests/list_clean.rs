@@ -46,6 +46,17 @@ fn scaffold(tmp: &TempDir) -> PathBuf {
     )
     .unwrap();
 
+    // `smelt init`'s template project defaults to `state.mode: stateless`
+    // (`docs/specs/state.md` §"`state.mode` and what each posture
+    // provides"), under which `.smelt/` need not exist at all —
+    // `clean_removes_artifacts_preserves_state` below asserts `.smelt/`
+    // exists after a build, which needs a posture that writes it.
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut smelt_yml =
+        std::fs::read_to_string(&smelt_yml_path).expect("scaffolded smelt.yml must exist");
+    smelt_yml.push_str("state:\n  mode: intervals\n");
+    std::fs::write(&smelt_yml_path, smelt_yml).unwrap();
+
     project_dir
 }
 

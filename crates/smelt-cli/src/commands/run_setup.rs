@@ -164,8 +164,9 @@ pub(super) fn compute_auto_time_range(
     project_dir: &Path,
     target: &str,
     graph: &DependencyGraph,
+    state_mode: smelt_core::config::StateMode,
 ) -> Option<(String, String)> {
-    let file_store = FileStore::new(project_dir, target);
+    let file_store = FileStore::new(project_dir, target, state_mode);
     let interval_store = match file_store.load_intervals() {
         Ok(store) => store,
         Err(e) => {

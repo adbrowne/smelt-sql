@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
-use smelt_core::config::{Config, Target};
+use smelt_core::config::{Config, StateMode, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
@@ -118,7 +118,7 @@ GROUP BY 1
     // orthogonal enforcement — a real deployment would tune cadence and D
     // together so routine catch-up runs do not also trip the probe.
     let smelt_yml = format!(
-        "name: deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        "name: deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
@@ -317,7 +317,7 @@ async fn deferred_run_is_recorded_skipped_and_writes_nothing() {
     );
 
     // The interval ledger records no new coverage for `deferred_model`.
-    let file_store = FileStore::new(&project_dir, "dev");
+    let file_store = FileStore::new(&project_dir, "dev", StateMode::Environments);
     let interval_store = file_store.load_intervals().expect("load intervals");
     let maintained = interval_store
         .get("deferred_model")

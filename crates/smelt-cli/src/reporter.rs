@@ -195,8 +195,13 @@ fn hint_for(cause: FailureCause) -> &'static str {
 /// be read back (e.g. a stateless project, or a pre-execution failure with
 /// no run directory yet) — `run_failed`'s per-model lines above still ran
 /// either way.
-pub fn print_failure_summary(project_dir: &std::path::Path, target: &str, run_id: &str) {
-    let file_store = smelt_state::file_store::FileStore::new(project_dir, target);
+pub fn print_failure_summary(
+    project_dir: &std::path::Path,
+    target: &str,
+    run_id: &str,
+    state_mode: smelt_core::config::StateMode,
+) {
+    let file_store = smelt_state::file_store::FileStore::new(project_dir, target, state_mode);
     let Ok(Some(report)) = file_store.load_report(run_id) else {
         return;
     };

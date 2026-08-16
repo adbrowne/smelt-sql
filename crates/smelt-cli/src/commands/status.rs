@@ -27,7 +27,7 @@ pub async fn status(args: StatusArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
 
-    let file_store = FileStore::new(&project_dir, &args.target);
+    let file_store = FileStore::new(&project_dir, &args.target, config.state.mode);
     if !file_store.exists() {
         println!("No state directory found. Run `smelt run` with a time range first.");
         return Ok(());

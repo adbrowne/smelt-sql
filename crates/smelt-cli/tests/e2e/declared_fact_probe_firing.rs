@@ -158,6 +158,8 @@ fn stage_bounded_domain_workspace(tmp: &TempDir, name: &str, probes_off: bool) -
 version: 1
 paths:
   - models
+state:
+  mode: intervals
 targets:
   dev:
     type: duckdb
@@ -325,6 +327,8 @@ fn stage_append_only_workspace(tmp: &TempDir, name: &str, probes_off: bool) -> P
 version: 1
 paths:
   - models
+state:
+  mode: intervals
 targets:
   dev:
     type: duckdb

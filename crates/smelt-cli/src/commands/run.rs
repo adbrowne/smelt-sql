@@ -167,7 +167,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
     let (auto_start, auto_end) = if args.auto && effective_start.is_none() {
-        compute_auto_time_range(&project_dir, &args.target, &graph)
+        compute_auto_time_range(&project_dir, &args.target, &graph, config.state.mode)
             .map_or((None, None), |(s, e)| (Some(s), Some(e)))
     } else {
         (None, None)
@@ -221,6 +221,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
 
     let run_id = generate_run_id();
     let config_arc = Arc::new(config);
+    let state_mode = config_arc.state.mode;
     let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
     let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
     let reporter = CliReporter::new(args.verbose, args.dry_run, args.show_results);
@@ -243,7 +244,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(e) => {
-            print_failure_summary(&project_dir, &args.target, &run_id);
+            print_failure_summary(&project_dir, &args.target, &run_id, state_mode);
             return Err(e);
         }
     };

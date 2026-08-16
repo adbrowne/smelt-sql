@@ -4416,6 +4416,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "smelt-core",
  "smelt-dialect",
  "smelt-maintenance-testkit",
  "smelt-types",

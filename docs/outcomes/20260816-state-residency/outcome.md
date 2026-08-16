@@ -66,7 +66,7 @@ this outcome runs first in the programme.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
-| 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | planned |
+| 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
 | 3 | Absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | pending |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
 | 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
@@ -76,6 +76,17 @@ this outcome runs first in the programme.
 
 ## Decision log
 
+- **2026-08-16 (phase 2 implement).** Phase 2 landed: `FileStore` now carries `StateMode`,
+  gates every observability family per `state.md`'s consequence table, and `--resume` refuses
+  by name under `stateless`. The `contract_lattice_spec` repair (phase 1's Blocked entry,
+  option (b)) is done and verified. Discovered — but deliberately did not fix, to stay inside
+  the "no `docs/specs/` edits" constraint — a second, distinct pre-existing red-gate class in
+  `smelt-logical --test output_delta_spec` and `--test typed_edge_spec`: `incremental_models.md`
+  has two `### The graph layer` headings post PR #166, and even the correct section's prose
+  uses lowercase `general` (delta-signature verdict) where the test expects capitalized
+  `General` (output-delta profile verdict) — a spec-content judgment call, not a mechanical
+  pointer fix. See `phases/02-summary.md` "For the next planner" for the full analysis; a
+  follow-up phase/task should resolve it.
 - **2026-08-16 (phase 2 plan).** Split the old row 2 into two rows (posture threading; absent-state
   runtime behaviours) and renumbered the tail 4–8. The old row bundled two independently testable
   changes with different oracles — posture gating is verified by "which files exist after a run",

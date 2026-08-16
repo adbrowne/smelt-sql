@@ -307,8 +307,19 @@ pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String
     // probe cannot yet distinguish from an in-place mutation (the declared
     // `mutation_profile.lateness` limitation recorded in that section's
     // §Known Divergences).
+    // `state: {mode: intervals}` — the conformance harness reads back the
+    // deployed-schema snapshot (column-add/remove trigger derivation), the
+    // run manifest/history, and the interval ledger across the multi-step
+    // schedules it drives, so it needs a posture that writes them
+    // (`docs/specs/state.md` §"`state.mode` and what each posture
+    // provides"). `stateless` — the default `state.mode` value as of
+    // `docs/outcomes/20260816-state-residency/phases/02-plan.md` — would
+    // silently degrade this harness's schema-diffing rather than fail
+    // loudly, since every gated `load_*` returns an empty default instead
+    // of erroring. `intervals` (not `environments`) is sufficient: the
+    // snapshot/environment store is not exercised by this harness.
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\nstate:\n  mode: intervals\nprobes:\n  cadence: off\n",
     )
 }
 

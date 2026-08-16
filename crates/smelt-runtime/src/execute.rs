@@ -1083,7 +1083,7 @@ pub async fn execute_project(
         HashMap::new()
     };
 
-    let file_store = FileStore::new(project_dir, &request.target);
+    let file_store = FileStore::new(project_dir, &request.target, config.state.mode);
 
     // Models declaring `contract.deferral` at model granularity
     // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
@@ -1155,6 +1155,22 @@ pub async fn execute_project(
     // latest run succeeded cleanly, or no manifest exists at all) is a hard
     // error, never a silent full run, so a typo'd `--resume` on a clean
     // project can't be mistaken for "nothing needed doing".
+    // `stateless` never writes a run manifest (`docs/specs/state.md`
+    // §"`state.mode` and what each posture provides": "`.smelt/` need not
+    // exist"), so `--resume` can never find a prior run to resume from —
+    // refuse by name, before the manifest scan below, rather than falling
+    // through to the generic "no partially-failed run" error that would
+    // otherwise fire (which reads as "your last run succeeded", not "this
+    // posture keeps no history").
+    if request.resume && config.state.mode == smelt_core::config::StateMode::Stateless {
+        anyhow::bail!(
+            "--resume: target '{}' has state.mode: stateless, so no run manifest exists to \
+             resume from — no `.smelt/` history is kept under this posture. Set state.mode to \
+             `intervals` or `environments`, or run without --resume.",
+            request.target
+        );
+    }
+
     let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
     let resume_manifest: Option<RunManifest> = if request.resume {
         let latest_candidate = file_store

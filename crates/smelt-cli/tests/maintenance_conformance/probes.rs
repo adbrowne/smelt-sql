@@ -317,9 +317,13 @@ async fn persisted_reconciliation_store_reflects_recompute_reset() {
     r2.end = Some("2024-01-03".to_string());
     project.run_quiet("recon-run-2", r2).await.expect("run 2");
 
-    let store = smelt_state::file_store::FileStore::new(&project.project_dir, "dev")
-        .load_reconciliation_store()
-        .expect("load persisted reconciliation store");
+    let store = smelt_state::file_store::FileStore::new(
+        &project.project_dir,
+        "dev",
+        smelt_core::config::StateMode::Environments,
+    )
+    .load_reconciliation_store()
+    .expect("load persisted reconciliation store");
     let ledger = store.get(&recipe.model_name).unwrap_or_else(|| {
         panic!(
             "no reconciliation ledger persisted for model {:?}: store={store:?}",

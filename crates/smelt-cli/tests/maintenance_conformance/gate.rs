@@ -4167,7 +4167,11 @@ fn column_add_between_runs_recovers_equivalence() {
 /// synthetic stand-in. `None` when no schema has been deployed yet (before
 /// the model's first successful run).
 fn deployed_column_names(project: &LinkCProject, table: &str) -> Vec<String> {
-    let file_store = smelt_state::file_store::FileStore::new(&project.project_dir, "dev");
+    let file_store = smelt_state::file_store::FileStore::new(
+        &project.project_dir,
+        "dev",
+        smelt_core::config::StateMode::Environments,
+    );
     file_store
         .load_schema(table)
         .ok()

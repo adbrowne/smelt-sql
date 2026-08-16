@@ -9,3 +9,5 @@ targets:
     schema: main
 default_materialization: view
 unstable_schema: true
+state:
+  mode: intervals

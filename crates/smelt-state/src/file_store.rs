@@ -8,10 +8,40 @@ use crate::source_postures::SourcePostureStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use smelt_core::config::StateMode;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// The observability-write families a [`FileStore`] gates by [`StateMode`]
+/// (`docs/specs/state.md` §"`state.mode` and what each posture provides").
+/// This is the single, exhaustive vocabulary [`FileStore::writes`] matches
+/// over — every `save_*`/`load_*` method for an observability structure
+/// names exactly one variant here rather than re-deriving the posture rule
+/// inline. Correctness structures (currently just the reconciliation
+/// ledger) are not represented here at all: they are ungated by
+/// construction, per the same spec section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StateFamily {
+    /// `.smelt/targets/<target>/runs/{run_id}.json`.
+    Manifest,
+    /// `.smelt/targets/<target>/reports/{run_id}.json`.
+    Report,
+    /// `.smelt/targets/<target>/intervals.json`.
+    Intervals,
+    /// `.smelt/targets/<target>/landed_deltas.json`.
+    LandedDeltas,
+    /// `.smelt/targets/<target>/schemas/{model}.json`.
+    SchemaSnapshot,
+    /// `.smelt/targets/<target>/source_postures.json`.
+    SourcePosture,
+    /// `.smelt/targets/<target>/frozen_band_baselines.json`.
+    FrozenBandBaseline,
+    /// `.smelt/targets/<target>/snapshots.json` — the fingerprint/environment
+    /// snapshot store.
+    SnapshotStore,
+}
 
 /// The on-disk `.smelt/` layout version this binary writes and the highest
 /// version it can read (`docs/specs/run_state.md` §"`meta.json` and layout
@@ -72,14 +102,21 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 /// (`docs/specs/run_state.md` §"Locking"). Held for a run's duration;
 /// dropping the guard (on success or on any error path, since it is an
 /// ordinary local binding) releases the lock.
+///
+/// Under `stateless`, [`FileStore::lock`] never touches the filesystem —
+/// there is no `.smelt/` to lock — and returns the `Noop` variant, which
+/// drops without side effects.
 #[derive(Debug)]
-pub struct StateLock {
-    file: File,
+pub enum StateLock {
+    Held { file: File },
+    Noop,
 }
 
 impl Drop for StateLock {
     fn drop(&mut self) {
-        let _ = fs4::FileExt::unlock(&self.file);
+        if let StateLock::Held { file } = self {
+            let _ = fs4::FileExt::unlock(file);
+        }
     }
 }
 
@@ -117,23 +154,60 @@ pub struct FileStore {
     /// legacy-layout migration, which needs to know which target's
     /// subtree legacy root-level artifacts move into.
     target: String,
+    /// The project's declared `state.mode` posture
+    /// (`docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides"). Gates every observability-family `save_*`/`load_*`
+    /// via [`FileStore::writes`]; never gates the reconciliation ledger,
+    /// which is correctness-class and stays ungated.
+    mode: StateMode,
 }
 
 impl FileStore {
     /// Create a new FileStore rooted at `.smelt/targets/<target>/` under the
     /// given project directory. `meta.json` and `lock` remain project-wide
-    /// at `.smelt/` regardless of `target`.
-    pub fn new(project_dir: &Path, target: &str) -> Self {
+    /// at `.smelt/` regardless of `target`. `mode` is the project's declared
+    /// `state.mode` posture, consulted by every observability write/read
+    /// (see [`FileStore::writes`]).
+    pub fn new(project_dir: &Path, target: &str, mode: StateMode) -> Self {
         let root_dir = project_dir.join(".smelt");
         Self {
             target_dir: root_dir.join("targets").join(target),
             root_dir,
             target: target.to_string(),
+            mode,
         }
     }
 
-    /// Ensure the state directories exist.
+    /// Whether this store's posture writes/reads the given observability
+    /// family, per the consequence table in `docs/specs/state.md`
+    /// §"`state.mode` and what each posture provides":
+    ///
+    /// | Posture | Observability structures written |
+    /// |---|---|
+    /// | `stateless` | none |
+    /// | `intervals` | manifests, reports, interval ledger, landed deltas, schema snapshots, source postures, frozen-band baselines |
+    /// | `environments` | everything in `intervals` plus the snapshot/environment store |
+    ///
+    /// This is the single owner of the gating rule — every observability
+    /// `save_*`/`load_*` method below calls this rather than re-deriving
+    /// the table inline. Correctness structures (the reconciliation
+    /// ledger) are not `StateFamily` variants at all and are never gated.
+    fn writes(&self, family: StateFamily) -> bool {
+        match self.mode {
+            StateMode::Stateless => false,
+            StateMode::Intervals => !matches!(family, StateFamily::SnapshotStore),
+            StateMode::Environments => true,
+        }
+    }
+
+    /// Ensure the state directories exist. A no-op under `stateless`: no
+    /// `.smelt/` directory is created, per `docs/specs/state.md`
+    /// §"`state.mode` and what each posture provides" ("`.smelt/` need not
+    /// exist").
     pub fn init(&self) -> Result<()> {
+        if self.mode == StateMode::Stateless {
+            return Ok(());
+        }
         self.check_version()?;
         std::fs::create_dir_all(self.runs_dir())
             .with_context(|| format!("Failed to create runs directory: {:?}", self.runs_dir()))?;
@@ -288,7 +362,15 @@ impl FileStore {
     /// (`docs/specs/run_state.md` §"Locking"). Also performs the one-time
     /// legacy-layout `meta.json` upgrade / future-version hard-error check
     /// under the lock.
+    ///
+    /// Under `stateless`, this never touches the filesystem — there is no
+    /// `.smelt/` to lock, no legacy layout to migrate — and returns
+    /// [`StateLock::Noop`] (`docs/specs/state.md` §"`state.mode` and what
+    /// each posture provides": "`.smelt/` need not exist").
     pub fn lock(&self) -> Result<StateLock> {
+        if self.mode == StateMode::Stateless {
+            return Ok(StateLock::Noop);
+        }
         std::fs::create_dir_all(&self.root_dir)
             .with_context(|| format!("Failed to create state directory: {:?}", self.root_dir))?;
         let lock_path = self.lock_path();
@@ -329,13 +411,17 @@ impl FileStore {
             return Err(err);
         }
 
-        Ok(StateLock { file })
+        Ok(StateLock::Held { file })
     }
 
     // --- Run Manifests ---
 
-    /// Save a run manifest to disk.
+    /// Save a run manifest to disk. A no-op under a posture that excludes
+    /// [`StateFamily::Manifest`] (`stateless`).
     pub fn save_run(&self, manifest: &RunManifest) -> Result<()> {
+        if !self.writes(StateFamily::Manifest) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.runs_dir().join(format!("{}.json", manifest.run_id));
         write_json_atomic(&path, manifest)
@@ -348,6 +434,9 @@ impl FileStore {
     /// Files are sorted by name (descending) before loading, so with a limit
     /// only the newest files are read from disk.
     pub fn load_runs(&self, limit: Option<usize>) -> Result<Vec<RunManifest>> {
+        if !self.writes(StateFamily::Manifest) {
+            return Ok(Vec::new());
+        }
         self.check_version()?;
         let runs_dir = self.runs_dir();
         if !runs_dir.exists() {
@@ -390,6 +479,9 @@ impl FileStore {
 
     /// Load a specific run manifest by ID.
     pub fn load_run(&self, run_id: &str) -> Result<Option<RunManifest>> {
+        if !self.writes(StateFamily::Manifest) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.runs_dir().join(format!("{}.json", run_id));
         if !path.exists() {
@@ -407,6 +499,9 @@ impl FileStore {
     /// Save a run report to disk, alongside its manifest
     /// (`docs/specs/run_state.md` §"Run report").
     pub fn save_report(&self, report: &crate::RunReport) -> Result<()> {
+        if !self.writes(StateFamily::Report) {
+            return Ok(());
+        }
         self.init()?;
         let dir = self.reports_dir();
         std::fs::create_dir_all(&dir)
@@ -418,6 +513,9 @@ impl FileStore {
 
     /// Load a specific run report by ID.
     pub fn load_report(&self, run_id: &str) -> Result<Option<crate::RunReport>> {
+        if !self.writes(StateFamily::Report) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.reports_dir().join(format!("{}.json", run_id));
         if !path.exists() {
@@ -434,6 +532,9 @@ impl FileStore {
 
     /// Load the interval store from disk. Returns default if file doesn't exist.
     pub fn load_intervals(&self) -> Result<IntervalStore> {
+        if !self.writes(StateFamily::Intervals) {
+            return Ok(IntervalStore::default());
+        }
         self.check_version()?;
         let path = self.intervals_path();
         if !path.exists() {
@@ -448,6 +549,9 @@ impl FileStore {
 
     /// Save the interval store to disk.
     pub fn save_intervals(&self, store: &IntervalStore) -> Result<()> {
+        if !self.writes(StateFamily::Intervals) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.intervals_path();
         write_json_atomic(&path, store)
@@ -459,6 +563,16 @@ impl FileStore {
     /// Load the reconciliation ledger store from disk (one ledger per
     /// model). Returns default if the file doesn't exist — a model with no
     /// ledger has never had a plan-managed fold/recompute recorded.
+    ///
+    /// **Deliberately ungated by `state.mode`.** The reconciliation ledger
+    /// is a correctness structure, not an observability one
+    /// (`docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides": "correctness structures ... all, whenever the plan
+    /// derives them"), so it is written under every posture, including
+    /// `stateless`. Its `.smelt/`-file residency is itself a live Known
+    /// Divergence, tracked to move engine-resident in phase 4 of
+    /// `docs/outcomes/20260816-state-residency/outcome.md`; do not add a
+    /// `StateFamily` gate here before that lands.
     pub fn load_reconciliation_store(&self) -> Result<ReconciliationStore> {
         self.check_version()?;
         let path = self.reconciliation_path();
@@ -473,6 +587,9 @@ impl FileStore {
     }
 
     /// Save the reconciliation ledger store to disk.
+    ///
+    /// **Deliberately ungated by `state.mode`** — see
+    /// [`FileStore::load_reconciliation_store`]'s doc comment.
     pub fn save_reconciliation_store(&self, store: &ReconciliationStore) -> Result<()> {
         self.init()?;
         let path = self.reconciliation_path();
@@ -487,6 +604,9 @@ impl FileStore {
     /// doesn't exist — a source with no entry has never had a landing
     /// recorded.
     pub fn load_landed_deltas(&self) -> Result<LandedDeltaStore> {
+        if !self.writes(StateFamily::LandedDeltas) {
+            return Ok(LandedDeltaStore::default());
+        }
         self.check_version()?;
         let path = self.landed_deltas_path();
         if !path.exists() {
@@ -501,6 +621,9 @@ impl FileStore {
 
     /// Save the per-source landed-delta store to disk.
     pub fn save_landed_deltas(&self, store: &LandedDeltaStore) -> Result<()> {
+        if !self.writes(StateFamily::LandedDeltas) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.landed_deltas_path();
         write_json_atomic(&path, store)
@@ -515,6 +638,9 @@ impl FileStore {
     /// doesn't exist — a source with no entry has never had its posture
     /// verified, so builds no probe.
     pub fn load_source_postures(&self) -> Result<SourcePostureStore> {
+        if !self.writes(StateFamily::SourcePosture) {
+            return Ok(SourcePostureStore::default());
+        }
         self.check_version()?;
         let path = self.source_postures_path();
         if !path.exists() {
@@ -529,6 +655,9 @@ impl FileStore {
 
     /// Save the per-source append-only posture baseline store to disk.
     pub fn save_source_postures(&self, store: &SourcePostureStore) -> Result<()> {
+        if !self.writes(StateFamily::SourcePosture) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.source_postures_path();
         write_json_atomic(&path, store)
@@ -543,6 +672,9 @@ impl FileStore {
     /// no entry has never had its frozen band snapshotted, so its next
     /// observation is unconditionally established.
     pub fn load_frozen_band_baselines(&self) -> Result<FrozenBandBaselineStore> {
+        if !self.writes(StateFamily::FrozenBandBaseline) {
+            return Ok(FrozenBandBaselineStore::default());
+        }
         self.check_version()?;
         let path = self.frozen_band_baselines_path();
         if !path.exists() {
@@ -557,6 +689,9 @@ impl FileStore {
 
     /// Save the per-source frozen-band row-count baseline store to disk.
     pub fn save_frozen_band_baselines(&self, store: &FrozenBandBaselineStore) -> Result<()> {
+        if !self.writes(StateFamily::FrozenBandBaseline) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.frozen_band_baselines_path();
         write_json_atomic(&path, store)
@@ -567,6 +702,9 @@ impl FileStore {
 
     /// Load the snapshot store from disk. Returns an empty store if the file doesn't exist.
     pub fn load_snapshot_store(&self) -> Result<SnapshotStore> {
+        if !self.writes(StateFamily::SnapshotStore) {
+            return Ok(SnapshotStore::default());
+        }
         self.check_version()?;
         let path = self.snapshots_path();
         if !path.exists() {
@@ -581,6 +719,9 @@ impl FileStore {
 
     /// Save the snapshot store to disk.
     pub fn save_snapshot_store(&self, store: &SnapshotStore) -> Result<()> {
+        if !self.writes(StateFamily::SnapshotStore) {
+            return Ok(());
+        }
         self.init()?;
         let path = self.snapshots_path();
         write_json_atomic(&path, store)
@@ -591,6 +732,9 @@ impl FileStore {
 
     /// Save a deployed schema for a model.
     pub fn save_schema(&self, schema: &DeployedSchema) -> Result<()> {
+        if !self.writes(StateFamily::SchemaSnapshot) {
+            return Ok(());
+        }
         self.check_version()?;
         let dir = self.schemas_dir();
         std::fs::create_dir_all(&dir)
@@ -602,6 +746,9 @@ impl FileStore {
 
     /// Load the deployed schema for a model. Returns None if not found.
     pub fn load_schema(&self, model_name: &str) -> Result<Option<DeployedSchema>> {
+        if !self.writes(StateFamily::SchemaSnapshot) {
+            return Ok(None);
+        }
         self.check_version()?;
         let path = self.schemas_dir().join(format!("{}.json", model_name));
         if !path.exists() {
@@ -707,7 +854,7 @@ mod tests {
     #[test]
     fn test_save_and_load_run() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let manifest = test_manifest();
         store.save_run(&manifest).unwrap();
@@ -722,7 +869,7 @@ mod tests {
     #[test]
     fn test_load_all_runs() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut m1 = test_manifest();
         m1.run_id = "20260322-100000-aaa".to_string();
@@ -741,7 +888,7 @@ mod tests {
     #[test]
     fn test_intervals_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut intervals = IntervalStore::default();
         let model = intervals.get_or_create("daily_revenue", "sha256:abc");
@@ -762,7 +909,7 @@ mod tests {
         use crate::landed_deltas::LandedDeltaStore;
 
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut deltas = LandedDeltaStore::default();
         let delta = deltas
@@ -787,7 +934,7 @@ mod tests {
     #[test]
     fn test_landed_deltas_empty_when_file_missing() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
         let loaded = store.load_landed_deltas().unwrap();
         assert!(loaded.sources.is_empty());
     }
@@ -795,7 +942,7 @@ mod tests {
     #[test]
     fn test_empty_store() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let runs = store.load_runs(None).unwrap();
         assert!(runs.is_empty());
@@ -807,7 +954,7 @@ mod tests {
     #[test]
     fn test_schema_save_and_load() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let schema = DeployedSchema {
             model: "daily_revenue".to_string(),
@@ -841,7 +988,7 @@ mod tests {
     #[test]
     fn test_schema_not_found() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let loaded = store.load_schema("nonexistent").unwrap();
         assert!(loaded.is_none());
@@ -850,7 +997,7 @@ mod tests {
     #[test]
     fn test_delete_schema_removes_file() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let schema = DeployedSchema {
             model: "stg_orders".to_string(),
@@ -873,7 +1020,7 @@ mod tests {
     #[test]
     fn test_delete_schema_noop_when_missing() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         // Deleting a non-existent schema should not error
         store.delete_schema("nonexistent").unwrap();
@@ -882,7 +1029,7 @@ mod tests {
     #[test]
     fn test_snapshot_store_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let file_store = FileStore::new(dir.path(), "dev");
+        let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut snap = SnapshotStore::default();
         snap.upsert(SnapshotEntry {
@@ -916,7 +1063,7 @@ mod tests {
     #[test]
     fn test_snapshot_store_empty_when_file_missing() {
         let dir = TempDir::new().unwrap();
-        let file_store = FileStore::new(dir.path(), "dev");
+        let file_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let loaded = file_store.load_snapshot_store().unwrap();
         assert!(loaded.is_empty());
@@ -927,7 +1074,7 @@ mod tests {
     #[test]
     fn atomic_write_leaves_no_temp_files() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut intervals = IntervalStore::default();
         intervals
@@ -968,8 +1115,8 @@ mod tests {
     #[test]
     fn second_lock_holder_gets_fail_loud_error() {
         let dir = TempDir::new().unwrap();
-        let store1 = FileStore::new(dir.path(), "dev");
-        let store2 = FileStore::new(dir.path(), "dev");
+        let store1 = FileStore::new(dir.path(), "dev", StateMode::Environments);
+        let store2 = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let _guard1 = store1.lock().unwrap();
         let err = store2
@@ -989,7 +1136,7 @@ mod tests {
     #[test]
     fn future_state_version_is_hard_error() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
         store.init().unwrap();
         std::fs::write(
             dir.path().join(".smelt").join("meta.json"),
@@ -1036,7 +1183,7 @@ mod tests {
         let meta_path = smelt_dir.join("meta.json");
         assert!(!meta_path.exists());
 
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         // First locked open upgrades the layout by stamping the current
         // version and migrating the legacy root-level file under the
@@ -1066,8 +1213,8 @@ mod tests {
     #[test]
     fn stores_for_different_targets_are_disjoint() {
         let dir = TempDir::new().unwrap();
-        let dev_store = FileStore::new(dir.path(), "dev");
-        let prod_store = FileStore::new(dir.path(), "prod");
+        let dev_store = FileStore::new(dir.path(), "dev", StateMode::Environments);
+        let prod_store = FileStore::new(dir.path(), "prod", StateMode::Environments);
 
         let mut dev_intervals = IntervalStore::default();
         dev_intervals
@@ -1133,7 +1280,7 @@ mod tests {
         std::fs::write(smelt_dir.join("landed_deltas.json"), "{}").unwrap();
         std::fs::write(smelt_dir.join("schemas").join("daily_revenue.json"), "{}").unwrap();
 
-        let store = FileStore::new(dir.path(), "prod");
+        let store = FileStore::new(dir.path(), "prod", StateMode::Environments);
         let _guard = store.lock().unwrap();
 
         // Every legacy artifact moved under targets/prod/, none left at root.
@@ -1175,7 +1322,7 @@ mod tests {
     #[test]
     fn failed_run_manifest_persists_all_outcomes() {
         let dir = TempDir::new().unwrap();
-        let store = FileStore::new(dir.path(), "dev");
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
 
         let mut models = HashMap::new();
         models.insert(
@@ -1266,5 +1413,237 @@ mod tests {
         let all_runs = store.load_runs(None).unwrap();
         assert_eq!(all_runs.len(), 1);
         assert!(all_runs[0].completed_at.is_none());
+    }
+
+    // --- state.mode posture gating (docs/outcomes/20260816-state-residency phase 2) ---
+
+    /// `docs/specs/state.md` §"`state.mode` and what each posture provides":
+    /// `stateless` writes none of the observability structures, and
+    /// `.smelt/` need not exist.
+    #[test]
+    fn stateless_store_creates_no_directories() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+
+        store.save_run(&test_manifest()).unwrap();
+        store
+            .save_report(&crate::RunReport {
+                run_id: "r1".to_string(),
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                duration_ms: 100,
+                outcome_counts: crate::OutcomeCounts::default(),
+                failures: Vec::new(),
+            })
+            .unwrap();
+        store.save_intervals(&IntervalStore::default()).unwrap();
+        store
+            .save_landed_deltas(&LandedDeltaStore::default())
+            .unwrap();
+        store
+            .save_source_postures(&SourcePostureStore::default())
+            .unwrap();
+        store
+            .save_frozen_band_baselines(&FrozenBandBaselineStore::default())
+            .unwrap();
+        store
+            .save_snapshot_store(&SnapshotStore::default())
+            .unwrap();
+        store
+            .save_schema(&DeployedSchema {
+                model: "m".to_string(),
+                version: 1,
+                deployed_at: Utc::now(),
+                model_hash: "sha256:abc".to_string(),
+                columns: vec![],
+            })
+            .unwrap();
+
+        assert!(
+            !dir.path().join(".smelt").exists(),
+            "stateless store must never create .smelt/"
+        );
+    }
+
+    /// `docs/specs/run_state.md` §"Locking": under `stateless` there is
+    /// nothing to lock — `.smelt/` need not exist.
+    #[test]
+    fn stateless_lock_is_a_noop() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+
+        let _guard = store.lock().unwrap();
+        assert!(
+            !dir.path().join(".smelt").exists(),
+            "stateless lock() must never create .smelt/"
+        );
+        assert!(!dir.path().join(".smelt").join("lock").exists());
+    }
+
+    /// `docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides": `intervals` writes manifests, reports, the interval
+    /// ledger, landed deltas, schema snapshots, source postures, and
+    /// frozen-band baselines — but not the snapshot/environment store.
+    #[test]
+    fn intervals_posture_writes_its_families_but_not_snapshots() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Intervals);
+
+        store.save_run(&test_manifest()).unwrap();
+        store
+            .save_report(&crate::RunReport {
+                run_id: "20260322-143022-abc123".to_string(),
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                duration_ms: 100,
+                outcome_counts: crate::OutcomeCounts::default(),
+                failures: Vec::new(),
+            })
+            .unwrap();
+        let mut intervals = IntervalStore::default();
+        intervals
+            .get_or_create("daily_revenue", "sha256:abc")
+            .record_interval("2026-01-01", "2026-01-02");
+        store.save_intervals(&intervals).unwrap();
+        let mut deltas = LandedDeltaStore::default();
+        deltas
+            .get_or_create("sources.orders")
+            .record_landing("2026-01-01", "2026-01-10");
+        store.save_landed_deltas(&deltas).unwrap();
+        store
+            .save_source_postures(&SourcePostureStore::default())
+            .unwrap();
+        store
+            .save_frozen_band_baselines(&FrozenBandBaselineStore::default())
+            .unwrap();
+        store
+            .save_schema(&DeployedSchema {
+                model: "daily_revenue".to_string(),
+                version: 1,
+                deployed_at: Utc::now(),
+                model_hash: "sha256:abc".to_string(),
+                columns: vec![],
+            })
+            .unwrap();
+
+        // Its own families landed on disk.
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/runs/20260322-143022-abc123.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/reports/20260322-143022-abc123.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/intervals.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/landed_deltas.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/source_postures.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/frozen_band_baselines.json")
+            .exists());
+        assert!(dir
+            .path()
+            .join(".smelt/targets/dev/schemas/daily_revenue.json")
+            .exists());
+
+        // The snapshot store is excluded.
+        store
+            .save_snapshot_store(&SnapshotStore::default())
+            .unwrap();
+        assert!(
+            !dir.path()
+                .join(".smelt/targets/dev/snapshots.json")
+                .exists(),
+            "intervals posture must not write the snapshot store"
+        );
+    }
+
+    /// `docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides": `environments` writes every observability family,
+    /// including the snapshot/environment store.
+    #[test]
+    fn environments_posture_writes_every_family() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Environments);
+
+        let mut snap = SnapshotStore::default();
+        snap.upsert(SnapshotEntry {
+            model: "orders".to_string(),
+            environment: "prod".to_string(),
+            physical_table: "orders__prod".to_string(),
+            source_sql: "SELECT * FROM raw.orders".to_string(),
+            fingerprint_hex: Some("fp_abc123".to_string()),
+        });
+        store.save_snapshot_store(&snap).unwrap();
+
+        assert!(
+            dir.path()
+                .join(".smelt/targets/dev/snapshots.json")
+                .exists(),
+            "environments posture must write the snapshot store"
+        );
+    }
+
+    /// `docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides": a `load_*` for a posture-excluded family returns the
+    /// family's default rather than erroring, so consumers degrade
+    /// gracefully instead of failing.
+    #[test]
+    fn excluded_family_loads_as_empty_not_error() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Intervals);
+
+        let loaded = store
+            .load_snapshot_store()
+            .expect("excluded family must load, not error");
+        assert!(loaded.is_empty());
+
+        let stateless_store = FileStore::new(dir.path(), "prod", StateMode::Stateless);
+        assert!(stateless_store
+            .load_runs(None)
+            .expect("excluded family must load, not error")
+            .is_empty());
+        assert!(stateless_store
+            .load_intervals()
+            .expect("excluded family must load, not error")
+            .models
+            .is_empty());
+        assert!(stateless_store
+            .load_schema("nonexistent")
+            .expect("excluded family must load, not error")
+            .is_none());
+    }
+
+    /// `docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides": the reconciliation ledger is a correctness structure and
+    /// is written under every posture, including `stateless` — guards
+    /// against over-gating it alongside the observability families.
+    #[test]
+    fn reconciliation_store_ignores_the_posture() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+
+        store
+            .save_reconciliation_store(&ReconciliationStore::default())
+            .unwrap();
+
+        assert!(
+            dir.path()
+                .join(".smelt/targets/dev/reconciliation.json")
+                .exists(),
+            "reconciliation ledger must write even under stateless"
+        );
+        let loaded = store.load_reconciliation_store().unwrap();
+        assert!(loaded.models.is_empty());
     }
 }
