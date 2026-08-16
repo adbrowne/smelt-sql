@@ -1,7 +1,7 @@
 # Outcome: Wire the definition-delta vertical (`smelt migrate`, v2 — narrow)
 
 **Created:** 2026-08-16
-**Status:** active
+**Status:** done
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 3);
 supersedes `docs/outcomes/20260815-definition-delta-migrate/` (this is that outcome's original
 narrow vertical — its phases 2–9 — without the 2026-08-15 build-everything widening)
@@ -374,6 +374,35 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   there. Full standing-gate sweep green (`verify-phase.sh`, `maintenance_conformance`,
   `statement_parity`, `execute_parity`, `walk_coverage`, `backbuild_docs`, `rebuild_dry_run`,
   `mkdocs build --strict`).
+
+- **2026-08-17 (close-out). Outcome complete — Status `done`.** All eleven rows are `done` and
+  every success criterion is met on the evidence of the phase summaries, re-checked at HEAD
+  `ae8cd984` with a clean worktree: (1) `smelt migrate` is a real CLI verb
+  (`main.rs::Commands::Migrate` → `commands/migrate.rs` → `smelt-runtime/src/migrate.rs`) that
+  runs diff → classify → emit and prints the per-group verdict/technique plan without executing
+  (phase 1); (2) the pure `plan_hash`, the `migration_approvals.rs` store, `--json`, and the
+  exit-code `3` contract gate `--apply` against drift (phase 2), with `--apply` executing the
+  approved plan transactionally per column group, re-recording the deployed definition and
+  resuming on reinvoke (phase 3); (3) the ranged-rebuild verb is `smelt rebuild` end to end with
+  a hard no-alias rename plus the standing `no_backbuild_verb_in_user_docs` ratchet (phase 4);
+  (4) `arb_schedule_with_definition_edit` plus two standing pool gates put definition edits under
+  the generative equivalence suite, and windowed runs now record the deployed definition so the
+  harness drives a migrate-based recovery step mid-history (phases 5–6); (5) the atomicity
+  divergence is closed by `resolve_definition_change_route` and the spec bullet is deleted
+  (phase 7); (6) the diagnostic is `MaintenanceSkeletonChanged` across code and sibling specs —
+  no `MaintenanceSkeletonColumnAdded` survives in `crates/`, `docs/specs/`, or `docs-site/docs/`
+  — and it fires ahead of a run for both the LSP and `smelt explain` via the
+  `ProjectInput::deployed_columns` Salsa input (phases 8–9); (7) `guide/backbuild-synthesis.md`
+  is rewritten around `smelt migrate`, a `## smelt migrate` reference section ships, the
+  `models.md`/`seeds.md` bullets are reworded to what the verb does not cover, and
+  `migrate_verb_is_documented` keeps the "no CLI command yet" claim from returning (phase 10);
+  (8) the validate sweep is clean, §References is live-path-gated by
+  `spec_references_are_live_paths`, and the four surviving §Known Divergences bullets are each
+  re-verified and repointed at their "## Out of scope" owner rather than at this outcome
+  (phase 11). Gate evidence this session: `bash .claude/scripts/verify-phase.sh` — ALL GREEN
+  (fmt-check, clippy zero-warnings, full workspace `cargo test` — which carries
+  `maintenance_conformance`, `statement_parity`, `execute_parity`, `walk_coverage`, and
+  `backbuild_docs` — and `example_diagnostics`).
 
 ## Blocked
 
