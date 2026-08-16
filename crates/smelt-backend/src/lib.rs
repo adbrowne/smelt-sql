@@ -25,8 +25,9 @@ use async_trait::async_trait;
 
 /// Map a backend's [`SqlDialect`] to the [`MaintenanceDialect`] the
 /// single-owner emitters key their dialect-specific variants on. The region
-/// `DELETE`+`INSERT` family this maps for today is dialect-invariant (no
-/// emitter branch actually reads it yet); `PostgreSQL` has no
+/// `DELETE`+`INSERT` family is dialect-invariant; the whole-row `MERGE`
+/// families are not — GoogleSQL accepts neither `UPDATE SET *` nor
+/// `INSERT *`, so `BigQuery` selects the spelled-out arms. `PostgreSQL` has no
 /// `smelt-backend-*` implementation, so it shares the `Spark` branch until
 /// one exists.
 pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
@@ -63,6 +64,34 @@ fn build_delete_insert_group(
     )
 }
 
+/// Refuse a whole-row `MERGE` whose dialect needs an explicit column list and
+/// was not given one.
+///
+/// DuckDB and Spark spell the matched arm `UPDATE SET *` and never read
+/// `columns`; GoogleSQL has no star form, so an empty list there would emit a
+/// syntactically valid `MERGE` whose matched arm assigns nothing — rows would
+/// silently stop being updated. Fail-loud discipline (`architecture.md`
+/// §"Fail-loud discipline") makes that an error naming the model, not a
+/// degraded write.
+pub fn require_merge_columns(
+    dialect: SqlDialect,
+    schema: &str,
+    table: &str,
+    columns: &[String],
+) -> Result<(), BackendError> {
+    if matches!(maintenance_dialect(dialect), MaintenanceDialect::BigQuery) && columns.is_empty() {
+        return Err(BackendError::execution_failed(
+            format!("{schema}.{table}"),
+            "column-scoped MERGE on BigQuery needs the model's output column list, and none was \
+             resolved — GoogleSQL has no `UPDATE SET *`, so the emitted matched arm would assign \
+             no columns. This usually means the model's output columns are not statically \
+             resolvable (e.g. a surviving `SELECT *`); name the columns in the model's projection."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the column-scoped `MERGE` [`StatementGroup`] for `Backend::
 /// merge_into`'s default implementation — the single call site every
 /// `Backend` impl routes through unless it overrides `merge_into` itself
@@ -72,6 +101,7 @@ fn build_column_scoped_merge_group(
     table: &str,
     source_sql: &str,
     unique_key: &[String],
+    columns: &[String],
     dialect: SqlDialect,
 ) -> StatementGroup {
     let table_name = format!("{schema}.{table}");
@@ -79,6 +109,7 @@ fn build_column_scoped_merge_group(
         &table_name,
         unique_key,
         source_sql,
+        columns,
         maintenance_dialect(dialect),
     )
 }
@@ -374,6 +405,11 @@ pub trait Backend: Send + Sync {
     /// full target row (see the emitter's doc comment for the full-row
     /// projection contract `UPDATE SET *` relies on).
     ///
+    /// `columns` names that same full target row. It is inert on the dialects
+    /// with a star form and **required** on BigQuery, whose GoogleSQL has
+    /// none — passing an empty list there emits a `MERGE` whose matched arm
+    /// updates nothing, so this method refuses rather than executing it.
+    ///
     /// Default implementation routes through the shared emitter and
     /// `execute_statement_group`; a backend only needs to override this if
     /// it cannot express the emitted `MERGE` text at all (see
@@ -388,9 +424,13 @@ pub trait Backend: Send + Sync {
         table: &str,
         source_sql: &str,
         unique_key: &[String],
+        columns: &[String],
     ) -> Result<(), BackendError> {
-        let group =
-            build_column_scoped_merge_group(schema, table, source_sql, unique_key, self.dialect());
+        let dialect = self.dialect();
+        require_merge_columns(dialect, schema, table, columns)?;
+        let group = build_column_scoped_merge_group(
+            schema, table, source_sql, unique_key, columns, dialect,
+        );
         self.execute_statement_group(&group).await
     }
 

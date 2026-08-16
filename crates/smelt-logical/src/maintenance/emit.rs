@@ -201,11 +201,24 @@ pub fn emit_delete_insert_delta_restricted(
 /// actually executes for `Technique::ColumnScopedMerge`
 /// (`crate::maintenance_driver::execute_column_scoped_merge`/
 /// `execute_column_scoped_merge_full` in `smelt-runtime`) —
-/// `WHEN MATCHED THEN UPDATE SET *`, `WHEN NOT MATCHED THEN INSERT *`. There
-/// is no column-list `SET` variant: DuckDB and Spark both key-match on
-/// `unique_key` and update every column from `source_select`'s projection
-/// (dialect-invariant text for this family — no branch reads `dialect` yet,
-/// kept for signature symmetry with the other emitters in this module).
+/// `WHEN MATCHED THEN UPDATE SET *`, `WHEN NOT MATCHED THEN INSERT *` on
+/// DuckDB and Spark, which both key-match on `unique_key` and update every
+/// column from `source_select`'s projection.
+///
+/// **BigQuery spells both arms out.** GoogleSQL accepts neither star form —
+/// `UPDATE SET *` fails with `Expected "(" but got "*"` and `INSERT *` with
+/// `Expected keyword ROW or keyword VALUES but got "*"`, both established
+/// against the live warehouse by `scripts/bigquery-probe-merge.sh` rather than
+/// read from documentation (`multi_backend.md` §Surface — a capability value
+/// comes from the warehouse). So the BigQuery branch renders the matched arm as
+/// `SET c = source.c` over `columns` and the not-matched arm as `INSERT ROW`.
+/// `columns` must therefore be the target's full output projection — the same
+/// full-row set `UPDATE SET *` already writes, so the two forms agree on which
+/// columns change. It is **inert on DuckDB and Spark**, whose text stays
+/// byte-identical whatever is passed, and an empty `columns` under BigQuery
+/// would silently emit a MERGE that updates nothing: callers must refuse that
+/// case before reaching here (fail-loud discipline), which is why no
+/// column-list-free BigQuery path exists in this emitter.
 ///
 /// **Full-row source-projection contract** (moved from
 /// `smelt-backend-duckdb`'s doc comment): `UPDATE SET *` requires
@@ -232,20 +245,55 @@ pub fn emit_column_scoped_merge(
     table: &str,
     unique_key: &[String],
     source_select: &str,
-    _dialect: MaintenanceDialect,
+    columns: &[String],
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let on = unique_key
         .iter()
         .map(|k| format!("target.{k} = source.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    let set = whole_row_update_set(columns, "source", dialect);
+    let insert = whole_row_insert_arm(dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
-             WHEN MATCHED THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN MATCHED THEN UPDATE SET {set} \
+             WHEN NOT MATCHED THEN {insert}"
         ))],
         transactional: false,
+    }
+}
+
+/// The assignment list of a whole-row `UPDATE SET`, in the grammar `dialect`
+/// accepts.
+///
+/// DuckDB and Spark take the star form and ignore `columns` entirely; BigQuery
+/// has no star form and is given `c = <alias>.c` for each column.
+/// `source_alias` names the `USING` relation, which differs by emitter
+/// (`source` for the column-scoped merge, `delta` for the keyed fold).
+fn whole_row_update_set(
+    columns: &[String],
+    source_alias: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "*".to_string(),
+        MaintenanceDialect::BigQuery => columns
+            .iter()
+            .map(|c| format!("{c} = {source_alias}.{c}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// The `WHEN NOT MATCHED` arm of a whole-row upsert. Needs no column list in
+/// either grammar, so emitters that render their own explicit `UPDATE SET`
+/// (the keyed folds) use this alone.
+fn whole_row_insert_arm(dialect: MaintenanceDialect) -> &'static str {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "INSERT *",
+        MaintenanceDialect::BigQuery => "INSERT ROW",
     }
 }
 
@@ -278,7 +326,8 @@ pub fn emit_column_scoped_merge_suppressed(
     unique_key: &[String],
     source_select: &str,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    columns: &[String],
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !compared_columns.is_empty(),
@@ -294,11 +343,13 @@ pub fn emit_column_scoped_merge_suppressed(
         .map(|c| format!("target.{c} IS DISTINCT FROM source.{c}"))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let set = whole_row_update_set(columns, "source", dialect);
+    let insert = whole_row_insert_arm(dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
-             WHEN MATCHED AND ({suppression}) THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET {set} \
+             WHEN NOT MATCHED THEN {insert}"
         ))],
         transactional: false,
     }
@@ -395,9 +446,10 @@ pub enum TargetSlicePredicate {
 /// never depend on it, so the emitter only assembles plain strings it is
 /// handed, never chooses or renders a combiner itself.
 ///
-/// `dialect` is accepted for signature symmetry with the other emitters in
-/// this module; the keyed-fold `MERGE` shape is currently dialect-invariant
-/// (no branch reads it yet).
+/// `dialect` selects the not-matched arm only. The matched arm is already an
+/// explicit `SET` list (the fold expressions), so unlike
+/// [`emit_column_scoped_merge`] this family needs no column list to reach
+/// GoogleSQL, which rejects `INSERT *` and takes `INSERT ROW`.
 ///
 /// `slice` is the target-scan slice predicate a locality-admitted model
 /// (`incremental_shapes.md` §"Key temporal locality") licenses: an extra
@@ -416,7 +468,7 @@ pub fn emit_keyed_fold(
     folds: &[(String, String)],
     delta_select: &str,
     slice: Option<&TargetSlicePredicate>,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let mut on = key
         .iter()
@@ -456,7 +508,8 @@ pub fn emit_keyed_fold(
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED THEN UPDATE SET {sets} \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN NOT MATCHED THEN {insert}",
+            insert = whole_row_insert_arm(dialect)
         ))],
         transactional: false,
     }
@@ -497,7 +550,7 @@ pub fn emit_keyed_fold_suppressed(
     delta_select: &str,
     slice: Option<&TargetSlicePredicate>,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !compared_columns.is_empty(),
@@ -558,7 +611,8 @@ pub fn emit_keyed_fold_suppressed(
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED AND ({suppression}) THEN UPDATE SET {sets} \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN NOT MATCHED THEN {insert}",
+            insert = whole_row_insert_arm(dialect)
         ))],
         transactional: false,
     }
@@ -3068,6 +3122,7 @@ mod column_scoped_merge_tests {
             "warehouse.dim_users",
             &keys(),
             "SELECT * FROM delta",
+            &[],
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(group.statements.len(), 1);
@@ -3089,6 +3144,7 @@ mod column_scoped_merge_tests {
             &keys(),
             "SELECT * FROM delta",
             &compared,
+            &[],
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(group.statements.len(), 1);
@@ -3111,6 +3167,7 @@ mod column_scoped_merge_tests {
             "warehouse.dim_users",
             &keys(),
             "SELECT * FROM delta",
+            &[],
             &[],
             MaintenanceDialect::DuckDb,
         );

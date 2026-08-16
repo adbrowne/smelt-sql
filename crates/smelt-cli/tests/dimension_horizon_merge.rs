@@ -76,7 +76,7 @@ fn horizon_merge_matches_full_rebuild_over_the_clamped_slice() {
         .expect("licensed horizon MERGE should succeed");
 
         backend
-            .merge_into("main", "dim_users", &source_sql, &["user_id".to_string()])
+            .merge_into("main", "dim_users", &source_sql, &["user_id".to_string()], &[])
             .await
             .unwrap_or_else(|e| panic!("horizon MERGE failed: {e}\nSQL: {source_sql}"));
 
@@ -105,6 +105,7 @@ fn horizon_merge_matches_full_rebuild_over_the_clamped_slice() {
                  WHERE conv_ts >= (TIMESTAMP '2026-07-05 01:00:00' - INTERVAL '86400 seconds') \
                  AND conv_ts <= TIMESTAMP '2026-07-05 01:00:00'",
                 &["user_id".to_string()],
+                &[],
             )
             .await
             .unwrap_or_else(|e| panic!("oracle merge failed: {e}"));

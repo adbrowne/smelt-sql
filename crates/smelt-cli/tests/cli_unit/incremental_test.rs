@@ -236,6 +236,8 @@ async fn test_incremental_merge() -> anyhow::Result<()> {
             GROUP BY 1, 2
         "#,
             &["revenue_date".to_string(), "user_id".to_string()],
+            // Inert on DuckDB, which spells the matched arm `UPDATE SET *`.
+            &[],
         )
         .await?;
 

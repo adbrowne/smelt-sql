@@ -46,6 +46,15 @@ fn second_batch_source_sql() -> &'static str {
      UNION ALL SELECT 'C', CAST(50 AS BIGINT)"
 }
 
+/// The target's full output projection, in order.
+///
+/// Inert on DuckDB and Spark, which spell the matched arm `UPDATE SET *`, and
+/// required on BigQuery, whose GoogleSQL has no star form — so passing it is
+/// what makes the same call work on all three.
+fn target_columns() -> Vec<String> {
+    vec!["user_id".to_string(), "total_score".to_string()]
+}
+
 /// Expected final state after the MERGE:
 /// - A: updated from 100 → 300
 /// - B: unchanged at 200 (not in the second batch)
@@ -113,6 +122,7 @@ fn cumulative_merge_matches_across_backends() {
                             "merge_target",
                             second_batch_source_sql(),
                             &["user_id".to_string()],
+                            &target_columns(),
                         )
                         .await
                         .unwrap_or_else(|e| panic!("DuckDB merge_into failed: {e}"));
@@ -154,6 +164,7 @@ fn cumulative_merge_matches_across_backends() {
                                 "merge_target",
                                 second_batch_source_sql(),
                                 &["user_id".to_string()],
+                                &target_columns(),
                             )
                             .await
                             .unwrap_or_else(|e| panic!("Spark merge_into failed: {e}"));
@@ -182,6 +193,7 @@ fn cumulative_merge_matches_across_backends() {
                             "merge_target",
                             second_batch_source_sql(),
                             &["user_id".to_string()],
+                            &target_columns(),
                         )
                         .await
                         .unwrap_or_else(|e| panic!("BigQuery merge_into failed: {e}"));

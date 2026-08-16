@@ -1066,6 +1066,7 @@ mod tests {
                 "users",
                 "SELECT * FROM (VALUES (1, 'Alice', 200), (2, 'Bob', 150)) AS t(id, name, score)",
                 &["id".to_string()],
+                &[],
             )
             .await
             .unwrap();
@@ -1107,6 +1108,7 @@ mod tests {
                 "items",
                 "SELECT * FROM (VALUES (2, 'B'), (3, 'C')) AS t(id, name)",
                 &["id".to_string()],
+                &[],
             )
             .await
             .unwrap();

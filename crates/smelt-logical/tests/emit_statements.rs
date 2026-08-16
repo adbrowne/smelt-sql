@@ -295,6 +295,7 @@ fn column_scoped_merge_duckdb_uses_set_star_full_row_projection() {
         &["event_id".to_string()],
         "SELECT event_id, event_date, user_id, event_type, user_name \
          FROM sources_raw_events e JOIN sources_raw_users u ON e.user_id = u.user_id",
+        &[],
         MaintenanceDialect::DuckDb,
     );
 
@@ -322,6 +323,7 @@ fn column_scoped_merge_composite_key_ands_every_column() {
         "cat.db.events",
         &["user_id".to_string(), "event_date".to_string()],
         "SELECT * FROM staging",
+        &[],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -330,6 +332,91 @@ fn column_scoped_merge_composite_key_ands_every_column() {
          target.user_id = source.user_id AND target.event_date = source.event_date \
          WHEN MATCHED THEN UPDATE SET * \
          WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// GoogleSQL has neither `UPDATE SET *` nor `INSERT *`, so the BigQuery
+/// variant spells the matched arm out column by column and uses `INSERT ROW`
+/// for the whole-row insert. Both refusals were established against the live
+/// warehouse (`scripts/bigquery-probe-merge.sh`), not read from documentation:
+/// `UPDATE SET *` fails with `Expected "(" but got "*"`, and `INSERT *` with
+/// `Expected keyword ROW or keyword VALUES but got "*"`.
+///
+/// The explicit `SET` list is the model's full output projection — the same
+/// full-row contract `UPDATE SET *` already imposes on `source_select` — so
+/// this writes exactly the columns the star form would have written.
+#[test]
+fn column_scoped_merge_bigquery_spells_out_the_matched_arm() {
+    let group = emit_column_scoped_merge(
+        "ds.daily_events",
+        &["event_id".to_string()],
+        "SELECT event_id, user_id, event_type FROM staging",
+        &[
+            "event_id".to_string(),
+            "user_id".to_string(),
+            "event_type".to_string(),
+        ],
+        MaintenanceDialect::BigQuery,
+    );
+
+    assert_eq!(group.statements.len(), 1);
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO ds.daily_events AS target USING (SELECT event_id, user_id, event_type FROM \
+         staging) AS source ON target.event_id = source.event_id \
+         WHEN MATCHED THEN UPDATE SET event_id = source.event_id, user_id = source.user_id, \
+         event_type = source.event_type \
+         WHEN NOT MATCHED THEN INSERT ROW"
+    );
+}
+
+/// `columns` is inert on the star-form dialects: passing a column list must
+/// not perturb DuckDB's or Spark's emitted text, which stays byte-identical to
+/// what every backend has always executed.
+#[test]
+fn column_scoped_merge_columns_do_not_affect_star_dialects() {
+    let with_columns = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id, 2 AS v",
+        &["id".to_string(), "v".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    let without_columns = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id, 2 AS v",
+        &[],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(with_columns, without_columns);
+    assert!(with_columns.statements[0]
+        .sql
+        .ends_with("WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *"));
+}
+
+/// The keyed fold already emits an explicit `UPDATE SET` (its fold
+/// expressions), so BigQuery only diverges on the not-matched arm — no column
+/// list is needed to lower it.
+#[test]
+fn keyed_fold_bigquery_uses_insert_row() {
+    let group = emit_keyed_fold(
+        "ds.totals",
+        &["user_id".to_string()],
+        &[(
+            "total".to_string(),
+            "target.total + delta.total".to_string(),
+        )],
+        "SELECT user_id, total FROM staging",
+        None,
+        MaintenanceDialect::BigQuery,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO ds.totals AS target USING (SELECT user_id, total FROM staging) AS delta ON \
+         target.user_id = delta.user_id \
+         WHEN MATCHED THEN UPDATE SET total = target.total + delta.total \
+         WHEN NOT MATCHED THEN INSERT ROW"
     );
 }
 
@@ -345,12 +432,14 @@ fn column_scoped_merge_dialect_invariant_shape() {
         "t",
         &["id".to_string()],
         "SELECT 1 AS id",
+        &[],
         MaintenanceDialect::DuckDb,
     );
     let spark = emit_column_scoped_merge(
         "t",
         &["id".to_string()],
         "SELECT 1 AS id",
+        &[],
         MaintenanceDialect::Spark,
     );
     assert_eq!(duckdb, spark);

@@ -170,6 +170,7 @@ mod tests {
             name: "test_model".to_string(),
             sql: "SELECT 1 as id, 'test' as name".to_string(),
             materialization: crate::config::Materialization::Table,
+            output_columns: Vec::new(),
         };
 
         let result = execute_model(&backend, &compiled, "main", false)
@@ -192,6 +193,7 @@ mod tests {
             name: "test_view".to_string(),
             sql: "SELECT 1 as id, 'test' as name".to_string(),
             materialization: crate::config::Materialization::View,
+            output_columns: Vec::new(),
         };
 
         let result = execute_model(&backend, &compiled, "main", false)
@@ -213,6 +215,7 @@ mod tests {
             name: "test_preview".to_string(),
             sql: "SELECT 1 as id UNION SELECT 2 UNION SELECT 3".to_string(),
             materialization: crate::config::Materialization::Table,
+            output_columns: Vec::new(),
         };
 
         let result = execute_model(&backend, &compiled, "main", true)

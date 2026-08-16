@@ -5920,6 +5920,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         "user_daily_spend",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &suppression,
         &window,
         &no_retry_policy(),

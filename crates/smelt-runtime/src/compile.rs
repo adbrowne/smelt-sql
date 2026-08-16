@@ -415,6 +415,48 @@ pub struct CompiledModel {
     pub name: String,
     pub sql: String,
     pub materialization: Materialization,
+    /// The model's output column names, in projection order.
+    ///
+    /// Empty when they are not statically resolvable — a surviving wildcard,
+    /// an unnamed item, or SQL whose top level is not a `SELECT`. Consumers
+    /// must treat empty as "unknown", never as "no columns": the
+    /// column-scoped `MERGE` on BigQuery needs this list and refuses loudly
+    /// without it (`smelt_backend::require_merge_columns`), because GoogleSQL
+    /// has no `UPDATE SET *` to fall back to.
+    pub output_columns: Vec<String>,
+}
+
+/// Derive a model's output column names from its compiled SQL.
+///
+/// Reads the same notion of "output column name" the analyzer's `model_schema`
+/// query reads — `SelectItem::column_name`, which resolves an alias when there
+/// is one and the bare column name otherwise — so the build path and the editor
+/// agree on what a model's columns are (`architecture.md` §"Diagnostic parity
+/// rule"). A wildcard makes the set unknowable here (its expansion needs the
+/// upstream schemas the analyzer resolves lazily), and an unknowable set is
+/// reported as empty rather than as a partial list a consumer might trust.
+fn output_column_names(sql: &str) -> Vec<String> {
+    let parse = smelt_parser::parse(sql);
+    let Some(file) = File::cast(parse.syntax()) else {
+        return Vec::new();
+    };
+    let Some(select_stmt) = file.select_stmt() else {
+        return Vec::new();
+    };
+    let Some(select_list) = select_stmt.select_list() else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for item in select_list.items() {
+        if item.is_wildcard() {
+            return Vec::new();
+        }
+        match item.column_name() {
+            Some(name) => names.push(name),
+            None => return Vec::new(),
+        }
+    }
+    names
 }
 
 fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
@@ -1403,6 +1445,7 @@ impl SqlCompiler {
             // Use the full address-based DB name (e.g. "staging_stg_events")
             // so the backend creates/accesses the correct table.
             name: model.db_name_owned(),
+            output_columns: output_column_names(&compiled_sql),
             sql: compiled_sql,
             materialization,
         })
@@ -1519,6 +1562,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&compiled_sql),
             sql: compiled_sql,
             materialization,
         })
@@ -1610,6 +1654,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&final_sql),
             sql: final_sql,
             materialization,
         })
@@ -2165,6 +2210,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&final_sql),
             sql: final_sql,
             materialization,
         })

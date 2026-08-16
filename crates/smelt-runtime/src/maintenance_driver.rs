@@ -2414,6 +2414,7 @@ pub async fn execute_column_scoped_merge_full(
     table: &str,
     unique_key: &[String],
     dimension_batch_sql: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
@@ -2427,6 +2428,7 @@ pub async fn execute_column_scoped_merge_full(
         table,
         unique_key,
         dimension_batch_sql,
+        columns,
         suppression,
         dialect,
         window,
@@ -2556,11 +2558,16 @@ async fn execute_column_scoped_write_with_observed_delta(
     table: &str,
     unique_key: &[String],
     source_select: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     dialect: MaintenanceDialect,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<(), BackendError> {
+    // Both arms below emit a whole-row MERGE, so a dialect without a star form
+    // needs `columns` populated. Refuse here — before either emitter runs —
+    // rather than let a matched arm that assigns nothing reach the warehouse.
+    smelt_backend::require_merge_columns(backend.dialect(), schema, table, columns)?;
     let full_table = format!("{schema}.{table}");
     match suppression {
         WriteSuppression::Suppressed { compared_columns } => {
@@ -2569,6 +2576,7 @@ async fn execute_column_scoped_write_with_observed_delta(
                 unique_key,
                 source_select,
                 compared_columns,
+                columns,
                 dialect,
             );
             if backend.dialect() != SqlDialect::DuckDB {
@@ -2607,7 +2615,8 @@ async fn execute_column_scoped_write_with_observed_delta(
             .await
         }
         WriteSuppression::Unconditional { .. } => {
-            let group = emit_column_scoped_merge(&full_table, unique_key, source_select, dialect);
+            let group =
+                emit_column_scoped_merge(&full_table, unique_key, source_select, columns, dialect);
             crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
                 .await
         }
@@ -3475,6 +3484,7 @@ pub async fn execute_column_scoped_merge(
     conv_ts_column: &str,
     conv_ts: &str,
     dimension_batch_sql: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
@@ -3498,6 +3508,7 @@ pub async fn execute_column_scoped_merge(
         table,
         unique_key,
         &source_sql,
+        columns,
         suppression,
         dialect,
         window,
@@ -3888,6 +3899,7 @@ mod tests {
             _table: &str,
             _source_sql: &str,
             _unique_key: &[String],
+            _columns: &[String],
         ) -> Result<(), BackendError> {
             unreachable!("driver merges via execute_sql, not native merge_into")
         }

@@ -466,6 +466,8 @@ mod integration {
                 "SELECT 1 AS id, 'Alice' AS name, 200 AS score \
                  UNION ALL SELECT 2 AS id, 'Bob' AS name, 150 AS score",
                 &["id".to_string()],
+                // Inert on Spark, which spells the matched arm `UPDATE SET *`.
+                &[],
             )
             .await;
 

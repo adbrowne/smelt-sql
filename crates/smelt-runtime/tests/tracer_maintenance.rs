@@ -179,6 +179,7 @@ fn ex07_dimension_churn_column_merge_equals_full_refresh() {
             "orders_tiered",
             &strings(&["order_id", "order_date"]),
             body,
+            &[],
             MaintenanceDialect::DuckDb,
         ),
     );
@@ -285,6 +286,7 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
                 "daily_revenue",
                 &strings(&["pay_date"]),
                 &count_body,
+                &[],
                 MaintenanceDialect::DuckDb,
             ),
         );

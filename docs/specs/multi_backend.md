@@ -197,6 +197,27 @@ capability flag above — never re-derived by a consumer. `supports_column_scope
 struct field; `supports_merge_not_matched_by_source` and `supports_staged_relation_group` are
 specified ahead of their own struct fields (see §Known Divergences).
 
+### Whole-row MERGE
+
+The column-scoped merge and keyed-fold emitters upsert a whole row, and the two SQL families
+spell that differently. DuckDB and Spark accept `WHEN MATCHED THEN UPDATE SET *` and `WHEN NOT
+MATCHED THEN INSERT *`, which name no columns. GoogleSQL accepts neither: `SET *` is a syntax
+error, and the whole-row insert is spelled `INSERT ROW`. So BigQuery's matched arm is rendered
+column by column, `c = source.c`, over the model's output projection.
+
+That projection is carried on the compiled model (`CompiledModel::output_columns`), derived from
+the compiled SQL's select list using the same notion of an output column name the analyzer's
+`model_schema` query uses — so the build path and the editor agree on what a model's columns are.
+It is **inert** wherever a star form exists: passing it never perturbs DuckDB's or Spark's
+emitted text.
+
+Where the projection is not statically resolvable — a surviving wildcard, an unnamed select item
+— the list is empty, and empty means *unknown*, never *no columns*. A backend needing the list
+refuses at that point rather than emitting a `MERGE` whose matched arm assigns nothing, which
+would silently stop updating matched rows. The keyed folds are exempt: their matched arm is
+already an explicit `SET` list of fold expressions, so only their not-matched arm varies by
+dialect and no column list is needed.
+
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
 not exist yet (first run against a fresh warehouse). When `requires_schema_init = true`, the
@@ -324,6 +345,11 @@ resolves nested widening to a table rewrite.
   carry a BigQuery leg. `NOT MATCHED BY SOURCE` is likewise uncovered, but for a different
   reason — no emitter produces the clause on any backend yet, so there is nothing to run.
   Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **A model whose output columns are not statically resolvable cannot use
+  `Technique::ColumnScopedMerge` on BigQuery.** The whole-row `MERGE` needs an explicit column
+  list there (see §"Whole-row MERGE"), and a surviving wildcard projection leaves that list
+  empty, so the run fails with an error naming the model rather than emitting a matched arm
+  that assigns nothing. DuckDB and Spark are unaffected — their `UPDATE SET *` needs no list.
 - **`cross_engine_parity` and `cross_engine_types_parity` are DuckDB↔Spark only.** They assert
   handoff between two live engines rather than looping over `targets_to_run`, so extending them
   to BigQuery means a new engine *pair*, not a third leg of an existing loop. The type-level

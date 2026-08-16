@@ -651,6 +651,7 @@ fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
         "daily_revenue",
         &strings(&["pay_date"]),
         &source_select,
+        &[],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(group.statements.len(), 1);

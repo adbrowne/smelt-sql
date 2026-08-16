@@ -604,6 +604,7 @@ fn build_technique_statements(
                 &table_name,
                 unique_key,
                 &compiled.sql,
+                &compiled.output_columns,
                 dialect,
             ))
         }
