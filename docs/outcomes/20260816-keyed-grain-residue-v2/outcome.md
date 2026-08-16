@@ -72,7 +72,7 @@ scope, and the pattern helpers ship as a `smelt.define` template file.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Snapshot-reconcile anti-join delete leg (transactional with the merge) + conformance key-departure staging, red-green against the oracle | planned |
+| 1 | Snapshot-reconcile anti-join delete leg (transactional with the merge) + conformance key-departure staging, red-green against the oracle | done |
 | 2 | `retain_departed` lattice-point triple in `smelt-logical` (declaration incl. tombstone, quotient oracle, probe) + `ContractRetainDepartedInvalid`; conformance gate consumes the oracle transform | pending |
 | 3 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | pending |
 | 4 | Frontier record for re-run-tolerant models gated on the project's state mode; `--auto` consults it | pending |
@@ -87,6 +87,10 @@ scope, and the pattern helpers ship as a `smelt.define` template file.
 - **Inherited (2026-08-16, decision track).** All product calls this outcome implements are
   recorded in `docs/research/20260816-open-questions-triage.md` and already landed as spec text
   (PR #167); this outcome makes no product decisions of its own.
+- **2026-08-17, phase 1.** The generative key-departure pool drives only `KeyedCombiner::
+  PlainOverwrite` — it's the only combiner family `is_snapshot_reconcile`'s classification arm
+  admits; every other family is refused fail-loud under snapshot-reconcile, so there is no
+  second admitted combiner to include.
 
 ## Blocked
 

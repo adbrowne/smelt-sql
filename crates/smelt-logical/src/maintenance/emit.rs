@@ -22,6 +22,7 @@
 //! never author maintenance-statement text of their own
 //! (`docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 
+use super::choice::WriteSuppression;
 use super::diff_patch::DeleteLeg;
 use super::ScanClamp;
 
@@ -560,6 +561,65 @@ pub fn emit_keyed_fold_suppressed(
              WHEN NOT MATCHED THEN INSERT *"
         ))],
         transactional: false,
+    }
+}
+
+/// The snapshot-reconcile keyed `MERGE` plus its departed-key anti-join
+/// `DELETE` (`docs/specs/incremental_shapes.md` §"Departed keys and
+/// deletion"): a snapshot-reconcile run re-scans the whole source every
+/// run, so a stored key absent from that scan has genuinely departed the
+/// upstream — this emitter deletes it in the same transaction as the
+/// reconciling `MERGE`, so both statements see one consistent snapshot of
+/// the source (a delta arriving between the two would otherwise let the
+/// `MERGE`'s view and the `DELETE`'s view of "departed" disagree).
+///
+/// The `MERGE` leg is byte-identical to [`emit_keyed_fold`] (`suppression`
+/// unconditional) or [`emit_keyed_fold_suppressed`] (suppressed) — this
+/// emitter adds no new `MERGE` shape of its own, only the paired `DELETE`.
+/// No `slice` parameter: a snapshot-reconcile model reconciles the whole
+/// target by construction (`incremental_shapes.md` §"The two run shapes" —
+/// there is no `[run_start, run_end)` window to slice against).
+///
+/// # Panics
+/// Panics under the same conditions as [`emit_keyed_fold_suppressed`] when
+/// `suppression` is [`WriteSuppression::Suppressed`] with an empty
+/// `compared_columns`, or a member not present in `folds`.
+pub fn emit_snapshot_reconcile(
+    schema_table: &str,
+    key: &[String],
+    folds: &[(String, String)],
+    delta_select: &str,
+    suppression: &WriteSuppression,
+    dialect: MaintenanceDialect,
+) -> StatementGroup {
+    let merge_group = match suppression {
+        WriteSuppression::Suppressed { compared_columns } => emit_keyed_fold_suppressed(
+            schema_table,
+            key,
+            folds,
+            delta_select,
+            None,
+            compared_columns,
+            dialect,
+        ),
+        WriteSuppression::Unconditional { .. } => {
+            emit_keyed_fold(schema_table, key, folds, delta_select, None, dialect)
+        }
+    };
+    let key_join_departed = key
+        .iter()
+        .map(|k| format!("{schema_table}.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let delete_departed = format!(
+        "DELETE FROM {schema_table} WHERE NOT EXISTS (SELECT 1 FROM ({delta_select}) AS s WHERE \
+         {key_join_departed})"
+    );
+    let mut statements = merge_group.statements;
+    statements.push(MaintenanceStatement::new(delete_departed));
+    StatementGroup {
+        statements,
+        transactional: true,
     }
 }
 

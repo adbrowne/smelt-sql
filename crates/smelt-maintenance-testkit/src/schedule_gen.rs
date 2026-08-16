@@ -689,6 +689,77 @@ pub fn scan_clamp_for<'a>(
     .and_then(|cell| cell.scans.iter().find(|c| c.source == source_name))
 }
 
+/// One mutation against a snapshot-reconcile keyed pool's staged `(id,
+/// attr)` `mutable_snapshot` source (`docs/outcomes/20260816-keyed-grain-
+/// residue-v2` phase 1) — the departure-staging counterpart of
+/// [`ConformanceStep`]'s clocked, append-only shape: this source has no
+/// clock column, so mutations replace rather than append.
+#[derive(Debug, Clone)]
+pub enum SnapshotMutation {
+    Insert { id: i64, val: i64 },
+    Update { id: i64, val: i64 },
+    Delete { id: i64 },
+}
+
+/// The bounded id pool [`arb_snapshot_mutation_schedule`] draws from —
+/// small enough that inserts/updates/deletes collide often (the interesting
+/// case: a key that departs and a key that only changes value).
+const SNAPSHOT_MUTATION_ID_POOL: i64 = 6;
+
+/// Deterministic-seeded generator for a snapshot-reconcile mutation
+/// schedule (`docs/specs/incremental_shapes.md` §"Departed keys and
+/// deletion"): a sequence of inserts/updates/deletes over a small shared id
+/// space. Freely generates a raw `(id, kind, val)` sequence, then repairs it
+/// in one pass so every [`SnapshotMutation::Delete`]/[`SnapshotMutation::Update`]
+/// targets an id a prior step in the SAME sequence already inserted — an
+/// `Update`/`Delete` drawn against a not-yet-live id becomes an `Insert`
+/// instead, mirroring [`arb_keyed_schedule`]'s own "repair rather than
+/// reject" generation style.
+pub fn arb_snapshot_mutation_schedule() -> impl Strategy<Value = Vec<SnapshotMutation>> {
+    #[derive(Debug, Clone, Copy)]
+    enum RawKind {
+        Insert,
+        Update,
+        Delete,
+    }
+
+    proptest::collection::vec(
+        (
+            1_i64..=SNAPSHOT_MUTATION_ID_POOL,
+            prop_oneof![
+                Just(RawKind::Insert),
+                Just(RawKind::Update),
+                Just(RawKind::Delete),
+            ],
+            arb_payload_value(),
+        ),
+        1..=8,
+    )
+    .prop_map(|raw| {
+        let mut live = std::collections::HashSet::new();
+        let mut out = Vec::with_capacity(raw.len());
+        for (id, kind, val) in raw {
+            let step = match kind {
+                RawKind::Insert | RawKind::Update if !live.contains(&id) => {
+                    live.insert(id);
+                    SnapshotMutation::Insert { id, val }
+                }
+                RawKind::Insert | RawKind::Update => SnapshotMutation::Update { id, val },
+                RawKind::Delete if live.contains(&id) => {
+                    live.remove(&id);
+                    SnapshotMutation::Delete { id }
+                }
+                RawKind::Delete => {
+                    live.insert(id);
+                    SnapshotMutation::Insert { id, val }
+                }
+            };
+            out.push(step);
+        }
+        out
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

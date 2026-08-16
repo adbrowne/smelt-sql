@@ -1056,18 +1056,18 @@ fn delete_row_keyed_snapshot(
     Ok(())
 }
 
-/// Phase 3 (`docs/plans/20260809-keyed-frontier.md`): drive the ONE family
-/// the admission matrix actually admits under snapshot-reconcile
-/// (plain-overwrite, `ANY_VALUE`) end to end through the real
-/// `execute_project` pipeline and the now-built snapshot-reconcile
-/// executor: seed rows, run (creation), mutate/delete/insert source rows,
-/// run again (reconcile), and assert the maintained table equals the
-/// current snapshot's own aggregation UNION the pre-mutation state of any
-/// key that departed the snapshot — the SAME retained-departed-keys
-/// carve-out `retained_departed_keys_adjusts_the_oracle` above pins as pure
-/// data, now exercised against a real backend.
+/// `docs/outcomes/20260816-keyed-grain-residue-v2` phase 1 (supersedes
+/// `snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys`,
+/// retired with the decision track's posture-derived deletion, PR #167):
+/// drive the ONE family the admission matrix actually admits under
+/// snapshot-reconcile (plain-overwrite, `ANY_VALUE`) end to end through the
+/// real `execute_project` pipeline and the anti-join delete leg: seed rows,
+/// run (creation), mutate/delete/insert source rows, run again (reconcile),
+/// and assert the maintained table equals the **unadjusted** full-scan
+/// oracle over the CURRENT source — no departed-keys exemption — plus an
+/// explicit check that the departed key's row is actually gone.
 #[tokio::test]
-async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys() {
+async fn snapshot_reconcile_plain_overwrite_settles_after_key_departure() {
     let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project = stage_keyed_recipe(&recipe, &tmp).expect("stage snapshot-reconcile recipe");
@@ -1100,68 +1100,136 @@ async fn snapshot_reconcile_plain_overwrite_settles_with_retained_departed_keys(
         assert!(equal, "creation run must equal the full-scan oracle");
     }
 
-    // Snapshot the pre-mutation source state — the retained-departed-keys
-    // formula needs the departing key's value AS OF BEFORE it departed.
-    {
-        let conn = project.connect().expect("connect");
-        conn.execute_batch(&format!(
-            "CREATE TABLE main.pre_mutation_snapshot AS SELECT * FROM main.sources_{}",
-            recipe.source.name
-        ))
-        .expect("snapshot pre-mutation state");
-    }
-
     // Mutate: update id=1's value, delete id=2 (genuine departure), insert
     // a fresh id=4.
     update_row_keyed_snapshot(&project, &recipe, 1, 999).expect("update id=1");
     delete_row_keyed_snapshot(&project, &recipe, 2).expect("delete id=2");
     insert_row_keyed_snapshot(&project, &recipe, 4, 400).expect("insert id=4");
 
-    // Second run: still no window — reconciles via the whole-source MERGE.
+    // Second run: still no window — reconciles via the whole-source MERGE +
+    // departed-key DELETE.
     project
         .run_quiet("snapshot-reconcile-2", base_request("dev"))
         .await
         .expect("second (reconcile) run must succeed");
 
-    let adjusted_oracle_sql = format!(
-        "{full_scan_oracle_sql} \
-         UNION ALL \
-         SELECT {key}, {attr} AS current_val FROM main.pre_mutation_snapshot \
-         WHERE {key} NOT IN (SELECT {key} FROM main.sources_{name})",
-        key = recipe.source.key_column,
-        attr = recipe.source.payload_column,
-        name = recipe.source.name,
-    );
     {
         let backend = project.backend().await.expect("backend");
         let equal =
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &adjusted_oracle_sql)
+            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &full_scan_oracle_sql)
                 .await
                 .expect("comparison must run");
         assert!(
             equal,
-            "reconcile run must equal the oracle's current rows plus the retained departed key"
+            "reconcile run must equal the unadjusted full-scan oracle — no departed-keys \
+             exemption under the default point"
         );
     }
 
     // Explicit assertion, not just the multiset comparison: the departed
-    // key (id=2) is present, unchanged from its PRE-mutation value (200) —
-    // not silently deleted.
+    // key (id=2) is gone, not retained.
     let conn = project.connect().expect("connect");
-    let departed_value: i64 = conn
+    let departed_count: i64 = conn
         .query_row(
             &format!(
-                "SELECT current_val FROM main.{} WHERE id = 2",
+                "SELECT COUNT(*) FROM main.{} WHERE id = 2",
                 recipe.model_name
             ),
             [],
             |row| row.get(0),
         )
-        .expect("departed key must still be present");
+        .expect("count query must run");
     assert_eq!(
-        departed_value, 200,
-        "the departed key must be RETAINED at its pre-departure value, never deleted"
+        departed_count, 0,
+        "the departed key must be DELETED under the default posture-derived-deletion point"
     );
+}
+
+/// Generative counterpart of
+/// `snapshot_reconcile_plain_overwrite_settles_after_key_departure`: for the
+/// snapshot-admitted combiner (plain-overwrite, `ANY_VALUE` — the only
+/// family the admission matrix currently admits under snapshot-reconcile,
+/// `crates/smelt-logical/src/rules/cumulative.rs`'s `is_snapshot_reconcile`
+/// arm), drive a generated insert/update/delete mutation schedule
+/// (`arb_snapshot_mutation_schedule`) through the real `execute_project`
+/// pipeline and assert the maintained table equals the unadjusted
+/// full-refresh oracle over the current source after EVERY step — no
+/// departed-keys exemption.
+#[test]
+fn snapshot_reconcile_pool_upholds_end_state_equivalence() {
+    use smelt_maintenance_testkit::schedule_gen::{
+        arb_snapshot_mutation_schedule, SnapshotMutation,
+    };
+
+    let n = keyed_case_count();
+    let mut runner = TestRunner::deterministic();
+    let schedule_strat = arb_snapshot_mutation_schedule();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    for i in 0..n {
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+        let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::PlainOverwrite);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: snapshot recipe failed to stage: {e}"));
+
+        rt.block_on(async {
+            let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+            let full_scan_oracle_sql = format!(
+                "SELECT {key}, ANY_VALUE({attr}) AS current_val FROM main.sources_{name} GROUP \
+                 BY {key}",
+                key = recipe.source.key_column,
+                attr = recipe.source.payload_column,
+                name = recipe.source.name,
+            );
+
+            for (step_idx, mutation) in schedule.iter().enumerate() {
+                match mutation {
+                    SnapshotMutation::Insert { id, val } => {
+                        insert_row_keyed_snapshot(&project, &recipe, *id, *val).unwrap_or_else(
+                            |e| panic!("case {i} step {step_idx}: insert failed: {e}"),
+                        );
+                    }
+                    SnapshotMutation::Update { id, val } => {
+                        update_row_keyed_snapshot(&project, &recipe, *id, *val).unwrap_or_else(
+                            |e| panic!("case {i} step {step_idx}: update failed: {e}"),
+                        );
+                    }
+                    SnapshotMutation::Delete { id } => {
+                        delete_row_keyed_snapshot(&project, &recipe, *id).unwrap_or_else(|e| {
+                            panic!("case {i} step {step_idx}: delete failed: {e}")
+                        });
+                    }
+                }
+
+                project
+                    .run_quiet(
+                        &format!("snapshot-pool-{i}-{step_idx}"),
+                        base_request("dev"),
+                    )
+                    .await
+                    .unwrap_or_else(|e| panic!("case {i} step {step_idx}: run failed: {e}"));
+
+                let backend = project.backend().await.expect("backend");
+                let equal = multiset_equal_via_backend(
+                    backend.as_ref(),
+                    &maintained_sql,
+                    &full_scan_oracle_sql,
+                )
+                .await
+                .unwrap_or_else(|e| {
+                    panic!("case {i} step {step_idx}: comparison failed to run: {e}")
+                });
+                assert!(
+                    equal,
+                    "case {i} step {step_idx}: maintained table diverged from the full-refresh \
+                     oracle after {mutation:?} — schedule so far: {:?}",
+                    &schedule[..=step_idx]
+                );
+            }
+        });
+    }
 }
 
 /// Phase 3: `--event-time-start`/`--event-time-end` on a snapshot-reconcile
