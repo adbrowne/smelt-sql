@@ -1,7 +1,7 @@
 # Outcome: Wire the definition-delta vertical (`smelt migrate`, v2 — narrow)
 
 **Created:** 2026-08-16
-**Status:** queued
+**Status:** active
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 3);
 supersedes `docs/outcomes/20260815-definition-delta-migrate/` (this is that outcome's original
 narrow vertical — its phases 2–9 — without the 2026-08-15 build-everything widening)
@@ -64,7 +64,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | pending |
+| 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | planned |
 | 2 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
 | 3 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | pending |
 | 4 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
@@ -83,6 +83,15 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   `MaintenanceSkeletonChanged`, one code, not an add/changed split. Both already landed in
   `docs/specs/definition_deltas.md` §Design / §Known Divergences; this outcome implements
   against them.
+- **2026-08-16 (phase 1 planning).** No phase reshape. Scoped into phase 1: state records only a
+  `definition_hash`, never the definition text, so there is no "before" side to diff. The recorded
+  definition SQL is persisted in the per-model deployed-schema snapshot
+  (`.smelt/targets/<target>/schemas/<model>.json`, a `#[serde(default)]` field so pre-existing
+  snapshots read back as "no recorded definition" — fail-closed). Spec §Detection already promises
+  smelt records the definition the table was last maintained under, so this implements the spec
+  rather than widening scope. Also decided: plan *derivation* is pure data in `smelt-logical`
+  (`backbuild/plan.rs`), fact assembly lives in `smelt-runtime` (so the UI can consume it), and the
+  CLI is a renderer only — keeping maintenance-plan purity and CLI↔UI parity intact.
 
 ## Blocked
 
