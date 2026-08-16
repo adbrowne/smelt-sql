@@ -86,7 +86,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
 | 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | done |
-| 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
+| 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | planned |
 | 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
@@ -327,6 +327,22 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   `Refusal::SkeletonColumnAdded`, merged into the primary result. See phase 9 summary "Decisions"
   for the full rationale and the follow-up this leaves (whether `Refusal` variants should carry
   trigger provenance to collapse the double-derivation into one pass).
+
+- **2026-08-17 (phase 10 planning). No phase reshape.** Phase 9's carry-forwards are follow-ups,
+  not criteria work. Reading the targets settled three things. (a) The `models.md`/`seeds.md`
+  bullets criterion 7 names are **spec** files, not docs-site pages, and both use `smelt migrate`
+  to mean a *config/seed-file rewrite assist* — a different verb from the shipped deployed-table
+  migration verb. They are therefore reworded (naming what the shipped verb does not cover), not
+  deleted, and `models.md`'s "(`smelt migrate` applies it)" fix-it parenthetical is corrected in
+  the same pass since it now points at the wrong verb. (b) `smelt migrate` has **no** docs-site
+  reference entry, so the rewritten guide would link into nothing; a `## smelt migrate` section in
+  `docs-site/docs/reference/cli.md` is scoped in — mirroring `definition_deltas.md` §Surface and
+  `cli.md` §"Exit codes" rather than inventing surface. (c) Hard constraint on the rewrite: the
+  guide is under a doc-sync gate (`crates/smelt-logical/tests/backbuild_docs.rs`) whose sweep fails
+  on any ```sql fence lacking a `backbuild-example` marker and whose `registry_matches_guide_markers`
+  fails on a dropped or renamed id — so every existing marked block stays verbatim and new CLI
+  examples use ```text/```console fences. A standing `migrate_verb_is_documented` ratchet lands
+  beside `no_backbuild_verb_in_user_docs` to keep the "no CLI command yet" claim from returning.
 
 ## Blocked
 
