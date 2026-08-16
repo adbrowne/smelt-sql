@@ -66,15 +66,32 @@ this outcome runs first in the programme.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
-| 2 | Thread `StateMode` through `execute_project`: each mode gates exactly the state families `state.md` assigns it; red-green per mode. Includes implementing phase 1's absent-state behaviours (`ProbeBaselineUnavailable`, absent-snapshot degradation) so criterion 4's "implementation matches" half is met | pending |
-| 3 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
-| 4 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
-| 5 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
-| 6 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` | pending |
-| 7 | Close-out: full standing-gate sweep, outcome status flip | pending |
+| 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | planned |
+| 3 | Absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | pending |
+| 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
+| 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
+| 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
+| 7 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` | pending |
+| 8 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
 
+- **2026-08-16 (phase 2 plan).** Split the old row 2 into two rows (posture threading; absent-state
+  runtime behaviours) and renumbered the tail 4–8. The old row bundled two independently testable
+  changes with different oracles — posture gating is verified by "which files exist after a run",
+  absent-state degradation by "which diagnostic is emitted" — and neither leaves the outcome:
+  criterion 1 is row 2, criterion 4's implementation half is row 3.
+- **2026-08-16 (phase 2 plan).** Adopted option (b) of phase 1's Blocked entry: the
+  `contract_lattice_spec::constraint_and_claude_md_state_the_lattice_invariant` regression is
+  repaired as phase 2's first task. Phase 2 already touches `crates/`, and no standing gate may
+  stay red while this outcome adds work behind it. The repair is test-side: post-redraft the
+  lattice-point invariant is a §Constraints & Invariants *bullet*, not a `###` subsection, so the
+  test's `section_body("### The contract, plan, and graph layer")` lookup becomes an
+  `h2_section_body("## Constraints & Invariants")` lookup asserting the same two substrings. No
+  spec text changes; the invariant's strength is unchanged.
+- **2026-08-16 (phase 2 plan).** Phase 1's row stays `blocked` (its deliverables all landed and
+  were verified per `phases/01-summary.md`; only the unrelated red gate blocked it). Phase 8's
+  close-out judges criterion 4 against phases 1 and 3 together.
 - **2026-08-16 (phase 1 plan).** Criterion 4 has two halves — spec sentence and matching
   implementation. Phase 1 is spec-only, so the implementation half is folded into phase 2's row
   (where posture gating already touches every baseline write site) rather than deferred out. No
