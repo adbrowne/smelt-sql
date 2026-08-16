@@ -158,6 +158,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let request = ExecuteRequest {
@@ -372,6 +373,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let mut graph = DependencyGraph::build(models.clone(), None)

@@ -85,7 +85,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
-| 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | planned |
+| 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | done |
 | 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
 | 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
@@ -312,6 +312,21 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   set (`derive_watch_globs`) gains `.smelt/targets/*/schemas/*.json` so a run that rewrites a
   snapshot refreshes the diagnostic without an editor restart; without it the surfaced diagnostic
   would be correct only until the next run, which criterion 6 would not honestly meet.
+
+- **2026-08-17 (phase 9 implementation).** Landed the `ProjectInput::deployed_columns` Salsa
+  input, populated at the workspace-loading edge (`workspace_ingest::read_deployed_columns`) and
+  consumed by `maintenance_plan` (LSP) and `maintenance_plan_report` (`smelt explain`), so
+  `MaintenanceSkeletonChanged` now fires ahead of a run. Caught, mid-phase, a real build
+  regression: threading the real snapshot straight into the primary maintenance-plan derivation
+  also surfaced `MaintenanceScanUnbounded` (and would surface other admission refusals) for
+  ordinary nullable-column additions that `smelt build`/`smelt run` actually handles via
+  `schema_evolution.rs`'s simpler ALTER-with-NULL-default route (phase 7) rather than
+  `smelt-logical`'s backfill-technique catalogue. Fixed with a double-derivation: the primary
+  plan derivation stays `&[]` (byte-identical pre-phase-9 behaviour for every non-skeleton
+  refusal); a secondary derivation with the real snapshot is consulted only to extract
+  `Refusal::SkeletonColumnAdded`, merged into the primary result. See phase 9 summary "Decisions"
+  for the full rationale and the follow-up this leaves (whether `Refusal` variants should carry
+  trigger provenance to collapse the double-derivation into one pass).
 
 ## Blocked
 

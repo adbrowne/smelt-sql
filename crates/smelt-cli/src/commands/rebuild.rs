@@ -137,6 +137,7 @@ pub async fn rebuild(args: RebuildArgs, scope: Option<&str>) -> Result<()> {
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     // rebuild always passes full_refresh: false — the upstream-closure

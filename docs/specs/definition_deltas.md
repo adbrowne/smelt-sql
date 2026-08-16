@@ -94,6 +94,14 @@ or by `smelt migrate --apply`; a windowed or incrementally-maintained run under 
 overwrites the recorded definition, so a pending definition delta survives — visible to `smelt
 migrate` — until it is migrated.
 
+Detection also fires **ahead of a run**: the deployed column names recorded in the per-model
+schema snapshot are read once, at workspace load — never inside an analysis query — and are the
+"before" side the pre-run skeleton-change diagnostic (`MaintenanceSkeletonChanged`) diffs
+against. Both the LSP and `smelt explain` read this same input, so a skeleton change (a column
+addition occupying a `GROUP BY`/partition key position) is flagged before either invokes a run or
+`smelt migrate`. A model with no recorded schema snapshot derives no definition-change trigger at
+all — fail-closed, never a guess.
+
 ### `smelt migrate`
 
 ```
@@ -482,12 +490,6 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   destructive candidate as a group's first candidate refuses to execute that group (and, by the
   all-groups-admitted-first rule, the whole plan) rather than running it unverified. Tracked:
   `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
-- **The diagnostic code is not yet surfaced ahead of a run.** `MaintenanceSkeletonChanged` is the
-  shipped `DiagnosticCode` variant and covers both mechanisms (the maintenance driver's refusal
-  and `smelt migrate`'s skeleton-change verdict), but `smelt-db`'s Salsa query has no
-  deployed-schema input to diff against — the code never fires ahead of a run for the LSP or
-  `smelt explain`. Tracked: `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`
-  phase 9.
 - **The pending-delta run refusal is not implemented.** §Detection's "`smelt run` refuses to fold
   data deltas while a non-eclipsed definition delta is pending" is not yet enforced: today a
   windowed or incrementally-maintained run under changed SQL folds data deltas under the new SQL

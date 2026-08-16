@@ -1588,3 +1588,75 @@ fn explain_json_guarantees_match_text() {
     let refusals = smelt_cli::explain::explain_refusals_json(&result);
     assert!(refusals.is_empty(), "daily_events is admitted, no refusals");
 }
+
+/// `smelt explain <model>`'s refusal block names `MaintenanceSkeletonChanged`
+/// for a GROUP BY key addition against a deployed-schema snapshot recorded
+/// under a *prior* definition — the pre-run surfacing this outcome's phase 9
+/// wires (`docs/specs/definition_deltas.md` §Detection): the deployed column
+/// names now come from the real `ProjectInput::deployed_columns` Salsa
+/// input, populated by `init_db` at workspace-loading time, not a hardcoded
+/// `&[]`.
+#[test]
+fn explain_refusal_block_names_skeleton_change() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+
+    let yml = "name: skeleton_fixture\n\
+               version: 1\n\
+               paths:\n  - models\n\
+               targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+               default_materialization: view\n\
+               state:\n  mode: intervals\n";
+    std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
+
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/events.yml"),
+        "description: events\ncolumns:\n- name: device_id\n  type: VARCHAR\n- name: user_id\n  type: VARCHAR\nmutation_profile:\n  kind: append_only\n",
+    )
+    .unwrap();
+
+    let model_sql = "---\n\
+                      materialization: table\n\
+                      refresh: incremental\n\
+                      grain: key\n\
+                      ---\n\
+                      SELECT device_id, user_id, COUNT(*) AS n \
+                      FROM smelt.sources.events GROUP BY device_id, user_id\n";
+    std::fs::write(tmp.path().join("models/device_user_counts.sql"), model_sql).unwrap();
+
+    // The deployed schema BEFORE the edit — only `device_id` was grouped by.
+    let store = smelt_state::file_store::FileStore::new(
+        tmp.path(),
+        "dev",
+        smelt_core::config::StateMode::Intervals,
+    );
+    store
+        .save_schema(&smelt_state::schema_tracking::DeployedSchema {
+            model: "device_user_counts".to_string(),
+            version: 1,
+            deployed_at: chrono::Utc::now(),
+            model_hash: "fixture-hash".to_string(),
+            columns: vec![
+                smelt_state::schema_tracking::DeployedColumn {
+                    name: "device_id".to_string(),
+                    data_type: "VARCHAR".to_string(),
+                    nullable: false,
+                },
+                smelt_state::schema_tracking::DeployedColumn {
+                    name: "n".to_string(),
+                    data_type: "BIGINT".to_string(),
+                    nullable: false,
+                },
+            ],
+            definition_sql: String::new(),
+        })
+        .expect("save deployed schema");
+
+    let report = build_report_for(tmp.path(), "device_user_counts")
+        .expect("device_user_counts is an incremental model with a maintenance plan");
+
+    assert!(
+        report.contains("MaintenanceSkeletonChanged"),
+        "expected the refusal block to name MaintenanceSkeletonChanged: {report}"
+    );
+}

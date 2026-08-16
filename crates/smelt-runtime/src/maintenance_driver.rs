@@ -1008,13 +1008,16 @@ pub fn resolve_live_column_scoped_cell(
 /// [`resolve_live_membership_recompute_cell`] above (which only ever
 /// inspect `NewData`/`UpstreamMutation` cells).
 ///
-/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` is the
-/// one caller with real access to the deployed-schema snapshot the runtime
-/// `schema_evolution` module already reads/writes
-/// (`crate::schema_evolution::infer_deployed_columns`/
+/// `deployed_column_names` is the caller's own I/O: `smelt-runtime` reads
+/// the deployed-schema snapshot directly via the runtime `schema_evolution`
+/// module (`crate::schema_evolution::infer_deployed_columns`/
 /// `save_deployed_schema`) — `derive_model_maintenance_plan` itself does no
-/// I/O (Salsa-purity rule). An empty slice (no known deployed schema) derives
-/// no trigger at all, same as `smelt-db`'s own diagnostic path.
+/// I/O (Salsa-purity rule). `smelt-db`'s own callers (the `maintenance_plan`
+/// Salsa query, `smelt explain`) now read the same kind of snapshot too, via
+/// the `ProjectInput::deployed_columns` Salsa input populated once at the
+/// workspace-loading edge (`workspace_ingest::read_deployed_columns`) rather
+/// than this runtime-side read. An empty slice (no known deployed schema)
+/// derives no trigger at all, in either path.
 ///
 /// Returns the admitted cell plus its ready-to-execute `(column,
 /// expression)` assignment pairs — the added columns' own defining

@@ -217,8 +217,17 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
 
     // Set the active target from the project's smelt.yml `target:` field
     // (symmetric with ingest_loaded_workspace — Workspace Loading Parity rule).
+    // Also populate the deployed-columns Salsa input for this same effective
+    // target, same rationale as `workspace_ingest::ingest_loaded_workspace`
+    // — callers that override the target afterwards (`run`, `build`,
+    // `rebuild`) re-populate for the real target via
+    // `set_project_deployed_columns`.
     if let Ok(cfg) = smelt_core::config::Config::load(project_dir) {
-        db.set_active_target(cfg.target.map(|t| std::sync::Arc::from(t.as_str())));
+        db.set_active_target(cfg.target.clone().map(|t| std::sync::Arc::from(t.as_str())));
+        let target = cfg.target.as_deref().unwrap_or("dev").to_string();
+        let columns =
+            smelt_db::workspace_ingest::read_deployed_columns(project_dir, &target, cfg.state.mode);
+        db.set_project_deployed_columns(project_dir, columns);
     }
 
     db

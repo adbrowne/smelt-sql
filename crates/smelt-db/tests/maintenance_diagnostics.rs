@@ -340,12 +340,14 @@ GROUP BY event_id
 /// `derive_model_maintenance_plan`'s new `deployed_column_names` parameter
 /// diffs the model's currently-projected columns against a supplied
 /// deployed-schema snapshot and, when the diff finds a genuinely new
-/// column, pushes a `Trigger::ColumnAdded` — `smelt-db`'s own callers (this
-/// module, `smelt explain`) have no I/O access to a real snapshot and
-/// always pass `&[]` (asserted by the earlier tests in this file never
-/// seeing the trigger fire); this test exercises the pure function
-/// directly with a caller-supplied snapshot, exactly as `smelt-runtime`'s
-/// maintenance driver does in production.
+/// column, pushes a `Trigger::ColumnAdded`. `smelt-db`'s own callers (this
+/// module, `smelt explain`) now read a real snapshot too — via the
+/// `ProjectInput::deployed_columns` Salsa input, populated once at the
+/// workspace-loading edge (`workspace_ingest::read_deployed_columns`), never
+/// inside this pure derivation itself (Salsa purity rule); this test
+/// exercises the pure function directly with a caller-supplied snapshot,
+/// exactly as `smelt-runtime`'s maintenance driver and `smelt-db`'s own
+/// Salsa-fed callers now both do in production.
 ///
 /// A column whose expression reads only already-stored columns (`val`, via
 /// `val * 2`) over an append-only source with no aggregation classifies
@@ -426,9 +428,11 @@ fn column_added_trigger_derived_from_deployed_schema() {
 /// `Refusal::SkeletonColumnAdded`, which `smelt-db`'s refusal→diagnostic
 /// mapping surfaces as `MaintenanceSkeletonChanged`
 /// (`crates/smelt-db/src/lib.rs`'s `file_diagnostics` match arm). That
-/// mapping is not exercised here — `maintenance_plan_diagnostics` always
-/// passes an empty deployed-column set (`docs/specs/definition_deltas.md`
-/// §Known Divergences), so this test drives the pure derivation directly.
+/// mapping is exercised end to end by
+/// `skeleton_change_fires_from_deployed_columns_input` below, which drives
+/// it through a real `ProjectInput::deployed_columns` snapshot; this test
+/// drives the pure derivation directly to pin the refusal shape in
+/// isolation.
 #[test]
 fn column_added_trigger_skeleton_position_refuses() {
     use smelt_core::config::{Grain, RefreshStrategy};
@@ -684,5 +688,180 @@ fn state_downgrade_surfaces_as_an_advisory_diagnostic() {
                 && d.message.contains("frontier record")),
         "the region-recompute (backfill) cell's own frontier-record downgrade must be among \
          them; got {downgrades:?}"
+    );
+}
+
+const SMELT_YML_INTERVALS: &str = r#"
+name: maintenance_diagnostics_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+state:
+  mode: intervals
+"#;
+
+const SKELETON_SOURCE: &str = r#"
+description: Events, append-only.
+mutation_profile: append_only
+columns:
+  - { name: device_id, type: VARCHAR, nullable: false }
+  - { name: user_id, type: VARCHAR, nullable: false }
+"#;
+
+const SKELETON_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, user_id, COUNT(*) AS n
+FROM smelt.sources.events
+GROUP BY device_id, user_id
+"#;
+
+/// Build a real on-disk workspace, optionally pre-seeding a deployed-schema
+/// snapshot at `.smelt/targets/dev/schemas/<model>.json` before ingest, then
+/// return the diagnostics for `model_file` — exercising the real
+/// `ProjectInput::deployed_columns` Salsa input
+/// (`workspace_ingest::read_deployed_columns`) end to end, rather than the
+/// pure-function-direct fixtures above.
+fn diagnostics_for_with_snapshot(
+    files: &[(&str, &str)],
+    model_file: &str,
+    schema: Option<smelt_state::schema_tracking::DeployedSchema>,
+) -> Vec<smelt_db::Diagnostic> {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    for (rel, content) in files {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+    }
+    if let Some(schema) = schema {
+        let store = smelt_state::file_store::FileStore::new(
+            &root,
+            "dev",
+            smelt_core::config::StateMode::Intervals,
+        );
+        store.save_schema(&schema).expect("save deployed schema");
+    }
+
+    let loaded = load_workspace(&root);
+    let mut db = smelt_db::Database::default();
+    let ingested = ingest_loaded_workspace(&mut db, &loaded);
+    db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
+    let ws = db.workspace();
+
+    let target_path = root.join("models").join(format!("{model_file}.sql"));
+    let file = ingested
+        .source_files
+        .iter()
+        .zip(ingested.paths.iter())
+        .find(|(_, p)| **p == target_path)
+        .map(|(f, _)| *f)
+        .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
+
+    smelt_db::file_diagnostics(&db, ws, file)
+}
+
+fn skeleton_fixture_deployed_schema(
+    columns: &[&str],
+) -> smelt_state::schema_tracking::DeployedSchema {
+    smelt_state::schema_tracking::DeployedSchema {
+        model: "device_user_counts".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "fixture-hash".to_string(),
+        columns: columns
+            .iter()
+            .map(|name| smelt_state::schema_tracking::DeployedColumn {
+                name: name.to_string(),
+                data_type: "VARCHAR".to_string(),
+                nullable: false,
+            })
+            .collect(),
+        definition_sql: String::new(),
+    }
+}
+
+/// A GROUP BY key addition against a deployed snapshot that lacks the new
+/// key column fires `MaintenanceSkeletonChanged` — read entirely from the
+/// `ProjectInput::deployed_columns` Salsa input populated at workspace-load
+/// time, not a hardcoded `&[]`. `docs/specs/definition_deltas.md` §Detection.
+#[test]
+fn skeleton_change_fires_from_deployed_columns_input() {
+    let diags = diagnostics_for_with_snapshot(
+        &[
+            ("smelt.yml", SMELT_YML_INTERVALS),
+            ("models/sources/events.yml", SKELETON_SOURCE),
+            ("models/device_user_counts.sql", SKELETON_MODEL),
+        ],
+        "device_user_counts",
+        Some(skeleton_fixture_deployed_schema(&["device_id", "n"])),
+    );
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+        "expected MaintenanceSkeletonChanged for a GROUP BY key addition against a snapshot \
+         missing 'user_id'; got {diags:?}"
+    );
+}
+
+/// A deployed snapshot that already lists every current output column
+/// yields no maintenance diagnostic — no false positive when the recorded
+/// definition matches the current one.
+#[test]
+fn deployed_columns_matching_current_sql_yield_no_diagnostic() {
+    let diags = diagnostics_for_with_snapshot(
+        &[
+            ("smelt.yml", SMELT_YML_INTERVALS),
+            ("models/sources/events.yml", SKELETON_SOURCE),
+            ("models/device_user_counts.sql", SKELETON_MODEL),
+        ],
+        "device_user_counts",
+        Some(skeleton_fixture_deployed_schema(&[
+            "device_id",
+            "user_id",
+            "n",
+        ])),
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+        "a snapshot matching the current output columns must not fire a definition-change \
+         diagnostic; got {diags:?}"
+    );
+}
+
+/// No deployed-schema snapshot at all (no prior run under this target) —
+/// today's fail-closed behaviour: an empty trigger set, never a guess.
+#[test]
+fn missing_snapshot_yields_no_definition_change_trigger() {
+    let diags = diagnostics_for_with_snapshot(
+        &[
+            ("smelt.yml", SMELT_YML_INTERVALS),
+            ("models/sources/events.yml", SKELETON_SOURCE),
+            ("models/device_user_counts.sql", SKELETON_MODEL),
+        ],
+        "device_user_counts",
+        None,
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+        "no deployed snapshot exists, so no definition-change trigger should derive; got \
+         {diags:?}"
     );
 }

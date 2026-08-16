@@ -1276,6 +1276,7 @@ pub fn write_pin_diagnostics(
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
 /// only gathers `source_refs`/`metadata`/`sql` and calls this.
+#[allow(clippy::too_many_arguments)]
 pub fn maintenance_plan_diagnostics(
     sql: &str,
     table: &str,
@@ -1284,6 +1285,7 @@ pub fn maintenance_plan_diagnostics(
     project_scan_bounds: Option<&ScanBoundsConfig>,
     extra_model_sources: &[(SourceFacts, Granularity)],
     active_backends: &[String],
+    deployed_column_names: &[String],
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
@@ -1319,6 +1321,20 @@ pub fn maintenance_plan_diagnostics(
     let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
     let source_referential_integrity = build_source_referential_integrity(source_refs);
+    // Primary derivation always uses `&[]` — byte-identical to this
+    // function's pre-existing behaviour for every non-skeleton-change
+    // refusal (`MaintenanceScanUnbounded`, `MaintenanceNoAdmissibleTechnique`,
+    // …). `smelt-runtime`'s maintenance driver, not the LSP/build-gate
+    // diagnostic surface, is the production caller that resolves a
+    // `ColumnAdded` cell's *backfill technique* (which genuinely needs an
+    // unbounded source scan to recompute historical rows); ordinary
+    // `smelt build`/`smelt run` never attempts that backfill at all — a
+    // nullable column addition takes `schema_evolution.rs`'s simpler
+    // ALTER-with-NULL-default route instead (`docs/specs/schema_evolution.md`
+    // §"Routing on a maintained model"). Threading a real snapshot straight
+    // into this primary derivation would surface `MaintenanceScanUnbounded`
+    // as a build-blocking diagnostic for definition changes that build
+    // never refuses in practice.
     let Some(result) = derive_model_maintenance_plan(
         sql,
         table,
@@ -1327,10 +1343,6 @@ pub fn maintenance_plan_diagnostics(
         &explicitly_mutable,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt-db` diagnostics/`smelt explain` have no I/O access to the
-        // deployed-schema snapshot (Salsa purity) — no `ColumnAdded`
-        // trigger is derivable here; `smelt-runtime`'s maintenance driver
-        // is the production caller that supplies a real snapshot.
         &[],
         &source_referential_integrity,
         smelt_logical::maintenance::availability::StateAvailability::all(),
@@ -1340,10 +1352,43 @@ pub fn maintenance_plan_diagnostics(
             ..Default::default()
         };
     };
+    // Secondary derivation, real deployed-column-names input
+    // (`workspace_ingest::read_deployed_columns`): consulted ONLY to detect
+    // a skeleton-position column add (a grain change — `Refusal::
+    // SkeletonColumnAdded`), which no ordinary run route can ever apply
+    // atomically, so it belongs in the pre-run diagnostic surface exactly
+    // like `smelt-runtime`'s own run-time refusal. Every other refusal kind
+    // this secondary run might derive is discarded — the primary derivation
+    // above is still their single source of truth.
+    let skeleton_column_added = if deployed_column_names.is_empty() {
+        None
+    } else {
+        derive_model_maintenance_plan(
+            sql,
+            table,
+            metadata,
+            &sources,
+            &explicitly_mutable,
+            driving_source_granularity,
+            &key_recurrences,
+            deployed_column_names,
+            &source_referential_integrity,
+            smelt_logical::maintenance::availability::StateAvailability::all(),
+        )
+        .and_then(|r| {
+            r.plan.refusals.into_iter().find(|r| {
+                matches!(
+                    r,
+                    smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. }
+                )
+            })
+        })
+    };
     let refusals = result
         .plan
         .refusals
         .iter()
+        .chain(skeleton_column_added.iter())
         .filter_map(|r| match r {
             smelt_logical::maintenance::Refusal::ScanUnbounded { source, why } => {
                 Some(MaintenanceRefusal::ScanUnbounded {

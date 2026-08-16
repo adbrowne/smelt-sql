@@ -380,6 +380,15 @@ pub struct ProjectInput {
     /// the file changes on disk, keeping Salsa's change detection valid.
     #[returns(ref)]
     pub smelt_yml_text: String,
+    /// Deployed column names per model, read once at the workspace-loading
+    /// edge (`workspace_ingest::read_deployed_columns`) from the effective
+    /// target's `.smelt/targets/<target>/schemas/<model>.json` snapshots —
+    /// never inside an analysis query (Salsa purity rule). A model absent
+    /// from this list has no recorded deployed schema and derives no
+    /// definition-change trigger (fail-closed, never a guess). Deterministically
+    /// sorted by model name. `docs/specs/definition_deltas.md` §Detection.
+    #[returns(ref)]
+    pub deployed_columns: Vec<(String, Vec<String>)>,
 }
 
 /// Workspace-level singleton input tracking the full set of files and projects.
@@ -498,7 +507,8 @@ impl Database {
                 project
             }
             None => {
-                let project = ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text);
+                let project =
+                    ProjectInput::new(self, root.clone(), sources_yaml, smelt_yml_text, Vec::new());
                 self.projects.write().unwrap().insert(root, project);
                 project
             }
@@ -513,6 +523,25 @@ impl Database {
         let project = self.projects.read().unwrap().get(root).copied();
         if let Some(project) = project {
             project.set_smelt_yml_text(self).to(smelt_yml_text);
+        }
+    }
+
+    /// Update the deployed-column-names input for an already-registered
+    /// project. The only mutation point for `ProjectInput::deployed_columns`
+    /// — called once at workspace-loading time
+    /// (`workspace_ingest::read_deployed_columns`) and again whenever a
+    /// `--target` override changes the effective target after ingest, or a
+    /// run rewrites a schema snapshot (LSP watch-glob refresh). A no-op if
+    /// `root` has no registered `ProjectInput` yet.
+    pub fn set_project_deployed_columns(
+        &mut self,
+        root: &Path,
+        columns: Vec<(String, Vec<String>)>,
+    ) {
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        let project = self.projects.read().unwrap().get(root).copied();
+        if let Some(project) = project {
+            project.set_deployed_columns(self).to(columns);
         }
     }
 
@@ -1710,6 +1739,8 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    let deployed_column_names = deployed_columns_for(db, project, &table);
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
@@ -1718,7 +1749,28 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        &deployed_column_names,
     ))
+}
+
+/// Look up `table`'s deployed column names from `project`'s
+/// `ProjectInput::deployed_columns` input (empty if `project` is `None` or
+/// `table` has no recorded deployed schema — fail-closed, never a guess).
+/// Shared by [`maintenance_plan`] and [`maintenance_plan_report`] so both
+/// consumers read the same edge-populated input the same way.
+fn deployed_columns_for(
+    db: &dyn salsa::Database,
+    project: Option<ProjectInput>,
+    table: &str,
+) -> Vec<String> {
+    project
+        .and_then(|p| {
+            p.deployed_columns(db)
+                .iter()
+                .find(|(name, _)| name == table)
+                .map(|(_, cols)| cols.clone())
+        })
+        .unwrap_or_default()
 }
 
 /// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
@@ -1861,6 +1913,15 @@ pub fn maintenance_plan_report(
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let source_referential_integrity =
         crate::queries::maintenance::build_source_referential_integrity(&source_refs);
+    let deployed_column_names = deployed_columns_for(db, project, &table);
+    // Primary derivation always uses `&[]` — same rationale as
+    // `queries::maintenance::maintenance_plan_diagnostics`'s own primary
+    // call: a real deployed-schema snapshot would surface
+    // `MaintenanceScanUnbounded`/other backfill-technique refusals for
+    // definition changes that `smelt build`/`smelt run` never actually
+    // routes through that technique (they take `schema_evolution.rs`'s
+    // simpler ALTER-with-NULL-default route instead), which would make
+    // `smelt explain`'s refusal block misleading about what a real run does.
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1870,13 +1931,42 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt explain`'s report path has no I/O access to the
-        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
-        // own call site for the same rationale.
         &[],
         &source_referential_integrity,
         crate::queries::maintenance::state_availability_for(dialect_name),
     )?;
+    // Secondary derivation, real deployed-column-names input: consulted
+    // ONLY to detect a skeleton-position column add (a grain change), which
+    // no ordinary run route can ever apply atomically — see
+    // `queries::maintenance::maintenance_plan_diagnostics`'s own secondary
+    // derivation for the full rationale.
+    if !deployed_column_names.is_empty() {
+        if let Some(skeleton_refusal) =
+            crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
+                sql_body,
+                &table,
+                &metadata,
+                &sources,
+                &explicitly_mutable,
+                &model_edges,
+                driving_source_granularity,
+                &key_recurrences,
+                &deployed_column_names,
+                &source_referential_integrity,
+                crate::queries::maintenance::state_availability_for(dialect_name),
+            )
+            .and_then(|r| {
+                r.plan.refusals.into_iter().find(|r| {
+                    matches!(
+                        r,
+                        smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. }
+                    )
+                })
+            })
+        {
+            result.plan.refusals.push(skeleton_refusal);
+        }
+    }
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
     // row 9): only a `grain: key` model can carry state-bearing columns

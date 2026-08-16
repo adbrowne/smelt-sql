@@ -60,7 +60,15 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
     // override is supplied, keeping discovery symmetric (Workspace Loading Parity rule).
     // Calling this before register_loader_files_from_disk ensures the Workspace
     // singleton exists so loader files are added to its loader_files list.
+    let effective_target = loaded.config.target.as_deref().unwrap_or("dev").to_string();
     db.set_active_target(loaded.config.target.as_deref().map(Arc::from));
+
+    let deployed_columns = read_deployed_columns(
+        &loaded.project_root,
+        &effective_target,
+        loaded.config.state.mode,
+    );
+    db.set_project_deployed_columns(&loaded.project_root, deployed_columns);
 
     register_loader_files_from_disk(db, &loaded.project_root);
 
@@ -69,6 +77,36 @@ pub fn ingest_loaded_workspace(db: &mut Database, loaded: &LoadedWorkspace) -> I
         source_files,
         paths,
     }
+}
+
+/// Read every model's deployed column names from
+/// `.smelt/targets/<target>/schemas/<model>.json` for `project_root`'s
+/// effective target. The "before" side the pre-run skeleton-change
+/// diagnostic diffs against (`docs/specs/definition_deltas.md` §Detection).
+///
+/// Read once at the workspace-loading edge — never inside a Salsa analysis
+/// query (the Salsa purity rule). A missing `.smelt/`, a `state.mode` that
+/// doesn't persist schema snapshots (`StateMode::Stateless`), or an
+/// unparsable snapshot yields no entry for that model, never a panic and
+/// never a guess (fail-closed). Deterministically sorted by model name so
+/// the Salsa input's equality check is stable.
+pub fn read_deployed_columns(
+    project_root: &Path,
+    target: &str,
+    mode: smelt_core::config::StateMode,
+) -> Vec<(String, Vec<String>)> {
+    let store = smelt_state::file_store::FileStore::new(project_root, target, mode);
+    let mut columns: Vec<(String, Vec<String>)> = store
+        .list_deployed_model_names()
+        .into_iter()
+        .filter_map(|model_name| {
+            let schema = store.load_schema(&model_name).ok().flatten()?;
+            let names = schema.columns.into_iter().map(|c| c.name).collect();
+            Some((model_name, names))
+        })
+        .collect();
+    columns.sort_by(|a, b| a.0.cmp(&b.0));
+    columns
 }
 
 /// Scan `project_root` recursively for YAML/JSON/TOML data files and register
@@ -228,6 +266,47 @@ mod tests {
 
         let ws = crate::Workspace::try_get(&db).expect("workspace not initialized");
         assert!(ws.active_target(&db).is_none());
+    }
+
+    #[test]
+    fn ingest_populates_deployed_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: t\nversion: 1\npaths:\n  - models\ntarget: dev\nstate:\n  mode: intervals\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let store = smelt_state::file_store::FileStore::new(
+            dir.path(),
+            "dev",
+            smelt_core::config::StateMode::Intervals,
+        );
+        store
+            .save_schema(&smelt_state::schema_tracking::DeployedSchema {
+                model: "a".to_string(),
+                version: 1,
+                deployed_at: chrono::Utc::now(),
+                model_hash: "hash".to_string(),
+                columns: vec![smelt_state::schema_tracking::DeployedColumn {
+                    name: "x".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                }],
+                definition_sql: String::new(),
+            })
+            .unwrap();
+
+        let loaded = load_workspace(dir.path());
+        let mut db = Database::default();
+        let ingested = ingest_loaded_workspace(&mut db, &loaded);
+
+        assert_eq!(
+            ingested.project.deployed_columns(&db),
+            &vec![("a".to_string(), vec!["x".to_string()])],
+        );
     }
 
     #[test]

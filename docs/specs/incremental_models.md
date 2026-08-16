@@ -2024,10 +2024,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
   poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
   assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonChanged` is reachable (unit coverage, and via `smelt-runtime`'s
-  maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
-  but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
-  diagnostics/`smelt explain` path always derives an empty trigger set);
+  `MaintenanceSkeletonChanged` is reachable both via `smelt-runtime`'s maintenance driver at run
+  time and, ahead of a run, via `smelt-db`'s own Salsa query against the
+  `ProjectInput::deployed_columns` input (`definition_deltas.md` §Detection), so the LSP and
+  `smelt explain` both surface it before a run or `smelt migrate` invocation;
   column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
   is declared surface but propagation is day-ordinal; the built grain-alignment check
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and

@@ -1,7 +1,7 @@
 //! The LSP backend: `Backend` struct and `LanguageServer` trait impl.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -163,10 +163,14 @@ fn collect_function_call_sites(
 
 /// Derive file-system watcher patterns for a set of project roots.
 ///
-/// Returns two `FileSystemWatcher` entries per project root:
+/// Returns three `FileSystemWatcher` entries per project root:
 /// - `<root>/**/*.sql` — covers every discoverable `.sql` (any non-excluded
 ///   `.sql` is a model or function per universal discovery D-01/D-05)
 /// - `<root>/**/*.py` — covers Python model files
+/// - `<root>/.smelt/targets/*/schemas/*.json` — deployed-schema snapshots; a
+///   run that rewrites one (`docs/specs/definition_deltas.md` §Detection)
+///   must refresh the `MaintenanceSkeletonChanged` diagnostic without an
+///   editor restart (`ProjectInput::deployed_columns`).
 ///
 /// LSP glob patterns have no exclusion syntax, so the hidden-dir and `target/`
 /// skip-list is enforced at the handler level: files in those paths are not
@@ -184,8 +188,35 @@ pub(crate) fn derive_watch_globs(project_roots: &[PathBuf]) -> Vec<FileSystemWat
             glob_pattern: GlobPattern::String(format!("{root_str}/**/*.py")),
             kind: Some(WatchKind::all()),
         });
+        watchers.push(FileSystemWatcher {
+            glob_pattern: GlobPattern::String(format!(
+                "{root_str}/.smelt/targets/*/schemas/*.json"
+            )),
+            kind: Some(WatchKind::all()),
+        });
     }
     watchers
+}
+
+/// If `path` is a deployed-schema snapshot (`.smelt/targets/<target>/schemas/
+/// <model>.json`), return its `(project_root, target)`. Used by
+/// `did_change_watched_files` to decide whether to re-read
+/// `ProjectInput::deployed_columns` for the project that owns it.
+fn deployed_schema_snapshot_target(path: &Path) -> Option<(PathBuf, String)> {
+    let comps: Vec<&std::ffi::OsStr> = path.components().map(|c| c.as_os_str()).collect();
+    let smelt_idx = comps.iter().rposition(|c| *c == ".smelt")?;
+    if comps.get(smelt_idx + 1)? != &std::ffi::OsStr::new("targets") {
+        return None;
+    }
+    let target = comps.get(smelt_idx + 2)?.to_str()?.to_string();
+    if comps.get(smelt_idx + 3)? != &std::ffi::OsStr::new("schemas") {
+        return None;
+    }
+    if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        return None;
+    }
+    let project_root: PathBuf = comps[..smelt_idx].iter().copied().collect();
+    Some((project_root, target))
 }
 
 impl Backend {
@@ -1252,6 +1283,26 @@ impl LanguageServer for Backend {
                         &project_root,
                     );
 
+                    // Deployed-column-names input for the pre-run
+                    // `MaintenanceSkeletonChanged` diagnostic
+                    // (`docs/specs/definition_deltas.md` §Detection) — read
+                    // once here at the workspace-loading edge, same
+                    // effective-target rule `workspace_ingest::
+                    // ingest_loaded_workspace` uses (`smelt.yml`'s `target:`
+                    // field, defaulting to `"dev"`). Kept fresh afterwards by
+                    // the `.smelt/targets/*/schemas/*.json` watch glob
+                    // (`derive_watch_globs`) via `did_change_watched_files`.
+                    {
+                        let effective_target =
+                            loaded.config.target.as_deref().unwrap_or("dev").to_string();
+                        let columns = smelt_db::workspace_ingest::read_deployed_columns(
+                            &project_root,
+                            &effective_target,
+                            loaded.config.state.mode,
+                        );
+                        db.set_project_deployed_columns(&project_root, columns);
+                    }
+
                     // Register SQL files via register_sql_content so the LSP's
                     // multi-model line-offset tracking populates correctly.
                     // Dedup by real path — multi-model files appear once per
@@ -1662,7 +1713,34 @@ impl LanguageServer for Backend {
                 Err(_) => continue,
             };
 
-            if path.extension().and_then(|s| s.to_str()) == Some("py") {
+            if let Some((project_root, target)) = deployed_schema_snapshot_target(&path) {
+                // A run rewrote a deployed-schema snapshot
+                // (`docs/specs/definition_deltas.md` §Detection) — re-read
+                // `ProjectInput::deployed_columns` for this project so
+                // `MaintenanceSkeletonChanged` refreshes without an editor
+                // restart. Only the effective target's own snapshots move
+                // the input; a change under a different target's `.smelt/`
+                // subtree is irrelevant to this project's single-valued
+                // input.
+                let effective_target = smelt_core::config::Config::load(&project_root)
+                    .ok()
+                    .and_then(|c| c.target)
+                    .unwrap_or_else(|| "dev".to_string());
+                if target == effective_target {
+                    let mode = smelt_core::config::Config::load(&project_root)
+                        .map(|c| c.state.mode)
+                        .unwrap_or_default();
+                    let columns = smelt_db::workspace_ingest::read_deployed_columns(
+                        &project_root,
+                        &target,
+                        mode,
+                    );
+                    let mut db = self.db.lock().await;
+                    db.set_project_deployed_columns(&project_root, columns);
+                    drop(db);
+                    self.publish_all_diagnostics().await;
+                }
+            } else if path.extension().and_then(|s| s.to_str()) == Some("py") {
                 self.handle_python_file_change(&path).await;
             } else if is_sources_file(&path) {
                 // Re-read sources.yml from disk when changed outside the editor
@@ -5558,9 +5636,11 @@ mod watch_glob_tests {
         }
     }
 
-    /// Verify `derive_watch_globs` produces two root-scoped watchers per root:
-    /// one for `**/*.sql` (all discoverable SQL) and one for `**/*.py`.
-    /// The patterns must not restrict to `models/` or `functions/`.
+    /// Verify `derive_watch_globs` produces three root-scoped watchers per
+    /// root: one for `**/*.sql` (all discoverable SQL), one for `**/*.py`,
+    /// and one for `.smelt/targets/*/schemas/*.json` (deployed-schema
+    /// snapshots). The `.sql`/`.py` patterns must not restrict to `models/`
+    /// or `functions/`.
     #[test]
     fn derive_watch_globs_covers_all_sql_and_py() {
         let dir = TempDir::new().unwrap();
@@ -5569,8 +5649,8 @@ mod watch_glob_tests {
         let watchers = derive_watch_globs(std::slice::from_ref(&root));
         assert_eq!(
             watchers.len(),
-            2,
-            "expected exactly one .sql and one .py watcher"
+            3,
+            "expected one .sql, one .py, and one deployed-schema-snapshot watcher"
         );
 
         let root_str = root.to_string_lossy();
@@ -5608,7 +5688,7 @@ mod watch_glob_tests {
         );
     }
 
-    /// Two project roots produce four watchers (2 per root), each root-scoped.
+    /// Two project roots produce six watchers (3 per root), each root-scoped.
     #[test]
     fn derive_watch_globs_scales_with_multiple_roots() {
         let dir1 = TempDir::new().unwrap();
@@ -5616,9 +5696,9 @@ mod watch_glob_tests {
         let roots = vec![dir1.path().to_path_buf(), dir2.path().to_path_buf()];
 
         let watchers = derive_watch_globs(&roots);
-        assert_eq!(watchers.len(), 4, "expected 2 watchers per project root");
+        assert_eq!(watchers.len(), 6, "expected 3 watchers per project root");
 
-        for (root, expected_count) in [(&dir1, 2usize), (&dir2, 2)] {
+        for (root, expected_count) in [(&dir1, 3usize), (&dir2, 3)] {
             let root_str = root.path().to_string_lossy();
             let root_watchers: Vec<_> = watchers
                 .iter()

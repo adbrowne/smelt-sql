@@ -195,6 +195,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         &models,
         &project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let request = ExecuteRequest {
@@ -431,6 +432,7 @@ async fn run_since_upstream(
         &salsa_models,
         project_dir,
         &args.target,
+        config.state.mode,
     )?;
 
     let config_arc = Arc::new(config.clone());
