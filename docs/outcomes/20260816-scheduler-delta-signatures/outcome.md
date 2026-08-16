@@ -63,8 +63,8 @@ run shape.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
-| 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | pending |
-| 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals | pending |
+| 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | planned |
+| 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals; dispatch composition when a model receives several components in one tick (lifts phase 2's single-edge substitution gate) | pending |
 | 4 | Live observed-delta consumption: `--since-upstream` reads the recorded delta table; settle-bound × observed-delta "delta empty" leg | pending |
 | 5 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 6 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
@@ -93,6 +93,16 @@ run shape.
   `phases/01-plan.md` is still pending/parallel to this implementation, per the outcome's
   operator note — phases 2+ implement exactly what this phase pinned, so a requested change
   here should land as a follow-up spec amendment before phase 2 proceeds far.
+- 2026-08-16 (phase 2 planning): reshape — phase 3's row now explicitly carries dispatch
+  *composition* (a model receiving several components in one tick). Phase 2 substitutes the
+  key-addressed cell for the ordinary route only when every inbound ref of the model is a
+  key-addressed edge that resolved a cell; a partition-grain downstream with an additional
+  uncovered source keeps its ordinary route rather than risking a silently dropped component.
+  That residue serves success criteria 1–2, so it stays inside the outcome (phase 3) rather
+  than being deferred out. Confirmed the derivation half already admits the cell for a
+  `grain: partition` downstream (`derive.rs::append_model_edge_cells`, clock route inapplicable
+  for a clockless upstream) — phase 2 is a dispatch-only gap, and the
+  `keyed_partition_sink_dag` testkit fixture plus its oracle test already exist to extend.
 
 ## Blocked
 
