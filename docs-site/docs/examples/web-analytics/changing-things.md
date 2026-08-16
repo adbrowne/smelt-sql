@@ -15,7 +15,7 @@ them distinct, because the correct response to each is different:
 
 There is a fourth kind — changing the *logic* of an existing column —
 that smelt does not yet detect: the schema is unchanged, so nothing
-flags that history is stale, and you re-run or `backbuild` the affected
+flags that history is stale, and you re-run or `rebuild` the affected
 range yourself. Automatic definition-change handling is tracked in the
 project's maintenance-plan spec; until it lands, treat logic edits as
 backfills you initiate.
@@ -27,14 +27,14 @@ stage projects ([stage 3](https://github.com/adbrowne/smelt-sql/tree/main/exampl
 
 ## Backfilling a range
 
-`smelt backbuild` rebuilds a model (and anything upstream it needs) over
+`smelt rebuild` rebuilds a model (and anything upstream it needs) over
 a date range. `--dry-run` prints the full plan without executing:
 
 ```bash
-smelt backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run
+smelt rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run
 ```
 
-<!-- smelt-generate: @cwd=tutorial_stages/03_late_data @render=skeleton backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
+<!-- smelt-generate: @cwd=tutorial_stages/03_late_data @render=skeleton rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
 ```sql
 -- Would run: bronze.raw_events (materialization shown below)
 -- … model SELECT body (see the full SQL below) …
@@ -66,7 +66,7 @@ COMMIT
 
 ??? example "Full dry-run transcript"
 
-    <!-- smelt-generate: @cwd=tutorial_stages/03_late_data backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
+    <!-- smelt-generate: @cwd=tutorial_stages/03_late_data rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
     ```sql
     -- Would run: bronze.raw_events (materialization shown below)
     SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, CAST(seconds_in_day AS INTEGER) AS seconds_in_day, CAST(event_time AS TIMESTAMP) AS event_time, CAST(arrival_time AS TIMESTAMP) AS arrival_time, CAST(utm_campaign AS VARCHAR) AS utm_campaign, CAST(payload AS VARCHAR) AS payload, CAST(event_date AS DATE) AS event_date FROM (
@@ -219,7 +219,7 @@ Two follow-ups you'll want eventually:
 
 - **Populating history.** `NULL` history is often fine (the flag simply
   starts existing). When it isn't, declare a `backfill:` expression for
-  the column in frontmatter, or `smelt backbuild` the range — the
+  the column in frontmatter, or `smelt rebuild` the range — the
   definition already computes the column, so a backfill fills it. See
   [schema evolution](../../guide/schema-evolution.md).
 - **The not-nullable trap.** If the new column is provably `NOT NULL`

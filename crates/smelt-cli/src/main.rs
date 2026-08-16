@@ -42,8 +42,8 @@ enum Commands {
     Init(InitArgs),
     /// Run models and materialize them in the target database
     Run(RunArgs),
-    /// Backbuild: rebuild a target model and all its upstreams for a time range
-    Backbuild(BackbuildArgs),
+    /// Rebuild: rebuild a target model and all its upstreams for a time range
+    Rebuild(RebuildArgs),
     /// Show column types for a model
     Table(TableArgs),
     /// Start the web UI for visualizing the model graph
@@ -227,7 +227,7 @@ struct RunArgs {
 }
 
 #[derive(Parser)]
-struct BackbuildArgs {
+struct RebuildArgs {
     /// Target model selector (e.g., +daily_revenue, model_name)
     selector: String,
 
@@ -739,7 +739,7 @@ async fn main() -> std::process::ExitCode {
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
         Commands::Run(args) => commands::run::run(args, scope).await,
-        Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
+        Commands::Rebuild(args) => commands::rebuild::rebuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
         Commands::Ui(args) => commands::ui::ui(args).await,
         Commands::Seed(args) => commands::seed::run_seed(args, scope).await,

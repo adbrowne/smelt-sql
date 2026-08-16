@@ -16,11 +16,11 @@ use smelt_logical::maintenance::emit::StatementGroup;
 
 /// Which chunk of a chunked range a [`StatementGroup`] belongs to, when the
 /// batch-safety classification (or an explicit `--batch-size`/`--per-partition`)
-/// splits a run/backbuild range into more than one window. `index` is 0-based;
+/// splits a run/rebuild range into more than one window. `index` is 0-based;
 /// `total` is the count of chunks for this model; `start`/`end` are the
 /// `[start, end)` window this chunk covers, formatted as `YYYY-MM-DD`. A
 /// single-chunk range still carries a `ChunkInfo` with `total == 1` — consumers
-/// decide whether to render a boundary line (`smelt backbuild --dry-run` prints
+/// decide whether to render a boundary line (`smelt rebuild --dry-run` prints
 /// one only when `total > 1`, `docs/specs/cli.md` §"`--dry-run` prints the
 /// maintenance statements").
 #[derive(Debug, Clone)]
@@ -81,7 +81,7 @@ pub trait RunReporter: Send + Sync {
     /// dry-run), for every maintained (non-`full`) technique this runtime lowers
     /// to a `StatementGroup`. `chunk` names which window of a chunked range this
     /// group covers (`None` when the technique is not region-chunked, e.g. a
-    /// keyed fold). Default: no-op; `smelt run`/`smelt backbuild --dry-run` and
+    /// keyed fold). Default: no-op; `smelt run`/`smelt rebuild --dry-run` and
     /// statement-parity tests are the consumers.
     fn maintenance_statements(
         &self,

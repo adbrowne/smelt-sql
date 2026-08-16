@@ -67,7 +67,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 1 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
-| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | planned |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
@@ -145,6 +145,17 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   (`no_backbuild_verb_in_user_docs`) keeps the verb from creeping back into `docs-site/docs` or
   `docs/specs`; the `backbuild/` module path, "backbuild synthesis" mechanism name, and
   `guide/backbuild-synthesis.md` (rewritten in place by phase 8) are deliberately untouched.
+
+- **2026-08-17 (phase 4 implementation).** Landed the hard, no-alias rename end to end: CLI
+  (`Commands::Rebuild`/`RebuildArgs`, `commands/rebuild.rs`), `docs/specs/cli.md` and
+  `model_selection.md`, the `definition_deltas.md` Known Divergences bullet removed, `docs-site`
+  (`reference/cli.md`, `guide/incremental-models.md`, `developing/architecture.md`), the
+  `web_analytics` tutorial template + generator + regenerated page, and `README.md`. Also fixed
+  two stale `smelt backbuild` mentions inside `guide/backbuild-synthesis.md` (the naming-collision
+  callout and the "Related pages" cross-reference) that the plan's file list didn't call out but
+  the standing ratchet test requires — the page's title/structure/content otherwise stay
+  untouched for phase 8's rewrite. `docs/specs/architecture.md` audited: all four occurrences name
+  the mechanism/module, no edit needed.
 
 ## Blocked
 

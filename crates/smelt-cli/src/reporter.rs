@@ -89,7 +89,7 @@ impl RunReporter for CliReporter {
         // `--dry-run` prints the maintenance statements this invocation would
         // execute (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
         // statements"). A real run does not re-print them — its progress is the
-        // `batch_completed`/`model_completed` summary. A backbuild whose range
+        // `batch_completed`/`model_completed` summary. A rebuild whose range
         // was split into chunks introduces each chunk's block with a boundary
         // line naming its `[start, end)` window and position.
         if !self.dry_run {

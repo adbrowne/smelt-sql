@@ -697,12 +697,12 @@ The partitions a run actually writes — the **output window** — are not alway
 
 The output window is what the `DELETE` and the output clamp both key off; every written partition's **scan** is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.
 
-## Backbuilding
+## Rebuilding
 
-Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
+`smelt rebuild` rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
 
 ```bash
-smelt backbuild +daily_revenue --start 2025-01-01 --end 2025-02-01
+smelt rebuild +daily_revenue --start 2025-01-01 --end 2025-02-01
 ```
 
 The `+` prefix means "include upstream dependencies." smelt will:
@@ -711,9 +711,9 @@ The `+` prefix means "include upstream dependencies." smelt will:
 2. Process each upstream model for the specified time range, in topological order.
 3. Process the target model last.
 
-Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
+Rebuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
-Backbuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+Rebuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
 
 ## Incremental strategies
 

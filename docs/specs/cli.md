@@ -22,7 +22,7 @@ owners: [andrew]
 | `smelt init [DIR]` | Non-interactively scaffold a minimal working project in `DIR` (default `.`) |
 | `smelt run` | Execute models in topological order |
 | `smelt build` | Seed then run (convenience wrapper) |
-| `smelt backbuild` | Rebuild a model and its upstreams over a time range |
+| `smelt rebuild` | Rebuild a model and its upstreams over a time range |
 | `smelt seed` | Load CSV seeds into the target database |
 | `smelt test` | Run unit tests against in-memory DuckDB |
 | `smelt check` | Run data-quality checks against built data in the configured target |
@@ -370,11 +370,11 @@ A single `smelt build` performs these steps, in order:
 
 `--exclude` removes models from the working set after all `--select` expansions complete (`model_selection.md` §"Selection algorithm"). When the excluded selector carries an upstream `+` operator (`--exclude +model`), it removes the model **and its transitive upstreams**. If any removed upstream is still required by a model that remains in the working set, smelt refuses to run an inconsistent set: it emits a diagnostic naming the retained model and the missing upstream dependency rather than executing a model against an absent input. The user must either narrow the exclusion (drop the `+`) or also exclude the dependent model.
 
-### `smelt run` vs `smelt backbuild`
+### `smelt run` vs `smelt rebuild`
 
 `smelt run` executes the selected models for the requested time range. Incremental models receive a DELETE+INSERT for the given `[start, end)` window.
 
-`smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
+`smelt rebuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
 
 ### Failure summary
 
@@ -390,7 +390,7 @@ The hint is chosen from a coarse classification of the recorded error text into 
 
 ### `--dry-run` prints the maintenance statements
 
-`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation
+`smelt run --dry-run` and `smelt rebuild --dry-run` print, for every model the invocation
 would execute, the maintenance statements the run would execute — the output of the same pure
 emitters a real run consumes (`incremental_models.md` §"Statement emission (single owner)") — not
 merely the compiled SELECT body. Region literals are **real**: they come from the invocation's
@@ -398,10 +398,10 @@ resolved `--event-time-start`/`--event-time-end` window, never symbolic placehol
 Transactional groups are bracketed by `BEGIN`/`COMMIT` lines, exactly as in
 `smelt explain <model> --show-sql`.
 
-`smelt backbuild --dry-run` additionally reflects the chunking a real backbuild performs: when
+`smelt rebuild --dry-run` additionally reflects the chunking a real `rebuild` performs: when
 the batch-safety classification splits the range, statements print once per chunk, each chunk
 introduced by a boundary line naming its `[start, end)` window and its position
-(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real backbuild would execute them. An
+(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real `rebuild` would execute them. An
 auto-chunked backfill is thereby inspectable in full before it runs.
 
 `--dry-run` never executes a statement against the target. The division of labour with
@@ -544,7 +544,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 4. **`smelt test` runs on in-memory DuckDB.** Tests never touch the project's configured target database.
 5. **`smelt explain --json` schema is append-stable.** Fields may be added; existing fields must not be renamed or removed without a major version bump.
 6. **Exit codes are meaningful.** See §"Exit codes" for the full contract. Scripts should check exit codes, not stdout patterns.
-7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt backbuild` only.
+7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt rebuild` only.
 8. **`--show-plan` requires a positional model-file argument.** Absence is a hard error, not a fallback to project-wide mode.
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
 10. **All CLI output is canonical `smelt.<path>`.** Model lists, type signatures, diagnostics, `smelt explain --json` keys, log lines, and any other identifier-bearing output must use the full canonical path. `--scope` adjusts input parsing only.
@@ -616,7 +616,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics
   - `models.md` — materialization modes
-  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
+  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `rebuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
   - `schema_evolution.md` — `smelt diff` change classification
   - `testing.md` — `smelt test` and `smelt check` execution

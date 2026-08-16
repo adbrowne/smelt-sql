@@ -54,7 +54,7 @@ smelt run --dry-run --verbose
 
 **Active development** — see [docs/ROADMAP.md](docs/ROADMAP.md) for full details.
 
-**CLI** (April 2026): Full pipeline — `smelt run`, `backbuild`, `test`, `explain`, `diff`, `docs generate`, `status`, `history`. Two-stage graph architecture (LogicalGraph → PhysicalGraph) with planner transformations.
+**CLI** (April 2026): Full pipeline — `smelt run`, `rebuild`, `test`, `explain`, `diff`, `docs generate`, `status`, `history`. Two-stage graph architecture (LogicalGraph → PhysicalGraph) with planner transformations.
 
 **Backends**: DuckDB (full), Spark/Databricks via PySpark/PyO3 (full), per-model backend routing, cross-engine data exchange via Parquet.
 

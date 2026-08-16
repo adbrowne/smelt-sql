@@ -9,7 +9,7 @@
 //! `plan.rs` re-shapes a [`BackbuildOptions`] into the printable
 //! [`plan::MigrationPlan`] `smelt migrate` renders
 //! (`docs/specs/definition_deltas.md` §Overview); the ranged-rebuild path
-//! (`smelt backbuild`) does not consume this module.
+//! (`smelt rebuild`) does not consume this module.
 
 pub mod classify;
 pub mod diff;

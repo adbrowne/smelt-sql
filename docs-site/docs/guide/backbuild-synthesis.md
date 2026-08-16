@@ -20,7 +20,7 @@ suite.
 
 !!! note "Naming: two things called “backbuild”"
 
-    [`smelt backbuild`](../reference/cli.md#smelt-backbuild) is the CLI command
+    [`smelt rebuild`](../reference/cli.md#smelt-rebuild) is the CLI command
     that re-runs a model (and its upstreams) over a date range — reprocessing
     *data* under an unchanged definition. **Backbuild synthesis**, this page, is
     about *definition* changes: deriving a migration script from the diff
@@ -644,7 +644,7 @@ page cannot drift from what smelt actually emits.
 ## Related pages
 
 - [Incremental Models](incremental-models.md) — maintenance of *data* changes
-  under an unchanged definition, including the `smelt backbuild` range rebuild.
+  under an unchanged definition, including the `smelt rebuild` range rebuild.
 - [Schema Evolution](schema-evolution.md) — physical schema change
   classification and DDL capability per backend.
 - [Incremental Equivalence](../concepts/incremental-equivalence.md) — the same

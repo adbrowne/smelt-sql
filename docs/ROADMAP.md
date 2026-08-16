@@ -141,6 +141,10 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Ranged-rebuild verb renamed `smelt backbuild` → `smelt rebuild`~~ ✅ (August 17, 2026)
+
+Phase 4 of [`docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`](outcomes/20260816-definition-delta-migrate-v2/outcome.md). Hard rename, no alias: `smelt backbuild` no longer parses (clap's unrecognized-subcommand error), swept across the CLI (`Commands::Rebuild`/`RebuildArgs`, `commands/rebuild.rs`), `docs/specs/cli.md` and `model_selection.md`, `docs-site/docs/reference/cli.md` and `guide/incremental-models.md`, the `examples/web_analytics` tutorial generator + regenerated pages, and tests (`rebuild_dry_run.rs`, `e2e/rebuild_cumulative_e2e.rs`, `tutorial_freshness.rs`). A standing ratchet test (`no_backbuild_verb_in_user_docs`) keeps the verb from creeping back into `docs-site/docs`/`docs/specs`. The `backbuild/` module path and "backbuild synthesis" mechanism name are unchanged — only the CLI verb and prose that means it moved.
+
 ### ~~Keyed Frontier — column-family union + snapshot-reconcile executor~~ ✅ (August 9, 2026)
 
 5-phase plan ([plan](plans/20260809-keyed-frontier.md)) widening the keyed classifier past the direct-monoid families and building the second keyed run shape. Every family arrived with its admission-matrix conformance recipes including the refusal directions.

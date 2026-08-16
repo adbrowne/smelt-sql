@@ -3,7 +3,7 @@
 //! After Phase 6, `smelt-runtime` exposes only two paths to a `CompiledModel`:
 //! - `execute_project(request, reporter)` — the primary entry point.
 //! - `CompilerRegistry::get(target).compile_with_sql_and_ephemerals(...)` — for
-//!   backbuild, which manages its own backend session outside the shared pipeline.
+//!   rebuild, which manages its own backend session outside the shared pipeline.
 //!
 //! Internal constructors (`SqlCompiler::new`, `SqlCompiler::set_*`, `compile_with_sql`)
 //! are `pub(crate)` — this file is an external integration test and therefore
@@ -71,7 +71,7 @@ fn test_no_compiler_internals_exposed() {
     let registry = CompilerRegistry::new(&config, &targets);
     let compiler = registry.get("dev");
 
-    // `build_ephemeral_resolver` is accessible (needed by backbuild).
+    // `build_ephemeral_resolver` is accessible (needed by rebuild).
     let resolver = compiler.build_ephemeral_resolver(&[], "main");
 
     // `EphemeralResolver::empty` is the other valid empty-resolver path.

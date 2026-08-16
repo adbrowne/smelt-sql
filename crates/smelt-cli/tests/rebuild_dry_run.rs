@@ -1,4 +1,4 @@
-//! `smelt backbuild --dry-run` renders the emitted maintenance statements with
+//! `smelt rebuild --dry-run` renders the emitted maintenance statements with
 //! per-chunk boundaries (`docs/specs/cli.md` §"`--dry-run` prints the
 //! maintenance statements"): when the batch-safety classification splits the
 //! range, statements print once per chunk, each chunk introduced by a boundary
@@ -46,7 +46,7 @@ fn chunked_range_prints_per_chunk_boundaries() {
         .expect("examples/web_analytics exists");
 
     let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
-        .arg("backbuild")
+        .arg("rebuild")
         .arg("silver.sessions")
         .arg("--start")
         .arg("2026-03-01")
@@ -56,11 +56,11 @@ fn chunked_range_prints_per_chunk_boundaries() {
         .arg("--project-dir")
         .arg(&project_dir)
         .output()
-        .expect("spawn smelt backbuild silver.sessions --dry-run");
+        .expect("spawn smelt rebuild silver.sessions --dry-run");
 
     assert!(
         output.status.success(),
-        "backbuild --dry-run failed: stderr={}",
+        "rebuild --dry-run failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -111,4 +111,125 @@ fn chunked_range_prints_per_chunk_boundaries() {
         stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-14'"),
         "expected real chunk window literals in the statements:\n{stdout}"
     );
+}
+
+/// `smelt backbuild` no longer exists — the verb was renamed to `smelt
+/// rebuild` with no alias (`docs/outcomes/20260816-definition-delta-migrate-v2`
+/// phase 4 Decision log: "the rename is hard, with no `backbuild` alias").
+/// Invoking the old name must fail with clap's unrecognized-subcommand error
+/// and execute nothing.
+#[test]
+fn backbuild_verb_no_longer_exists() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("backbuild")
+        .arg("silver.sessions")
+        .arg("--start")
+        .arg("2026-03-01")
+        .arg("--end")
+        .arg("2026-03-29")
+        .arg("--dry-run")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt backbuild silver.sessions --dry-run");
+
+    assert!(
+        !output.status.success(),
+        "smelt backbuild must no longer exist; output:\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand") || stderr.contains("error:"),
+        "expected clap's unrecognized-subcommand error, got:\n{stderr}"
+    );
+}
+
+/// `smelt --help` lists the `rebuild` verb and no longer mentions `backbuild`.
+#[test]
+fn help_lists_rebuild_verb() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("--help")
+        .output()
+        .expect("spawn smelt --help");
+    assert!(output.status.success(), "smelt --help must succeed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rebuild"),
+        "expected `rebuild` in --help output:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("backbuild"),
+        "expected no `backbuild` in --help output:\n{stdout}"
+    );
+}
+
+/// Standing ratchet: the literal `smelt backbuild` and a fenced-block line
+/// starting with `backbuild ` must never appear in user-facing docs again.
+/// Mechanism strings (`backbuild-synthesis`, "backbuild synthesis",
+/// `backbuild/`) are not matched by either pattern, so no allow-list is
+/// needed.
+#[test]
+fn no_backbuild_verb_in_user_docs() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root exists");
+
+    let mut offenders = Vec::new();
+    for dir in ["docs-site/docs", "docs/specs"] {
+        let root = repo_root.join(dir);
+        for entry in walkdir(&root) {
+            if entry.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&entry).unwrap_or_default();
+            let mut in_fence = false;
+            for (i, line) in text.lines().enumerate() {
+                if line.trim_start().starts_with("```") {
+                    in_fence = !in_fence;
+                    continue;
+                }
+                if line.contains("smelt backbuild")
+                    || (in_fence && line.trim_start().starts_with("backbuild "))
+                {
+                    offenders.push(format!("{}:{}: {}", entry.display(), i + 1, line));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "found `smelt backbuild` remnants in user docs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if !root.exists() {
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
 }

@@ -4718,7 +4718,7 @@ fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Opti
 /// project-wide source-timeseries map — so both the dry-run statement-emission
 /// branch and the real run share the identical chunk decomposition
 /// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements":
-/// backbuild's per-chunk boundaries under `--dry-run` are the real chunks).
+/// rebuild's per-chunk boundaries under `--dry-run` are the real chunks).
 /// Returns the plans plus the total batch count (for `run_started`).
 #[allow(clippy::too_many_arguments)]
 fn build_model_plans(

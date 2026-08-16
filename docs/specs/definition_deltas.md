@@ -441,13 +441,10 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **`smelt migrate <model>` exists and derives/prints the plan-only migration plan, with `--apply`,
-  `--json`, and the approval store all wired as a gate, and `--apply` on a matching hash executes**
-  (phases 2–3); the ranged-rebuild verb still ships under the name `smelt backbuild` rather than
-  `smelt rebuild` (phase 4), and the live handling of a definition change outside `smelt migrate`
-  is still the narrower third mechanism covering **column additions only** (the definition-change
-  trigger in the maintenance driver); a changed column's redefinition still falls to a full
-  recompute there. Tracked: `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
+- **The live handling of a definition change outside `smelt migrate` is still the narrower third
+  mechanism covering column additions only** (the definition-change trigger in the maintenance
+  driver); a changed column's redefinition still falls to a full recompute there. Tracked:
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md`.
 - **Migration resume is recorded per column group, not per region.** §"Frontier semantics"
   describes per-region catch-up as the general frontier mechanism; `--apply`'s resume (§Surface
   "`smelt migrate`" "Resume") only distinguishes "this group's statements ran" from "they
