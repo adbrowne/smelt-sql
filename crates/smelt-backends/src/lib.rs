@@ -101,6 +101,57 @@ pub async fn create_backend(
                 ))
             }
         }
+        BackendType::BigQuery => {
+            #[cfg(feature = "bigquery")]
+            {
+                use smelt_backend_bigquery::BigQueryBackend;
+
+                let project = target_config
+                    .project
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("BigQuery target requires 'project' field"))?;
+                let dataset = target_config
+                    .dataset
+                    .as_ref()
+                    .unwrap_or(&target_config.schema);
+
+                // Read the token here rather than in the adapter so a missing
+                // one is a smelt-level diagnostic naming the script that mints
+                // it, not a Python traceback. There is deliberately no
+                // application-default-credentials fallback
+                // (`multi_backend.md` §Surface).
+                let access_token = std::env::var("SMELT_BQ_ACCESS_TOKEN").map_err(|_| {
+                    anyhow::anyhow!(
+                        "BigQuery target requires SMELT_BQ_ACCESS_TOKEN. \
+                         Mint one with `bash scripts/bigquery-auth.sh` then \
+                         `source scripts/bigquery-env.sh`. smelt never falls back to \
+                         Google application-default credentials."
+                    )
+                })?;
+
+                tracing::info!("Backend [{}]: BigQuery", target_name);
+                tracing::info!("Project: {}, dataset: {}", project, dataset);
+
+                Ok(Box::new(
+                    BigQueryBackend::new(
+                        project,
+                        dataset,
+                        target_config.location.as_deref(),
+                        &access_token,
+                    )
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!("Failed to connect to BigQuery project {}: {}", project, e)
+                    })?,
+                ))
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                Err(anyhow::anyhow!(
+                    "BigQuery backend not available. Rebuild with --features bigquery"
+                ))
+            }
+        }
     }
 }
 

@@ -3979,6 +3979,9 @@ mod in_place_update_lowering {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
         smelt_core::config::Config {

@@ -254,13 +254,47 @@ deliberately refuses to create — so automating it would have undone the creden
 posture to save a minute of clicking. It stays a manual console step, tracked in
 Open Questions below.
 
+## Measured against the live warehouse
+
+The capability column, the type-name surface, and the rate limit were established by executing
+statements against the provisioned project (`scripts/bigquery-probe.sh`, `-probe2`, `-probe3`,
+`-probe4`), not from documentation.
+
+**The per-table modification rate limit binds, and latency is not the governing constraint.**
+Twenty-five sequential `UPDATE`s against one table, spaced by their own ~3 s round trip, all
+succeeded — but eight rapid `CREATE OR REPLACE TABLE` statements against a *single* table name
+were refused with `Job exceeded rate limits: Your table exceeded quota for table update
+operations`. The limit is per table, not per project, and it is reached by burst rate rather
+than by total volume. A generative suite must therefore allocate a fresh target table per case;
+that mitigation is required, not optional, and it also means concurrency across cases is the
+right way to absorb latency rather than cutting cases.
+
+**Type names.** GoogleSQL rejects exactly `VARCHAR`, `TEXT`, `DOUBLE`, `REAL` and `FLOAT`
+(`Type not found`). It accepts the integer aliases (`INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`),
+`DECIMAL`/`NUMERIC`/`BIGNUMERIC`, `BOOLEAN`/`BOOL`, `STRING`, `BYTES`, `DATE`, `TIME`,
+`DATETIME`, `TIMESTAMP`, `JSON` and `INTERVAL` verbatim. Only the rejected families need
+rewriting at the output-boundary cast wrap and in the maintenance emitters' bootstrap DDL, which
+is a far smaller surface than "a large share of DuckDB-canonical inferences will diverge"
+anticipated — the divergence is concentrated in *type spelling*, not type semantics.
+
+**Two surprises worth naming.** BigQuery accepts `CREATE MATERIALIZED VIEW` with incremental
+refresh, making it the first backend whose `supports_native_ivm: false` describes smelt rather
+than the engine. And `SHA256` returns `BYTES` rather than a hex string, so every fingerprint
+expression needs a `TO_HEX` wrap that neither other dialect requires.
+
+**The least-privilege grant excludes dataset creation.** The service account holds `jobUser`
+plus `WRITER` on one dataset, which does not include `bigquery.datasets.create` — so the
+dataset-per-run isolation described above is unavailable to it, and the suites fall back to
+table-level isolation inside the granted dataset. Widening the grant is a real option (the
+project is dedicated and capped), but it was not taken unilaterally.
+
 ## Open questions
 
 - **Phase 3's true size** — mechanical versus semantic split of the type-divergence surface.
   Answered by phase 2.
-- **Per-table DML rate limit.** Answered by phase 1; sets phase 7's case count and possibly
-  its table-allocation strategy. Per-query latency is now measurable via
-  `scripts/bigquery-verify.sh`, which times a probe query and a DDL round-trip.
+- **Whether to widen the service-account grant to allow dataset creation**, restoring
+  dataset-per-run isolation, or to keep table-level isolation inside the one granted dataset.
+  The project is dedicated and capped, so the widening is small; the current fallback works.
 - **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the
   manual console step permanently, or find a budgets path that does not require
   application-default credentials.

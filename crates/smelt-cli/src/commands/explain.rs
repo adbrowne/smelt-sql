@@ -765,6 +765,7 @@ fn backend_type_to_maintenance_dialect(
     let dialect = match backend_type {
         smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+        smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
     };
     smelt_backend::maintenance_dialect(dialect)
 }

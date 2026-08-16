@@ -142,6 +142,51 @@ To use Delta, ensure your Spark cluster has Delta Lake installed (e.g. the
 `io.delta:delta-spark_2.13:4.0.0` package). See `scripts/spark-up.sh` for the reference setup
 used in CI.
 
+### BigQuery
+
+BigQuery is supported through Google's BigQuery client. A BigQuery dataset is the analogue of a
+schema, so a target names a `project`, a `dataset`, and the dataset's `location` in place of
+DuckDB's `database` or Spark's `connect_url`.
+
+```yaml
+targets:
+  bigquery_prod:
+    type: bigquery
+    project: my-gcp-project
+    dataset: analytics
+    location: US
+    schema: analytics
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `bigquery`. |
+| `project` | Yes | GCP project the jobs are billed to. |
+| `dataset` | No | Dataset holding the created tables and views. Defaults to `schema`. |
+| `location` | No | Dataset location (e.g. `US`, `europe-west2`). Must match at query time. |
+| `schema` | Yes | Default schema for created tables and views. |
+
+smelt compiles the same logical models to GoogleSQL, handling dialect differences automatically —
+`x::T` casts become `CAST(x AS T)`, partition replacement becomes a scoped `DELETE` + `INSERT`
+(BigQuery has no `INSERT OVERWRITE`), and type names GoogleSQL does not recognise (`VARCHAR`,
+`TEXT`, `DOUBLE`) are emitted as `STRING` and `FLOAT64`.
+
+#### Credentials
+
+The BigQuery backend authenticates from a short-lived OAuth access token read from
+`SMELT_BQ_ACCESS_TOKEN`, and **never** falls back to Google application-default credentials. This
+is deliberate: ambient credentials on a developer machine carry that developer's entire cloud
+identity, so refusing the fallback keeps the explicitly-supplied token the only route to the
+warehouse. A run with no token set fails with a message naming the token, rather than silently
+picking up whichever identity happens to be logged in.
+
+```bash
+export SMELT_BQ_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+smelt run --target bigquery_prod
+```
+
+Prefer a service account scoped to the datasets it needs over a user credential.
+
 ## Switching targets
 
 Use the `--target` flag on any command:

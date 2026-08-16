@@ -932,6 +932,9 @@ mod tests {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
 

@@ -11,6 +11,9 @@ fn unknown_type_target() -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 
@@ -39,6 +42,9 @@ fn duckdb_target(db_name: &str) -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 
@@ -71,6 +77,9 @@ async fn creates_spark_backend_from_spark_target() {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     };
     let result = create_backend("spark_test", &target, dir.path(), None).await;
     assert!(

@@ -34,36 +34,38 @@ owners: [andrew]
   (b) the dialect-specific physical SQL the printer emits; they do **not** differ in which
   smelt models a user may write. The flags are:
 
-  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) |
-  |------|:------:|:-------------:|:---------------:|
-  | `supports_qualify` | ✓ | ✗ | ✗ |
-  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ |
-  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ |
-  | `supports_merge` | ✓ | ✓ | ✗ |
-  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ |
-  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ |
-  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ |
-  | `supports_pivot` | ✓ | ✓ | ✓ |
-  | `supports_date_literal` | ✓ | ✗ | ✗ |
-  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ |
-  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ |
-  | `supports_transactional_ddl` | ✓ | ✗ | ✗ |
-  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ |
-  | `supports_trailing_commas` | ✓ | ✗ | ✗ |
-  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ |
-  | `supports_native_ivm` | ✗ | ✗ | ✗ |
-  | `supports_retraction` | ✗ | ✗ | ✗ |
-  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ |
-  | `supports_alter_column_using` | ✓ | ✗ | ✗ |
-  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ |
-  | `supports_merge_schema_write` | ✗ | ✓ | ✓ |
-  | `supports_column_mapping` | ✗ | ✓ | ✗ |
-  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ |
-  | `requires_schema_init` | ✓ | ✓ | ✓ |
+  | Flag | DuckDB | Spark (Delta) | Spark (Parquet) | BigQuery |
+  |------|:------:|:-------------:|:---------------:|:--------:|
+  | `supports_qualify` | ✓ | ✗ | ✗ | ✓ |
+  | `supports_create_or_replace_table` | ✓ | ✗ | ✗ | ✓ |
+  | `supports_create_or_replace_view` | ✓ | ✓ | ✓ | ✓ |
+  | `supports_merge` | ✓ | ✓ | ✗ | ✓ |
+  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ |
+  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ | ✓ |
+  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ | ✓ |
+  | `supports_pivot` | ✓ | ✓ | ✓ | ✓ |
+  | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ |
+  | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ |
+  | `supports_array_literal` (`[a,b]`) | ✓ | ✗ | ✗ | ✓ |
+  | `supports_transactional_ddl` | ✓ | ✗ | ✗ | ✓ |
+  | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ |
+  | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ |
+  | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✗ |
+  | `supports_retraction` | ✗ | ✗ | ✗ | ✗ |
+  | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ |
+  | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ |
+  | `supports_nested_array_ddl` | ✓ | ✓ | ✗ | ✓ |
+  | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ |
+  | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ |
+  | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
+  | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
-  constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`) match
-  it. When a flag changes, this table changes in the same commit.
+  constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,
+  `::bigquery()`) match it. When a flag changes, this table changes in the same commit. A
+  backend's column is established by executing the statement each flag names against a live
+  instance of that backend, never by reading its documentation.
 - **`SPARK_CONNECT_URL`.** Spark integration tests connect to a Spark Connect server at this
   URL. When it is unset, Spark-targeted tests **skip** (not fail). The runtime backend reads
   `connect_url` from the target config (see `smelt_yml.md`).
@@ -303,15 +305,35 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **BigQuery's capability column is not yet populated, and its parity is unverified.** The
-  matrix above carries DuckDB and both Spark profiles only. BigQuery's flag values are
-  established empirically against a live warehouse rather than asserted from documentation, so
-  until that runs there is no `BackendCapabilities::bigquery()` for the capability-conformance
-  test to check and no BigQuery leg in the dual-target parity suites. Two flags are expected to
-  move for the first time when it lands — `supports_pipe_syntax`, which no backend sets today,
-  and `supports_merge_not_matched_by_source`, which only Spark-over-Delta sets — so the printer
-  paths behind them get their first exercise. Tracked in
+- **BigQuery has no leg in the dual-target parity suites.** Its capability column is populated
+  and asserted, and a single model materializes end to end, but `materialization_parity`,
+  `cross_engine_parity`, `seed_parity`, `lowering_parity`, `merge_parity`,
+  `incremental_parity` and `schema_evolution_parity` still run over `{DuckDb, Spark}` only. The
+  BigQuery gate is `bigquery_smoke` alone, so the capability flags are verified as *warehouse
+  facts* without yet being verified as *parity outcomes*. Two flags reach `true` for the first
+  time on any backend — `supports_pipe_syntax` and, outside Spark-over-Delta,
+  `supports_merge_not_matched_by_source` — so the printer paths behind them remain unexercised
+  by a parity test. Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **BigQuery advertises `supports_native_ivm: false` despite supporting materialized views.**
+  The warehouse accepts `CREATE MATERIALIZED VIEW` with incremental refresh, so unlike DuckDB
+  and Spark this backend's `false` describes smelt, not the engine: `true` obliges smelt to emit
+  the native maintained object and cede freshness to the engine, and that emission path does not
+  exist. Until it does, `refresh: materialized_view` hard-errors on BigQuery exactly as it does
+  everywhere else. This is the first case where a flag's value is an implementation statement
+  rather than a warehouse one, and it is the reason the matrix cell alone is not a sufficient
+  description. Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **Schema-evolution DDL is not implemented for BigQuery.** GoogleSQL rejects the type names the
+  DuckDB generator emits (`VARCHAR`, `TEXT`, `DOUBLE` are each `Type not found`) and has no
+  `ALTER COLUMN … USING`, so no generator is shared. A schema change on a BigQuery model
+  therefore resolves to a full refresh rather than a migration — surfaced as a refusal naming
+  the reason, never as emitted DDL the warehouse would reject. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
+- **Per-run dataset isolation requires a permission the least-privilege service account lacks.**
+  The isolation model below assumes each run creates its own dataset, but creating one needs
+  `bigquery.datasets.create`, which a service account granted `WRITER` on a single dataset does
+  not hold. When dataset creation is refused the suites isolate by table name inside the granted
+  dataset instead. Both paths are safe for concurrent runs; only teardown differs (a dataset drop
+  versus a table drop). Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **BigQuery has no CI tier.** Spark parity runs per-PR on changed paths and nightly in full;
   BigQuery runs **only when a developer runs it by hand** against their own GCP project, gated on
   `SMELT_BQ_PROJECT`. A BigQuery regression therefore does not surface on `main` on any schedule.
@@ -321,9 +343,12 @@ resolves nested widening to a table rewrite.
   decision. Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **The generative conformance case count on BigQuery is undecided.** Every statement costs a
   network round trip — measured at roughly 0.7 s for a trivial query and 2 s for a
-  `CREATE TABLE` — against sub-millisecond in-process DuckDB. Whether the suite absorbs that by
-  reducing cases (the precedent Spark set) or by running cases concurrently is open; the latter
-  preserves coverage and is preferred if per-table write-rate limits allow it. Tracked in
+  `CREATE TABLE` — against sub-millisecond in-process DuckDB. Concurrency across cases is
+  preferred to cutting cases, because it preserves coverage, but it is bounded by a per-table
+  limit rather than by latency: repeated modification of *one* table is refused with
+  `Your table exceeded quota for table update operations` after roughly eight rapid statements,
+  while the same rate spread across distinct tables is not. A generative suite must therefore
+  allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated

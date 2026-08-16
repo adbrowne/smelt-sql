@@ -9,6 +9,8 @@ pub enum SqlDialect {
     SparkSQL,
     /// PostgreSQL dialect
     PostgreSQL,
+    /// Google BigQuery (GoogleSQL) dialect
+    BigQuery,
 }
 
 impl SqlDialect {
@@ -18,6 +20,7 @@ impl SqlDialect {
             SqlDialect::DuckDB => "DuckDB",
             SqlDialect::SparkSQL => "Spark SQL",
             SqlDialect::PostgreSQL => "PostgreSQL",
+            SqlDialect::BigQuery => "BigQuery",
         }
     }
 }
@@ -221,6 +224,57 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+        }
+    }
+
+    /// Capabilities for Google BigQuery (GoogleSQL).
+    ///
+    /// Every flag below was established by executing the statement it names
+    /// against a live warehouse (`scripts/bigquery-probe.sh`), not read from
+    /// documentation — the capability matrix in `docs/specs/multi_backend.md`
+    /// §Surface is normative and the conformance test asserts this constructor
+    /// against it.
+    pub fn bigquery() -> Self {
+        Self {
+            supports_qualify: true,
+            supports_create_or_replace_table: true,
+            supports_create_or_replace_view: true,
+            supports_merge: true,
+            supports_pivot: true,
+            supports_date_literal: true,
+            supports_concat_operator: true,
+            supports_array_literal: true,
+            supports_transactional_ddl: true,
+            // GoogleSQL has no `::` cast operator: `SELECT 1::INT64` is a syntax error.
+            supports_double_colon_cast: false,
+            supports_trailing_commas: true,
+            // No `INSERT OVERWRITE` in GoogleSQL; partition replacement lowers to a
+            // scoped DELETE + INSERT.
+            supports_insert_overwrite: false,
+            // BigQuery genuinely supports CREATE MATERIALIZED VIEW with incremental
+            // refresh, so this `false` is an implementation statement, not a warehouse
+            // one: `true` obliges smelt to emit the native maintained object and own
+            // nothing of the refresh loop, and that emission path does not exist yet.
+            // Advertising it before then would turn `refresh: materialized_view` from a
+            // clean hard error into a broken path. Tracked in `multi_backend.md`
+            // §Known Divergences.
+            supports_native_ivm: false,
+            supports_retraction: false,
+            supports_struct_field_ddl: true,
+            // GoogleSQL has no `USING` clause on ALTER COLUMN at all (syntax error);
+            // the bare `SET DATA TYPE` form permits only assignable widenings, so a
+            // conversion needing an expression is a table rewrite.
+            supports_alter_column_using: false,
+            supports_nested_array_ddl: true,
+            // A write naming a column the table lacks is rejected, not auto-added.
+            supports_merge_schema_write: false,
+            supports_column_mapping: true,
+            // The first backend to advertise native pipe syntax.
+            supports_pipe_syntax: true,
+            // A write into a dataset that does not exist is refused with
+            // `Not found: Dataset ...`, so the dataset must be created first.
+            requires_schema_init: true,
+            supports_column_scoped_merge: true,
         }
     }
 

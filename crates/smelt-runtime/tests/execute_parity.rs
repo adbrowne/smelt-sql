@@ -244,6 +244,9 @@ async fn test_cli_ui_manifest_parity() {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         },
     );
     let mut models_config = HashMap::new();
@@ -355,6 +358,9 @@ async fn test_cli_ui_manifest_parity() {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         },
     );
 

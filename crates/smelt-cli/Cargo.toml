@@ -24,6 +24,7 @@ smelt-backends = { path = "../smelt-backends" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb", optional = true, default-features = false }
 duckdb = { workspace = true, optional = true }
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
+smelt-backend-bigquery = { path = "../smelt-backend-bigquery", optional = true }
 smelt-state = { path = "../smelt-state" }
 smelt-runtime = { path = "../smelt-runtime" }
 smelt-ui = { path = "../smelt-ui" }
@@ -80,4 +81,5 @@ default = ["duckdb"]
 duckdb = ["smelt-backend-duckdb", "dep:duckdb", "smelt-backends/duckdb"]
 bundled-duckdb = ["smelt-backend-duckdb/bundled", "duckdb/bundled", "smelt-ui/bundled-duckdb", "smelt-backends/bundled-duckdb"]
 spark = ["smelt-backend-spark", "python", "smelt-backends/spark", "smelt-maintenance-testkit/spark"]
+bigquery = ["smelt-backend-bigquery", "python", "smelt-backends/bigquery"]
 python = ["smelt-planner/python", "smelt-core/python", "pyo3"]

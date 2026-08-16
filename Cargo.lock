@@ -4067,6 +4067,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "smelt-backend-bigquery"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "async-trait",
+ "pyo3",
+ "smelt-backend",
+ "smelt-dialect",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "smelt-backend-duckdb"
 version = "0.3.2"
 dependencies = [
@@ -4102,6 +4117,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "smelt-backend",
+ "smelt-backend-bigquery",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
  "smelt-core",
@@ -4151,6 +4167,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "smelt-backend",
+ "smelt-backend-bigquery",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
  "smelt-backends",

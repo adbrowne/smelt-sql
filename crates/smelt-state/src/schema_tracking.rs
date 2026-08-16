@@ -1224,6 +1224,12 @@ pub enum DdlBackend {
         format: SparkTableFormat,
         capabilities: BackendCapabilities,
     },
+    /// BigQuery — no DDL generator yet. GoogleSQL rejects the type names the
+    /// DuckDB generator emits (`VARCHAR`, `DOUBLE`, `TEXT` are all
+    /// `Type not found`) and has no `ALTER COLUMN … USING`, so borrowing another
+    /// backend's generator would emit invalid SQL. Until a generator exists, a
+    /// schema change on BigQuery resolves to a full refresh rather than DDL.
+    BigQuery,
 }
 
 /// Plan the migration action for a model based on the schema diff.
@@ -1530,6 +1536,13 @@ pub fn plan_migration_for_backend(
                         let ddl_stmts =
                             crate::ddl_duckdb::generate_duckdb_ddl(schema, table, &plan.operations);
                         statements.extend(ddl_stmts);
+                    }
+                    DdlBackend::BigQuery => {
+                        return MigrationAction::FullRefreshBlocked {
+                            reason: "schema evolution DDL is not implemented for BigQuery; \
+                                     rebuild the model with a full refresh"
+                                .to_string(),
+                        };
                     }
                     DdlBackend::Spark {
                         catalog,

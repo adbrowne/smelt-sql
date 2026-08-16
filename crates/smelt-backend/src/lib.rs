@@ -33,6 +33,7 @@ pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
     match dialect {
         SqlDialect::DuckDB => MaintenanceDialect::DuckDb,
         SqlDialect::SparkSQL | SqlDialect::PostgreSQL => MaintenanceDialect::Spark,
+        SqlDialect::BigQuery => MaintenanceDialect::BigQuery,
     }
 }
 

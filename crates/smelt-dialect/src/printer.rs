@@ -1721,6 +1721,20 @@ fn remap_function_name<'a>(dialect: &SqlDialect, name: &str) -> Option<&'a str> 
                 None
             }
         }
+        SqlDialect::BigQuery => {
+            // GoogleSQL spells the boolean aggregates LOGICAL_AND / LOGICAL_OR and
+            // has no BOOL_AND / BOOL_OR / EVERY. It does have UNNEST natively, so
+            // only EXPLODE needs remapping onto it.
+            if name.eq_ignore_ascii_case("EXPLODE") {
+                Some("UNNEST")
+            } else if name.eq_ignore_ascii_case("BOOL_AND") || name.eq_ignore_ascii_case("EVERY") {
+                Some("LOGICAL_AND")
+            } else if name.eq_ignore_ascii_case("BOOL_OR") {
+                Some("LOGICAL_OR")
+            } else {
+                None
+            }
+        }
     }
 }
 

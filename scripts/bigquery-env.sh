@@ -11,6 +11,22 @@
 # falls back to application-default credentials. That is deliberate: it makes
 # ambient credentials unusable, so the only way to reach GCP is the token this
 # script exports.
+_bq_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
+
+# The PyO3-embedded interpreter resolves `import smelt.bigquery_adapter` via
+# PYTHONPATH, so both the repo's python/ package and the pinned client venv's
+# site-packages must be importable without an activated venv — the same shape
+# scripts/spark-env.sh uses.
+export PYTHONPATH="${_bq_repo_root}/python${PYTHONPATH:+:${PYTHONPATH}}"
+_bq_venv_site="${_bq_repo_root}/.smelt-bq-venv/lib/python3.12/site-packages"
+if [ -d "${_bq_venv_site}" ]; then
+  export PYTHONPATH="${_bq_venv_site}:${PYTHONPATH}"
+else
+  echo "no BigQuery client venv — create it with:" >&2
+  echo "  uv venv --python 3.12 .smelt-bq-venv" >&2
+  echo "  uv pip install --python .smelt-bq-venv/bin/python google-cloud-bigquery pyarrow" >&2
+fi
+
 _bq_config_dir="${SMELT_BQ_CONFIG_DIR:-$HOME/.config/gcloud-smelt-bq}"
 _bq_env_file="${_bq_config_dir}/config.env"
 

@@ -56,6 +56,7 @@ pub struct StatementGroup {
 pub enum MaintenanceDialect {
     DuckDb,
     Spark,
+    BigQuery,
 }
 
 /// A half-open region `[start, end)` on the output partition column; values
@@ -1104,6 +1105,9 @@ pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static
     match dialect {
         MaintenanceDialect::DuckDb => "VARCHAR",
         MaintenanceDialect::Spark => "STRING",
+        // GoogleSQL has no VARCHAR at all (`Type not found: VARCHAR`); its
+        // unsized string type is STRING. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "STRING",
     }
 }
 
@@ -1117,6 +1121,9 @@ fn probe_dialect_sample_agg(dialect: MaintenanceDialect) -> String {
     match dialect {
         MaintenanceDialect::DuckDb => "STRING_AGG(violation_key, ', ')".to_string(),
         MaintenanceDialect::Spark => "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
+        // GoogleSQL has STRING_AGG with the same shape as DuckDB's.
+        // Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "STRING_AGG(violation_key, ', ')".to_string(),
     }
 }
 
@@ -1545,6 +1552,12 @@ pub fn emit_append_only_baseline_snapshot(
         MaintenanceDialect::Spark => {
             format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
         }
+        // GoogleSQL's SHA256 returns BYTES rather than a hex string, so the
+        // digest is wrapped in TO_HEX to keep the fingerprint a STRING the way
+        // every other dialect's is. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => {
+            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+        }
     };
     let sql = format!(
         "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
@@ -1582,6 +1595,10 @@ pub fn emit_create_table_as(
     let using_clause = match dialect {
         MaintenanceDialect::DuckDb => "",
         MaintenanceDialect::Spark => " USING DELTA",
+        // BigQuery has one table format and no format clause; MERGE against a
+        // plainly-created table is accepted, so the bootstrap needs nothing
+        // extra. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "",
     };
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
@@ -1658,6 +1675,19 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
         | (smelt_types::DataType::Varchar { max_length: None }, MaintenanceDialect::Spark) => {
             "STRING".to_string()
         }
+        // GoogleSQL rejects the string and floating-point names `to_backend_sql`
+        // emits — VARCHAR, TEXT, DOUBLE, REAL and FLOAT are all `Type not found`
+        // (verified by scripts/bigquery-probe4.sh, which also confirms the integer
+        // aliases, DECIMAL, TIMESTAMP and DATE are accepted verbatim). Only the
+        // rejected families are rewritten here; the rest pass through unchanged.
+        (dt, MaintenanceDialect::BigQuery) => match dt {
+            smelt_types::DataType::Text
+            | smelt_types::DataType::Varchar { .. }
+            | smelt_types::DataType::Char { .. } => "STRING".to_string(),
+            smelt_types::DataType::Float | smelt_types::DataType::Double => "FLOAT64".to_string(),
+            smelt_types::DataType::Blob => "BYTES".to_string(),
+            other => other.to_backend_sql(),
+        },
         _ => dt.to_backend_sql(),
     }
 }
@@ -2174,10 +2204,13 @@ fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
 /// `VARCHAR` or Spark's `STRING` — so the fingerprint is well-formed under
 /// either dialect, unlike [`concat_varchar_expr`]'s DuckDB-only default.
 fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
-    format!(
-        "sha256({})",
-        concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect))
-    )
+    let concatenated = concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect));
+    match dialect {
+        // GoogleSQL's SHA256 returns BYTES; the row hash is fed straight into a
+        // STRING_AGG, so it has to be hex-encoded to stay a STRING.
+        MaintenanceDialect::BigQuery => format!("TO_HEX(SHA256({concatenated}))"),
+        _ => format!("sha256({concatenated})"),
+    }
 }
 
 /// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to

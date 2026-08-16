@@ -4535,6 +4535,7 @@ fn maintenance_dialect_for_target(
         .map(|bt| match bt {
             smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)

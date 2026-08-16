@@ -421,6 +421,7 @@ fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabil
     match backend_type {
         BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
+        BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
     }
 }
 
@@ -1167,6 +1168,7 @@ impl SqlCompiler {
             SqlDialect::DuckDB => "duckdb",
             SqlDialect::SparkSQL => "spark",
             SqlDialect::PostgreSQL => "postgres",
+            SqlDialect::BigQuery => "bigquery",
         };
         let as_struct_emitter: Option<AsStructEmitter<'static>> = type_ctx.map(|tc| {
             let backend = dialect_name.to_string();
@@ -2257,6 +2259,9 @@ mod tests {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         }
     }
 
@@ -2283,6 +2288,9 @@ mod tests {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
 
