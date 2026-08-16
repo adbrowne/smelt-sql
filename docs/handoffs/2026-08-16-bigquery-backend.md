@@ -6,88 +6,101 @@
 
 ## Where we are
 
-Phase 0 (provisioning) is complete and the `multi_backend.md` spec diff has landed.
-Nothing is implemented in Rust yet — no `BackendType::BigQuery`, no dialect variant, no
-backend crate.
+The walking skeleton is live and the capability matrix is populated. One model materialises
+in a real BigQuery dataset through the ordinary `smelt run` pipeline, verified by
+`cargo test -p smelt-cli --features bigquery --test bigquery_smoke`.
 
-**Read first:** `docs/research/20260816-bigquery-backend.md`. It holds the decisions, the
-rejected alternatives and why, the phase order, and the provisioned environment. This
-handoff does not restate it.
+**Read first:** `docs/research/20260816-bigquery-backend.md` — decisions, rejected
+alternatives, phase order, the provisioned environment, and the §"Measured against the live
+warehouse" findings. This handoff does not restate it.
 
 ## The decisions that constrain everything downstream
 
-1. **Client layer is a PyO3 → Python adapter**, mirroring `python/smelt/spark_adapter.py`,
-   using `google-cloud-bigquery` and Arrow. Not a Rust crate: the available ones return JSON
-   rows rather than Arrow, and the workspace pins `arrow = 58` to DuckDB's version.
+1. **Client layer is a PyO3 → Python adapter** (`python/smelt/bigquery_adapter.py`), mirroring
+   `spark_adapter.py`, using `google-cloud-bigquery` and Arrow.
 2. **Verification is local-gated with no CI tier.** BigQuery tests skip green when
-   `SMELT_BQ_PROJECT` is unset. Recorded as a Known Divergence, not left implicit.
-3. **Ordering is walking-skeleton-first.** Get one model materialising before any breadth
-   work, because the unknown is the loop (auth, latency, quota), not GoogleSQL.
-4. **Credentials are non-ambient — do not "simplify" this.** No application-default
-   credentials at any point: ADC carries Andrew's entire Google Cloud identity across every
-   project, which is a far worse blast radius than a dataset-scoped service account. The
-   adapter must authenticate from `SMELT_BQ_ACCESS_TOKEN` explicitly and never fall back.
+   `SMELT_BQ_PROJECT` is unset. Recorded as a Known Divergence.
+3. **Credentials are non-ambient — do not "simplify" this.** No application-default
+   credentials at any point. The adapter authenticates from `SMELT_BQ_ACCESS_TOKEN` explicitly
+   and refuses to construct without one; `bigquery_smoke.rs` asserts that refusal, because it
+   is a security property rather than an implementation detail.
+4. **Capability values come from the warehouse, never from documentation.** Every cell in the
+   matrix was established by running the statement the flag names (`scripts/bigquery-probe*.sh`).
 
-## Provisioned environment (do not re-create)
+## What is implemented
 
-Project `smelt-bq-test-20260816`; dataset `smelt_test` (US, 24h default table expiration);
-control dataset `smelt_test_notgranted` (exists so the least-privilege check has something
-real to be refused from); service account `smelt-bq-test@smelt-bq-test-20260816.iam.gserviceaccount.com`
-holding project-scoped `bigquery.jobUser` plus `WRITER` on `smelt_test` only. Isolated
-gcloud config at `~/.config/gcloud-smelt-bq`; SA key gpg-encrypted at rest.
+`BackendType::BigQuery`, `Target` `project`/`dataset`/`location`, `SqlDialect::BigQuery`,
+`BackendCapabilities::bigquery()` (asserted by `capability_conformance`),
+`crates/smelt-backend-bigquery`, the `create_backend` arm behind a `bigquery` feature, and
+`MaintenanceDialect::BigQuery`.
 
-Scripts (`scripts/`): `bigquery-login.sh` → `bigquery-provision.sh` → `bigquery-key.sh` for
-setup; `bigquery-auth.sh` + `bigquery-env.sh` per session; `bigquery-verify.sh` to prove the
-chain. `bigquery-setup.sh` is the single-command path for a fresh machine.
+Dialect work landed where the warehouse actually refused something:
 
-**Start a session with:** `bash scripts/bigquery-auth.sh` (prompts for the passphrase) then
-`source scripts/bigquery-env.sh`.
+- **Type names.** GoogleSQL rejects `VARCHAR`, `TEXT`, `DOUBLE`, `REAL`, `FLOAT`. The
+  output-boundary cast wrap (`type_conformance.rs`) and the maintenance bootstrap DDL map them
+  to `STRING`/`FLOAT64`/`BYTES`; everything else passes through.
+- **`SHA256` returns `BYTES`**, so fingerprint emitters need a `TO_HEX` wrap no other dialect
+  requires.
+- **No `INSERT OVERWRITE`** — `insert_overwrite` lowers to the scoped `DELETE` + `INSERT`.
+- **Schema-evolution DDL is unimplemented** — resolves to a full refresh naming the reason
+  rather than emitting DDL BigQuery would reject.
+
+## Two findings that change downstream sizing
+
+- **The per-table modification quota binds.** Eight rapid `CREATE OR REPLACE TABLE` statements
+  against *one* table name are refused (`Your table exceeded quota for table update
+  operations`); the same rate across distinct tables is not. A generative conformance suite
+  must allocate a fresh target table per case. An earlier reading that the limit did not bind
+  came from a loop whose own round-trip latency kept it under the burst threshold — do not
+  trust a rate measurement whose spacing is set by its own latency.
+- **BigQuery supports native materialized views.** `supports_native_ivm` is nonetheless `false`,
+  because `true` obliges smelt to emit a native maintained object and that path does not exist.
+  It is the only flag whose value describes smelt rather than the engine.
 
 ## Working constraints that cost time to rediscover
 
-- `.claude/settings.json` **denies** `gcloud`, `bq`, and the BigQuery scripts, so an agent
-  cannot reach GCP. Relax only with Andrew's explicit say-so, and restore immediately after.
-- Interactive flows — gcloud OAuth, the gpg passphrase — need a **real terminal**. They fail
-  under both the Bash tool and the `!` prefix, which have no TTY.
-- `bq` shells out to `gcloud`, so the SDK bin dir must be on `PATH`; absolute paths alone fail.
-- The worktree guard rejects compound shell commands (pipes, env-var prefixes, `$(…)` plus
-  redirects). Put anything non-trivial in a script and run the script.
+- `.claude/settings.json` **denies** `gcloud`, `bq`, and the credential scripts, so an agent
+  cannot reach GCP directly. It *can* run `scripts/bigquery-probe*.sh`, `bigquery-verify.sh`
+  and `bigquery-test.sh`, which read the minted token off disk.
+- Interactive flows — gcloud OAuth, the gpg passphrase — need a **real terminal**.
+- **`bq` is unusable on this host** (bundled-Python pyOpenSSL mismatch:
+  `module 'lib' has no attribute 'GEN_EMAIL'`). `gcloud` is fine. Everything talks to BigQuery
+  over the REST API with `curl` + a token; do not reintroduce `bq`.
+- **`bigquery-auth.sh` activates the service account**, which sets it as the gcloud config's
+  active account. It now restores the previous account on exit — if that regresses, every
+  human-identity operation silently runs as the service account and fails with
+  `PERMISSION_DENIED`.
+- The worktree guard rejects compound shell commands (pipes, `source`, `$(…)` plus redirects).
+  Put anything non-trivial in a script and run the script.
 
-## Measured, and still unknown
+## Session workflow
 
-Round-trip cost, measured 2026-08-16: `SELECT 1` **745 ms**, `CREATE OR REPLACE TABLE`
-**1,945 ms** — three orders of magnitude above in-process DuckDB. This is the constraint that
-shapes Phase 7.
-
-Still unknown, and **Phase 1's first job**: the per-table DML rate limit. `maintenance_conformance`
-applies repeated DML to one table, which is exactly the shape BigQuery throttles. Measure it with
-a tight DML loop before designing around a number. If it binds, allocate a fresh target table per
-generative case rather than cutting cases.
+```
+bash scripts/bigquery-venv.sh     # once: uv-based client venv (system python has no pip)
+bash scripts/bigquery-auth.sh     # per session: prompts for the passphrase, 1h token
+bash scripts/bigquery-test.sh     # runs the gated suites
+```
 
 ## Next steps, in order
 
-1. **`/smelt:plan`** off the `multi_backend.md` spec diff (commit `<this branch>`), producing
-   `docs/plans/2026MMDD-bigquery-backend.md`.
-2. **Phase 1 walking skeleton** — `BackendType::BigQuery`, `Target` fields (`project`,
-   `dataset`, `location`), `SqlDialect::BigQuery`, a best-effort capability constructor,
-   `python/smelt/bigquery_adapter.py`, `crates/smelt-backend-bigquery`, the `create_backend`
-   arm behind a `bigquery` feature, and `bigquery_smoke.rs` mirroring `spark_smoke.rs`.
-   Done when one model materialises **and** latency plus the DML rate limit are measured.
-3. **Phase 2 dialect** — fill the capability struct empirically, one flag at a time against
-   the live warehouse, then populate the spec's matrix column in the same commit.
-
-Do not populate the capability matrix from documentation. The spec calls that table the honest
-matrix and the conformance test asserts it against the code constructors; guessed values would
-be unverified assertions in a normative document.
+1. **`/smelt:plan`** for the remaining phases, now that the dialect surface has reported.
+2. **Type oracle and divergences** — a BigQuery oracle beside `duckdb_oracle.rs` plus a
+   divergence column. The surface is smaller than anticipated: the divergence is concentrated
+   in type *spelling*, not semantics.
+3. **Parity legs** — a third `TargetKind` in `crates/smelt-cli/tests/common/mod.rs`, gated on
+   `SMELT_BQ_PROJECT`, which every parity suite picks up at once. This is the largest gap:
+   the capability flags are verified as warehouse facts but not yet as parity outcomes, and
+   `supports_pipe_syntax` / `supports_merge_not_matched_by_source` are `true` for the first
+   time on any backend, so those printer paths are still unexercised.
+4. **Incremental legs, schema evolution, generative conformance** — the last needs the
+   fresh-table-per-case allocation above.
 
 ## Loose ends
 
 - **The budget alert is unprovisioned.** `gcloud billing budgets` requires ADC, which this
-  design refuses. Manual console step: US$5/month on `smelt-bq-test-20260816`. Note a GCP
-  budget alerts rather than hard-stops.
-- **The fixed least-privilege check has not been re-run.** The original version failed with
-  "dataset not found" — the same error an owner would get — so it verified nothing. It now
-  targets the control dataset and asserts on `Access Denied` specifically. Re-run
-  `bash scripts/bigquery-provision.sh smelt-bq-test-20260816 017727-8AD4F3-C0182A` then
-  `bash scripts/bigquery-verify.sh` and confirm it reports **DENIED** before building on the
-  grant.
+  design refuses. Manual console step: US$5/month on `smelt-bq-test-20260816`. A GCP budget
+  alerts rather than hard-stops.
+- **One pre-existing test failure, unrelated to this work:**
+  `cargo test -p smelt-logical --test contract_lattice_spec` wants a
+  `### The contract, plan, and graph layer` heading in `docs/specs/incremental_models.md` that
+  is absent at `HEAD`.
