@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786840096477,
+  "lastUpdate": 1786840099787,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.933855,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "3611fae3c43682fa52b0806ea590c8aa763a1f74",
+          "message": "research: open-questions triage doc for the decision track\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-08-16T10:25:19+10:00",
+          "tree_id": "25a1638cf973ceb3fe945a50bbb1759362c2d127",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/3611fae3c43682fa52b0806ea590c8aa763a1f74"
+        },
+        "date": 1786840098563,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.74017420161183,
+            "unit": "MB/s"
           }
         ]
       }
