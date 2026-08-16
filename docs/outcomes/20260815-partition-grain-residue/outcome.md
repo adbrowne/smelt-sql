@@ -1,7 +1,8 @@
 # Outcome: Close the partition grain's stale-plan-tracked implementation residues
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** superseded
+**Superseded by:** the delta-signature closure programme — `docs/handoffs/2026-08-16-delta-signature-closure-programme.md`. This outcome will never be run as written; its content remains reusable by the successor outcomes named there.
 **Source:** `docs/specs/incremental_shapes.md` §"The partition grain" §Known Divergences;
 `docs/plans/20260530-thread-fn-registry-classification.md`,
 `docs/plans/20260616-smelt-feedback-fixes.md`, `docs/plans/20260509-meta-language-overall.md`,

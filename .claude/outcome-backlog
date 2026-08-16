@@ -2,13 +2,13 @@
 # One outcome directory per non-comment line, priority order. The loop works
 # the first entry whose outcome.md **Status:** is neither `done` nor `blocked`,
 # then advances to the next. Scaffold + append via /smelt:outcome.
-docs/outcomes/20260815-definition-delta-migrate
-docs/outcomes/20260815-keyed-grain-residue
-docs/outcomes/20260815-partition-grain-residue
-docs/outcomes/20260815-incremental-spec-closure-confirm
-docs/outcomes/20260809-rung2-state-shapes
-docs/outcomes/20260809-repair-family
-docs/outcomes/20260809-probe-backed-facts
-docs/outcomes/20260809-output-delta-typing
-docs/outcomes/20260809-contract-lattice-v1
-docs/outcomes/20260809-incremental-spec-redraft
+#
+# Delta-signature closure programme
+# (docs/handoffs/2026-08-16-delta-signature-closure-programme.md).
+# Outcomes 4/5 (keyed-grain-residue-v2, partition-grain-residue-v2) and
+# closure-confirm-v2 are NOT scaffolded yet — they wait for at least one
+# decision-track session with Andrew. The 20260815-* outcomes are superseded;
+# the 20260809-* outcomes are done. Neither belongs in this queue.
+docs/outcomes/20260816-state-residency
+docs/outcomes/20260816-scheduler-delta-signatures
+docs/outcomes/20260816-definition-delta-migrate-v2
