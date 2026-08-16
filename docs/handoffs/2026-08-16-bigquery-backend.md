@@ -6,9 +6,14 @@
 
 ## Where we are
 
-The walking skeleton is live and the capability matrix is populated. One model materialises
-in a real BigQuery dataset through the ordinary `smelt run` pipeline, verified by
-`cargo test -p smelt-cli --features bigquery --test bigquery_smoke`.
+BigQuery has a leg in every fixed-recipe parity suite, and **all eight pass against the live
+warehouse**: `dual_target_harness`, `source_seed`, `seed_parity`, `materialization_parity`,
+`lowering_parity`, `merge_parity`, `incremental_parity`, `schema_evolution_parity`.
+
+```
+bash scripts/bigquery-auth.sh       # per session: prompts for the passphrase, 1h token
+bash scripts/bigquery-parity.sh     # the whole sweep
+```
 
 **Read first:** `docs/research/20260816-bigquery-backend.md` — decisions, rejected
 alternatives, phase order, the provisioned environment, and the §"Measured against the live
@@ -26,6 +31,8 @@ warehouse" findings. This handoff does not restate it.
    is a security property rather than an implementation detail.
 4. **Capability values come from the warehouse, never from documentation.** Every cell in the
    matrix was established by running the statement the flag names (`scripts/bigquery-probe*.sh`).
+   The MERGE arm shapes below were established the same way *after* a parity test went red —
+   the probe is how a failure gets converted into a fact, not a formality before the work.
 
 ## What is implemented
 
@@ -42,8 +49,51 @@ Dialect work landed where the warehouse actually refused something:
 - **`SHA256` returns `BYTES`**, so fingerprint emitters need a `TO_HEX` wrap no other dialect
   requires.
 - **No `INSERT OVERWRITE`** — `insert_overwrite` lowers to the scoped `DELETE` + `INSERT`.
+- **No whole-row `MERGE` star forms** — see below; this was the one thing the parity legs broke.
 - **Schema-evolution DDL is unimplemented** — resolves to a full refresh naming the reason
-  rather than emitting DDL BigQuery would reject.
+  rather than emitting DDL BigQuery would reject. (The warehouse's own `ADD COLUMN` works and is
+  covered by `schema_evolution_parity`; that is a separate question from smelt emitting the DDL.)
+
+## The parity harness
+
+`TargetKind::BigQuery { dataset }` in `crates/smelt-cli/tests/common/mod.rs`. A suite enumerates
+its targets through `targets_to_run(label)`, so a backend joins every suite in one edit and the
+compiler names each suite that has not yet handled it.
+
+- **The dataset is derived, not minted.** `bq_dataset(label)` = `<base>_<label>_<pid>`, so
+  staging (which writes the `bq:` block via `bq_target_block`) and the assertion loop compute the
+  same name independently — no state threaded through suites that hand-write their `smelt.yml`.
+  Pid separates concurrent runs; label separates suites, because **the per-table modification
+  quota binds** and suites must not share target tables.
+- Each suite drops its dataset on the way out; `bigquery-env.sh` exports a default table
+  expiration as the backstop for an interrupted run.
+- `bigquery-parity.sh` passes `--no-fail-fast` deliberately: the sweep is slow and rate-limited,
+  so one red leg must not hide the state of the others.
+
+## The whole-row MERGE lowering
+
+The emitters had always produced `WHEN MATCHED THEN UPDATE SET *` / `WHEN NOT MATCHED THEN
+INSERT *`, in a function whose own doc comment called itself dialect-invariant. GoogleSQL accepts
+neither. Probed (`scripts/bigquery-probe-merge.sh`): `SET *` → `Expected "(" but got "*"`;
+`INSERT *` → `Expected keyword ROW or keyword VALUES but got "*"`; `SET c = source.c` and
+`INSERT ROW` are taken.
+
+- The two **column-scoped** emitters take a `columns` list and spell the matched arm out under
+  BigQuery. The two **keyed folds** already emit an explicit `SET` of fold expressions, so only
+  their not-matched arm varies — no column list needed there.
+- The list is the model's output projection, carried on `CompiledModel::output_columns` and
+  derived from the compiled SQL's select list via the same `SelectItem::column_name` the
+  analyzer's `model_schema` reads, so the build path and the editor agree on a model's columns.
+- **It is inert wherever a star form exists**, and that is asserted rather than assumed — roughly
+  twenty existing call sites now pass `&[]`, so a test pins that DuckDB's and Spark's emitted
+  text stays byte-identical whatever is passed. Do not weaken that test.
+- **Empty means unknown, never "no columns."** A surviving wildcard leaves the list empty, and an
+  empty `SET` list is a syntactically valid `MERGE` that silently stops updating matched rows.
+  `smelt_backend::require_merge_columns` refuses instead, and both paths that emit a whole-row
+  MERGE (the `Backend` default and the maintenance driver) route through that one guard.
+- **New limitation, now in the spec:** a model whose output projection is not statically
+  resolvable cannot use `Technique::ColumnScopedMerge` on BigQuery. DuckDB and Spark are
+  unaffected.
 
 ## Two findings that change downstream sizing
 
@@ -60,8 +110,8 @@ Dialect work landed where the warehouse actually refused something:
 ## Working constraints that cost time to rediscover
 
 - `.claude/settings.json` **denies** `gcloud`, `bq`, and the credential scripts, so an agent
-  cannot reach GCP directly. It *can* run `scripts/bigquery-probe*.sh`, `bigquery-verify.sh`
-  and `bigquery-test.sh`, which read the minted token off disk.
+  cannot reach GCP directly. It *can* run `scripts/bigquery-probe*.sh`, `bigquery-verify.sh`,
+  `bigquery-test.sh` and `bigquery-parity.sh`, which read the minted token off disk.
 - Interactive flows — gcloud OAuth, the gpg passphrase — need a **real terminal**.
 - **`bq` is unusable on this host** (bundled-Python pyOpenSSL mismatch:
   `module 'lib' has no attribute 'GEN_EMAIL'`). `gcloud` is fine. Everything talks to BigQuery
@@ -78,22 +128,24 @@ Dialect work landed where the warehouse actually refused something:
 ```
 bash scripts/bigquery-venv.sh     # once: uv-based client venv (system python has no pip)
 bash scripts/bigquery-auth.sh     # per session: prompts for the passphrase, 1h token
-bash scripts/bigquery-test.sh     # runs the gated suites
+bash scripts/bigquery-parity.sh   # the parity sweep (8 suites)
+bash scripts/bigquery-test.sh     # defaults to the smoke suite; takes cargo args
 ```
 
 ## Next steps, in order
 
-1. **`/smelt:plan`** for the remaining phases, now that the dialect surface has reported.
-2. **Type oracle and divergences** — a BigQuery oracle beside `duckdb_oracle.rs` plus a
+1. **Type oracle and divergences** — a BigQuery oracle beside `duckdb_oracle.rs` plus a
    divergence column. The surface is smaller than anticipated: the divergence is concentrated
    in type *spelling*, not semantics.
-3. **Parity legs** — a third `TargetKind` in `crates/smelt-cli/tests/common/mod.rs`, gated on
-   `SMELT_BQ_PROJECT`, which every parity suite picks up at once. This is the largest gap:
-   the capability flags are verified as warehouse facts but not yet as parity outcomes, and
-   `supports_pipe_syntax` / `supports_merge_not_matched_by_source` are `true` for the first
-   time on any backend, so those printer paths are still unexercised.
-4. **Incremental legs, schema evolution, generative conformance** — the last needs the
-   fresh-table-per-case allocation above.
+2. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
+   `true` and no parity fixture writes a pipe query, so the printer's emit-pipes-natively path
+   is the one BigQuery-relevant path still unexercised. A fixture with a `|>` query closes it.
+3. **Generative conformance** — needs the fresh-table-per-case allocation above. BigQuery has no
+   `maintenance_conformance` leg, so its incremental coverage is fixed-recipe only.
+4. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
+   between two live engines rather than looping over `targets_to_run`, so extending them means a
+   new engine *pair*, not a third leg. Sized separately from the work above.
+5. **`/smelt:plan`** if the remaining work is taken as one programme rather than piecemeal.
 
 ## Loose ends
 
@@ -103,4 +155,9 @@ bash scripts/bigquery-test.sh     # runs the gated suites
 - **One pre-existing test failure, unrelated to this work:**
   `cargo test -p smelt-logical --test contract_lattice_spec` wants a
   `### The contract, plan, and graph layer` heading in `docs/specs/incremental_models.md` that
-  is absent at `HEAD`.
+  is absent at `HEAD`. It predates the BigQuery branch; `verify-phase.sh` is otherwise green.
+- **Three capability-matrix rows are not `BackendCapabilities` struct fields**
+  (`supports_column_scoped_merge` aside, the `..._not_matched_by_source` and
+  `..._staged_relation_group` rows). The spec says so deliberately — they are "specified ahead of
+  their own struct fields" — but it means a reader grepping the codebase for a matrix row will
+  come up empty. Not a defect; just a trap worth knowing before chasing it.
