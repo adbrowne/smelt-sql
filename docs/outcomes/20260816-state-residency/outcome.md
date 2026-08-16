@@ -70,7 +70,7 @@ this outcome runs first in the programme.
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
 | 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
-| 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | planned |
+| 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | pending |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
 | 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
@@ -78,6 +78,18 @@ this outcome runs first in the programme.
 
 ## Decision log
 
+- **2026-08-16 (phase 6 implement).** Phase 6 landed: the corrected `state.md` §"Declarations
+  stay fail-loud" sentence, the `diagnostics.md` catalogue row,
+  `StateStructure::IntervalFrontier`/`StateAvailability::interval_frontier`, the new pure
+  `smelt_logical::contract::state_requirements` module (`required_state_structures`,
+  `validate_contract_state`), `state_availability_for_project`, the
+  `DeclaredContractRequiresState` `DiagnosticCode` (smelt-db + LSP code string), its
+  `check_file_diagnostics` wiring (effective posture × every declared backend, deduped by
+  declaration), and `examples/timeseries`' `state: mode: intervals`. All phase-6 gates green,
+  including the full `verify-phase.sh` sweep, the LSP example-workspace gate, and the new
+  runtime e2e test proving the refusal actually blocks `execute_project`. See
+  `phases/06-summary.md` "For the next planner" for `smelt explain`'s own non-rendering of this
+  refusal, left for a later phase.
 - **2026-08-16 (phase 6 plan).** No reshape of the remaining rows (7–10 stand as written).
   Planning phase 6 established that `contract.deferral`'s lag is measured from the
   **`.smelt/`-resident** interval-store and landed-delta frontiers

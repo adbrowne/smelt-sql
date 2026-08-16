@@ -947,6 +947,17 @@ pub enum DiagnosticCode {
     /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
     /// the top of the file (line 0, column 0).
     ContractDeferralInvalid,
+    /// Emitted (Error) when a declared contract point's semantics require a
+    /// state structure the effective posture or a project's declared
+    /// backend cannot supply — today, only `contract.deferral` (model- or
+    /// cell-level): its lag is measured against the interval ledger and
+    /// landed-delta record, which `state.mode: stateless` withholds
+    /// entirely (`docs/specs/state.md` §"Declarations stay fail-loud").
+    /// `contract.frozen_horizon` never raises this code — its baseline
+    /// degrades with `ProbeBaselineUnavailable` instead. Names the
+    /// declaration and the missing structure. Anchored at the top of the
+    /// file (line 0, column 0).
+    DeclaredContractRequiresState,
 }
 
 /// Structured metadata attached to diagnostics for code actions

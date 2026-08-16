@@ -503,6 +503,7 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceRepairKeysNotDiscoverable` | Error | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set (`incremental_models.md` §"The repair family" obligation (c)). Names the changed input and why the delta yields no key set. |
 | `MaintenanceRepairSliceUnbounded` | Error | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked (`incremental_models.md` §"The repair family" obligation (b)). Names the source and the unbounded reach. |
 | `MaintenanceStateDowngraded` | Advisory | A cell's derived technique requires a state structure with no realisation on the target backend; the cell was downgraded to its recompute-family equivalent, naming the cell, the ideal technique, and the missing structure (`state.md` §"The degradation contract"). |
+| `DeclaredContractRequiresState` | Error | A declared contract point whose semantics require a state structure (`contract.deferral`'s interval/landed-delta-measured lag) is declared in a project whose effective posture or target backend cannot supply it; names the declaration and the missing structure (`state.md` §"Declarations stay fail-loud"). |
 
 Declaring `grain: key_per_partition` in frontmatter is refused outright at config parse —
 `YamlParseError` (no dedicated code) — since the label has no writable spelling; the message

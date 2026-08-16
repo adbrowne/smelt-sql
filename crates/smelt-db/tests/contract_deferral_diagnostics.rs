@@ -70,6 +70,43 @@ columns:
   - { name: tier, type: VARCHAR, nullable: false }
 "#;
 
+const SMELT_YML_INTERVALS: &str = r#"
+name: contract_deferral_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+state:
+  mode: intervals
+"#;
+
+const CLOCKED_DEFERRAL_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  deferral: '6 hours'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.orders o
+GROUP BY 1
+"#;
+
 /// `deferral:` declared on a model with no `timeseries:` clock is refused —
 /// there is no frontier to measure lag against.
 #[test]
@@ -238,5 +275,155 @@ FROM smelt.sources.orders o
         matches.len(),
         1,
         "expected exactly one ContractDeferralInvalid, got {diags:?}"
+    );
+}
+
+/// `docs/outcomes/20260816-state-residency/phases/06-plan.md`: a
+/// model-level `contract.deferral` under the project's default
+/// `state.mode: stateless` posture is refused — the declared lag can never
+/// be measured without the interval ledger and landed-delta record
+/// (`docs/specs/state.md` §"Declarations stay fail-loud").
+#[test]
+fn deferral_under_stateless_posture_is_refused() {
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", CLOCKED_DEFERRAL_MODEL),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert!(
+        matches[0].message.contains("contract.deferral"),
+        "message must name the offending declaration, got: {}",
+        matches[0].message
+    );
+    assert_eq!(matches[0].severity, smelt_db::DiagnosticSeverity::Error);
+}
+
+/// The same declaration under `state.mode: intervals` is clean — the
+/// posture supplies the interval ledger and landed-delta record the
+/// declaration's lag is measured against.
+#[test]
+fn deferral_under_intervals_posture_is_clean() {
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML_INTERVALS),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", CLOCKED_DEFERRAL_MODEL),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert!(
+        matches.is_empty(),
+        "expected no DeclaredContractRequiresState, got {diags:?}"
+    );
+}
+
+/// A model that narrows its own `state:` block to `stateless` under an
+/// `intervals` project is still refused — the check reads the *effective*
+/// (narrowest) posture, not the project's alone (D-47 narrowing,
+/// `docs/specs/state.md` §"`state.mode` and what each posture provides").
+#[test]
+fn model_narrowing_to_stateless_refuses_declared_deferral() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+state:
+  mode: stateless
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  deferral: '6 hours'
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.orders o
+GROUP BY 1
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML_INTERVALS),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+}
+
+/// A `contract.cells[].deferral` entry is refused per-cell under the
+/// `stateless` posture, same as the model-level declaration.
+#[test]
+fn cell_deferral_under_stateless_posture_is_refused() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [order_id]
+contract:
+  cells:
+    - columns: [amount]
+      on: orders
+      deferral: '1 day'
+---
+SELECT
+    o.order_id,
+    o.order_date,
+    o.amount
+FROM smelt.sources.orders o
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", ORDERS_SOURCE),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let matches: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert!(
+        matches[0].message.contains("contract.cells"),
+        "message must name the offending cell declaration, got: {}",
+        matches[0].message
     );
 }

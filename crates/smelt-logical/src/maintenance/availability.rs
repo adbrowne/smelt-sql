@@ -25,6 +25,16 @@ pub enum StateStructure {
     /// correctness, so the technique is unaffected and the downgrade is
     /// advisory.
     FrontierRecord,
+    /// The run's interval ledger and landed-delta record
+    /// (`docs/specs/run_state.md` §"Interval ledger", §"Relationship to the
+    /// reconciliation ledger") — observability-class, withheld under
+    /// `state.mode: stateless` (`docs/specs/state.md` §"`state.mode` and
+    /// what each posture provides"). `contract.deferral`'s lag is measured
+    /// against this pair, not against [`FrontierRecord`]; losing it makes
+    /// the declared lag unmeasurable, so a declaration that needs it is
+    /// refused fail-loud rather than downgraded
+    /// (`docs/specs/state.md` §"Declarations stay fail-loud").
+    IntervalFrontier,
 }
 
 /// Per-structure availability on a target backend
@@ -33,6 +43,14 @@ pub enum StateStructure {
 pub struct StateAvailability {
     pub reconciliation_ledger: bool,
     pub frontier_record: bool,
+    /// The run's interval ledger and landed-delta record — withheld under
+    /// `state.mode: stateless` regardless of backend
+    /// (`docs/specs/state.md` §"`state.mode` and what each posture
+    /// provides"). Unlike the other two fields this is a posture property,
+    /// not a backend-capability one; [`StateStructure::IntervalFrontier`]
+    /// is consulted only by contract-declaration validation, never by
+    /// [`resolve_state_availability`]'s plan-derivation downgrade.
+    pub interval_frontier: bool,
 }
 
 impl StateAvailability {
@@ -44,15 +62,17 @@ impl StateAvailability {
         Self {
             reconciliation_ledger: true,
             frontier_record: true,
+            interval_frontier: true,
         }
     }
 
     /// No structure available — the ledger-less/frontier-less backend
-    /// (every dialect but DuckDB today).
+    /// (every dialect but DuckDB today), under `state.mode: stateless`.
     pub fn none() -> Self {
         Self {
             reconciliation_ledger: false,
             frontier_record: false,
+            interval_frontier: false,
         }
     }
 }
@@ -111,6 +131,11 @@ pub fn resolve_state_availability(
         let available = match structure {
             StateStructure::ReconciliationLedger => availability.reconciliation_ledger,
             StateStructure::FrontierRecord => availability.frontier_record,
+            // `required_state_structure` never yields this variant — no
+            // `Technique` depends on it, only a declared contract point.
+            StateStructure::IntervalFrontier => {
+                unreachable!("no Technique requires the interval/landed-delta frontier")
+            }
         };
         if available {
             kept_cells.push(cell);
@@ -166,6 +191,9 @@ pub fn resolve_state_availability(
                         ),
                     });
                 }
+            }
+            StateStructure::IntervalFrontier => {
+                unreachable!("no Technique requires the interval/landed-delta frontier")
             }
         }
     }

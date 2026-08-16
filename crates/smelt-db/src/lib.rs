@@ -2344,6 +2344,60 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
+        // Contract-lattice state-requirements check (`docs/specs/state.md`
+        // §"Declarations stay fail-loud"): a declared contract point whose
+        // semantics require a state structure the effective posture or a
+        // declared backend cannot supply is refused fail-loud, distinct from
+        // the clock-admissibility checks above (which validate the
+        // declaration against the SQL, not against state availability). The
+        // effective posture is the model's own `state:` block if declared,
+        // else the project's (D-47 narrowing already validated separately,
+        // above). Single-owner rule: `smelt_logical::contract::
+        // state_requirements::validate_contract_state` decides which
+        // declarations need which structure; this wrapper only resolves the
+        // posture and backends and reports the result once per declaration
+        // even when multiple declared backends share the same refusal.
+        if let Some(contract) = &metadata.contract {
+            let project_mode = project
+                .map(|p| crate::queries::project::project_state_mode(db, p))
+                .unwrap_or_default();
+            let effective_mode = metadata
+                .state
+                .as_ref()
+                .map(|s| s.mode)
+                .unwrap_or(project_mode);
+            let backends = project
+                .and_then(|p| project_active_backends(db, p))
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| vec!["duckdb".to_string()]);
+            let mut reported = std::collections::BTreeSet::new();
+            for backend in &backends {
+                let availability = crate::queries::maintenance::state_availability_for_project(
+                    backend,
+                    effective_mode,
+                );
+                for refusal in smelt_logical::contract::state_requirements::validate_contract_state(
+                    contract,
+                    &availability,
+                ) {
+                    if !reported.insert(refusal.declaration.clone()) {
+                        continue;
+                    }
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "DeclaredContractRequiresState: {} — {}",
+                            refusal.declaration, refusal.why
+                        ),
+                        range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                        code: Some(DiagnosticCode::DeclaredContractRequiresState),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+
         // Declarative column test validation (`docs/specs/data_tests.md`
         // §"Fail-loud validation"). Two checks, run only when at least one
         // column declares a non-empty `tests` list:
@@ -2610,6 +2664,12 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 }
                 smelt_logical::maintenance::availability::StateStructure::FrontierRecord => {
                     "the frontier record"
+                }
+                smelt_logical::maintenance::availability::StateStructure::IntervalFrontier => {
+                    unreachable!(
+                        "no MaintenanceStateDowngraded is ever raised for the interval frontier \
+                         — no Technique depends on it, only a declared contract point"
+                    )
                 }
             };
             DiagnosticAcc(Diagnostic {

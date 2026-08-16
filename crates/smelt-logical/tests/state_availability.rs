@@ -113,6 +113,7 @@ fn region_recompute_without_frontier_record_records_a_downgrade() {
         &StateAvailability {
             reconciliation_ledger: true,
             frontier_record: false,
+            interval_frontier: true,
         },
     );
 

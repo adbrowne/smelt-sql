@@ -20,6 +20,13 @@ targets:
 
 default_materialization: view
 
+# `daily_event_counts_deferred` declares `contract.deferral`, whose lag is
+# measured against the interval ledger and landed-delta record — the
+# `stateless` default withholds them, so this project opts into `intervals`
+# (`docs/specs/state.md` §"Declarations stay fail-loud").
+state:
+  mode: intervals
+
 models:
   users:
     materialization: table

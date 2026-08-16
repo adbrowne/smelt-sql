@@ -1064,6 +1064,26 @@ pub fn state_availability_for(
     }
 }
 
+/// [`state_availability_for`]'s sibling for contract-declaration validation
+/// (`docs/specs/state.md` §"Declarations stay fail-loud"): adds the
+/// posture-gated `interval_frontier` field on top of the backend-gated
+/// reconciliation/frontier pair. `state_mode` is the caller-resolved
+/// *effective* posture (project narrowed by a model's own `state:` block,
+/// per D-47) — `interval_frontier` is available only when it is not
+/// [`smelt_core::config::StateMode::Stateless`], regardless of backend: the
+/// interval ledger and landed-delta record are `.smelt/`-resident
+/// observability state the `stateless` posture withholds entirely
+/// (`docs/specs/state.md` §"`state.mode` and what each posture provides"),
+/// not a per-backend capability.
+pub fn state_availability_for_project(
+    backend_name: &str,
+    state_mode: smelt_core::config::StateMode,
+) -> smelt_logical::maintenance::availability::StateAvailability {
+    let mut availability = state_availability_for(backend_name);
+    availability.interval_frontier = state_mode != smelt_core::config::StateMode::Stateless;
+    availability
+}
+
 /// The `on:` address a derived [`Trigger`] resolves to, for matching against
 /// a `maintenance.cells[].on` frontmatter entry — mirrors the vocabulary
 /// `cells[].on` already writes (`incremental_models.md` §Surface

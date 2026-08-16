@@ -475,6 +475,7 @@ impl Backend {
                 DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
                 DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
                 DbCode::ContractDeferralInvalid => "contract-deferral-invalid",
+                DbCode::DeclaredContractRequiresState => "declared-contract-requires-state",
             };
             NumberOrString::String(code_str.to_string())
         });

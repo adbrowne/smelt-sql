@@ -170,10 +170,12 @@ contract points), and validation checks those facts against the **SQL**, exactly
 (`incremental_models.md` §"Validator, not chooser"). State availability never enters that
 check: a declaration the SQL upholds is valid under every posture, and the plan beneath it
 degrades per the contract above. The one exception is a declaration whose semantics *are* a
-statement about state: `contract.deferral` promises a bounded, ledger-measured lag, which
-cannot be measured without the frontier — declaring it where the frontier has no realisation
-is `DeclaredContractRequiresState`, a validation error, because silently skipping the
-measurement would turn a declared guarantee into an unverified hope.
+statement about state: `contract.deferral` promises a lag bounded against the run's own
+interval ledger and landed-delta record (`run_state.md` §"Interval ledger", §"Relationship to
+the reconciliation ledger"), which the `stateless` posture withholds and no backend can
+substitute — declaring `deferral` where that frontier has no realisation is
+`DeclaredContractRequiresState`, a validation error, because silently skipping the measurement
+would turn a declared guarantee into an unverified hope.
 
 ## Design
 
