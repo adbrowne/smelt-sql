@@ -52,7 +52,7 @@ gcloud auth activate-service-account --key-file="$_plain" --quiet >/dev/null 2>&
 # Name the service account explicitly rather than relying on it being active:
 # the restore above may already have run in a previous invocation, and this is
 # the one command that genuinely must be the service account.
-_sa_email="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["client_email"])' "$_plain" 2>/dev/null || true)"
+_sa_email="$(jq -r '.client_email // empty' "$_plain" 2>/dev/null || true)"
 if [[ -n "$_sa_email" ]]; then
   TOKEN="$(gcloud auth print-access-token --account="$_sa_email")"
 else

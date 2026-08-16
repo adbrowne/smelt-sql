@@ -65,8 +65,8 @@ impl BigQueryBackend {
                     let module = py.import("smelt.bigquery_adapter").map_err(|e| {
                         BackendError::connection_failed(format!(
                             "Failed to import smelt.bigquery_adapter: {}. \
-                             Ensure the BigQuery client is installed: \
-                             uv pip install google-cloud-bigquery pyarrow",
+                             Create the client venv with `bash scripts/bigquery-venv.sh`, \
+                             then `source scripts/bigquery-env.sh` to put it on PYTHONPATH.",
                             e
                         ))
                     })?;

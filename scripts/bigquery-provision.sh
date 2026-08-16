@@ -19,11 +19,8 @@ DATASET="${SMELT_BQ_DATASET:-smelt_test}"
 LOCATION="${SMELT_BQ_LOCATION:-US}"
 
 export CLOUDSDK_CONFIG="${SMELT_BQ_CONFIG_DIR:-$HOME/.config/gcloud-smelt-bq}"
-# `bq` shells out to `gcloud` for auth, so the SDK bin dir must be on PATH —
-# resolving the binaries by absolute path alone is not enough.
 [[ -d "$HOME/google-cloud-sdk/bin" ]] && export PATH="$HOME/google-cloud-sdk/bin:$PATH"
 GCLOUD="$(command -v gcloud || echo "$HOME/google-cloud-sdk/bin/gcloud")"
-BQ="$(command -v bq || echo "$HOME/google-cloud-sdk/bin/bq")"
 SA="smelt-bq-test@${PROJECT}.iam.gserviceaccount.com"
 
 say() { printf '\n=== %s\n' "$1"; }
@@ -38,8 +35,7 @@ say() { printf '\n=== %s\n' "$1"; }
 # PERMISSION_DENIED. Pin the admin identity explicitly instead.
 #
 # CLOUDSDK_CORE_ACCOUNT is used rather than `gcloud config set account` because
-# it applies to `bq` as well (bq shells out to gcloud) and mutates no stored
-# state — this script leaves the config exactly as it found it.
+# it mutates no stored state — this script leaves the config as it found it.
 ADMIN_ACCOUNT="${SMELT_BQ_ADMIN_ACCOUNT:-$("$GCLOUD" auth list \
   --format='value(account)' 2>/dev/null | grep -v 'gserviceaccount\.com' | head -n1)}"
 
@@ -57,29 +53,65 @@ say "Enabling APIs"
 "$GCLOUD" services enable bigquery.googleapis.com --project="$PROJECT"
 "$GCLOUD" services enable iam.googleapis.com --project="$PROJECT"
 
+# Dataset work goes through the REST API rather than `bq`.
+#
+# `bq` runs on the SDK's bundled Python and imports pyOpenSSL, a pairing that
+# breaks outright on some installs ("module 'lib' has no attribute 'GEN_EMAIL'"
+# — a pyOpenSSL/cryptography version mismatch). `gcloud` itself does not touch
+# that import path and keeps working, so a broken `bq` would otherwise take down
+# provisioning for a reason unrelated to BigQuery. Every other script here
+# (bigquery-verify.sh, the probes) already speaks REST over curl, so this also
+# leaves one way of talking to BigQuery instead of two.
+API="https://bigquery.googleapis.com/bigquery/v2"
+TOKEN="$("$GCLOUD" auth print-access-token)"
+
+# HTTP status only — for existence checks.
+bq_status() {
+  curl -sS -o /dev/null -w '%{http_code}' \
+    -H "Authorization: Bearer ${TOKEN}" "${API}/$1"
+}
+
+# Body, with a non-zero exit and the API's own message on failure.
+bq_call() {
+  local method="$1" path="$2" body="${3:-}" resp msg
+  if [[ -n "$body" ]]; then
+    resp=$(curl -sS -X "$method" -H "Authorization: Bearer ${TOKEN}" \
+      -H "Content-Type: application/json" -d "$body" "${API}/${path}")
+  else
+    resp=$(curl -sS -X "$method" -H "Authorization: Bearer ${TOKEN}" "${API}/${path}")
+  fi
+  msg=$(jq -r '.error.message // ""' <<<"$resp")
+  if [[ -n "$msg" ]]; then
+    echo "API ${method} ${path} failed: ${msg}" >&2
+    return 1
+  fi
+  printf '%s' "$resp"
+}
+
+ensure_dataset() {
+  local id="$1" description="$2" expiration_ms="${3:-}" body
+  if [[ "$(bq_status "projects/${PROJECT}/datasets/${id}")" == "200" ]]; then
+    echo "already exists"
+    return 0
+  fi
+  body=$(jq -n \
+    --arg p "$PROJECT" --arg d "$id" --arg loc "$LOCATION" --arg desc "$description" \
+    --arg exp "$expiration_ms" \
+    '{datasetReference: {projectId: $p, datasetId: $d}, location: $loc, description: $desc}
+     + (if $exp == "" then {} else {defaultTableExpirationMs: $exp} end)')
+  bq_call POST "projects/${PROJECT}/datasets" "$body" >/dev/null
+  echo "created"
+}
+
 say "Dataset $DATASET (tables self-expire after 24h)"
-if "$BQ" --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}" >/dev/null 2>&1; then
-  echo "already exists"
-else
-  "$BQ" --project_id="$PROJECT" mk --dataset \
-     --location="$LOCATION" \
-     --default_table_expiration=86400 \
-     --description="smelt integration tests — tables expire after 24h" \
-     "${PROJECT}:${DATASET}"
-fi
+ensure_dataset "$DATASET" "smelt integration tests — tables expire after 24h" 86400000
 
 say "Control dataset ${DATASET}_notgranted (negative-test target)"
 # Exists so the least-privilege check has something real to be refused FROM.
-# Querying a non-existent dataset returns "not found" for every principal
-# including owners, which proves nothing about the grant.
-if "$BQ" --project_id="$PROJECT" show --dataset "${PROJECT}:${DATASET}_notgranted" >/dev/null 2>&1; then
-  echo "already exists"
-else
-  "$BQ" --project_id="$PROJECT" mk --dataset \
-     --location="$LOCATION" \
-     --description="control dataset: the test service account must NOT have access" \
-     "${PROJECT}:${DATASET}_notgranted"
-fi
+# Creating a table in a non-existent dataset returns "Not found" for every
+# principal including owners, which proves nothing about the grant.
+ensure_dataset "${DATASET}_notgranted" \
+  "control dataset: the test service account must NOT have access"
 
 say "Service account $SA"
 if "$GCLOUD" iam service-accounts describe "$SA" --project="$PROJECT" >/dev/null 2>&1; then
@@ -114,13 +146,14 @@ if "$GCLOUD" projects remove-iam-policy-binding "$PROJECT" \
 fi
 
 say "Grant: WRITER on dataset $DATASET ONLY (not project-wide)"
-_cur="$(mktemp)"; _new="$(mktemp)"
-trap 'rm -f "$_cur" "$_new"' EXIT
-"$BQ" --project_id="$PROJECT" show --format=prettyjson --dataset "${PROJECT}:${DATASET}" > "$_cur"
-jq --arg sa "$SA" \
-   '.access += [{"role":"WRITER","userByEmail":$sa}] | .access |= unique' \
-   "$_cur" > "$_new"
-"$BQ" --project_id="$PROJECT" update --source "$_new" "${PROJECT}:${DATASET}"
+# Read-modify-write the dataset's ACL: PATCH replaces the `access` array
+# wholesale, so the existing entries have to be carried forward or the owner
+# loses access.
+_acl=$(bq_call GET "projects/${PROJECT}/datasets/${DATASET}" \
+  | jq --arg sa "$SA" \
+      '{access: ((.access // []) + [{"role":"WRITER","userByEmail":$sa}] | unique)}')
+bq_call PATCH "projects/${PROJECT}/datasets/${DATASET}" "$_acl" >/dev/null
+echo "granted"
 
 say "Budget alert (US\$5/month — ALERTS, does not hard-stop spend)"
 "$GCLOUD" services enable billingbudgets.googleapis.com --project="$PROJECT" >/dev/null 2>&1 || true
@@ -135,7 +168,7 @@ else
 fi
 
 say "Effective dataset ACL"
-"$BQ" --project_id="$PROJECT" show --format=prettyjson --dataset "${PROJECT}:${DATASET}" \
+bq_call GET "projects/${PROJECT}/datasets/${DATASET}" \
   | jq -r '.access[] | "\(.role)\t\(.userByEmail // .specialGroup // .groupByEmail // "-")"'
 
 say "Done — next: bash scripts/bigquery-setup.sh (mints + encrypts the key)"

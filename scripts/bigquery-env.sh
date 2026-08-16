@@ -22,9 +22,7 @@ _bq_venv_site="${_bq_repo_root}/.smelt-bq-venv/lib/python3.12/site-packages"
 if [ -d "${_bq_venv_site}" ]; then
   export PYTHONPATH="${_bq_venv_site}:${PYTHONPATH}"
 else
-  echo "no BigQuery client venv — create it with:" >&2
-  echo "  uv venv --python 3.12 .smelt-bq-venv" >&2
-  echo "  uv pip install --python .smelt-bq-venv/bin/python google-cloud-bigquery pyarrow" >&2
+  echo "no BigQuery client venv — create it with: bash scripts/bigquery-venv.sh" >&2
 fi
 
 _bq_config_dir="${SMELT_BQ_CONFIG_DIR:-$HOME/.config/gcloud-smelt-bq}"
