@@ -13,9 +13,9 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, keyed_restrictions_from_plan, plan_since_upstream,
-    plan_since_upstream_with_keyed_seeds, plan_since_upstream_with_observed_deltas,
-    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    build_forward_graph, keyed_restrictions_from_plan, observed_delta_keys_to_read,
+    plan_since_upstream, plan_since_upstream_with_keyed_seeds,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1581,5 +1581,199 @@ fn keyed_restrictions_from_plan_drops_unresolved_values() {
     assert!(
         !restrictions.contains_key("downstream"),
         "an unresolved seed must contribute no restriction entry: {restrictions:?}"
+    );
+}
+
+/// Phase 6 (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`):
+/// `observed_delta_keys_to_read` returns exactly one key for a delta on a
+/// locality-admitted composed origin (`user_daily_spend`, route 1
+/// key-embedded — the same fixture `composed_model_as_source` reuses), and
+/// no key at all for a delta on a raw `sources.*` address (`raw.events`) or
+/// a bare `grain: partition` model with no key-temporal-locality route
+/// (`daily_events`) — mirroring `plan_since_upstream_with_observed_deltas`'s
+/// own eligibility rule, since both consult the same `key_locality_slice`.
+#[test]
+fn observed_delta_keys_to_read_lists_only_locality_admitted_origins() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let deltas = vec![
+        SourceDelta {
+            source: "user_daily_spend".to_string(),
+            landed: window,
+        },
+        SourceDelta {
+            source: "raw.events".to_string(),
+            landed: window,
+        },
+        SourceDelta {
+            source: "daily_events".to_string(),
+            landed: window,
+        },
+    ];
+
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+
+    assert_eq!(
+        keys,
+        vec![(
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        )],
+        "only the locality-admitted composed origin must contribute a key: {keys:?}"
+    );
+}
+
+/// Phase 6: the live "delta empty" leg — `resolve_observed_delta_lookup`
+/// reads a present-and-empty row (recorded via the real
+/// `generate_observed_delta_upsert_sql`, not a hand-built `ObservedDeltaLookup`)
+/// off a real DuckDB backend, and the resulting plan schedules zero
+/// downstream regions, exactly like `empty_observed_delta_schedules_zero_downstream_regions`'s
+/// hand-built-lookup counterpart.
+#[tokio::test]
+async fn live_observed_lookup_suppresses_downstream_for_present_and_empty_delta() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let window_start = smelt_logical::maintenance::propagate::ordinal_to_iso(window.start);
+    let window_end = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ddl).await.expect("create delta table");
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "user_daily_spend",
+        &window_start,
+        &window_end,
+        "SELECT NULL::VARCHAR AS delta_key, NULL::VARCHAR AS delta_partition WHERE FALSE",
+    );
+    backend
+        .execute_sql(&upsert)
+        .await
+        .expect("record the fully-suppressed run's empty delta");
+
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let observed =
+        smelt_runtime::propagation_live::resolve_observed_delta_lookup(&backend, "main", &keys)
+            .await
+            .expect("live lookup succeeds");
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        plan.runs.is_empty(),
+        "a present-and-empty recorded delta read live must schedule zero downstream regions: \
+         {:?}",
+        plan.runs
+    );
+}
+
+/// Phase 6: an absent record (nothing recorded for this window) makes
+/// `resolve_observed_delta_lookup` return an empty lookup, and the plan
+/// falls back to the declared `--landed` window unchanged (widen-never-
+/// narrow) — the live read must not turn absent into empty.
+#[tokio::test]
+async fn live_observed_lookup_falls_back_to_declared_window_when_absent() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    // No row recorded — the table isn't even created before this read.
+
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+    let keys = observed_delta_keys_to_read(&models, &source_infos, &deltas)
+        .expect("observed_delta_keys_to_read succeeds");
+    let observed =
+        smelt_runtime::propagation_live::resolve_observed_delta_lookup(&backend, "main", &keys)
+            .await
+            .expect("live lookup succeeds even with nothing recorded");
+    assert!(
+        observed.is_empty(),
+        "an unrecorded window must resolve to an empty lookup, not a fabricated entry: \
+         {observed:?}"
+    );
+
+    let with_live_lookup = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("absent record must fall back, not error");
+    let baseline = plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("baseline plan_since_upstream");
+
+    assert_eq!(
+        with_live_lookup.runs, baseline.runs,
+        "an absent live-read observed delta must propagate identically to the declared window"
+    );
+    assert!(
+        with_live_lookup
+            .runs
+            .iter()
+            .any(|r| r.model == "user_spend_rollup"),
+        "the declared window must still propagate downstream: {:?}",
+        with_live_lookup.runs
     );
 }

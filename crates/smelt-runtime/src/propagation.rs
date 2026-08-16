@@ -1102,6 +1102,43 @@ pub type ObservedDeltaKey = (String, String, String);
 /// changed-row set for that exact window.
 pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckdb::ObservedDelta>;
 
+/// The exact set of [`ObservedDeltaKey`]s
+/// [`plan_since_upstream_with_observed_deltas`] would consult for `deltas` —
+/// one key per delta whose `source` names a locality-admitted composed
+/// model, derived from the SAME [`derive_clamp_and_locality`]
+/// `key_locality_slice` the planner itself reads for eligibility (never a
+/// second, independently re-derived "is this origin locality-admitted"
+/// rule). A delta whose origin has no admitted key-temporal-locality route
+/// (a raw `sources.*` address, or a bare `grain: partition` model) is not
+/// eligible at all and contributes no key — a live resolver has nothing to
+/// read for it, exactly as [`plan_since_upstream_with_observed_deltas`]
+/// itself never looks such an origin up in `observed`.
+///
+/// Pure — no backend I/O. The live resolver (`propagation_live.rs`) calls
+/// this first to know which `(model, window)` keys to actually read off the
+/// warehouse, then passes the resulting [`ObservedDeltaLookup`] to
+/// [`plan_since_upstream_with_observed_deltas`].
+pub fn observed_delta_keys_to_read(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    deltas: &[SourceDelta],
+) -> Result<Vec<ObservedDeltaKey>> {
+    let ClampAndLocality {
+        key_locality_slice, ..
+    } = derive_clamp_and_locality(models, source_infos)?;
+    Ok(deltas
+        .iter()
+        .filter(|d| key_locality_slice.contains_key(&d.source))
+        .map(|d| {
+            (
+                d.source.clone(),
+                ordinal_to_iso(d.landed.start),
+                ordinal_to_iso(d.landed.end),
+            )
+        })
+        .collect())
+}
+
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
 /// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely

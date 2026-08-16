@@ -67,7 +67,7 @@ run shape.
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
-| 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | planned |
+| 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | pending |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
@@ -223,6 +223,18 @@ run shape.
   (2) The live read runs under `--dry-run` too — it is a read plus the same idempotent
   `CREATE TABLE IF NOT EXISTS` every other state read performs, and a dry run that printed a
   different dirty set from the live run it previews would be worse than the write.
+
+- 2026-08-16 (phase 6 implemented): `maintenance_driver::read_observed_delta` (decodes both
+  `changed_keys` and `partitions`; `read_observed_delta_changed_keys` now delegates to it),
+  `propagation::observed_delta_keys_to_read` (pure, consults the same `key_locality_slice` the
+  planner reads), and a new `smelt-runtime::propagation_live::resolve_observed_delta_lookup`
+  (the live backend read) land; `run_since_upstream` now creates a real backend, resolves the
+  live lookup, and calls `plan_since_upstream_with_observed_deltas` in place of the always-empty
+  `plan_since_upstream`. Two Known Divergences bullets narrowed in `incremental_models.md` — the
+  observed-delta-consumption bullet loses its "doesn't read live"/"delta-empty leg" clauses, and
+  the scheduler-currency bullet's live-resolution parenthetical loses its observed-delta clause
+  (key-value live resolution stays open, row 7). All five planned tests pass; no reshape of the
+  phase table.
 
 ## Blocked
 

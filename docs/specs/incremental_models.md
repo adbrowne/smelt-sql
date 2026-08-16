@@ -1942,9 +1942,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   day-intervals in most respects: the graph layer's keyed channel now carries resolved key
   *values*, not just key columns and provenance (§"Keyed dirt-sets and the narrowed refusal"),
   but only when a caller feeds them in as a seed — live resolution (reading the actually-changed
-  key values off the backend, and consuming the recorded observed-delta table for
-  `--since-upstream` rather than trusting the command line) is still the run-time mechanism's own
-  job, not yet wired live into propagation; and cross-model runs require the operator to state
+  key values off the backend) is still the run-time mechanism's own job, not yet wired live into
+  propagation; and cross-model runs require the operator to state
   what landed upstream on the command line, because no per-source watermark is yet persisted (the
   watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no run yet writes or
   reads one). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:
@@ -1978,10 +1977,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `technique: suppress` on a refusing cell silently falls back to full recompute instead of
   refusing; `smelt explain` also misses this case. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded
-  delta table live; backward resolution consumes none; the keyed-fold and staged-candidate
-  write families record nothing; the settle-bound × observed-delta composition has no live
-  "delta empty" leg. Tracked:
+- **Observed-delta consumption is partial**: backward resolution consumes none; the
+  keyed-fold and staged-candidate write families record nothing. Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **No execution technique keys off a maintained-model creation cell** — the propagated
   region materializes via the ordinary run loop, not a per-cell technique. Tracked:

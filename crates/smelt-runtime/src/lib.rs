@@ -33,6 +33,7 @@ pub mod model_probes;
 pub mod probe_plan;
 pub mod probes;
 pub mod propagation;
+pub mod propagation_live;
 pub mod python;
 pub mod reporter;
 pub mod safety;

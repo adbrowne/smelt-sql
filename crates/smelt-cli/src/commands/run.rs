@@ -7,6 +7,7 @@ use smelt_cli::{
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_runtime::execute::BackendFactory;
 use smelt_runtime::types::ExecuteRequest;
 use smelt_state::generate_run_id;
 use std::sync::Arc;
@@ -357,9 +358,55 @@ async fn run_since_upstream(
         .execution_order()
         .with_context(|| "Failed to compute execution order")?;
 
-    let plan =
-        smelt_runtime::propagation::plan_since_upstream(models, &source_infos, &order, &deltas)
+    // Live observed-delta consumption (`docs/outcomes/
+    // 20260816-scheduler-delta-signatures/outcome.md` phase 6): read the
+    // recorded `_smelt_observed_delta` table off the real backend for every
+    // key `observed_delta_keys_to_read` says matters, rather than trusting
+    // only the command-line `--landed` window. Runs under `--dry-run` too —
+    // it is a read plus the same idempotent `CREATE TABLE IF NOT EXISTS`
+    // every other state read performs, and a dry run must preview the SAME
+    // dirty set the live run would compute. A backend-creation failure is a
+    // named error here, never a silent fallback to an empty lookup (which
+    // would silently widen every eligible origin back to its declared
+    // window).
+    let observed_keys =
+        smelt_runtime::propagation::observed_delta_keys_to_read(models, &source_infos, &deltas)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let observed = {
+        let target_config = config
+            .targets
+            .get(&args.target)
+            .ok_or_else(|| anyhow::anyhow!("Target '{}' not found in smelt.yml", args.target))?;
+        let observed_delta_backend_factory = CliBackendFactory {
+            database_override: args.database.clone(),
+        };
+        let backend = observed_delta_backend_factory
+            .create(&args.target, target_config, project_dir)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to create the '{}' backend to read recorded observed deltas",
+                    args.target
+                )
+            })?;
+        let schema = &config.targets[&args.target].schema;
+        smelt_runtime::propagation_live::resolve_observed_delta_lookup(
+            backend.as_ref(),
+            schema,
+            &observed_keys,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?
+    };
+
+    let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+        models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {

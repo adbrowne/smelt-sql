@@ -2731,6 +2731,36 @@ pub async fn read_observed_delta_changed_keys(
     window_start: &str,
     window_end: &str,
 ) -> std::result::Result<Option<Vec<String>>, BackendError> {
+    Ok(
+        read_observed_delta(backend, schema, model, window_start, window_end)
+            .await?
+            .map(|od| od.changed_keys),
+    )
+}
+
+/// Read one `(model, window)`'s recorded observed delta back off the
+/// warehouse — the live-read counterpart of
+/// [`ddl_duckdb::generate_observed_delta_upsert_sql`], decoding BOTH
+/// `changed_keys` and `partitions` (unlike
+/// [`read_observed_delta_changed_keys`], which only ever needed the former).
+/// `None` = no row was ever recorded for this window (the "never recorded"
+/// case — the widen-never-narrow fallback's trigger); `Some` — even with
+/// both vectors empty — means a conditional write ran and recorded its
+/// (possibly empty) changed set for that exact window
+/// (`incremental_models.md` §"The graph layer" — "Empty and absent are
+/// distinct").
+///
+/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
+/// this module — a missing delta on the read side is always a legal
+/// fallback trigger, so a non-DuckDB backend reads back `None` rather than
+/// erroring.
+pub async fn read_observed_delta(
+    backend: &dyn Backend,
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> std::result::Result<Option<smelt_state::ddl_duckdb::ObservedDelta>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Ok(None);
     }
@@ -2745,30 +2775,41 @@ pub async fn read_observed_delta_changed_keys(
         return Ok(None);
     }
 
-    let mut keys = Vec::new();
-    for batch in &batches {
-        let Some(col) = batch.column_by_name("changed_keys") else {
-            continue;
-        };
-        let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
-            continue;
-        };
-        for i in 0..list.len() {
-            if list.is_null(i) {
-                continue;
-            }
-            let values = list.value(i);
-            let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
+    fn decode_string_list_column(
+        batches: &[arrow::array::RecordBatch],
+        column_name: &str,
+    ) -> Vec<String> {
+        let mut values = Vec::new();
+        for batch in batches {
+            let Some(col) = batch.column_by_name(column_name) else {
                 continue;
             };
-            for j in 0..strings.len() {
-                if !strings.is_null(j) {
-                    keys.push(strings.value(j).to_string());
+            let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
+                continue;
+            };
+            for i in 0..list.len() {
+                if list.is_null(i) {
+                    continue;
+                }
+                let inner = list.value(i);
+                let Some(strings) = inner.as_any().downcast_ref::<arrow::array::StringArray>()
+                else {
+                    continue;
+                };
+                for j in 0..strings.len() {
+                    if !strings.is_null(j) {
+                        values.push(strings.value(j).to_string());
+                    }
                 }
             }
         }
+        values
     }
-    Ok(Some(keys))
+
+    Ok(Some(smelt_state::ddl_duckdb::ObservedDelta {
+        changed_keys: decode_string_list_column(&batches, "changed_keys"),
+        partitions: decode_string_list_column(&batches, "partitions"),
+    }))
 }
 
 // ── F3: fingerprint sidecar — synthesized external change feed ─────────
