@@ -1,7 +1,7 @@
 # Outcome: The scheduler consumes delta signatures
 
 **Created:** 2026-08-16
-**Status:** queued
+**Status:** active
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 2)
 **Spec anchors:** `docs/specs/incremental_models.md`, `docs/specs/incremental_shapes.md`,
 `docs/specs/run_state.md`
@@ -62,7 +62,7 @@ run shape.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | pending |
+| 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | planned |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | pending |
 | 3 | Key-valued dirt-sets through the graph layer: key-level dirt representation alongside intervals | pending |
 | 4 | Live observed-delta consumption: `--since-upstream` reads the recorded delta table; settle-bound × observed-delta "delta empty" leg | pending |
@@ -73,7 +73,16 @@ run shape.
 
 ## Decision log
 
-_(empty)_
+- 2026-08-16: outcome activated; phase 1 planned. No reshape of the phase table — this is the
+  first phase, there is no prior summary in this outcome to reshape from, and the eight rows
+  map one-to-one onto success criteria 1–7 plus close-out.
+- 2026-08-16 (phase 1 planning): pinned three design choices for Andrew's review rather than
+  leaving them to the implementing phases — dispatch typed by *addressing* not model grain;
+  key *values* seed a still-pure propagation function (rejecting backend I/O inside
+  propagation, and rejecting symbolic-only dirt resolved at run time); the per-source
+  watermark is a field on the existing observability-classified landed-delta family rather
+  than a new correctness-classified state family (which would contradict `state.md`'s
+  optionality rule).
 
 ## Blocked
 
