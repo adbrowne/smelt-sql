@@ -76,7 +76,15 @@ Decision: agree
 these functions to a fixed timestamp at compile time so reruns are reproducible; keyed
 models instead reject them outright. **Recommend:** unify on pinning — same rule
 everywhere is easier to learn, and the mechanism already exists.
-Decision: both these seem wrong - we should just allow this to work "as is" - I believe our promise of equality should only be for where two full runs would be equal. Can we ammend the rule?
+Decision: both current behaviours are wrong — allow `NOW()`/`CURRENT_*` to run as-is
+everywhere (no compile-time pinning in partition models, no rejection in keyed models),
+and amend the equivalence rule: **the promise is scoped to deterministic outputs** — where
+two full refreshes would themselves disagree, no equivalence is promised. Mechanically:
+the walk's existing per-column determinism verdict exempts time-dependent columns from
+the conformance oracle's comparison, `smelt explain`'s per-column guarantees state the
+exemption explicitly, and diff/suppression-style techniques that rely on
+recompute-equality exclude (or refuse on) volatile columns via the same verdict so they
+don't see permanent phantom drift.
 
 **8. Driver granularities.** The scheduling driver understands day and week only; month
 (and eventually hour) are inherited limitations for every consumer. **Recommend:** widen
