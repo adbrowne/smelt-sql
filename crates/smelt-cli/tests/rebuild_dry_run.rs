@@ -212,6 +212,63 @@ fn no_backbuild_verb_in_user_docs() {
     );
 }
 
+/// Standing ratchet, sibling to `no_backbuild_verb_in_user_docs`: the shipped
+/// `smelt migrate` verb must stay documented — its guide, its CLI reference
+/// entry, and no leftover "doesn't exist yet" claim in user-facing docs
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/10-plan.md`).
+#[test]
+fn migrate_verb_is_documented() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root exists");
+
+    let guide = repo_root.join("docs-site/docs/guide/backbuild-synthesis.md");
+    let guide_text = std::fs::read_to_string(&guide).unwrap_or_default();
+    assert!(
+        guide_text.contains("smelt migrate"),
+        "expected the guide to mention `smelt migrate`: {}",
+        guide.display()
+    );
+    assert!(
+        guide_text.contains("--apply"),
+        "expected the guide to mention `--apply`: {}",
+        guide.display()
+    );
+
+    let cli_ref = repo_root.join("docs-site/docs/reference/cli.md");
+    let cli_ref_text = std::fs::read_to_string(&cli_ref).unwrap_or_default();
+    assert!(
+        cli_ref_text.contains("## smelt migrate"),
+        "expected a `## smelt migrate` heading in {}",
+        cli_ref.display()
+    );
+
+    let mut offenders = Vec::new();
+    for dir in ["docs-site/docs", "docs/specs"] {
+        let root = repo_root.join(dir);
+        for entry in walkdir(&root) {
+            if entry.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&entry).unwrap_or_default();
+            for (i, line) in text.lines().enumerate() {
+                if line.contains("No `smelt migrate` command exists")
+                    || line.contains("no CLI command for this yet")
+                {
+                    offenders.push(format!("{}:{}: {}", entry.display(), i + 1, line));
+                }
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "found stale \"smelt migrate doesn't exist\" claims in user docs:\n{}",
+        offenders.join("\n")
+    );
+}
+
 fn walkdir(root: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if !root.exists() {

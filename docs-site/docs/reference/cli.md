@@ -391,6 +391,82 @@ smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-par
 
 ---
 
+## smelt migrate
+
+Migrate a deployed table after its model's SQL definition changed. Disjoint from
+[`smelt rebuild`](#smelt-rebuild): `rebuild` re-runs a model's *data* over a time range under its
+current, unchanged definition; `migrate` moves a deployed table from the *old* definition to the
+*new* one, in place where a targeted script can prove equivalence to a full rebuild (see
+[Backbuild Synthesis](../guide/backbuild-synthesis.md) for how the plan is derived).
+
+**Usage:**
+
+```
+smelt migrate <MODEL> [--apply] [--json]
+```
+
+**Arguments:**
+
+| Argument | Required | Description |
+|----------|----------|--------------|
+| `<MODEL>` | yes | Model to derive a migration plan for. Bare names are subject to scope resolution; see [Argument resolution and `--scope`](#argument-resolution-and-scope). |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--apply` | bool | `false` | Execute the plan most recently printed and recorded by a plan-mode call. Refuses (exit `3`) if the freshly re-derived plan's hash no longer matches the recorded one, or if the approved plan itself refuses to execute. |
+| `--json` | bool | `false` | Emit the plan as machine-readable JSON instead of the human-readable report (CI mode). |
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | Target environment from smelt.yml — the deployed-schema snapshot the diff's "before" side is read from is recorded per target |
+| `--database` | path | _(from config)_ | DuckDB database file path override — only opened by `--apply` on a matching hash |
+
+**What a plan step does:** derives the migration plan (diff the model's current SQL against its
+recorded deployed definition, classify each output column group into a verdict — eclipsed,
+backfill in place, re-derive, or skeleton change — and pick a technique per group), prints it, and
+records its **plan hash**. Nothing executes. A plan hash covers the plan's content — verdicts,
+techniques, and the input facts they were derived from — so approving a plan approves the exact
+statements `--apply` would run, never a stale description.
+
+**The approval contract:** `--apply` executes only the plan whose hash matches what plan mode most
+recently recorded. If the model's SQL or any input fact the plan depends on has changed since, the
+freshly re-derived plan's hash no longer matches, and `--apply` refuses — printing the new plan
+instead of running anything. There is no separate "approve" step: printing a plan *is* recording
+it, and reviewing that printed output before re-running with `--apply` is the approval. The
+approval store lives at `.smelt/targets/<target>/migration-approvals.json`, one entry per model.
+
+**Execution, once approved:** each column group's **first presented candidate** executes as one
+transactional statement group, in plan order. Admission is checked over every group before
+anything executes — a plan containing a skeleton-change group, a group with no admissible
+candidate, or a destructive (column-drop) candidate executes nothing and exits `3`, naming the
+refusing group; the honest route for that plan is `smelt build --full-refresh` or `smelt rebuild`.
+On success, `--apply` re-records the deployed definition, so the next plan step reports eclipsed.
+
+**Resume:** an interrupted `--apply` resumes on re-invocation. Progress is recorded **per column
+group** in the approval store — a group already applied under the currently-approved hash is
+skipped, and the remaining groups in plan order execute. Re-invoking once every group has applied
+executes nothing and reports "already applied", exiting `0`.
+
+**Exit codes** (see [Exit codes](#exit-codes)): `0` when there is no definition delta, the delta is
+eclipsed-only, or `--apply` executed (or found already-applied) every group; `3` when a non-trivial
+plan is derived and unapproved, when `--apply` finds the recorded hash stale, or when an approved
+`--apply` refuses to execute; `2` for the usual usage/config errors.
+
+**Examples:**
+
+```console
+# Print the migration plan for a changed model — derives, prints, records the hash
+$ smelt migrate marts.daily_revenue
+
+# Review the plan, then approve and execute it
+$ smelt migrate marts.daily_revenue --apply
+
+# CI gate: fail the pipeline while a migration is pending and unapproved
+$ smelt migrate marts.daily_revenue --json
+```
+
+---
+
 ## smelt build
 
 Seed the database with CSV files and then run all models. This is a convenience command that combines `smelt seed` followed by `smelt run`.

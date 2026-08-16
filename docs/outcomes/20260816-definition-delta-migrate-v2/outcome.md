@@ -86,7 +86,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | done |
 | 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | done |
-| 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | planned |
+| 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | done |
 | 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
@@ -343,6 +343,11 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   fails on a dropped or renamed id — so every existing marked block stays verbatim and new CLI
   examples use ```text/```console fences. A standing `migrate_verb_is_documented` ratchet lands
   beside `no_backbuild_verb_in_user_docs` to keep the "no CLI command yet" claim from returning.
+
+- **2026-08-17 (phase 10 implementation).** Landed the spec reword, the new `## smelt migrate`
+  CLI reference section, the guide rewrite, and the `migrate_verb_is_documented` ratchet exactly
+  as planned. No rework: the guide's page title never changed, so the plan's conditional
+  `mkdocs.yml`/`incremental-models.md:716` follow-ups did not apply.
 
 ## Blocked
 
