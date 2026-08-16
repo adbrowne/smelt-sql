@@ -76,7 +76,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
-| 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
+| 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | planned |
 | 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
 | 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
@@ -227,6 +227,29 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   it) — `drive_and_assert`'s return type widened to a 3-tuple carrying observed `--apply` exit
   codes; the two destructuring call sites updated, every other call site was already discarding
   the whole result.
+
+- **2026-08-17 (phase 7 planning). No phase reshape.** Read the two escapes the divergence bullet
+  names. (a) `schema_evolution: strategy: full_refresh` sets `use_alter = false` in `execute.rs`,
+  so the migration gate never runs and the derived `InPlaceUpdate` cell falls through to the
+  standalone `execute_in_place_update` dispatch — the non-atomic two-step, and today the model's
+  *declared* "always DROP + CREATE on schema changes" intent is not honoured at all (no rebuild
+  happens either). (b) On a backend without transactional DDL (Spark, both formats) the migration's
+  `StatementGroup` is executed non-transactionally and `ALTER TABLE ... ADD COLUMN` is not emitted
+  `IF NOT EXISTS`, so a partial apply cannot be retried — and `execute.rs` currently swallows the
+  failure with `tracing::warn!` and continues incrementally. Decided: **unify, don't inherit** —
+  one pure `resolve_definition_change_route` in `smelt-runtime` decides `AtomicGroup` (default
+  strategy + transactional DDL, today's path unchanged), `FullRebuild` (declared
+  `strategy: full_refresh` — the declaration is the consent; also the non-transactional case when
+  `--allow-full-refresh` is set), or `Refuse` (non-transactional without opt-in: apply nothing,
+  error naming the recovery flag). Refusal *is* the repair path — nothing is written and the
+  recorded definition is untouched, so the next invocation re-derives the identical change. The
+  standalone fallback dispatch in `execute.rs` is deleted outright; the `InPlaceUpdate` emitter
+  stays (owned by `smelt migrate --apply` and the maintenance driver). Rejected: emitting
+  `ADD COLUMN IF NOT EXISTS` + `WHERE col IS NULL`-scoped backfill to make the two-step retry-safe
+  — Spark's `ALTER TABLE ... ADD COLUMNS` has no `IF NOT EXISTS` form, so it would close (b) only
+  on backends that already have transactions. Also noted: the deleted block's comment cites an
+  `incremental_models.md` §Known Divergences bullet that does not exist — a stale pointer, fixed
+  in this phase rather than left for phase 10's validate pass.
 
 ## Blocked
 
