@@ -148,6 +148,10 @@ enum ReporterEvent {
         retry_max: u32,
         error: String,
     },
+    ProbeAdvisory {
+        code: String,
+        message: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -228,6 +232,9 @@ impl EventSink {
                     retry_max,
                     error,
                 } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
+                ReporterEvent::ProbeAdvisory { code, message } => {
+                    reporter.probe_advisory(run_id, model, code, message)
+                }
             }
         }
     }
@@ -310,6 +317,13 @@ impl RunReporter for EventSink {
             attempt,
             retry_max,
             error: error.to_string(),
+        });
+    }
+
+    fn probe_advisory(&self, _run_id: &str, _model: &str, code: &str, message: &str) {
+        self.push(ReporterEvent::ProbeAdvisory {
+            code: code.to_string(),
+            message: message.to_string(),
         });
     }
 }
@@ -3080,6 +3094,8 @@ pub async fn execute_project(
                                     backend,
                                     &probe_policy_for_model(config, prior_runs, &plan.name),
                                     &source_probes,
+                                    reporter,
+                                    run_id,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3134,6 +3150,8 @@ pub async fn execute_project(
                                     &probe_policy_for_model(config, prior_runs, &plan.name),
                                     &contract_probes,
                                     &frozen_band_baselines,
+                                    reporter,
+                                    run_id,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -3719,6 +3737,8 @@ pub async fn execute_project(
                                 backend,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
                                 &source_probes,
+                                reporter,
+                                run_id,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;

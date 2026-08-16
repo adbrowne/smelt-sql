@@ -29,6 +29,7 @@ use smelt_state::{ProbeRecord, ProbeRecordOutcome};
 use crate::probes::{
     dispatch_probe, probe_violation_suffix, ProbeContext, ProbePolicy, ProbeVerdict,
 };
+use crate::reporter::RunReporter;
 
 /// Which action a declared append-only source probe performs this run.
 pub enum SourcePostureAction {
@@ -239,11 +240,16 @@ async fn read_snapshot(
 ///
 /// Returns the refreshed baselines (for the caller to persist) and one
 /// [`ProbeRecord`] per probe that held/established or was skipped, for a
-/// future `ModelRunRecord.probes` population.
+/// future `ModelRunRecord.probes` population. An `Establish` action reports
+/// `ProbeBaselineUnavailable` through `reporter` — absent-baseline
+/// degradation must be said, not silent
+/// (`docs/specs/state.md` §"The optionality rule").
 pub async fn dispatch_and_record_append_only_postures(
     backend: &dyn Backend,
     policy: &ProbePolicy,
     probes: &[DeclaredSourceProbe],
+    reporter: &dyn RunReporter,
+    run_id: &str,
 ) -> Result<(Vec<RefreshedBaseline>, Vec<ProbeRecord>), BackendError> {
     let mut refreshed = Vec::new();
     let mut records = Vec::with_capacity(probes.len());
@@ -310,8 +316,18 @@ pub async fn dispatch_and_record_append_only_postures(
                         records.push(ProbeRecord {
                             fact: probe.ctx.fact.clone(),
                             probe: probe.ctx.probe_code.clone(),
-                            outcome: ProbeRecordOutcome::Dispatched,
+                            outcome: ProbeRecordOutcome::BaselineEstablished,
                         });
+                        reporter.probe_advisory(
+                            run_id,
+                            &probe.ctx.model,
+                            "ProbeBaselineUnavailable",
+                            &format!(
+                                "no recorded baseline for source '{}' ({}) — establishing a \
+                                 baseline from this observation instead of verifying",
+                                probe.source_address, probe.ctx.cell
+                            ),
+                        );
                     }
                 }
             }

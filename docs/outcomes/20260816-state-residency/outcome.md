@@ -67,7 +67,7 @@ this outcome runs first in the programme.
 |---|-------|--------|
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
-| 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | planned |
+| 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
 | 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
 | 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
@@ -76,6 +76,23 @@ this outcome runs first in the programme.
 
 ## Decision log
 
+- **2026-08-16 (phase 3 implement).** Phase 3 landed: the second pre-existing
+  red-gate class is fixed (`section_body` in `output_delta_spec.rs`/
+  `typed_edge_spec.rs` now searches only after `## Semantics`, so it cannot
+  match the Overview primer's restated heading), and `incremental_models.md`
+  §"The graph layer" now names `KeyedUpsert`/`General` explicitly alongside
+  its lowercase prose — the judgment call from phase 2's discovery landed as
+  a spec edit naming the owning verdict type, not a test weakening.
+  `ProbeRecordOutcome::BaselineEstablished` plus `RunReporter::probe_advisory`
+  are wired at both absent-baseline sites (source posture, frozen band) and
+  at `smelt diff`'s absent-schema-snapshot path; `execute.rs`'s per-model
+  `EventSink` event buffer needed a `ProbeAdvisory` variant too, or advisories
+  from concurrent model execution were silently dropped on replay — caught by
+  a debug test before shipping. All phase-3 gates green, including the full
+  `verify-phase.sh` sweep. `.claude/hardening-baseline.txt`'s `smelt-cli
+  println` count moved 161→163 via the gate's own `--update` path (both new
+  lines are intentional user-facing output; the ratchet's substring match
+  also counts the new `eprintln!`). See `phases/03-summary.md` for details.
 - **2026-08-16 (phase 3 plan).** Folded phase 2's newly-discovered red-gate class
   (`smelt-logical --test output_delta_spec` / `--test typed_edge_spec`, duplicate
   `### The graph layer` headings in `incremental_models.md` plus the lowercase `general` vs

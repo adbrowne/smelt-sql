@@ -105,15 +105,20 @@ pub struct ProbeRecord {
     pub outcome: ProbeRecordOutcome,
 }
 
-/// Whether a probe actually ran this run, or was skipped by cadence policy
+/// Whether a probe actually ran this run, was skipped by cadence policy, or
+/// found no recorded baseline to compare against
 /// (`docs/specs/model_properties.md` §"Probe cadence": a policy skip trusts
 /// the declaration and records it unverified, distinct from a probe that
-/// cannot be built, which stays fail-closed).
+/// cannot be built, which stays fail-closed; `docs/specs/run_state.md`
+/// §"Run manifest": a `BaselineEstablished` entry means the probe
+/// established a baseline from the current observation and reported
+/// `ProbeBaselineUnavailable` — neither verified nor disproved this run).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeRecordOutcome {
     Dispatched,
     Skipped,
+    BaselineEstablished,
 }
 
 fn default_outcome() -> RunOutcomeKind {
@@ -265,5 +270,36 @@ mod tests {
         let record: ModelRunRecord =
             serde_json::from_str(legacy_json).expect("legacy manifest entry must still parse");
         assert!(record.probes.is_empty());
+    }
+
+    /// `ProbeRecordOutcome::BaselineEstablished` serialises as
+    /// `"baseline_established"` (`docs/specs/run_state.md` §"Run manifest"),
+    /// and an older manifest without the field still defaults to an empty
+    /// `probes` list.
+    #[test]
+    fn probe_record_serde_round_trips_baseline_established() {
+        let record = ProbeRecord {
+            fact: "source_posture".to_string(),
+            probe: "ProbeBaselineUnavailable".to_string(),
+            outcome: ProbeRecordOutcome::BaselineEstablished,
+        };
+        let json = serde_json::to_value(&record).expect("probe record must serialize");
+        assert_eq!(json["outcome"], "baseline_established");
+
+        let round_tripped: ProbeRecord =
+            serde_json::from_value(json).expect("probe record must round-trip");
+        assert_eq!(round_tripped, record);
+
+        let legacy_json = r#"{
+            "strategy": "full_refresh",
+            "row_count": 42,
+            "duration_ms": 100,
+            "outcome": "success",
+            "definition_hash": "abc123",
+            "retry_count": 0
+        }"#;
+        let legacy: ModelRunRecord =
+            serde_json::from_str(legacy_json).expect("legacy manifest entry must still parse");
+        assert!(legacy.probes.is_empty());
     }
 }

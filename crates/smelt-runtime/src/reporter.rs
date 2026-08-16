@@ -143,6 +143,17 @@ pub trait RunReporter: Send + Sync {
         _error: &str,
     ) {
     }
+
+    /// A probe found no recorded baseline to compare against and
+    /// established one from the current observation instead of verifying —
+    /// the "reported, not silent" half of absent-state degradation
+    /// (`docs/specs/state.md` §"The optionality rule"). `code` is the
+    /// advisory diagnostic (`ProbeBaselineUnavailable`); `message` names the
+    /// source/model and why the baseline was absent. Called regardless of
+    /// `state.mode` — degradation must be reported even under `stateless`,
+    /// where no manifest is ever written. Default: no-op; `smelt run`'s
+    /// warning-line output is the consumer.
+    fn probe_advisory(&self, _run_id: &str, _model: &str, _code: &str, _message: &str) {}
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

@@ -18,14 +18,16 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, Materialization, ModelConfig, StateConfig, StateMode, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
 use smelt_runtime::execute::{BackendFactory, BackendFuture};
+use smelt_runtime::reporter::RunReporter;
 use smelt_runtime::types::ExecuteRequest;
 use smelt_runtime::{execute_project, NoOpReporter};
 use smelt_state::file_store::FileStore;
@@ -428,4 +430,113 @@ async fn resume_under_stateless_refuses_naming_the_posture() {
         "must not be the generic no-history error, which reads as \"your last \
          run succeeded\" rather than \"this posture keeps no history\": {msg}"
     );
+}
+
+/// Captures `probe_advisory` calls for assertion.
+#[derive(Default)]
+struct RecordingReporter {
+    advisories: Mutex<Vec<String>>,
+}
+
+impl RunReporter for RecordingReporter {
+    fn probe_advisory(&self, _run_id: &str, model: &str, code: &str, message: &str) {
+        self.advisories
+            .lock()
+            .unwrap()
+            .push(format!("{code}: model '{model}': {message}"));
+    }
+}
+
+fn write_file(path: &Path, content: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, content).unwrap();
+}
+
+fn stage_stateless_append_only_project(tmp: &tempfile::TempDir) -> anyhow::Result<LinkCProject> {
+    let root = tmp.path().join("stateless_probe_project");
+    let db_path = root.join("target/dev.duckdb");
+    write_file(
+        &root.join("smelt.yml"),
+        "name: stateless_probe_project\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: table\n\
+         probes:\n  cadence: per_run\n\
+         state:\n  mode: stateless\n",
+    );
+    write_file(
+        &root.join("models/sources/raw/clicks.yml"),
+        "description: Raw append-only clickstream rows; pre-loaded by the test\n\
+         name: raw.clicks\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n\
+         \x20 event_time_column: click_ts\n  partition_column: click_date\n  granularity: day\n\
+         columns:\n\
+         \x20 - name: click_ts\n    type: TIMESTAMP\n\
+         \x20 - name: click_date\n    type: DATE\n\
+         \x20 - name: payload\n    type: VARCHAR\n",
+    );
+    write_file(
+        &root.join("models/clicks_summary.sql"),
+        "---\n\
+         materialization: table\n\
+         ---\n\
+         SELECT click_date, payload FROM smelt.sources.raw.clicks\n",
+    );
+    std::fs::create_dir_all(db_path.parent().unwrap())?;
+    LinkCProject::load(root, db_path)
+}
+
+fn seed_clicks(db_path: &Path) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS raw; \
+         CREATE TABLE raw.clicks (click_ts TIMESTAMP, click_date DATE, payload VARCHAR); \
+         INSERT INTO raw.clicks VALUES \
+           (TIMESTAMP '2026-01-01 00:00:00', DATE '2026-01-01', 'a'), \
+           (TIMESTAMP '2026-01-02 00:00:00', DATE '2026-01-02', 'b');",
+    )?;
+    Ok(())
+}
+
+/// Under `state.mode: stateless` no `.smelt/` ever exists, so no posture
+/// baseline is ever recorded — every run is an establishing run, and the
+/// optionality rule requires that be *reported*, not silent
+/// (`docs/specs/sources.md` §Semantics 4). This asserts the "reported"
+/// half by running twice: a stateful project's second run would verify
+/// against a persisted baseline and report nothing, but stateless can never
+/// persist one, so both runs must report the advisory.
+#[tokio::test]
+async fn stateless_posture_reports_baseline_unavailable_every_run() -> anyhow::Result<()> {
+    let tmp = tempfile::TempDir::new()?;
+    let project = stage_stateless_append_only_project(&tmp)?;
+    seed_clicks(&project.db_path)?;
+
+    let reporter = RecordingReporter::default();
+    project
+        .run("stateless-probe-1", base_request("dev"), &reporter)
+        .await?;
+    assert_eq!(
+        reporter.advisories.lock().unwrap().len(),
+        1,
+        "the first run must report the advisory"
+    );
+
+    project
+        .run("stateless-probe-2", base_request("dev"), &reporter)
+        .await?;
+    let advisories = reporter.advisories.lock().unwrap();
+    assert_eq!(
+        advisories.len(),
+        2,
+        "a second run under `stateless` must still report the advisory — there \
+         is no persisted baseline for it to verify against: {advisories:?}"
+    );
+    for advisory in advisories.iter() {
+        assert!(advisory.contains("ProbeBaselineUnavailable"), "{advisory}");
+    }
+    Ok(())
 }

@@ -15,8 +15,11 @@ use smelt_runtime::contract_probes::{
     dispatch_and_record_frozen_horizon_probes, frozen_horizon_probes,
 };
 use smelt_runtime::probes::ProbePolicy;
+use smelt_runtime::reporter::{NoOpReporter, RunReporter};
 use smelt_state::frozen_band_baselines::FrozenBandBaselineStore;
+use smelt_state::ProbeRecordOutcome;
 use smelt_types::DataType;
+use std::sync::Mutex;
 
 async fn backend(tmp: &tempfile::TempDir) -> DuckDbBackend {
     let db_path = tmp.path().join("contract_probes.duckdb");
@@ -87,6 +90,32 @@ fn frozen_horizon_metadata(days: u32) -> ModelMetadata {
     }
 }
 
+fn deferral_metadata(days: u32) -> ModelMetadata {
+    ModelMetadata {
+        contract: Some(ContractConfig {
+            deferral: smelt_core::config::DataLatency::parse(&format!("{days} days")),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Captures `probe_advisory` calls for assertion — mirrors
+/// `tests/source_probes.rs`'s `RecordingReporter`.
+#[derive(Default)]
+struct RecordingReporter {
+    advisories: Mutex<Vec<(String, String)>>,
+}
+
+impl RunReporter for RecordingReporter {
+    fn probe_advisory(&self, _run_id: &str, model: &str, code: &str, message: &str) {
+        self.advisories
+            .lock()
+            .unwrap()
+            .push((model.to_string(), format!("{code}: {message}")));
+    }
+}
+
 #[tokio::test]
 async fn first_run_establishes_frozen_band_baseline_without_violating() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -128,6 +157,8 @@ async fn first_run_establishes_frozen_band_baseline_without_violating() {
         &ProbePolicy::per_run(),
         &probes,
         &empty_baselines,
+        &NoOpReporter,
+        "run-1",
     )
     .await
     .expect("establishing a first baseline never errors");
@@ -180,6 +211,8 @@ async fn late_row_in_frozen_band_raises_contract_late_arrival_outside_horizon() 
         &ProbePolicy::per_run(),
         &probes,
         &empty_baselines,
+        &NoOpReporter,
+        "run-1",
     )
     .await
     .expect("establish");
@@ -211,6 +244,8 @@ async fn late_row_in_frozen_band_raises_contract_late_arrival_outside_horizon() 
         &ProbePolicy::per_run(),
         &probes,
         &baselines,
+        &NoOpReporter,
+        "run-2",
     )
     .await
     .expect("dispatch must not error even on a violation");
@@ -259,5 +294,100 @@ async fn no_frozen_horizon_declaration_dispatches_no_contract_probe() {
     assert!(
         probes.is_empty(),
         "absent a `contract.frozen_horizon` declaration the probe is opt-in only"
+    );
+}
+
+#[tokio::test]
+async fn frozen_band_first_observation_reports_baseline_unavailable() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let backend = backend(&tmp).await;
+    backend
+        .execute_sql(
+            "CREATE SCHEMA IF NOT EXISTS raw; \
+             CREATE TABLE raw.events (event_date DATE, payload TEXT); \
+             INSERT INTO raw.events VALUES (DATE '2026-01-01', 'a'), (DATE '2026-01-02', 'b');",
+        )
+        .await
+        .expect("stage");
+
+    let model = make_model("m", "SELECT * FROM smelt.sources.raw.events");
+    let source = clocked_source(&["sources", "raw", "events"], "event_date");
+    let metadata = frozen_horizon_metadata(1);
+    let end_date = NaiveDate::from_ymd_opt(2026, 2, 1).unwrap();
+    let empty_baselines = FrozenBandBaselineStore::default();
+
+    let probes = frozen_horizon_probes(
+        "m",
+        "m creation",
+        &model,
+        Some(&metadata),
+        &[source],
+        end_date,
+        "dev",
+        "raw",
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(probes.len(), 1);
+
+    let reporter = RecordingReporter::default();
+    let result = dispatch_and_record_frozen_horizon_probes(
+        &backend,
+        &ProbePolicy::per_run(),
+        &probes,
+        &empty_baselines,
+        &reporter,
+        "run-1",
+    )
+    .await
+    .expect("establishing a first baseline never errors");
+
+    assert!(
+        result.violations.is_empty(),
+        "the absent-baseline branch must not manufacture a LateArrivalViolation"
+    );
+    assert_eq!(result.records.len(), 1);
+    assert_eq!(
+        result.records[0].outcome,
+        ProbeRecordOutcome::BaselineEstablished
+    );
+
+    let advisories = reporter.advisories.lock().unwrap();
+    assert_eq!(advisories.len(), 1);
+    let (model, message) = &advisories[0];
+    assert_eq!(model, "m");
+    assert!(message.contains("ProbeBaselineUnavailable"), "{message}");
+    assert!(message.contains("raw.events"), "{message}");
+}
+
+#[test]
+fn deferral_never_reports_baseline_unavailable() {
+    // `contract.deferral`'s refusal is phase 5's `DeclaredContractRequiresState`,
+    // not an absent-baseline advisory here — `evaluate_deferral` compares two
+    // already-recorded ledger frontiers and has no baseline concept at all, so
+    // it never records `BaselineEstablished` regardless of whether the
+    // frontiers are present.
+    let metadata = deferral_metadata(1);
+    let probes =
+        smelt_runtime::contract_probes::deferral_probes("m", "m creation", Some(&metadata));
+    assert_eq!(probes.len(), 1);
+
+    let policy = ProbePolicy::per_run();
+    let interval_store = smelt_state::intervals::IntervalStore::default();
+    let landed_deltas = smelt_state::landed_deltas::LandedDeltaStore::default();
+
+    let (records, _violations) = smelt_runtime::contract_probes::evaluate_deferral(
+        &policy,
+        &probes,
+        "m",
+        &[],
+        &interval_store,
+        &landed_deltas,
+    );
+
+    assert_eq!(records.len(), 1);
+    assert_ne!(
+        records[0].outcome,
+        ProbeRecordOutcome::BaselineEstablished,
+        "deferral has no baseline to establish"
     );
 }

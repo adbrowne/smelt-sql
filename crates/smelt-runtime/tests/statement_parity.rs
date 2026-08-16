@@ -4266,6 +4266,8 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
         &backend,
         &smelt_runtime::probes::ProbePolicy::per_run(),
         &probes,
+        &smelt_runtime::reporter::NoOpReporter,
+        "run-1",
     )
     .await
     .expect_err("the mismatched closed-partition fingerprint must fail loud");

@@ -133,6 +133,10 @@ impl RunReporter for CliReporter {
     fn run_cancelled(&self, _run_id: &str) {
         eprintln!("smelt: run cancelled");
     }
+
+    fn probe_advisory(&self, _run_id: &str, model: &str, code: &str, message: &str) {
+        eprintln!("smelt: warning: {}: model '{}': {}", code, model, message);
+    }
 }
 
 /// Coarse classification of why a model failed, inferred from its recorded

@@ -6,6 +6,7 @@
 // own binaries so their `--test <name>` invocations keep working.
 #![allow(dead_code, unused_imports, unused_macros)]
 
+mod absent_schema_snapshot;
 mod address_collision;
 mod backbuild_cumulative_e2e;
 mod build_summary_visibility;

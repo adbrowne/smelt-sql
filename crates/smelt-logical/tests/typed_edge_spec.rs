@@ -20,10 +20,20 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// Extracts the body of a `### <heading>` section within `## Semantics` —
+/// the spec's Overview primer restates several section names as its own
+/// `###` headings (`docs/specs/CLAUDE.md` "The pyramid rule"), so a bare
+/// `doc.find(heading)` would match the primer's one-paragraph mention
+/// instead of the normative body. Searching only after `## Semantics`
+/// disambiguates.
 fn section_body<'a>(doc: &'a str, heading: &str) -> &'a str {
-    let start = doc
-        .find(heading)
-        .unwrap_or_else(|| panic!("document must have a {heading:?} heading"));
+    let semantics_start = doc
+        .find("\n## Semantics")
+        .unwrap_or_else(|| panic!("document must have a \"## Semantics\" heading"));
+    let doc = &doc[semantics_start..];
+    let start = doc.find(heading).unwrap_or_else(|| {
+        panic!("document must have a {heading:?} heading under \"## Semantics\"")
+    });
     let after_heading = &doc[start..];
     let body_start = after_heading
         .find('\n')

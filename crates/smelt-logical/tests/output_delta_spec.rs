@@ -188,7 +188,17 @@ fn leaf_seeding_row_is_present() {
 #[test]
 fn graph_layer_states_typed_edges_and_narrowed_refusal() {
     let incremental_models = read("docs/specs/incremental_models.md");
-    let section = section_body(&incremental_models, "### The graph layer");
+    // The Overview primer restates several section names as its own
+    // one-paragraph `###` headings (`docs/specs/CLAUDE.md` "The pyramid
+    // rule"), so a bare `section_body` lookup would match that mention
+    // instead of the normative body under `## Semantics`.
+    let semantics_start = incremental_models
+        .find("\n## Semantics")
+        .expect("document must have a \"## Semantics\" heading");
+    let section = section_body(
+        &incremental_models[semantics_start..],
+        "### The graph layer",
+    );
 
     assert!(
         section.contains("shape")

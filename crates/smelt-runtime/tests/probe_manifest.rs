@@ -200,6 +200,11 @@ async fn manifest_records_source_posture_probe() -> anyhow::Result<()> {
             )
         });
     assert_eq!(probe.probe, "SourceMutationProfileViolated");
-    assert_eq!(probe.outcome, ProbeRecordOutcome::Dispatched);
+    assert_eq!(
+        probe.outcome,
+        ProbeRecordOutcome::BaselineEstablished,
+        "the first observation has no recorded baseline to verify against — it \
+         establishes one rather than dispatching a comparison"
+    );
     Ok(())
 }

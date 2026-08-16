@@ -1277,12 +1277,13 @@ projected through a consumer degrades to the coarsest component that consumer ca
 (whole-model dirt), never to nothing.
 
 **Keyed dirt-sets and the narrowed refusal.** A keyed node without an admitted time axis is
-not categorically refused. Where its delta signature is `keyed upsert` over key set `k`, the
-edge is key-addressed and propagates a **keyed dirt-set** — the affected-key set a changed
-input's delta resolves to (`model_properties.md` §"Affected-key discovery") — instead of an
-interval. The `MaintenanceGraphUnsupportedNode` refusal below fires only where the node's
-delta signature degrades all the way to `general`, and its message names the operator that
-degraded the type.
+not categorically refused. Where its delta signature is `keyed upsert` (the `KeyedUpsert`
+output-delta verdict, `model_properties.md` §"Output-delta shape") over key set `k`, the edge
+is key-addressed and propagates a **keyed dirt-set** — the affected-key set a changed input's
+delta resolves to (`model_properties.md` §"Affected-key discovery") — instead of an interval.
+The `MaintenanceGraphUnsupportedNode` refusal below fires only where the node's delta signature
+degrades all the way to `general` (the `General` verdict), and its message names the operator
+that degraded the type.
 
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
