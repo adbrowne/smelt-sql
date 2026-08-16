@@ -798,6 +798,7 @@ fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Month,
         components: Vec::new(),
+        consumer_key_scope: Vec::new(),
     };
 
     // A January day changes upstream (a late-arriving event lands).

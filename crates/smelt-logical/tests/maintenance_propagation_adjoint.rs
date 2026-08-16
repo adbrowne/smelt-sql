@@ -18,7 +18,7 @@ use smelt_logical::analysis::output_delta::OutputDelta;
 use smelt_logical::maintenance::edge_type::{Addressing, EdgeComponent};
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::propagate::{
-    project_observed_delta, propagate, required_inputs, DayInterval, Edge, KeyedDirt,
+    project_observed_delta, propagate, required_inputs, DayInterval, Edge, KeyValues, KeyedDirt,
     PartitionGrain,
 };
 
@@ -43,6 +43,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         upstream_grain: Default::default(),
         downstream_grain: Default::default(),
         components: Vec::new(),
+        consumer_key_scope: Vec::new(),
     }
 }
 
@@ -540,6 +541,9 @@ fn keyed_edge_propagates_a_keyed_dirt_set_not_intervals() {
         &vec![KeyedDirt {
             keys: vec!["user_id".to_string()],
             from: "agg".to_string(),
+            values: KeyValues::Unresolved {
+                reason: "no keyed seed was provided for this edge's upstream".to_string(),
+            },
         }]
     );
     assert!(!result

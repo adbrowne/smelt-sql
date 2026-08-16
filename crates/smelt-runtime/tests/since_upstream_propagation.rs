@@ -13,8 +13,8 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, plan_since_upstream_with_observed_deltas,
-    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    build_forward_graph, plan_since_upstream, plan_since_upstream_with_keyed_seeds,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1371,4 +1371,98 @@ fn bare_keyed_origin_refusal_narrows_to_general() {
     let msg = refused.to_string();
     assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
     assert!(msg.contains("general_agg"), "{msg}");
+}
+
+/// Phase 3 (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`):
+/// a keyed seed passed into `plan_since_upstream_with_keyed_seeds` surfaces
+/// resolved key values in the returned plan's `keyed_dirty` and
+/// `dirty_set_report`, and the consumer key scope `build_forward_graph`
+/// attaches to the edge is the downstream's own derived `KeyScope` (folded
+/// from phase 2's key-addressed dispatch substitution, `PlanCell::key_scope`)
+/// — the same clockless-`KeyedUpsert`-into-`grain: partition` shape
+/// `typed_edge_graph.rs::clockless_keyed_upstream_is_walkable_on_the_real_graph`
+/// exercises.
+#[test]
+fn keyed_seed_values_flow_through_plan_since_upstream() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect("build graph");
+    let agg_edge = edges
+        .iter()
+        .find(|e| e.upstream == "agg" && e.downstream == "downstream")
+        .unwrap_or_else(|| panic!("expected an agg -> downstream edge: {edges:?}"));
+    assert_eq!(
+        agg_edge.consumer_key_scope,
+        vec!["user_id".to_string()],
+        "the downstream's own derived key scope must be attached to the inbound edge: {agg_edge:?}"
+    );
+
+    let order = vec!["downstream".to_string()];
+    let mut keyed_seeds = std::collections::BTreeMap::new();
+    keyed_seeds.insert(
+        "agg".to_string(),
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "1".to_string(),
+            "2".to_string(),
+        ]),
+    );
+    let plan =
+        plan_since_upstream_with_keyed_seeds(&models, &source_infos, &order, &[], &keyed_seeds)
+            .expect("plan with keyed seeds");
+
+    let kd = plan
+        .keyed_dirty
+        .get("downstream")
+        .expect("downstream must carry keyed dirt")
+        .first()
+        .expect("at least one keyed dirt record");
+    assert_eq!(
+        kd.values,
+        smelt_logical::maintenance::propagate::KeyValues::Resolved(vec![
+            "1".to_string(),
+            "2".to_string()
+        ]),
+        "the seeded key values must project onto downstream's own key scope: {kd:?}"
+    );
+    assert!(
+        plan.dirty_set_report.contains("downstream <- agg: keyed"),
+        "the dirty-set report must surface the keyed channel: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains("[\"1\", \"2\"]")
+            || plan.dirty_set_report.contains("Resolved"),
+        "the dirty-set report must surface the resolved values: {}",
+        plan.dirty_set_report
+    );
 }

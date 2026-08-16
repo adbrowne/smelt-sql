@@ -1840,18 +1840,21 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **The scheduler does not yet consume delta signatures end to end**, per the design now
   pinned in §"Dispatch — from propagated components to run units". Signatures shape admission
   and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
-  day-intervals in most respects: keyed dirt-sets carry key columns and provenance, not yet the
-  affected key *values* the pinned design requires (§"Keyed dirt-sets and the narrowed refusal"
-  — value-level discovery stays with the run-time mechanism); and cross-model runs require the
-  operator to state what landed upstream on the command line, because no per-source watermark is
-  yet persisted (the watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no
-  run yet writes or reads one). A single-component key-addressed model edge now dispatches
-  outside the `grain: key` branch (a clockless `keyed upsert` upstream feeding a `grain:
-  partition` downstream runs the repair family's `PerGroupRecompute` cell, not the ordinary
-  route); the residue is a downstream that ALSO has an inbound edge or source the key-addressed
-  cell does not cover — that composed multi-component case still keeps the ordinary route rather
-  than risk silently dropping the uncovered component, pending the dirt-set representation work
-  below. Tracked: `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
+  day-intervals in most respects: the graph layer's keyed channel now carries resolved key
+  *values*, not just key columns and provenance (§"Keyed dirt-sets and the narrowed refusal"),
+  but only when a caller feeds them in as a seed — live resolution (reading the actually-changed
+  key values off the backend, and consuming the recorded observed-delta table for
+  `--since-upstream` rather than trusting the command line) is still the run-time mechanism's own
+  job, not yet wired live into propagation; and cross-model runs require the operator to state
+  what landed upstream on the command line, because no per-source watermark is yet persisted (the
+  watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no run yet writes or
+  reads one). A single-component key-addressed model edge now dispatches outside the `grain: key`
+  branch (a clockless `keyed upsert` upstream feeding a `grain: partition` downstream runs the
+  repair family's `PerGroupRecompute` cell, not the ordinary route); the residue is a downstream
+  that ALSO has an inbound edge or source the key-addressed cell does not cover — that composed
+  multi-component case still keeps the ordinary route rather than risk silently dropping the
+  uncovered component, pending dispatch-composition work. Tracked:
+  `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`;
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
 - **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes

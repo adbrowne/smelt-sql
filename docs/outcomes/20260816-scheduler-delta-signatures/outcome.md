@@ -64,7 +64,7 @@ run shape.
 |---|-------|--------|
 | 1 | Spec delta first: pin the scheduler-currency design (typed delta components, key-valued dirt, watermark semantics) in `incremental_models.md`/`run_state.md` §Design before wiring — **Andrew reviews this plan** | done |
 | 2 | Dispatch the derived key-addressed repair cell outside the `grain: key` branch (`KeyedUpsert` → `grain: partition` fixture, red-green) | done |
-| 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | planned |
+| 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
 | 4 | Dispatch composition in the run loop: a model receiving several components in one tick dispatches each (lifts phase 2's single-edge substitution gate); propagated key restrictions reach the key-addressed cell | pending |
 | 5 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
 | 6 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
@@ -125,6 +125,15 @@ run shape.
   recipes with derived columns currently hard-refuse grain proof), so it stays inside the
   outcome rather than being deferred out; placed before the conformance extension so recipes may
   use alias grouping. Old rows 4–8 renumbered 5–10; nothing dropped.
+
+- 2026-08-16 (phase 3 implemented): `KeyValues`/`KeyedDirt::values`, `Edge::consumer_key_scope`,
+  `propagate_with_keys` (with `propagate` as a delegating wrapper), and the keyed-only-node visit
+  fix land in `smelt-logical::maintenance::propagate`; `smelt-runtime::propagation` folds
+  `PlanCell::key_scope` into `Edge::consumer_key_scope` and adds
+  `plan_since_upstream_with_keyed_seeds` plus `SinceUpstreamPlan::keyed_dirty`. All six planned
+  tests pass; no reshape of the phase table. Fan-in merge across more than one admitted inbound
+  keyed edge is implemented but untested (no fixture in this phase's list exercised it) —
+  flagged for phase 4+ if a real fan-in scenario surfaces.
 
 ## Blocked
 

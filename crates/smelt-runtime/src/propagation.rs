@@ -31,7 +31,7 @@ use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::output_delta::{self, OutputDelta, OutputDeltaFacts};
 use smelt_logical::maintenance::edge_type::type_edge;
 use smelt_logical::maintenance::propagate::{
-    day_ordinal, ordinal_to_iso, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+    day_ordinal, ordinal_to_iso, required_inputs, DayInterval, Edge, PartitionGrain,
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
@@ -345,6 +345,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     let ClampAndLocality {
         clamp_days,
         locality_admitted,
+        key_scope_by_model,
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
 
@@ -393,6 +394,10 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &consumer_groups,
         );
 
+        let consumer_key_scope = key_scope_by_model
+            .get(&downstream)
+            .cloned()
+            .unwrap_or_default();
         edges.push(Edge {
             upstream,
             downstream,
@@ -401,6 +406,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             upstream_grain,
             downstream_grain,
             components,
+            consumer_key_scope,
         });
     }
     Ok(edges)
@@ -429,6 +435,16 @@ struct ClampAndLocality {
     /// never re-derived; the SAME verdict `locality_admitted` above folds
     /// `Some(_).is_some()` from.
     key_locality_slice: BTreeMap<String, smelt_logical::maintenance::locality::LocalitySlice>,
+    /// Every maintained model's own derived key scope (Phase 3,
+    /// `docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`): the
+    /// key columns of a `PlanCell::key_scope` this model's own derived
+    /// `MaintenancePlan` carries on ANY of its cells (populated by the
+    /// key-addressed dispatch substitution, `smelt-logical::maintenance::
+    /// derive`) — folded here so [`build_forward_graph`] can attach it as an
+    /// inbound edge's [`Edge::consumer_key_scope`] without a second
+    /// derivation. Absent for a model whose own plan carries no key-scoped
+    /// cell.
+    key_scope_by_model: BTreeMap<String, Vec<String>>,
 }
 
 fn derive_clamp_and_locality(
@@ -481,6 +497,7 @@ fn derive_clamp_and_locality(
             clamp_days,
             locality_admitted,
             key_locality_slice,
+            key_scope_by_model,
         } = derive_clamp_and_locality_pass(
             models,
             source_infos,
@@ -534,6 +551,7 @@ fn derive_clamp_and_locality(
                 clamp_days,
                 locality_admitted,
                 key_locality_slice,
+                key_scope_by_model,
             });
         }
         composed_sources = next_composed_sources;
@@ -578,6 +596,10 @@ fn derive_clamp_and_locality_pass(
         String,
         smelt_logical::maintenance::locality::LocalitySlice,
     > = BTreeMap::new();
+    // Every model's own derived key scope (`ClampAndLocality::
+    // key_scope_by_model`'s own doc comment) — populated from
+    // `PlanCell::key_scope` inside the per-model pass below.
+    let mut key_scope_by_model: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
     for model in models {
         let Some(metadata) = model.metadata.as_deref() else {
@@ -827,6 +849,16 @@ fn derive_clamp_and_locality_pass(
         }
 
         for cell in &result.plan.cells {
+            // Phase 3 (`docs/outcomes/20260816-scheduler-delta-signatures/
+            // outcome.md`): a cell substituted onto the key-addressed route
+            // (phase 2's dispatch, `derive.rs`'s `key_scope: Some(key_scope)`
+            // push site) names the key columns this model's own maintenance
+            // plan restricts by — fold it once per model so
+            // `build_forward_graph` can attach it to every inbound edge as
+            // `Edge::consumer_key_scope`, never re-deriving it.
+            if let Some(key_scope) = &cell.key_scope {
+                key_scope_by_model.insert(table.clone(), key_scope.keys.clone());
+            }
             for clamp in &cell.scans {
                 let e = Edge::from_clamp(&table, clamp);
                 let entry = clamp_days
@@ -901,6 +933,7 @@ fn derive_clamp_and_locality_pass(
         clamp_days,
         locality_admitted,
         key_locality_slice,
+        key_scope_by_model,
     })
 }
 
@@ -1004,6 +1037,16 @@ pub struct PropagatedRun {
 pub struct SinceUpstreamPlan {
     pub runs: Vec<PropagatedRun>,
     pub dirty_set_report: String,
+    /// The keyed dirt-set channel's own per-model merge (`model` → the
+    /// [`smelt_logical::maintenance::propagate::KeyedDirt`] records that
+    /// dirtied it) — the keyed-channel counterpart to `runs`/
+    /// `dirty_set_report`'s interval-channel reporting. Populated whenever
+    /// the assembled graph carries an admitted keyed edge, regardless of
+    /// whether [`plan_since_upstream_with_keyed_seeds`] seeded it (an
+    /// unseeded admitted edge still propagates a symbolic
+    /// [`smelt_logical::maintenance::propagate::KeyValues::Unresolved`]
+    /// record).
+    pub keyed_dirty: BTreeMap<String, Vec<smelt_logical::maintenance::propagate::KeyedDirt>>,
 }
 
 fn render_interval(iv: &DayInterval) -> String {
@@ -1090,6 +1133,53 @@ pub fn plan_since_upstream_with_observed_deltas(
     deltas: &[SourceDelta],
     observed: &ObservedDeltaLookup,
 ) -> Result<SinceUpstreamPlan> {
+    plan_since_upstream_full(
+        models,
+        source_infos,
+        order,
+        deltas,
+        observed,
+        &BTreeMap::new(),
+    )
+}
+
+/// [`plan_since_upstream`]'s keyed-seed sibling: mirrors
+/// [`plan_since_upstream_with_observed_deltas`]'s shape but instead of
+/// projecting a recorded observed delta, seeds the keyed dirt-set channel
+/// with `keyed_seeds` (node name → resolved
+/// [`smelt_logical::maintenance::propagate::KeyValues`]) via
+/// `smelt_logical::maintenance::propagate::propagate_with_keys`. The
+/// resolved values reach the returned plan's [`SinceUpstreamPlan::keyed_dirty`]
+/// and are rendered into `dirty_set_report` alongside the interval channel.
+/// Live resolution of the seed values themselves (reading the actual
+/// changed keys off the backend) is phase 5's work
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/outcome.md`); this
+/// function only threads an already-resolved seed map through to the graph.
+pub fn plan_since_upstream_with_keyed_seeds(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+    keyed_seeds: &BTreeMap<String, smelt_logical::maintenance::propagate::KeyValues>,
+) -> Result<SinceUpstreamPlan> {
+    plan_since_upstream_full(
+        models,
+        source_infos,
+        order,
+        deltas,
+        &BTreeMap::new(),
+        keyed_seeds,
+    )
+}
+
+fn plan_since_upstream_full(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+    observed: &ObservedDeltaLookup,
+    keyed_seeds: &BTreeMap<String, smelt_logical::maintenance::propagate::KeyValues>,
+) -> Result<SinceUpstreamPlan> {
     refuse_bare_keyed_origins(models, source_infos, deltas)?;
     let edges = build_forward_graph(models, source_infos)?;
     let ClampAndLocality {
@@ -1134,11 +1224,15 @@ pub fn plan_since_upstream_with_observed_deltas(
             .extend(projected);
     }
 
-    let prop = propagate(&edges, &source_deltas)
-        .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}",))?;
+    let prop = smelt_logical::maintenance::propagate::propagate_with_keys(
+        &edges,
+        &source_deltas,
+        keyed_seeds,
+    )
+    .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}",))?;
 
     let mut report = String::from("Dirty set (--since-upstream):\n");
-    if prop.per_edge.is_empty() {
+    if prop.per_edge.is_empty() && prop.per_edge_keys.is_empty() {
         report.push_str("  (no source landed a delta that any model reads — nothing to run)\n");
     }
     for ((downstream, upstream), intervals) in &prop.per_edge {
@@ -1146,6 +1240,14 @@ pub fn plan_since_upstream_with_observed_deltas(
             report.push_str(&format!(
                 "  {downstream} <- {upstream}: {}\n",
                 render_interval(iv)
+            ));
+        }
+    }
+    for ((downstream, upstream), keyed) in &prop.per_edge_keys {
+        for kd in keyed {
+            report.push_str(&format!(
+                "  {downstream} <- {upstream}: keyed {:?} = {:?}\n",
+                kd.keys, kd.values
             ));
         }
     }
@@ -1198,6 +1300,7 @@ pub fn plan_since_upstream_with_observed_deltas(
     Ok(SinceUpstreamPlan {
         runs,
         dirty_set_report: report,
+        keyed_dirty: prop.keyed_dirty,
     })
 }
 

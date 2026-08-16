@@ -327,18 +327,104 @@ pub fn project_observed_delta(
     normalize(intervals)
 }
 
+/// The resolved-values payload of a [`KeyedDirt`] record
+/// (`incremental_models.md` §"Keyed dirt-sets and the narrowed refusal"):
+/// distinct from the merely symbolic key-column marker. `Resolved(vec![])`
+/// (a seed landed but touched no keys) and `Unresolved` (no seed, or the
+/// seed's keys do not project onto the consumer's key scope) are distinct —
+/// the spec's empty-vs-absent rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyValues {
+    Resolved(Vec<String>),
+    Unresolved { reason: String },
+}
+
 /// One keyed dirt-set record on the keyed channel (`incremental_models.md`
-/// §"The graph layer" → "Keyed dirt-sets and the narrowed refusal"): a
-/// **symbolic** key-addressed delta — the upstream's admitted
-/// [`Addressing::Keyed`] key columns and the upstream node's own name — not
-/// a materialised key-value set. Value-level affected-key discovery stays
-/// with the run-time mechanism (§"Affected-key discovery"); this is only
-/// the graph-layer marker that an edge's dirt is key-addressed rather than
-/// interval-addressed.
+/// §"The graph layer" → "Keyed dirt-sets and the narrowed refusal"): the
+/// upstream's admitted [`Addressing::Keyed`] key columns, the upstream
+/// node's own name, and — since phase 3 — the [`KeyValues`] this edge
+/// resolved (a materialised key-value set when a seed landed and projected
+/// onto the consumer's key scope, else [`KeyValues::Unresolved`]).
+/// Value-level affected-key *discovery* (reading the actual changed values
+/// off the backend) stays with the run-time mechanism (§"Affected-key
+/// discovery"); this struct only carries values a caller already resolved
+/// and fed in as a seed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyedDirt {
     pub keys: Vec<String>,
     pub from: String,
+    pub values: KeyValues,
+}
+
+/// Project an upstream keyed component's resolved key values onto a
+/// consumer's own key scope (`incremental_models.md` §"Composition rules"):
+/// values carry through only when `consumer_key_scope` is non-empty and
+/// equals `admitted_keys` as an ASCII-case-insensitive set; otherwise the
+/// consumer receives [`KeyValues::Unresolved`] naming the mismatch, and the
+/// caller must widen to whole-model interval dirt (the returned `bool`).
+/// An absent `seed` (no seed landed for this edge's upstream at all) is
+/// [`KeyValues::Unresolved`] too, but does **not** signal widening here — an
+/// unseeded edge widens at dispatch time instead (§"Unresolved seeds").
+fn project_key_values(
+    admitted_keys: &[String],
+    consumer_key_scope: &[String],
+    seed: Option<&KeyValues>,
+) -> (KeyValues, bool) {
+    let Some(seed) = seed else {
+        return (
+            KeyValues::Unresolved {
+                reason: "no keyed seed was provided for this edge's upstream".to_string(),
+            },
+            false,
+        );
+    };
+    let scope_matches =
+        !consumer_key_scope.is_empty() && key_sets_match(admitted_keys, consumer_key_scope);
+    if scope_matches {
+        (seed.clone(), false)
+    } else {
+        (
+            KeyValues::Unresolved {
+                reason: format!(
+                    "the upstream's admitted key columns {admitted_keys:?} do not project onto \
+                     the consumer's key scope {consumer_key_scope:?}"
+                ),
+            },
+            true,
+        )
+    }
+}
+
+fn key_sets_match(a: &[String], b: &[String]) -> bool {
+    let sa: BTreeSet<String> = a.iter().map(|s| s.to_ascii_lowercase()).collect();
+    let sb: BTreeSet<String> = b.iter().map(|s| s.to_ascii_lowercase()).collect();
+    sa == sb
+}
+
+/// Merge every [`KeyedDirt`] record that has already landed on `node` (its
+/// `keyed_dirty` bucket) into the single [`KeyValues`] an outbound edge from
+/// `node` should treat as its own seed — the keyed-channel counterpart to
+/// reading `dirty[node]` as a source's own interval dirt. Any `Unresolved`
+/// entry makes the merge `Unresolved` (naming that entry's reason); a
+/// resolved merge is the deduplicated union of every entry's values.
+/// `None` when `node` has received no keyed dirt at all.
+fn merge_keyed_values(entries: &[KeyedDirt]) -> Option<KeyValues> {
+    if entries.is_empty() {
+        return None;
+    }
+    if let Some(reason) = entries.iter().find_map(|e| match &e.values {
+        KeyValues::Unresolved { reason } => Some(reason.clone()),
+        KeyValues::Resolved(_) => None,
+    }) {
+        return Some(KeyValues::Unresolved { reason });
+    }
+    let mut all: BTreeSet<String> = BTreeSet::new();
+    for e in entries {
+        if let KeyValues::Resolved(vs) = &e.values {
+            all.extend(vs.iter().cloned());
+        }
+    }
+    Some(KeyValues::Resolved(all.into_iter().collect()))
 }
 
 /// Per-edge classification against [`PartitionGrain::Keyed`] endpoints
@@ -457,13 +543,23 @@ pub struct Edge {
     /// refusal. Empty on [`Edge::from_clamp`] (today's untyped-edge
     /// behaviour); populate via [`Edge::with_components`].
     pub components: Vec<EdgeComponent>,
+    /// The downstream's own derived key scope (`smelt-runtime::propagation`
+    /// fills this from the downstream's already-derived
+    /// `PlanCell::key_scope` — never a second derivation), consulted by
+    /// [`project_key_values`] to decide whether an upstream keyed
+    /// component's resolved values project onto this consumer. Empty (the
+    /// default) means the consumer declares no key scope at all — every
+    /// keyed seed through this edge is unresolved. Populate via
+    /// [`Edge::with_consumer_key_scope`].
+    pub consumer_key_scope: Vec<String>,
 }
 
 impl Edge {
     /// Build the edge from a cell's derived [`ScanClamp`] — the same number
     /// that sizes the maintenance SQL sizes the propagation. Day grain on
     /// both axes; override the grain fields for coarser tables. Carries no
-    /// typed components — today's untyped-edge behaviour.
+    /// typed components and no consumer key scope — today's untyped-edge
+    /// behaviour.
     pub fn from_clamp(downstream: &str, clamp: &ScanClamp) -> Self {
         Edge {
             upstream: clamp.source.clone(),
@@ -473,6 +569,7 @@ impl Edge {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            consumer_key_scope: Vec::new(),
         }
     }
 
@@ -480,6 +577,13 @@ impl Edge {
     /// already-built edge.
     pub fn with_components(mut self, components: Vec<EdgeComponent>) -> Self {
         self.components = components;
+        self
+    }
+
+    /// Attach the downstream's own derived key scope to an already-built
+    /// edge.
+    pub fn with_consumer_key_scope(mut self, consumer_key_scope: Vec<String>) -> Self {
+        self.consumer_key_scope = consumer_key_scope;
         self
     }
 
@@ -588,12 +692,31 @@ fn topo_order<'a>(
 }
 
 /// Propagate `source_deltas` (the partitions that landed per source) through
-/// `edges`. Nodes are processed in topological order so a model's dirt is
-/// complete (all inbound edges merged) before its consumers read it. Errors
-/// on a cycle.
+/// `edges`, with no keyed seeds — every admitted keyed edge propagates
+/// [`KeyValues::Unresolved`] (today's symbolic-only behaviour). A thin
+/// delegating wrapper over [`propagate_with_keys`]; every existing caller
+/// and test is unchanged.
 pub fn propagate(
     edges: &[Edge],
     source_deltas: &BTreeMap<String, Vec<DayInterval>>,
+) -> Result<Propagation, String> {
+    propagate_with_keys(edges, source_deltas, &BTreeMap::new())
+}
+
+/// Propagate `source_deltas` through `edges`, seeding `keyed_seeds` (node
+/// name → resolved [`KeyValues`]) as pure input for every admitted keyed
+/// edge whose upstream is a seeded node. Nodes are processed in topological
+/// order so a model's dirt — both interval and keyed — is complete (all
+/// inbound edges merged) before its consumers read it: an admitted keyed
+/// edge downstream of another admitted keyed edge (a keyed chain) reads its
+/// seed from the upstream node's own merged `keyed_dirty` entry, not from
+/// `keyed_seeds` directly, so composition threads through as many keyed hops
+/// as the graph has (`incremental_models.md` §"Composition rules"). Errors
+/// on a cycle.
+pub fn propagate_with_keys(
+    edges: &[Edge],
+    source_deltas: &BTreeMap<String, Vec<DayInterval>>,
+    keyed_seeds: &BTreeMap<String, KeyValues>,
 ) -> Result<Propagation, String> {
     let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
@@ -615,18 +738,29 @@ pub fn propagate(
 
     for node in order {
         let node_dirty = result.dirty.get(node).cloned().unwrap_or_default();
-        if node_dirty.is_empty() {
+        let node_keyed_dirty = result.keyed_dirty.get(node).cloned().unwrap_or_default();
+        // A node with keyed dirt but no interval dirt must still be visited
+        // so its outbound keyed edges compose (a real chaining gap — the
+        // pre-phase-3 gate below only ever checked interval dirt).
+        if node_dirty.is_empty() && node_keyed_dirty.is_empty() && !keyed_seeds.contains_key(node) {
             continue;
         }
+        let node_seed: Option<KeyValues> = keyed_seeds
+            .get(node)
+            .cloned()
+            .or_else(|| merge_keyed_values(&node_keyed_dirty));
         for (idx, e) in edges.iter().enumerate() {
             if e.upstream != node {
                 continue;
             }
             match &keyed_admission[idx] {
                 KeyedAdmission::Admitted(keys) => {
+                    let (values, widen) =
+                        project_key_values(keys, &e.consumer_key_scope, node_seed.as_ref());
                     let kd = KeyedDirt {
                         keys: keys.clone(),
                         from: e.upstream.clone(),
+                        values,
                     };
                     result
                         .per_edge_keys
@@ -638,12 +772,15 @@ pub fn propagate(
                         .entry(e.downstream.clone())
                         .or_default()
                         .push(kd);
-                    // A downstream that is itself keyed-grain stays on the
-                    // keyed channel alone; a clocked (or unclocked) consumer
-                    // of a keyed node gets whole-table interval dirt so it
-                    // still runs (`incremental_models.md` §"The graph
-                    // layer": widen-never-narrow — never nothing).
-                    if e.downstream_grain != PartitionGrain::Keyed {
+                    // A downstream that is itself keyed-grain normally stays
+                    // on the keyed channel alone; a clocked (or unclocked)
+                    // consumer of a keyed node always gets whole-table
+                    // interval dirt so it still runs, and a keyed-grain
+                    // consumer ALSO gets whole-table dirt when the values
+                    // didn't project onto its own key scope — never nothing
+                    // (`incremental_models.md` §"The graph layer":
+                    // widen-never-narrow).
+                    if e.downstream_grain != PartitionGrain::Keyed || widen {
                         let per_edge = result
                             .per_edge
                             .entry((e.downstream.clone(), e.upstream.clone()))
@@ -790,6 +927,7 @@ mod locality_margin_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            consumer_key_scope: Vec::new(),
         }
     }
 
@@ -1135,6 +1273,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            consumer_key_scope: Vec::new(),
         }
     }
 
@@ -1172,6 +1311,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
+            consumer_key_scope: Vec::new(),
         };
         let e2 = Edge {
             upstream: "mid".to_string(),
@@ -1181,6 +1321,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
+            consumer_key_scope: Vec::new(),
         };
         let edges = vec![e1, e2];
 
