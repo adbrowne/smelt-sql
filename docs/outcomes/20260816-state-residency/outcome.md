@@ -72,12 +72,33 @@ this outcome runs first in the programme.
 | 5 | Two-step ideal-then-availability derivation: ideal plan preserved, availability resolution pass, recorded explain-visible `MaintenanceStateDowngraded` | done |
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
-| 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | pending |
+| 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | planned |
 | 9 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
 | 10 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
 
+- **2026-08-16 (phase 8 plan).** No reshape (rows 9–10 stand). Phase 8 carries no spec delta: it
+  is a test-only leg over already-shipped behaviour, and the Known Divergences sweep is row 9's
+  job. The one carve-out is named in the plan — if a residency step exposes a real defect (some
+  correctness decision still riding on `.smelt/`), fixing it is inside phase 8, since catching
+  exactly that is what criterion 5 exists for.
+- **2026-08-16 (phase 8 plan).** Two residency steps, not one: `DropStateDir` and `FreshClone`
+  are separately valuable because only the clone changes the project's absolute path — anything
+  keyed on the old path (interval-store lookups, model-hash keying, legacy-file import) is caught
+  there and nowhere else, while `DropStateDir` alone would leave it invisible.
+- **2026-08-16 (phase 8 plan).** Two wiring mechanisms, deliberately: the partition/append-only
+  pool gets real `ConformanceStep` enum variants (honest modelling, and it forces the Spark twin
+  to state a position — it must `bail!` on residency steps, since a ledger-less backend has no
+  engine-resident state to survive the deletion, per phase 5's downgrade), while the keyed pool
+  gets an index-keyed `BTreeMap<usize, StateResidencyOp>` parameter on a new
+  `drive_keyed_and_assert_with_state_ops` — `KeyedSchedule` is a plain `Vec<KeyedRunWindow>` with
+  no step enum, and adding a field would churn every construction site for no test value. The op
+  enum itself is single-owned in the testkit and shared by both shapes.
+- **2026-08-16 (phase 8 plan).** An explicit anti-vacuity test
+  (`drop_state_dir_step_actually_removes_the_directory`) plus a comment-out check in Verification:
+  a residency leg whose deletion silently no-ops would pass forever while proving nothing, which
+  is the specific failure mode a generative gate over an unobservable step invites.
 - **2026-08-16 (phase 7 implement).** Phase 7 landed: `maintenance_driver::
   execute_region_recompute_with_frontier_reset` fuses the ordinary DuckDB `DeleteInsert`
   batch's write with its frontier reset in one transaction (`Backend::
