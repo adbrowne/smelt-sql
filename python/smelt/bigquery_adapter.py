@@ -18,6 +18,22 @@ import io
 import pyarrow as pa
 
 
+def _field_to_dict(field):
+    """Flatten a SchemaField into plain data, recursing through RECORD fields.
+
+    A RECORD's sub-fields are the only place struct member types appear — the
+    parent reports only `RECORD` — so the recursion is load-bearing, not
+    cosmetic. Decimal precision/scale are deliberately absent: BigQuery reports
+    them as None on a query output schema, so there is nothing to carry.
+    """
+    return {
+        "name": field.name,
+        "type": field.field_type,
+        "mode": field.mode,
+        "fields": [_field_to_dict(child) for child in (field.fields or ())],
+    }
+
+
 class BigQueryAdapter:
     """Wraps a BigQuery client for SQL execution with Arrow results."""
 
@@ -76,6 +92,39 @@ class BigQueryAdapter:
         if result.schema is None:
             return pa.table({})
         return result.to_arrow()
+
+    def dry_run_schema(self, sql):
+        """Return the output schema of `sql` without executing it.
+
+        A dry run carries the full output schema, bills zero bytes, reads no
+        table, and still rejects invalid SQL with a 400 — so it answers "what
+        type does this expression have?" without materialising anything. The
+        query cache is disabled because a cache hit would answer from a prior
+        job rather than re-planning this exact text.
+
+        The schema is returned as plain JSON-serialisable data (a list of
+        `{"name", "type", "mode", "fields"}` dicts) so callers outside Python —
+        the Rust type-oracle harness — need no client objects. Note the
+        reported names are BigQuery's *legacy* ones (INT64 reports as INTEGER,
+        FLOAT64 as FLOAT, STRUCT as RECORD) and array-ness lives in `mode`
+        (`REPEATED`), never in the type name; translation is the caller's job.
+
+        A refusal propagates as an exception. Returning an empty schema instead
+        would be a lie: a query BigQuery rejects is not a query with no columns,
+        and a caller that could not tell the two apart would silently score
+        every rejected query as agreeing with anything.
+        """
+        config = self._job_config()
+        config.dry_run = True
+        config.use_query_cache = False
+
+        # No .result() call: a dry-run job is complete when client.query()
+        # returns, and the schema is already on it.
+        job = self.client.query(sql, job_config=config)
+        schema = job.schema
+        if schema is None:
+            raise ValueError(f"BigQuery dry run reported no output schema for: {sql}")
+        return [_field_to_dict(field) for field in schema]
 
     def execute_sql_no_result(self, sql):
         """Execute SQL without collecting results (for DDL/DML)."""
