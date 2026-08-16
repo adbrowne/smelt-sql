@@ -13,7 +13,8 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, keyed_restrictions_from_plan, observed_delta_keys_to_read,
+    build_forward_graph, fold_keyed_seed_values, keyed_restrictions_from_plan,
+    keyed_seed_diff_result_to_key_values, keyed_seed_diffs_to_read, observed_delta_keys_to_read,
     plan_since_upstream, plan_since_upstream_with_keyed_seeds,
     plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
@@ -1776,4 +1777,161 @@ async fn live_observed_lookup_falls_back_to_declared_window_when_absent() {
         "the declared window must still propagate downstream: {:?}",
         with_live_lookup.runs
     );
+}
+
+/// Phase 7 test 1 (`docs/outcomes/20260816-scheduler-delta-signatures/
+/// phases/07-plan.md`): a clockless `keyed upsert` model origin with two
+/// `grain: partition` consumers yields one [`KeyedSeedDiff`] per
+/// `(upstream, consumer)`, each carrying the upstream's admitted key
+/// columns and that consumer's own table (db) name.
+#[test]
+fn keyed_seed_diffs_to_read_names_each_consumer_of_a_keyed_origin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total, MAX(d) AS d\n\
+         FROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/downstream_a.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg\n",
+    );
+    write(
+        root,
+        "models/downstream_b.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\nunique_key:\n\
+         - user_id\ntimeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n\
+         ---\n\
+         SELECT user_id, total, d FROM smelt.models.agg WHERE total > 0\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let deltas = vec![SourceDelta {
+        source: "agg".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+    }];
+    let diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+
+    assert_eq!(
+        diffs.len(),
+        2,
+        "expected one descriptor per consumer of the keyed origin: {diffs:?}"
+    );
+    let mut consumers: Vec<&str> = diffs.iter().map(|d| d.consumer.as_str()).collect();
+    consumers.sort();
+    assert_eq!(consumers, vec!["downstream_a", "downstream_b"]);
+    for diff in &diffs {
+        assert_eq!(diff.upstream, "agg");
+        assert_eq!(diff.upstream_keys, vec!["user_id".to_string()]);
+        assert!(
+            !diff.digest_columns.is_empty(),
+            "the consumer's own digest column set must be non-empty: {diff:?}"
+        );
+        assert!(!diff.consumer_clean_sql.trim().is_empty());
+    }
+}
+
+/// Phase 7 test 2: a declared-source `--source` origin (not a maintained
+/// model) yields no descriptor — there is no key-addressed cell to seed for
+/// a node with no upstream `ModelFile`.
+#[test]
+fn keyed_seed_diffs_to_read_skips_a_raw_source_origin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.sources.bronze\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let deltas = vec![SourceDelta {
+        source: "bronze".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+    }];
+    let diffs = keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+        .expect("keyed_seed_diffs_to_read succeeds");
+    assert!(
+        diffs.is_empty(),
+        "a raw source origin must contribute no keyed-seed descriptor: {diffs:?}"
+    );
+}
+
+/// Phase 7 test 3: two consumers of one upstream fold to one sorted/deduped
+/// `KeyValues::Resolved`; a diff that found nothing stays `Resolved(vec![])`,
+/// never `Unresolved`.
+#[test]
+fn fold_keyed_seed_values_unions_across_consumers() {
+    use smelt_logical::maintenance::propagate::KeyValues;
+
+    let folded = fold_keyed_seed_values(vec![
+        KeyValues::Resolved(vec!["2".to_string(), "1".to_string()]),
+        KeyValues::Resolved(vec!["3".to_string(), "1".to_string()]),
+    ]);
+    assert_eq!(
+        folded,
+        KeyValues::Resolved(vec!["1".to_string(), "2".to_string(), "3".to_string()])
+    );
+
+    let empty = fold_keyed_seed_values(vec![KeyValues::Resolved(vec![])]);
+    assert_eq!(
+        empty,
+        KeyValues::Resolved(vec![]),
+        "a diff that found nothing must stay resolved-and-empty, never unresolved"
+    );
+}
+
+/// Phase 7 test 4: the classifier that turns a diff result into `KeyValues`
+/// maps a `BackendError::unsupported` (non-DuckDB target) to
+/// `KeyValues::Unresolved` naming the dialect.
+#[test]
+fn unsupported_dialect_diff_yields_an_unresolved_seed() {
+    use smelt_logical::maintenance::propagate::KeyValues;
+
+    let err = smelt_backend::BackendError::unsupported(
+        "postgres",
+        "group-grain fingerprint-sidecar diff for a mutable_snapshot repair source (P9)",
+    );
+    let kv = keyed_seed_diff_result_to_key_values(Err(err))
+        .expect("an unsupported-feature error classifies rather than propagates");
+    match kv {
+        KeyValues::Unresolved { reason } => {
+            assert!(reason.contains("postgres"), "{reason}");
+        }
+        other => panic!("expected Unresolved, got {other:?}"),
+    }
 }

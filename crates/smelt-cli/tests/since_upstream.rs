@@ -792,3 +792,155 @@ fn bare_keyed_source_still_refuses() {
     );
     assert!(!stderr.contains("panicked at"), "{stderr}");
 }
+
+/// Stage a clockless `keyed upsert` model (`agg`) feeding a `grain:
+/// partition` downstream (`downstream`) — the same shape
+/// `crates/smelt-runtime/tests/since_upstream_propagation.rs`'s
+/// `keyed_seed_values_flow_through_plan_since_upstream` proves at the
+/// assembly level, driven here through the real `smelt` binary.
+fn stage_keyed_edge_workspace(parent: &Path) -> PathBuf {
+    let root = parent.join("proj");
+    write(
+        &root,
+        "smelt.yml",
+        "name: keyed_edge_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    );
+    write(
+        &root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        &root,
+        "models/agg.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         unique_key: user_id\n---\n\
+         SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
+         GROUP BY user_id\n",
+    );
+    write(
+        &root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\ntimeseries:\n  event_time_column: d\n  \
+         partition_column: d\n  granularity: day\nrefresh: incremental\n\
+         grain: partition\n---\n\
+         SELECT DATE '2024-01-01' AS d, user_id, ANY_VALUE(total) AS total \
+         FROM smelt.agg GROUP BY user_id\n",
+    );
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    root
+}
+
+fn seed_keyed_edge_payments(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE TABLE main.sources_payments (user_id INTEGER, amount DECIMAL(10,2), d DATE);\n\
+         INSERT INTO main.sources_payments VALUES \
+           (1, 100.00, DATE '2026-01-01'), (1, 50.00, DATE '2026-01-02'), \
+           (2, 70.00, DATE '2026-01-01');\n",
+    )
+    .expect("seed payments source table");
+}
+
+fn downstream_total(db_path: &Path, user_id: i64) -> String {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    let mut stmt = conn
+        .prepare("SELECT CAST(total AS VARCHAR) FROM main.downstream WHERE user_id = ?")
+        .expect("prepare");
+    stmt.query_row([user_id], |row| row.get::<_, String>(0))
+        .expect("row for user_id")
+}
+
+/// Phase 7 test 6 (`docs/outcomes/20260816-scheduler-delta-signatures/
+/// phases/07-plan.md`): end to end over a staged clockless `keyed upsert` →
+/// `grain: partition` project. After a build (twice, so `downstream`'s own
+/// group-grain sidecar partition over `agg` is seeded before the mutation),
+/// mutating one upstream row and running `--since-upstream --source agg
+/// --landed <window>` renders the keyed component with the resolved key
+/// value in the dirty-set report, and only that key's downstream row
+/// reflects the mutation — a second, untouched key's row is unchanged.
+#[test]
+fn since_upstream_resolves_a_live_non_empty_keyed_restriction() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_keyed_edge_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_keyed_edge_payments(&db_path);
+
+    // Run 1: creation. Run 2: idempotent rebuild — `downstream`'s own first
+    // LIVE key-addressed dispatch, seeding its group-grain sidecar
+    // partition over `agg` before any real mutation exists to detect.
+    for _ in 0..2 {
+        let output = run_smelt(&project_dir, &["--allow-downgrade"]);
+        assert!(
+            output.status.success(),
+            "plain build must succeed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert_eq!(downstream_total(&db_path, 1), "150.00");
+    assert_eq!(downstream_total(&db_path, 2), "70.00");
+
+    {
+        let conn = Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "UPDATE main.sources_payments SET amount = 200.00 \
+             WHERE user_id = 1 AND amount = 100.00",
+        )
+        .expect("mutate payments");
+    }
+
+    // `agg` is the delta ORIGIN — `--since-upstream` never re-runs it (its
+    // landed delta is the output window a completed run already wrote), so
+    // its own output must be refreshed by a plain run first.
+    {
+        let output = run_smelt(&project_dir, &["--select", "agg", "--allow-downgrade"]);
+        assert!(
+            output.status.success(),
+            "agg-only refresh must succeed: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "agg",
+            "--landed",
+            "2026-01-01..2026-01-03",
+            "--allow-downgrade",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "keyed --since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("downstream <- agg: keyed"),
+        "the dirty-set report must render the keyed component: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"1\""),
+        "the dirty-set report must name the resolved key value: {stdout}"
+    );
+
+    assert_eq!(
+        downstream_total(&db_path, 1),
+        "250.00",
+        "user 1's row must reflect the mutated contribution (50.00 + 200.00)"
+    );
+    assert_eq!(
+        downstream_total(&db_path, 2),
+        "70.00",
+        "user 2's row must be unchanged — it was never in the resolved key set"
+    );
+}

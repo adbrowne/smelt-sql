@@ -4987,6 +4987,29 @@ fn restriction_keys_for<'a>(
         .unwrap_or(&[])
 }
 
+/// The upstream identity a key-addressed model-edge cell reads against
+/// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
+/// `smelt.models.<edge_name>` source address the sidecar partitions by, and
+/// the upstream's own schema-qualified physical table. Extracted so
+/// [`dispatch_key_addressed_model_edge`] and the plan-time keyed-seed
+/// resolver (`propagation_live::resolve_keyed_seeds`,
+/// `docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`)
+/// compute the SAME identity a divergence between the two would otherwise
+/// silently miss the sidecar partition rather than fail loudly.
+pub(crate) fn model_edge_source_identity(
+    config: &smelt_core::config::Config,
+    default_target: &str,
+    model_addr: &str,
+    metadata: Option<&smelt_core::ModelMetadata>,
+    db_name: &str,
+) -> (String, String) {
+    let resolved_target = config.get_target(model_addr, metadata, default_target);
+    let schema = &config.targets[&resolved_target].schema;
+    let table = format!("{schema}.{db_name}");
+    let source_address = format!("smelt.models.{model_addr}");
+    (source_address, table)
+}
+
 /// Execute an already-resolved live key-addressed model-edge cell
 /// (`docs/specs/incremental_models.md` §"Upstream model edges") — shared by
 /// the `grain: key` run branch and the non-keyed dispatch site
@@ -5026,10 +5049,13 @@ async fn dispatch_key_addressed_model_edge(
             plan_name
         )
     })?;
-    let upstream_target = config.get_target(edge_name, upstream_model.metadata.as_deref(), target);
-    let upstream_schema = &config.targets[&upstream_target].schema;
-    let upstream_table = format!("{upstream_schema}.{}", upstream_model.db_name_owned());
-    let upstream_source_address = format!("smelt.models.{edge_name}");
+    let (upstream_source_address, upstream_table) = model_edge_source_identity(
+        config,
+        target,
+        edge_name,
+        upstream_model.metadata.as_deref(),
+        &upstream_model.db_name_owned(),
+    );
     let compiled = compiler.compile_with_sql_and_ephemerals(
         model_file,
         schema,
@@ -5082,7 +5108,7 @@ async fn dispatch_key_addressed_model_edge(
 /// `refresh:` is not `incremental` (a `full`-mode or view upstream delivers
 /// no incremental delta) — contributes no edge either, never a spurious
 /// permissive whole-table synthesis.
-fn model_edges_for(
+pub(crate) fn model_edges_for(
     model_file: &smelt_core::ModelFile,
     model_by_addr: &HashMap<String, smelt_core::ModelFile>,
     source_infos: &[smelt_core::sources::SourceInfo],
@@ -5106,7 +5132,12 @@ fn model_edges_for(
         if segs.first().map(|s| s.as_str()) == Some("sources") {
             continue;
         }
-        let addr = segs.join(".");
+        // Strip a leading `models` breadcrumb the same way
+        // `crate::propagation::bare_name` does — a ref may spell a model
+        // address either `smelt.models.<addr>` or bare `smelt.<addr>`; both
+        // must resolve against `model_by_addr`'s own bare `canonical_path()`
+        // keys, never only the literal-prefixed spelling.
+        let addr = crate::propagation::bare_name(&segs);
         if !seen.insert(addr.clone()) {
             continue;
         }
@@ -5166,7 +5197,7 @@ fn model_edges_for(
 /// real execution loop's own inline construction exactly (same bare-name
 /// convention, same `mutation_profile.kind == Mutable` test) — factored out
 /// here so the two call sites cannot silently drift apart.
-fn build_maint_source_facts(
+pub(crate) fn build_maint_source_facts(
     model_file: &smelt_core::ModelFile,
     source_infos: &[smelt_core::sources::SourceInfo],
 ) -> (

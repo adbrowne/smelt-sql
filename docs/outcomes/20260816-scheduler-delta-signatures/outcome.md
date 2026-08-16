@@ -68,7 +68,7 @@ run shape.
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
-| 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | planned |
+| 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
 | 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
 | 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
 | 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
@@ -252,6 +252,17 @@ run shape.
   Also confirmed the non-DuckDB leg has a spec home already (§"Unresolved seeds"): an
   unsupported-dialect diff becomes `KeyValues::Unresolved`, not a run failure and not an empty
   resolved set.
+
+- 2026-08-16 (phase 7 implemented): `propagation::keyed_seed_diffs_to_read` (pure descriptor
+  enumeration), `keyed_seed_diff_result_to_key_values` + `fold_keyed_seed_values` (classify/fold),
+  and `propagation_live::resolve_keyed_seeds` (the live backend read) land; `execute::
+  model_edge_source_identity` extracts the shared upstream-identity formula; `run_since_upstream`
+  now resolves live keyed seeds alongside the existing observed-delta read and calls the newly
+  `pub` `plan_since_upstream_live`. Found and fixed a real pre-existing bug along the way:
+  `model_edges_for`'s edge-address lookup used the raw joined ref segments instead of stripping
+  the `models`/`sources` breadcrumb, so it silently found no edge for any ref spelled
+  `smelt.models.<addr>` (only bare `smelt.<addr>` worked) — this affected the existing phase 2-4
+  dispatch branches too, not just this phase's new code. No reshape of the phase table.
 
 ## Blocked
 

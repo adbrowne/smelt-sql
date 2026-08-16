@@ -1366,7 +1366,11 @@ discovery", instead of an interval. Propagation stays a **pure function**: key v
 as *seed* input exactly as landed intervals do — the caller resolves them once (the group-grain
 fingerprint-sidecar diff over the upstream's own output table, below, "Upstream model edges")
 and passes them in; propagation composes them through edges by projecting the upstream's key
-columns onto each consumer's own key scope.
+columns onto each consumer's own key scope. The sidecar partition identity resolving one seed is
+per `(upstream, consumer)` — each consumer hashes its own digest projection of the upstream's
+rows — so an upstream's seed is the **union** of every one of its consumers' own diffs: never
+one consumer's diff taken as the whole, never an intersection. Same widen-never-narrow reasoning
+as §"Restrictions compose by union".
 
 **Composition rules.** A keyed component into a keyed consumer whose key scope the projection
 resolves stays key-valued; one whose keys cannot be resolved through the consumer's grain
@@ -1941,9 +1945,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   and are printed, but the DAG scheduler's currency for "what needs re-running" is still whole
   day-intervals in most respects: the graph layer's keyed channel now carries resolved key
   *values*, not just key columns and provenance (§"Keyed dirt-sets and the narrowed refusal"),
-  but only when a caller feeds them in as a seed — live resolution (reading the actually-changed
-  key values off the backend) is still the run-time mechanism's own job, not yet wired live into
-  propagation; and cross-model runs require the operator to state
+  but only when a caller feeds them in as a seed; and cross-model runs require the operator to state
   what landed upstream on the command line, because no per-source watermark is yet persisted (the
   watermark's shape is pinned, `run_state.md` §"Per-source watermark", but no run yet writes or
   reads one). Key-addressed model edges now dispatch outside the `grain: key` branch, composed:

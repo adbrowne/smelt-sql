@@ -19,7 +19,7 @@
 //! pure `propagate`; it never re-implements admission or the graph
 //! composition math itself.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use anyhow::{bail, Context, Result};
 use chrono::Datelike;
@@ -1139,6 +1139,176 @@ pub fn observed_delta_keys_to_read(
         .collect())
 }
 
+/// One `(upstream, consumer)` keyed-seed descriptor
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`):
+/// everything [`crate::propagation_live::resolve_keyed_seeds`] needs to run
+/// ONE group-grain sidecar diff for a consumer's own admitted key-addressed
+/// edge onto `upstream`. Bare model addresses and bare db names only —
+/// schema qualification is the live half's job
+/// (`crate::execute::model_edge_source_identity`), mirroring
+/// [`observed_delta_keys_to_read`]'s own "the pure half names WHAT to read,
+/// the live half reads it" split.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyedSeedDiff {
+    pub upstream: String,
+    pub upstream_db_name: String,
+    pub consumer: String,
+    pub consumer_db_name: String,
+    pub upstream_keys: Vec<String>,
+    pub digest_columns: Vec<String>,
+    pub consumer_clean_sql: String,
+}
+
+/// The exact set of [`KeyedSeedDiff`] descriptors the live keyed-seed
+/// resolver needs to read for `deltas` — one descriptor per `(upstream,
+/// consumer)` pair where `upstream` names a delta origin that is a
+/// maintained model in `models` AND `consumer` (any other model in the
+/// workspace) admits a key-addressed model-edge cell onto it
+/// ([`smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges`]
+/// via [`crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells`]
+/// — the SAME resolver the run loop's own dispatch composition calls, never a
+/// second independent derivation). A delta origin absent from `models` (a
+/// declared `sources.*` address) contributes no descriptor at all — there is
+/// no upstream `ModelFile` for any consumer to key-address against.
+///
+/// An upstream's seed is the **union** of every one of its consumers' own
+/// diffs (`docs/specs/incremental_models.md` §"Keyed dirt-sets and the
+/// narrowed refusal": the sidecar partition identity is per `(upstream,
+/// consumer)`, since each consumer hashes its own digest projection) — this
+/// function only enumerates the per-consumer descriptors; the union itself
+/// happens in [`fold_keyed_seed_values`], after each descriptor's own diff
+/// has been read live.
+///
+/// Pure — assumes DuckDB when deriving which cells a consumer admits (the
+/// group-grain sidecar diff is DuckDB-only regardless of the actual run
+/// target; the non-DuckDB degradation is the LIVE read side's job, not
+/// descriptor generation — see [`keyed_seed_diff_result_to_key_values`]).
+pub fn keyed_seed_diffs_to_read(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    deltas: &[SourceDelta],
+) -> Result<Vec<KeyedSeedDiff>> {
+    let model_by_addr: HashMap<String, ModelFile> = models
+        .iter()
+        .map(|m| (m.canonical_path(), m.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for delta in deltas {
+        let Some(upstream_model) = model_by_addr.get(&delta.source) else {
+            continue;
+        };
+        for consumer in models {
+            let table = consumer.canonical_path();
+            if table == delta.source {
+                continue;
+            }
+            let Some(metadata) = consumer.metadata.as_deref() else {
+                continue;
+            };
+            let model_edges =
+                crate::execute::model_edges_for(consumer, &model_by_addr, source_infos);
+            let (sources, explicitly_mutable) =
+                crate::execute::build_maint_source_facts(consumer, source_infos);
+            let sql = smelt_parser::strip_frontmatter(&consumer.content);
+            let cells = crate::maintenance_driver::resolve_live_key_addressed_model_edge_cells(
+                &sql,
+                &table,
+                metadata,
+                &sources,
+                &explicitly_mutable,
+                &model_edges,
+                smelt_dialect::SqlDialect::DuckDB,
+            )?;
+            for (edge_name, _cell, _key_scope, upstream_keys, digest_columns, _write) in cells {
+                if edge_name != delta.source {
+                    continue;
+                }
+                out.push(KeyedSeedDiff {
+                    upstream: edge_name,
+                    upstream_db_name: upstream_model.db_name_owned(),
+                    consumer: table.clone(),
+                    consumer_db_name: consumer.db_name_owned(),
+                    upstream_keys,
+                    digest_columns,
+                    consumer_clean_sql: sql.clone(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Turn one [`KeyedSeedDiff`]'s live sidecar-diff result into a
+/// [`smelt_logical::maintenance::propagate::KeyValues`] (`docs/specs/
+/// incremental_models.md` §"Unresolved seeds"): `Ok` folds to `Resolved`
+/// (even an empty `Vec` — nothing changed is resolved-and-empty, never
+/// unresolved); a non-DuckDB target's `BackendError::UnsupportedFeature`
+/// folds to `Unresolved` naming the dialect, the honest degradation rather
+/// than a run failure or a fabricated empty set; any other error propagates
+/// (fail loud).
+pub fn keyed_seed_diff_result_to_key_values(
+    result: std::result::Result<Vec<String>, smelt_backend::BackendError>,
+) -> Result<smelt_logical::maintenance::propagate::KeyValues> {
+    use smelt_logical::maintenance::propagate::KeyValues;
+    match result {
+        Ok(values) => Ok(KeyValues::Resolved(values)),
+        Err(smelt_backend::BackendError::UnsupportedFeature { dialect, feature }) => {
+            Ok(KeyValues::Unresolved {
+                reason: format!(
+                    "'{dialect}' does not support {feature} — the group-grain sidecar diff \
+                     that resolves a keyed seed live is DuckDB-only"
+                ),
+            })
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Fold every [`KeyValues`](smelt_logical::maintenance::propagate::KeyValues)
+/// resolved for one upstream's own consumers into the single seed
+/// [`plan_since_upstream_with_keyed_seeds`] consumes for that upstream —
+/// the **union** rule §"Keyed dirt-sets and the narrowed refusal" pins.
+/// `Resolved` folds by set union (sorted, deduplicated) — a diff that found
+/// nothing contributes nothing but does not itself make the fold
+/// `Unresolved` (empty-and-resolved is not the same as unresolved). An empty
+/// `results` slice or one containing only `Unresolved` entries folds to
+/// `Resolved(vec![])` — one consumer's genuine "nothing changed" — UNLESS
+/// EVERY entry is `Unresolved`, in which case the fold stays `Unresolved`
+/// (naming the first reason) rather than silently claiming resolution no
+/// consumer actually achieved.
+pub fn fold_keyed_seed_values(
+    results: Vec<smelt_logical::maintenance::propagate::KeyValues>,
+) -> smelt_logical::maintenance::propagate::KeyValues {
+    use smelt_logical::maintenance::propagate::KeyValues;
+    let mut values: Vec<String> = Vec::new();
+    let mut any_resolved = false;
+    let mut first_unresolved_reason: Option<String> = None;
+    for kv in results {
+        match kv {
+            KeyValues::Resolved(v) => {
+                any_resolved = true;
+                values.extend(v);
+            }
+            KeyValues::Unresolved { reason } => {
+                if first_unresolved_reason.is_none() {
+                    first_unresolved_reason = Some(reason);
+                }
+            }
+        }
+    }
+    if any_resolved {
+        values.sort();
+        values.dedup();
+        KeyValues::Resolved(values)
+    } else if let Some(reason) = first_unresolved_reason {
+        KeyValues::Unresolved { reason }
+    } else {
+        // No descriptors at all for this upstream — resolved-and-empty, the
+        // same convention an actually-diffed-and-empty consumer gets.
+        KeyValues::Resolved(Vec::new())
+    }
+}
+
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
 /// (`docs/specs/incremental_shapes.md` §"What the composed shape uniquely
@@ -1172,7 +1342,7 @@ pub fn plan_since_upstream_with_observed_deltas(
     deltas: &[SourceDelta],
     observed: &ObservedDeltaLookup,
 ) -> Result<SinceUpstreamPlan> {
-    plan_since_upstream_full(
+    plan_since_upstream_live(
         models,
         source_infos,
         order,
@@ -1201,7 +1371,7 @@ pub fn plan_since_upstream_with_keyed_seeds(
     deltas: &[SourceDelta],
     keyed_seeds: &BTreeMap<String, smelt_logical::maintenance::propagate::KeyValues>,
 ) -> Result<SinceUpstreamPlan> {
-    plan_since_upstream_full(
+    plan_since_upstream_live(
         models,
         source_infos,
         order,
@@ -1211,7 +1381,15 @@ pub fn plan_since_upstream_with_keyed_seeds(
     )
 }
 
-fn plan_since_upstream_full(
+/// The full form both [`plan_since_upstream_with_observed_deltas`] and
+/// [`plan_since_upstream_with_keyed_seeds`] delegate to — both channels
+/// (observed deltas + keyed seeds) at once. `pub` so
+/// `smelt-cli`'s `run_since_upstream` can call it directly once it has
+/// resolved BOTH a live observed-delta lookup and a live keyed-seed map
+/// (`docs/outcomes/20260816-scheduler-delta-signatures/phases/07-plan.md`)
+/// — the two existing wrappers stay as the single-channel convenience
+/// entry points tests already depend on.
+pub fn plan_since_upstream_live(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
     order: &[String],

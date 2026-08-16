@@ -1596,4 +1596,153 @@ mod chain {
             "a fully-covered downstream must fire no dispatch_widened advisory, got: {widened:?}"
         );
     }
+
+    // ── 9 (phase 7: live keyed-seed resolution) ──────────────────────────
+    /// Phase 7 test 5 (`docs/outcomes/20260816-scheduler-delta-signatures/
+    /// phases/07-plan.md`): after a full build has populated `downstream`'s
+    /// own group-grain sidecar partition over `agg`, mutating exactly one
+    /// upstream row and re-running `agg` ALONE (never `downstream`) leaves
+    /// that sidecar partition stale relative to `agg`'s new output.
+    /// `resolve_keyed_seeds` — a read-only call, no run has repaired
+    /// `downstream` yet — must return `Resolved([that key])` and nothing
+    /// else.
+    #[tokio::test]
+    async fn resolve_keyed_seeds_reads_changed_keys_off_the_sidecar() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_chain_project(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_payments(&backend).await;
+        }
+
+        // Run 1: creation — `downstream` materializes via its own fold path
+        // (`table_exists_before_run == false`), so its key-addressed
+        // group-grain sidecar partition over `agg` is NOT seeded yet (only
+        // the declared-`sources.*` repair family seeds on create; the
+        // model-edge channel seeds inside its own first live dispatch).
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "seed-resolve-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        // Run 2: both models again, with no real data change. This is
+        // `downstream`'s own FIRST live key-addressed dispatch
+        // (`table_exists_before_run == true` now) — it seeds its
+        // group-grain sidecar partition over `agg`, transactionally
+        // alongside a (harmless, no-op-equivalent) repair write.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "seed-resolve-run-2".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run (sidecar seed) must succeed");
+        }
+
+        // Mutate user 1's contribution — user 2 is untouched.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_payments SET amount = 200.00 \
+                     WHERE user_id = 1 AND amount = 100.00",
+                )
+                .await
+                .expect("mutate payments");
+        }
+
+        // Run 3: `agg` ONLY. Its own output now reflects the mutation, but
+        // `downstream` never runs — its own sidecar partition over `agg`
+        // (seeded by Run 2) stays exactly as Run 2 left it.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "seed-resolve-run-3".to_string(),
+                select_request(&["agg"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("agg-only run must succeed");
+        }
+
+        let discovery = smelt_core::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let models = discovery.discover_models().expect("discover models");
+        let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+        let deltas = vec![smelt_runtime::propagation::SourceDelta {
+            source: "agg".to_string(),
+            landed: smelt_logical::maintenance::propagate::DayInterval::new(1, 2),
+        }];
+        let diffs =
+            smelt_runtime::propagation::keyed_seed_diffs_to_read(&models, &source_infos, &deltas)
+                .expect("keyed_seed_diffs_to_read succeeds");
+        assert_eq!(
+            diffs.len(),
+            1,
+            "downstream is the only consumer of agg's keyed-upsert output: {diffs:?}"
+        );
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let seeds =
+            smelt_runtime::propagation_live::resolve_keyed_seeds(&backend, &config, "dev", &diffs)
+                .await
+                .expect("resolve_keyed_seeds succeeds");
+
+        let kv = seeds
+            .get("agg")
+            .expect("agg must have a resolved seed entry");
+        match kv {
+            smelt_logical::maintenance::propagate::KeyValues::Resolved(values) => {
+                assert_eq!(
+                    values,
+                    &vec!["1".to_string()],
+                    "only user 1's group actually changed: {values:?}"
+                );
+            }
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    }
 }

@@ -372,39 +372,60 @@ async fn run_since_upstream(
     let observed_keys =
         smelt_runtime::propagation::observed_delta_keys_to_read(models, &source_infos, &deltas)
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let observed = {
+    // Live keyed-seed resolution (`docs/outcomes/
+    // 20260816-scheduler-delta-signatures/phases/07-plan.md`): the
+    // `(upstream, consumer)` descriptors to read off the group-grain
+    // sidecar, computed the same pure way `observed_keys` is above. Runs
+    // under `--dry-run` too, same rationale as the observed-delta read: a
+    // read plus the same idempotent `CREATE TABLE IF NOT EXISTS` every
+    // other state read performs, and a dry run must preview the live run's
+    // own dirty set.
+    let keyed_seed_diffs =
+        smelt_runtime::propagation::keyed_seed_diffs_to_read(models, &source_infos, &deltas)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (observed, keyed_seeds) = {
         let target_config = config
             .targets
             .get(&args.target)
             .ok_or_else(|| anyhow::anyhow!("Target '{}' not found in smelt.yml", args.target))?;
-        let observed_delta_backend_factory = CliBackendFactory {
+        let live_read_backend_factory = CliBackendFactory {
             database_override: args.database.clone(),
         };
-        let backend = observed_delta_backend_factory
+        let backend = live_read_backend_factory
             .create(&args.target, target_config, project_dir)
             .await
             .with_context(|| {
                 format!(
-                    "failed to create the '{}' backend to read recorded observed deltas",
+                    "failed to create the '{}' backend to read recorded deltas",
                     args.target
                 )
             })?;
         let schema = &config.targets[&args.target].schema;
-        smelt_runtime::propagation_live::resolve_observed_delta_lookup(
+        let observed = smelt_runtime::propagation_live::resolve_observed_delta_lookup(
             backend.as_ref(),
             schema,
             &observed_keys,
         )
         .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let keyed_seeds = smelt_runtime::propagation_live::resolve_keyed_seeds(
+            backend.as_ref(),
+            config,
+            &args.target,
+            &keyed_seed_diffs,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        (observed, keyed_seeds)
     };
 
-    let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+    let plan = smelt_runtime::propagation::plan_since_upstream_live(
         models,
         &source_infos,
         &order,
         &deltas,
         &observed,
+        &keyed_seeds,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 

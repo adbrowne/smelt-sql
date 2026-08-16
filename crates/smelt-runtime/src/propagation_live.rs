@@ -6,11 +6,17 @@
 //! `ObservedDeltaLookup` `propagation::plan_since_upstream_with_observed_deltas`
 //! consumes.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use smelt_backend::Backend;
+use smelt_logical::maintenance::propagate::KeyValues;
 
-use crate::maintenance_driver::read_observed_delta;
-use crate::propagation::{ObservedDeltaKey, ObservedDeltaLookup};
+use crate::maintenance_driver::{diff_repair_group_sidecar_changed_keys, read_observed_delta};
+use crate::propagation::{
+    fold_keyed_seed_values, keyed_seed_diff_result_to_key_values, KeyedSeedDiff, ObservedDeltaKey,
+    ObservedDeltaLookup,
+};
 
 /// Read every key in `keys` off `backend`, one `read_observed_delta` call
 /// each. An absent key (`read_observed_delta` returns `None` — never
@@ -35,4 +41,76 @@ pub async fn resolve_observed_delta_lookup(
         }
     }
     Ok(lookup)
+}
+
+/// Live keyed-seed resolution (`docs/outcomes/
+/// 20260816-scheduler-delta-signatures/phases/07-plan.md`): read the
+/// group-grain sidecar diff [`crate::propagation::keyed_seed_diffs_to_read`]
+/// says matters, one `diff_repair_group_sidecar_changed_keys` call per
+/// [`KeyedSeedDiff`] descriptor, folded across every consumer of the same
+/// upstream via [`fold_keyed_seed_values`] (the union rule). Read-only: this
+/// never refreshes any sidecar partition — the refresh stays inside the
+/// write transaction the run-time mechanism drives
+/// ([`crate::maintenance_driver::execute_key_addressed_model_edge_cell`]), so
+/// the live run's own diff re-derives the same set and the restriction union
+/// at dispatch (`resolve_key_addressed_affected_keys`) only ever widens.
+///
+/// Per-model target overrides are not consulted here (a [`KeyedSeedDiff`]
+/// carries bare addresses/db names only, not each model's own
+/// `ModelMetadata`) — `crate::execute::model_edge_source_identity` resolves
+/// against `config`'s `smelt.yml`-level `models:` overrides via the model
+/// address, but not a frontmatter `target:` override. A workspace relying on
+/// a per-model frontmatter target override for a keyed-edge participant is
+/// unaffected in the common single-target case and is the one known gap of
+/// this phase's live channel.
+pub async fn resolve_keyed_seeds(
+    backend: &dyn Backend,
+    config: &smelt_core::config::Config,
+    target: &str,
+    diffs: &[KeyedSeedDiff],
+) -> Result<BTreeMap<String, KeyValues>> {
+    let mut per_upstream: BTreeMap<String, Vec<KeyValues>> = BTreeMap::new();
+    for diff in diffs {
+        let (upstream_source_address, upstream_table) = crate::execute::model_edge_source_identity(
+            config,
+            target,
+            &diff.upstream,
+            None,
+            &diff.upstream_db_name,
+        );
+        let (_, consumer_table) = crate::execute::model_edge_source_identity(
+            config,
+            target,
+            &diff.consumer,
+            None,
+            &diff.consumer_db_name,
+        );
+        let consumer_target = config.get_target(&diff.consumer, None, target);
+        let consumer_schema = &config
+            .targets
+            .get(&consumer_target)
+            .ok_or_else(|| anyhow::anyhow!("target '{consumer_target}' not found in smelt.yml"))?
+            .schema;
+
+        let result = diff_repair_group_sidecar_changed_keys(
+            backend,
+            consumer_schema,
+            &upstream_source_address,
+            &upstream_table,
+            &consumer_table,
+            &diff.upstream_keys,
+            &diff.digest_columns,
+            &diff.consumer_clean_sql,
+        )
+        .await;
+        let key_values = keyed_seed_diff_result_to_key_values(result)?;
+        per_upstream
+            .entry(diff.upstream.clone())
+            .or_default()
+            .push(key_values);
+    }
+    Ok(per_upstream
+        .into_iter()
+        .map(|(upstream, values)| (upstream, fold_keyed_seed_values(values)))
+        .collect())
 }
