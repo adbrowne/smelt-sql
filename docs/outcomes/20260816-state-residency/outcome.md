@@ -67,7 +67,7 @@ this outcome runs first in the programme.
 |---|-------|--------|
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
-| 3 | Absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | pending |
+| 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | planned |
 | 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | pending |
 | 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
 | 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
@@ -75,6 +75,22 @@ this outcome runs first in the programme.
 | 8 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
 ## Decision log
+
+- **2026-08-16 (phase 3 plan).** Folded phase 2's newly-discovered red-gate class
+  (`smelt-logical --test output_delta_spec` / `--test typed_edge_spec`, duplicate
+  `### The graph layer` headings in `incremental_models.md` plus the lowercase `general` vs
+  `General` verdict-name question) into phase 3 as task 1, rather than opening a new row or
+  deferring it. Criterion 6 requires every standing gate green, so it cannot leave the outcome;
+  and phase 3 is the first phase after the discovery that may touch `docs/specs/` (its own spec
+  delta is a `run_state.md` edit), which is what phase 2's constraint forbade. Unlike phase 2's
+  mechanical repair, this one carries a genuine judgment call — the plan names the decision rule
+  rather than pre-deciding it.
+- **2026-08-16 (phase 3 plan).** Phase 3 needs a small spec delta of its own: the run-manifest
+  probe-record `outcome` vocabulary in `run_state.md` §"Run manifest" is currently
+  `"dispatched" | "skipped"`, and an established-not-compared probe is neither. Spec-first, so
+  the vocabulary gains `"baseline_established"` before the code does. This is inside criterion 4
+  (the absent-state behaviour has to be *reported*, and the manifest is where a run's probe
+  outcomes are durably reported), not new scope.
 
 - **2026-08-16 (phase 2 implement).** Phase 2 landed: `FileStore` now carries `StateMode`,
   gates every observability family per `state.md`'s consequence table, and `--resume` refuses
