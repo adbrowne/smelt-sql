@@ -1,0 +1,168 @@
+# Open-questions triage — incremental specs (2026-08-16)
+
+The decision doc for the delta-signature closure programme's decision track
+(`docs/handoffs/2026-08-16-delta-signature-closure-programme.md`). Each item below is an
+open question tagged across the incremental specs, stated so it can be read without the
+spec open, with a recommendation where one is defensible. **Mark up inline: write
+`Decision:` under each item (or just "agree").** Every decision lands as a spec diff first,
+then graduates into the residue outcomes.
+
+## A. Keys and deletion
+
+**1. Departed-key deletion / retention policy.** Keyed incremental models never delete
+today: a key that disappears from the source stays in the target unchanged, forever, and
+nothing in the model contract says so. There is no tombstone, no opt-in hard delete, and
+this same gap blocks maintaining aggregates under deletes and consuming change feeds that
+carry delete events. **Recommend:** make retention the first new contract feature — a
+declared per-model retention policy (`keep forever` as the explicit default matching
+today's behaviour; opt-in hard delete; tombstone marking) — prioritised ahead of all other
+contract-relaxation work, since two other questions below depend on it. This grows the
+keyed-residue outcome's scope.
+Decision:
+
+**2. Self-referential keyed models** (`state = state + delta − decay` patterns, where the
+model reads its own previous output). Rejected today. Admitting them needs an explicit
+design separating "input" from "carried state" — without it, the full-refresh oracle that
+backs the correctness guarantee doesn't exist. **Recommend:** keep rejecting; revisit only
+after retention (deletion of carried state interacts directly). No spec change now beyond
+confirming the rejection is intentional.
+Decision:
+
+**3. Deletion-adjacent locality relaxations.** Several smaller deferred questions (pruning
+which key-slices a snapshot-style model rescans; allowing a daily-grain driver to feed
+weekly output partitions; slice-scoped deletion) all interact with how deletion is
+contracted. **Recommend:** defer the lot until item 1 is decided; then re-triage.
+Decision:
+
+## B. Change data coming in
+
+**4. Change-feed sources.** A source declared as a change feed currently gets no
+incremental treatment — any change forces full re-derivation of consumers, and (unlike
+every other mutable source kind) it doesn't even get the standard "upstream mutated" repair
+handling. Two separable calls: (a) give change-feed sources the same upstream-mutation
+repair treatment as other mutable sources — **recommend yes now** (consistency, small);
+(b) real fold machinery that consumes the feed's inserts/updates/deletes incrementally —
+**recommend defer until retention (item 1) lands**, because delete events need a contract
+home first.
+Decision:
+
+**5. Joining multiple snapshot-style sources.** A keyed model reconciling against a full
+snapshot may have at most one un-clocked source in its FROM clause; joining two refuses
+loudly. Widening needs a proven multi-source scan design. **Recommend:** keep the loud
+refusal; widen only when a real workload hits it.
+Decision:
+
+## C. Run windows and scheduling
+
+**6. Finer-than-partition run windows.** Asking for an hourly run window on a
+day-partitioned model hard-rejects today. The alternatives are auto-coarsening (silently
+widen the request to a day) or rejecting with a suggested corrected window. **Recommend:
+reject-with-suggestion.** Silent widening recomputes more than the operator asked for and
+undermines "the engineer controls planning"; a precise error with the coarsened window
+spelled out costs one message.
+Decision:
+
+**7. `NOW()` / current-timestamp handling in keyed models.** Partition-grain models pin
+these functions to a fixed timestamp at compile time so reruns are reproducible; keyed
+models instead reject them outright. **Recommend:** unify on pinning — same rule
+everywhere is easier to learn, and the mechanism already exists.
+Decision:
+
+**8. Driver granularities.** The scheduling driver understands day and week only; month
+(and eventually hour) are inherited limitations for every consumer. **Recommend:** widen
+on demand, month first when a workload needs it; not programme work now.
+Decision:
+
+**9. `--auto` staleness precision.** For fully idempotent keyed models, `--auto` currently
+over-approximates what's stale (safe, sometimes wasteful); exact staleness needs
+delta-history machinery from a later ladder rung. **Recommend:** accept the conservatism;
+defer.
+Decision:
+
+**10. Merge history for idempotent keyed models.** The merge ledger is only written for
+models where re-folding would double-count; a fully idempotent keyed model keeps no record
+of which windows it has merged, so `--auto` has nothing to consult. Nothing is incorrect,
+just blind. **Recommend:** once the ledger moves into the warehouse (state-residency
+outcome, running now), write it for all keyed models — one small table buys staleness
+visibility everywhere. Fold into the keyed-residue outcome.
+Decision:
+
+## D. State and bookkeeping
+
+**11. Opting out of smelt-authored tables in the warehouse.** The state doctrine puts
+correctness-critical bookkeeping (the merge ledger) in the user's warehouse. A user who
+forbids any tool-authored objects in the target schema has no knob. **Recommend:** a
+project-level setting that forces the documented degradation path project-wide (recompute
+instead of ledger-dependent techniques, recorded and visible in `smelt explain`) — not
+per-table granularity. Honest and simple; refuse loudly where a declared contract can't be
+honoured without state.
+Decision:
+
+**12. A transactional ledger for Spark.** The warehouse-resident ledger is DuckDB-only;
+on other backends ledger-dependent models will take the recorded downgrade path once
+state-residency lands. **Recommend:** don't build the Spark ledger until a real
+Spark-targeted incremental workload demands it; the downgrade path makes absence safe and
+visible.
+Decision:
+
+**13. `.smelt/` storage format.** Local run state is JSON files today; an embedded
+database was sketched for when the environment/snapshot store grows. **Recommend:** stay
+with JSON; decide when the virtual-environments work actually lands.
+Decision:
+
+**14. Detecting out-of-band table edits.** If someone manually edits a target table
+between runs, smelt doesn't notice. A digest tripwire would catch it at a per-run cost.
+**Recommend:** don't build it — rare, self-inflicted, and expensive to check; record as an
+explicit non-goal so the question stops reopening.
+Decision:
+
+**15. Sub-day interval bookkeeping.** Run-state coverage intervals are keyed by calendar
+date, while models routinely filter at hourly/second boundaries. **Recommend:** move
+interval keys to full timestamps as part of the scheduler outcome (it's rebuilding the
+scheduler's currency anyway — cheapest moment to do it).
+Decision:
+
+## E. Definition changes and policy knobs
+
+**16. A per-model "what happens when a column is added" knob** (backfill / leave null /
+recompute). **Recommend: drop it.** `smelt migrate`'s per-column-group verdict (being
+wired in the definition-delta outcome) already answers this case-by-case; a standalone
+knob would be a second, drifting answer.
+Decision:
+
+**17. Values merged from two mutable inputs.** When one grouped output value draws on two
+different sources that can both mutate, there's no declared policy for which repair
+applies. **Recommend:** force full recompute of the affected region — the conservative
+default every comparable rule already takes; revisit only if it proves expensive in
+practice.
+Decision:
+
+## F. Surface and ergonomics
+
+**18. Pattern helpers (`smelt.latest`, `smelt.once`, `smelt.current`).** Each keyed
+pattern is reachable today only via its hand-written SQL spelling. Ship the helpers as
+built-in functions, or as a shipped template file users import? **Recommend:** shipped
+template file first — no parser/registry surface commitment, trivially promotable to
+built-ins later if they stick.
+Decision:
+
+**19. Metrics × incremental time filtering.** How metric expansion composes with the time
+filters injected into partition-grain models is unspecified. **Recommend:** refuse the
+combination loudly for now (a named diagnostic), and spec the composition when metrics
+work resumes — don't let it fail quietly in the meantime.
+Decision:
+
+**20. docs-site CLI coverage audit.** One divergence bullet says "docs coverage of the
+maintenance CLI surface is partial" without enumerating what's missing. **Recommend:**
+not a product decision — enumerate the residue once inside an outcome close-out phase,
+document or drop each item, delete the open question.
+Decision:
+
+## Not product decisions (triaged out)
+
+These carry "(Open Question)" tags in the specs but need engineering, not a product call;
+they route to the residue outcomes as scope: per-source clamp observability in
+`smelt explain --json` and editor hovers; the specified-but-never-produced retraction
+diagnostic (rides item 1); the declared-dependency-only locality route; NULL payloads in
+the generative conformance pool; ledger fold transactionality on non-DuckDB backends
+(subsumed by the state-residency outcome and item 12).
