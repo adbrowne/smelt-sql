@@ -69,7 +69,7 @@ run shape.
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
 | 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | done |
 | 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | done |
-| 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
+| 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | planned |
 | 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
 | 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
 | 11 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
@@ -263,6 +263,23 @@ run shape.
   the `models`/`sources` breadcrumb, so it silently found no edge for any ref spelled
   `smelt.models.<addr>` (only bare `smelt.<addr>` worked) — this affected the existing phase 2-4
   dispatch branches too, not just this phase's new code. No reshape of the phase table.
+
+- 2026-08-16 (phase 8 planning): no reshape — phase 7's summary flagged nothing that changes
+  row 8's scope, and its two live-read precedents are read-side only, while this row's new work
+  is the write side. Three things pinned so the implementer does not rediscover them. (1) The
+  `--landed`-optional surface needs a *pairing* rule the spec's "repeatable and optional per
+  source" phrasing leaves implicit, so the phase opens with a §Surface sentence: bare
+  `<start>..<end>` pairs positionally (today's equal-count rule, unchanged) or
+  `<address>=<start>..<end>` pairs by address; the two spellings do not mix. (2) The
+  absent-watermark refusal is a **named run error**, not a per-source skip — a skip would let a
+  named source silently contribute nothing and under-propagate, which the fail-loud discipline
+  and §"never a silent no-op" forbid; this is stated in §Surface rather than left to code. (3)
+  The advance's consumer set comes from the SAME `build_forward_graph` propagation already
+  builds, and a graph-build failure means coverage is unprovable → no advance (stall is the safe
+  direction), never a speculative one. Also noted for the next planner: a `--since-upstream`
+  sweep runs one `execute_project` per model and is therefore selective by construction, so it
+  never advances a watermark — only a run completing every consumer of the source does, exactly
+  as §Design "per source, not per `(source, consumer)`" intends.
 
 ## Blocked
 
