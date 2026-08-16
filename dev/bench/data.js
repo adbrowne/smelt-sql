@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1786861828849,
+  "lastUpdate": 1786861831336,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.155235,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "544d26bb0c312bbd6c6411fe3337e92c9e15ef49",
+          "message": "Merge pull request #167 from adbrowne/spec-decision-track-1\n\nspec: decision-track diffs — posture-derived deletion, determinism-scoped equivalence, and 18 smaller decisions",
+          "timestamp": "2026-08-16T16:27:34+10:00",
+          "tree_id": "162a50bc68879d302ff22b2bd5a68aca8145e45e",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/544d26bb0c312bbd6c6411fe3337e92c9e15ef49"
+        },
+        "date": 1786861830546,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.3532516415305,
+            "unit": "MB/s"
           }
         ]
       }
