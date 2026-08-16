@@ -402,6 +402,103 @@ fn escape_sql_literal(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+// ── Warehouse-resident frontier record (idempotent grading of the
+// reconciliation ledger, `docs/outcomes/20260816-state-residency/
+// phases/04-plan.md`) ────────────────────────────────────────────────────
+//
+// `docs/specs/incremental_models.md` §"The frontier record (reconciliation
+// ledger)": a region recompute resets every intersecting `(region, group)`
+// entry to exactly the input state it read. The **additive** grading
+// above (`_smelt_ledger`) already records that state as per-delta
+// identities; this table is the **idempotent** grading's counterpart — one
+// row per `(model, group, region, input)` recording the furthest delta
+// identity (watermark) reached for that input.
+//
+// Unlike `_smelt_ledger`'s per-input `PRIMARY KEY`, this table's key is
+// `(model_name, grp, region_start)` — one row per region-recompute today,
+// matching every production caller
+// (`crates/smelt-runtime/src/execute.rs`'s region-recompute reset, which
+// always folds exactly one nominal input, `"self"`, per region). A
+// multi-input frontier reset is not a shape any caller constructs today;
+// widening the key to include `input_name` is a mechanical follow-up if
+// one ever does.
+
+/// Table name for the warehouse-resident frontier record.
+pub const FRONTIER_TABLE_NAME: &str = "_smelt_frontier";
+
+/// DDL creating the frontier table if it does not already exist. Idempotent
+/// — safe to run before every region-recompute reset.
+pub fn generate_frontier_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         model_name VARCHAR NOT NULL, \
+         grp VARCHAR NOT NULL, \
+         input_name VARCHAR NOT NULL, \
+         delta_id VARCHAR NOT NULL, \
+         region_start VARCHAR NOT NULL, \
+         region_end VARCHAR NOT NULL, \
+         PRIMARY KEY (model_name, grp, region_start))",
+        quote_identifier(schema),
+        FRONTIER_TABLE_NAME,
+    )
+}
+
+/// `DELETE` every frontier row for `(model, group)` whose region intersects
+/// `[region_start, region_end)` — the recompute-reset half of
+/// [`crate::reconciliation::ReconciliationLedger::recompute_reset`], lowered
+/// to SQL. Mirrors `Region::intersects`'s half-open interval test
+/// (`region_start < region_end` AND `region_start < region_end`, applied
+/// symmetrically): a stored row intersects the reset region iff its own
+/// `region_start` is before the reset's end AND the reset's own start is
+/// before the stored row's `region_end`.
+pub fn generate_frontier_reset_delete_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    region_start: &str,
+    region_end: &str,
+) -> String {
+    format!(
+        "DELETE FROM {}.{} WHERE model_name = '{}' AND grp = '{}' \
+         AND region_start < '{}' AND '{}' < region_end",
+        quote_identifier(schema),
+        FRONTIER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(region_end),
+        escape_sql_literal(region_start),
+    )
+}
+
+/// `INSERT` recording the frontier state the recompute actually read for
+/// `(model, group, region)` — always paired with
+/// [`generate_frontier_reset_delete_sql`] over the SAME region, so the
+/// insert never collides with a surviving intersecting row (the delete
+/// already cleared them).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_frontier_insert_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+    region_start: &str,
+    region_end: &str,
+) -> String {
+    format!(
+        "INSERT INTO {}.{} (model_name, grp, input_name, delta_id, region_start, region_end) \
+         VALUES ('{}', '{}', '{}', '{}', '{}', '{}')",
+        quote_identifier(schema),
+        FRONTIER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(input),
+        escape_sql_literal(delta_id),
+        escape_sql_literal(region_start),
+        escape_sql_literal(region_end),
+    )
+}
+
 // ── Warehouse-resident observed output delta (T5) ───────────────────────
 //
 // `docs/specs/incremental_models.md` §"The graph layer" — "Observed deltas
@@ -1237,6 +1334,64 @@ mod tests {
         assert!(sql.contains("grp = '{*}'"));
         assert!(sql.contains("input_name = 'smelt.events'"));
         assert!(sql.contains("delta_id = '2026-01-01'"));
+    }
+
+    // ── warehouse-resident frontier record DDL/DML (idempotent grading) ─
+
+    #[test]
+    fn frontier_table_ddl_is_idempotent_and_keys_region_group() {
+        let ddl = generate_frontier_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_frontier"));
+        assert!(ddl.contains("PRIMARY KEY (model_name, grp, region_start)"));
+    }
+
+    #[test]
+    fn frontier_reset_sql_scopes_delete_to_intersecting_regions_of_the_same_group() {
+        let sql = generate_frontier_reset_delete_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "2026-01-01",
+            "2026-01-10",
+        );
+        assert!(sql.contains("DELETE FROM main._smelt_frontier"));
+        assert!(sql.contains("model_name = 'device_stats'"));
+        assert!(sql.contains("grp = '{*}'"));
+        assert!(sql.contains("region_start < '2026-01-10'"));
+        assert!(sql.contains("'2026-01-01' < region_end"));
+    }
+
+    #[test]
+    fn frontier_insert_sql_carries_every_field() {
+        let sql = generate_frontier_insert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "self",
+            "2026-01-10",
+            "2026-01-01",
+            "2026-01-10",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_frontier"));
+        assert!(sql.contains("'device_stats'"));
+        assert!(sql.contains("'{*}'"));
+        assert!(sql.contains("'self'"));
+        assert!(sql.contains("'2026-01-10'"));
+        assert!(sql.contains("'2026-01-01'"));
+    }
+
+    #[test]
+    fn frontier_sql_escapes_single_quotes_in_values() {
+        let sql = generate_frontier_insert_sql(
+            "main",
+            "model's_name",
+            "{*}",
+            "self",
+            "d1",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert!(sql.contains("'model''s_name'"));
     }
 
     // ── warehouse-resident observed-output-delta DDL/DML (T5) ──────────

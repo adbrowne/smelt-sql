@@ -68,7 +68,7 @@ this outcome runs first in the programme.
 | 1 | Spec deltas first: one-sentence absent-state behaviour for schema snapshots, source postures, probe baselines in their owning specs; sharpen `state.md` §Surface where wiring needs it | blocked |
 | 2 | Repair the pre-existing `contract_lattice_spec` heading-lookup regression (phase 1's Blocked entry, option (b)), then thread `StateMode` through `execute_project`: `FileStore` carries the project posture and each observability write is gated to exactly the families `state.md` §"`state.mode` and what each posture provides" assigns it; `--resume` refuses by name under `stateless` | done |
 | 3 | Repair the second pre-existing red-gate class (`output_delta_spec` / `typed_edge_spec` duplicate-`### The graph layer` lookup + the `General` verdict-name judgment call), then absent-state runtime behaviours (criterion 4's "implementation matches" half): `ProbeBaselineUnavailable` emitted for absent source-posture and frozen-band baselines, absent-schema-snapshot degradation per `schema_evolution.md` | done |
-| 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | planned |
+| 4 | Move the reconciliation ledger engine-resident: backend table transactional with the fold, migration/read path for existing `.smelt/reconciliation.json`, never-fold-twice check rides the table | done |
 | 5 | Two-step ideal-then-availability derivation with recorded downgrades: `MaintenanceStateDowngraded` + `DeclaredContractRequiresState`, explain-visible | pending |
 | 6 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle | pending |
 | 7 | Docs-site update for state modes and residency; `/smelt:validate state`; remove closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` | pending |
@@ -76,6 +76,19 @@ this outcome runs first in the programme.
 
 ## Decision log
 
+- **2026-08-16 (phase 4 implement).** Phase 4 landed: `_smelt_frontier` (new table) plus
+  `Backend::execute_write_and_reset_frontier` (DuckDB-transactional override) replace
+  `.smelt/reconciliation.json`'s frontier-grading writes; `FileStore::
+  take_legacy_reconciliation_store` imports a legacy file's both gradings into the engine
+  (`_smelt_frontier`/`_smelt_ledger`) once per run, then deletes it. Not achieved: fusing the
+  frontier reset with the model's own data write in one transaction — the actual per-batch
+  write already commits earlier in the loop by the time the reset runs, so `write_group` is
+  empty at the real call site today; the reset's own delete+insert are atomic with each other,
+  not with the write. See `phases/04-summary.md` "For the next planner" for the scoped
+  follow-up. All phase-4 gates green, including the full `verify-phase.sh` sweep and
+  `maintenance_conformance`. `.claude/hardening-baseline.txt`'s `smelt-backend-duckdb expect`
+  count moved 18→19 (one more infallible mutex-lock `.expect(...)`, same pattern as every other
+  transactional override in that file).
 - **2026-08-16 (phase 4 plan).** No reshape of the remaining rows. Planning phase 4 established
   that `state.md` §Known Divergences overstates the gap: the **additive** grading is already
   engine-resident (`_smelt_ledger`, whose `PRIMARY KEY` *is* the never-fold-twice key, committed

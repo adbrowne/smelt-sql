@@ -31,7 +31,6 @@ use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
-use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
@@ -1098,6 +1097,78 @@ pub async fn execute_project(
     };
 
     let file_store = FileStore::new(project_dir, &request.target, config.state.mode);
+
+    // One-time legacy reconciliation-ledger import (state residency phase
+    // 4, `docs/specs/run_state.md` §"Relationship to the reconciliation
+    // ledger"): a `.smelt/targets/<target>/reconciliation.json` left by a
+    // pre-residency binary holds both gradings' per-`(model, group,
+    // region)` entries — the idempotent frontier grading imports into
+    // `_smelt_frontier`, the additive delta-identity grading (from a binary
+    // old enough to predate MP12's own engine-residency move) imports into
+    // `_smelt_ledger`. On a ledger-capable (DuckDB) backend both import and
+    // the legacy file is removed; on any other dialect (no ledger/frontier
+    // builder exists yet) `take_legacy_reconciliation_store` is not even
+    // called, so the file is left untouched for a future run against a
+    // ledger-capable target.
+    if let Some(backend) = backends.get(&request.target) {
+        if backend.dialect() == smelt_backend::SqlDialect::DuckDB {
+            if let Some(legacy) = file_store.take_legacy_reconciliation_store()? {
+                let schema = &config.targets[&request.target].schema;
+                let frontier_ensure_sql =
+                    smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+                let ledger_ensure_sql = smelt_state::ddl_duckdb::generate_ledger_table_ddl(schema);
+                backend.execute_sql(&frontier_ensure_sql).await?;
+                backend.execute_sql(&ledger_ensure_sql).await?;
+                for (model_name, ledger) in &legacy.models {
+                    for record in &ledger.records {
+                        match &record.entry.processed {
+                            smelt_state::reconciliation::Processed::Frontier(watermarks) => {
+                                let reset_delete_sql =
+                                    smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+                                        schema,
+                                        model_name,
+                                        &record.group,
+                                        &record.region.start,
+                                        &record.region.end,
+                                    );
+                                backend.execute_sql(&reset_delete_sql).await?;
+                                for (input, delta_id) in watermarks {
+                                    let insert_sql =
+                                        smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+                                            schema,
+                                            model_name,
+                                            &record.group,
+                                            input,
+                                            delta_id,
+                                            &record.region.start,
+                                            &record.region.end,
+                                        );
+                                    backend.execute_sql(&insert_sql).await?;
+                                }
+                            }
+                            smelt_state::reconciliation::Processed::DeltaIdentities(identities) => {
+                                for (input, delta_ids) in identities {
+                                    for delta_id in delta_ids {
+                                        let insert_sql =
+                                            smelt_state::ddl_duckdb::generate_ledger_insert_sql(
+                                                schema,
+                                                model_name,
+                                                &record.group,
+                                                input,
+                                                delta_id,
+                                                &record.region.start,
+                                                &record.region.end,
+                                            );
+                                        backend.execute_sql(&insert_sql).await?;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Models declaring `contract.deferral` at model granularity
     // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
@@ -3629,17 +3700,18 @@ pub async fn execute_project(
                     }
                 }
 
-                // Reconciliation ledger: this batch loop performed a region
-                // recompute of `[start_str, end_str)` (DELETE the write
-                // window, INSERT its recompute — write window = output
-                // window; or, for a column-scoped MERGE cell, MERGE that
-                // SAME window's freshly-recomputed rows in by `unique_key` —
-                // the row VALUES are still a from-scratch recompute of the
-                // window, only the physical write op differs).
-                // `docs/specs/incremental_models.md` §"The reconciliation
-                // ledger": a region recompute resets every intersecting
-                // entry to exactly the input it read. This records the
-                // whole-row group `{*}` (matching
+                // Frontier record (reconciliation ledger, idempotent
+                // grading): this batch loop performed a region recompute of
+                // `[start_str, end_str)` (DELETE the write window, INSERT
+                // its recompute — write window = output window; or, for a
+                // column-scoped MERGE cell, MERGE that SAME window's
+                // freshly-recomputed rows in by `unique_key` — the row
+                // VALUES are still a from-scratch recompute of the window,
+                // only the physical write op differs).
+                // `docs/specs/incremental_models.md` §"The frontier record
+                // (reconciliation ledger)": a region recompute resets every
+                // intersecting entry to exactly the input it read. This
+                // records the whole-row group `{*}` (matching
                 // `smelt_logical::maintenance::PlanCell::group`'s
                 // whole-row-trigger convention) read from a single nominal
                 // `self` input, watermarked to the region's own end. This
@@ -3648,20 +3720,55 @@ pub async fn execute_project(
                 // side by side. Per-cell (not whole-row) ledger grading for
                 // the column-scoped-merge technique is MP12's job
                 // (`incremental_models.md` §"The reconciliation ledger").
+                //
+                // Engine-resident (`_smelt_frontier`), DuckDB-only — no
+                // frontier builder exists for another dialect yet (a Spark
+                // builder is out of scope for this outcome). `write_group`
+                // is empty: this batch's own model write already committed
+                // above via `execute_model_incremental`/the column-scoped
+                // MERGE dispatch, so the reset's own delete+insert commit
+                // atomically together, just not fused with that earlier
+                // write.
                 if !start_str.is_empty() && !end_str.is_empty() {
-                    // Same whole-store critical section rationale as the
-                    // interval store above — `reconciliation.json`.
-                    let _io_guard = state_io_lock.lock().await;
-                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
-                        let region = Region::new(start_str.clone(), end_str.clone());
-                        let mut read = std::collections::BTreeMap::new();
-                        read.insert("self".to_string(), end_str.clone());
-                        reconciliation.get_or_create(&plan.name).recompute_reset(
-                            &region,
+                    if backend.dialect() == smelt_backend::SqlDialect::DuckDB {
+                        let ensure_sql = smelt_state::ddl_duckdb::generate_frontier_table_ddl(schema);
+                        let reset_delete_sql =
+                            smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql(
+                                schema,
+                                &plan.name,
+                                "{*}",
+                                &start_str,
+                                &end_str,
+                            );
+                        let insert_sql = smelt_state::ddl_duckdb::generate_frontier_insert_sql(
+                            schema,
+                            &plan.name,
                             "{*}",
-                            Processed::Frontier(read),
+                            "self",
+                            &end_str,
+                            &start_str,
+                            &end_str,
                         );
-                        let _ = file_store.save_reconciliation_store(&reconciliation);
+                        let empty_write_group = smelt_logical::maintenance::emit::StatementGroup {
+                            statements: vec![],
+                            transactional: false,
+                        };
+                        backend
+                            .execute_write_and_reset_frontier(
+                                &ensure_sql,
+                                &empty_write_group,
+                                &reset_delete_sql,
+                                &insert_sql,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    } else {
+                        tracing::warn!(
+                            model = %plan.name,
+                            dialect = %backend.dialect().name(),
+                            "no engine-resident frontier builder for this dialect; the region \
+                             recompute's frontier record is not recorded"
+                        );
                     }
                 }
 

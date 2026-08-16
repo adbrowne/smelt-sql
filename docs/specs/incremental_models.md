@@ -1255,6 +1255,14 @@ containing its footprint. A definition delta is a fold-family operation on this 
 instantiates the affected groups' entries at `S = ∅` over every existing region
 (`definition_deltas.md` §"Frontier semantics").
 
+The record is engine-resident, graded by algebra into two backend tables: additive delta
+identities in `_smelt_ledger`, idempotent frontier watermarks in `_smelt_frontier`. A region
+recompute's reset (delete every intersecting `(region, group)` row, insert the input state the
+recompute read) commits in the same backend transaction as the recompute's own write, on a
+backend with a ledger builder (DuckDB today). Never `.smelt/`-resident — that residency belongs
+to run-state observability, not this correctness structure (`run_state.md` §"Relationship to
+the reconciliation ledger"; `state.md` §"The residency rule").
+
 ### The graph layer
 
 **Edges.** A dependency edge is `downstream reads upstream` under the downstream cell's
@@ -1803,11 +1811,13 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
   Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
-- **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
-  cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
-  the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
-  recompute family, explain-visible), and whether a Spark-dialect ledger builder is worth
-  building before a real Spark-targeted incremental workload demands it remains undecided.
+- **The ledger/frontier warehouse substrate is DuckDB-only** — an additive-graded
+  cell on another backend fails loudly today, and a region recompute on another backend skips
+  its frontier reset with a warning rather than recording it; `state.md` §"The degradation
+  contract" specifies the intended behaviour instead (a recorded `MaintenanceStateDowngraded`
+  downgrade to the recompute family, explain-visible), and whether a Spark-dialect
+  ledger/frontier builder is worth building before a real Spark-targeted incremental workload
+  demands it remains undecided.
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
   (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
   key-level dirt representation exists (intervals are the graph's only currency); the

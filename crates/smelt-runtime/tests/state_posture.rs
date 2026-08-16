@@ -241,6 +241,125 @@ async fn stateless_run_writes_no_manifest_or_report() {
     );
 }
 
+/// The reconciliation ledger's frontier grading is a correctness structure,
+/// not an observability one (`docs/specs/state.md` §"`state.mode` and what
+/// each posture provides") — it is engine-resident and posture-ungated, so
+/// even a `stateless` run still records it in `_smelt_frontier`. Needs its
+/// own incremental fixture, same shape as
+/// `intervals_run_writes_manifest_intervals_and_schemas` below, since the
+/// shared `Fixture`'s `base` model is a plain full-refresh table.
+#[tokio::test]
+async fn stateless_run_still_records_the_frontier_in_the_engine() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    let model_sql = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT event_date, amount FROM main.raw_events
+"#;
+    std::fs::write(project_dir.join("models/base.sql"), model_sql).unwrap();
+
+    let db_path = project_dir.join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE SCHEMA IF NOT EXISTS main;
+            CREATE OR REPLACE TABLE main.raw_events AS
+            SELECT * FROM (VALUES
+                (DATE '2026-01-01', 10.0),
+                (DATE '2026-01-02', 5.0)
+            ) AS t(event_date, amount);
+            "#,
+        )
+        .unwrap();
+    }
+
+    let smelt_yml = format!(
+        "name: stateless_frontier_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nstate:\n  mode: stateless\n",
+        db = db_path.display(),
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let mut targets = HashMap::new();
+    targets.insert(
+        "dev".to_string(),
+        Target {
+            target_type: "duckdb".to_string(),
+            database: Some(db_path.to_string_lossy().into_owned()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+        },
+    );
+    let config = Arc::new(Config {
+        name: "stateless_frontier_test".to_string(),
+        version: 1,
+        paths: vec!["models".to_string()],
+        targets,
+        default_materialization: Materialization::Table,
+        models: HashMap::new(),
+        python: None,
+        target: None,
+        state: StateConfig {
+            mode: StateMode::Stateless,
+        },
+        maintenance: None,
+        probes: Default::default(),
+    });
+
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let mut request = make_request("dev");
+    request.start = Some("2026-01-01".to_string());
+    request.end = Some("2026-01-03".to_string());
+
+    execute_project(
+        "stateless-frontier-run".to_string(),
+        request,
+        Arc::clone(&config),
+        Arc::clone(&graph),
+        Arc::clone(&db),
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("stateless incremental run must succeed");
+
+    assert!(
+        !project_dir.join(".smelt").exists(),
+        "a stateless project must never create .smelt/"
+    );
+
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    let rows = backend
+        .execute_sql("SELECT model_name FROM main._smelt_frontier WHERE model_name = 'base'")
+        .await
+        .expect("query frontier table");
+    let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(
+        total_rows, 1,
+        "the frontier record is correctness-class and must be written even under stateless"
+    );
+}
+
 /// The interval ledger is only written on the incremental-materialization
 /// execute path (`execute.rs`'s single `save_intervals` call site), so this
 /// needs its own fixture: a `refresh: incremental` model with a `timeseries`

@@ -558,43 +558,35 @@ impl FileStore {
             .with_context(|| format!("Failed to write intervals: {:?}", path))
     }
 
-    // --- Reconciliation Ledger ---
+    // --- Reconciliation Ledger (legacy import only) ---
 
-    /// Load the reconciliation ledger store from disk (one ledger per
-    /// model). Returns default if the file doesn't exist — a model with no
-    /// ledger has never had a plan-managed fold/recompute recorded.
+    /// Read and remove a legacy `.smelt/targets/<target>/reconciliation.json`
+    /// left by a pre-residency binary, if one exists. `Ok(None)` when no such
+    /// file is present — the common case for every run after the one-time
+    /// import.
     ///
-    /// **Deliberately ungated by `state.mode`.** The reconciliation ledger
-    /// is a correctness structure, not an observability one
-    /// (`docs/specs/state.md` §"`state.mode` and what each posture
-    /// provides": "correctness structures ... all, whenever the plan
-    /// derives them"), so it is written under every posture, including
-    /// `stateless`. Its `.smelt/`-file residency is itself a live Known
-    /// Divergence, tracked to move engine-resident in phase 4 of
-    /// `docs/outcomes/20260816-state-residency/outcome.md`; do not add a
-    /// `StateFamily` gate here before that lands.
-    pub fn load_reconciliation_store(&self) -> Result<ReconciliationStore> {
+    /// The reconciliation ledger's frontier grading is now engine-resident
+    /// (`docs/outcomes/20260816-state-residency/phases/04-plan.md`;
+    /// `docs/specs/incremental_models.md` §"The frontier record
+    /// (reconciliation ledger)") — this file is consumed exactly once, by
+    /// the runtime's legacy-import step, and never written again. **Posture-
+    /// ungated**, matching the correctness-structure treatment the file had
+    /// before the move: a `stateless` project that happens to carry a legacy
+    /// file from an earlier run still gets it imported and removed.
+    pub fn take_legacy_reconciliation_store(&self) -> Result<Option<ReconciliationStore>> {
         self.check_version()?;
         let path = self.reconciliation_path();
         if !path.exists() {
-            return Ok(ReconciliationStore::default());
+            return Ok(None);
         }
         let content = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read reconciliation ledger: {:?}", path))?;
-        let store = serde_json::from_str(&content)
-            .with_context(|| format!("Failed to parse reconciliation ledger: {:?}", path))?;
-        Ok(store)
-    }
-
-    /// Save the reconciliation ledger store to disk.
-    ///
-    /// **Deliberately ungated by `state.mode`** — see
-    /// [`FileStore::load_reconciliation_store`]'s doc comment.
-    pub fn save_reconciliation_store(&self, store: &ReconciliationStore) -> Result<()> {
-        self.init()?;
-        let path = self.reconciliation_path();
-        write_json_atomic(&path, store)
-            .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))
+            .with_context(|| format!("Failed to read legacy reconciliation ledger: {:?}", path))?;
+        let store: ReconciliationStore = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse legacy reconciliation ledger: {:?}", path))?;
+        std::fs::remove_file(&path).with_context(|| {
+            format!("Failed to remove legacy reconciliation ledger: {:?}", path)
+        })?;
+        Ok(Some(store))
     }
 
     // --- Landed-delta store ---
@@ -1624,26 +1616,38 @@ mod tests {
             .is_none());
     }
 
-    /// `docs/specs/state.md` §"`state.mode` and what each posture
-    /// provides": the reconciliation ledger is a correctness structure and
-    /// is written under every posture, including `stateless` — guards
-    /// against over-gating it alongside the observability families.
+    /// The reconciliation ledger's frontier grading is now engine-resident;
+    /// `.smelt/reconciliation.json` is only ever a legacy artifact a prior
+    /// binary left behind. `take_legacy_reconciliation_store` reads and
+    /// removes it, posture-ungated (matching the file's old
+    /// correctness-structure treatment), and reports `None` when absent.
     #[test]
-    fn reconciliation_store_ignores_the_posture() {
+    fn take_legacy_reconciliation_store_returns_it_and_removes_the_file() {
         let dir = TempDir::new().unwrap();
         let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+        store.init().unwrap();
+        let target_dir = dir.path().join(".smelt/targets/dev");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let mut legacy = ReconciliationStore::default();
+        legacy.get_or_create("revenue");
+        let content = serde_json::to_string(&legacy).unwrap();
+        std::fs::write(target_dir.join("reconciliation.json"), content).unwrap();
 
-        store
-            .save_reconciliation_store(&ReconciliationStore::default())
-            .unwrap();
-
+        let taken = store
+            .take_legacy_reconciliation_store()
+            .unwrap()
+            .expect("a legacy file present must be returned");
+        assert!(taken.models.contains_key("revenue"));
         assert!(
-            dir.path()
-                .join(".smelt/targets/dev/reconciliation.json")
-                .exists(),
-            "reconciliation ledger must write even under stateless"
+            !target_dir.join("reconciliation.json").exists(),
+            "the legacy file must be removed after import"
         );
-        let loaded = store.load_reconciliation_store().unwrap();
-        assert!(loaded.models.is_empty());
+    }
+
+    #[test]
+    fn take_legacy_reconciliation_store_returns_none_when_absent() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev", StateMode::Stateless);
+        assert!(store.take_legacy_reconciliation_store().unwrap().is_none());
     }
 }

@@ -250,17 +250,17 @@ lands.
   (`crates/smelt-runtime/src/execute.rs`) — `StateMode` is parsed (`smelt-core/src/config.rs`)
   but never consulted. The optionality rule is therefore entirely unimplemented: today every
   project behaves as (at least) `intervals`. No tracking plan yet; this spec is the intent.
-- **The reconciliation ledger is `.smelt/`-resident, violating the residency rule.** Both
-  gradings live in `.smelt/reconciliation.json` (`crates/smelt-state/src/reconciliation.rs`)
-  rather than in a backend table transactional with the fold. `run_state.md`
-  §"Relationship to the reconciliation ledger" and `incremental_models.md` §Known Divergences
-  already record the intended move; this spec makes the end-state normative. Until the move,
-  the additive grade's never-fold-twice check rides on `.smelt/`, so deleting `.smelt/`
-  today *can* affect correctness for keyed additive folds — the flagship gap this doctrine
-  exists to close.
+- **No ledger builder exists outside DuckDB.** Both gradings are now engine-resident and
+  transactional with the fold they guard — the additive grade in `_smelt_ledger`, the
+  frontier grade in `_smelt_frontier` (`crates/smelt-state/src/ddl_duckdb.rs`) — closing the
+  flagship gap this doctrine exists to close: deleting `.smelt/` can no longer affect
+  correctness for keyed additive or region-recompute folds. The residual gap is dialect
+  coverage: no ledger/frontier builder exists for a backend other than DuckDB (a Spark
+  builder is out of scope for this outcome, `incremental_models.md` §Known Divergences), so
+  an additive-graded cell there fails loudly today rather than downgrading — see the next
+  bullet.
 - **No availability-resolution step exists in derivation.** Today an additive-graded cell on
-  a backend without a ledger builder fails loudly (the ledger's warehouse substrate is
-  DuckDB-only, `incremental_models.md` §Known Divergences) instead of downgrading with
+  a backend without a ledger builder fails loudly instead of downgrading with
   `MaintenanceStateDowngraded`; neither diagnostic code in §Surface is implemented.
 - **Structure-level degradation behaviours are specified but not yet honoured by the runtime.**
   `--resume` (refuses) and forward propagation (falls back to full dirty set, `run_state.md`

@@ -25,7 +25,6 @@ use smelt_maintenance_testkit::schedule_gen::{
     arb_schedule_for, is_permutable, reorder_windows, GenRow,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
-use smelt_state::reconciliation::Region;
 
 use crate::gate::{
     classify_keyed, classify_mixed, drive_and_assert, insert_fact_row, insert_row_keyed,
@@ -264,10 +263,12 @@ async fn redelivered_window_refuses_for_additive_keyed() {
 }
 
 /// `persisted_reconciliation_store_reflects_recompute_reset` (plan Phase 5
-/// TDD list): after two `execute_project` runs of a partition-grain recipe,
-/// `.smelt/reconciliation.json` contains recompute-reset entries for
-/// exactly the recomputed regions (closes design §2 gap 6 — zero
-/// integration coverage of reconciliation-ledger persistence).
+/// TDD list; retargeted at the engine-resident `_smelt_frontier` table by
+/// `docs/outcomes/20260816-state-residency/phases/04-plan.md`): after two
+/// `execute_project` runs of a partition-grain recipe, `_smelt_frontier`
+/// contains reset entries for exactly the recomputed regions (closes design
+/// §2 gap 6 — zero integration coverage of reconciliation-ledger
+/// persistence).
 #[tokio::test]
 async fn persisted_reconciliation_store_reflects_recompute_reset() {
     let mut runner = TestRunner::deterministic();
@@ -317,39 +318,41 @@ async fn persisted_reconciliation_store_reflects_recompute_reset() {
     r2.end = Some("2024-01-03".to_string());
     project.run_quiet("recon-run-2", r2).await.expect("run 2");
 
-    let store = smelt_state::file_store::FileStore::new(
-        &project.project_dir,
-        "dev",
-        smelt_core::config::StateMode::Environments,
-    )
-    .load_reconciliation_store()
-    .expect("load persisted reconciliation store");
-    let ledger = store.get(&recipe.model_name).unwrap_or_else(|| {
-        panic!(
-            "no reconciliation ledger persisted for model {:?}: store={store:?}",
-            recipe.model_name
+    let conn = project.connect().expect("connect to read _smelt_frontier");
+    let region_exists = |region_start: &str| -> bool {
+        conn.query_row(
+            &format!(
+                "SELECT 1 FROM main._smelt_frontier WHERE model_name = '{}' \
+                 AND grp = '{{*}}' AND region_start = '{region_start}'",
+                recipe.model_name
+            ),
+            [],
+            |row| row.get::<_, i32>(0),
         )
-    });
+        .is_ok()
+    };
+    let region_count: i64 = conn
+        .query_row(
+            &format!(
+                "SELECT COUNT(*) FROM main._smelt_frontier WHERE model_name = '{}' AND grp = '{{*}}'",
+                recipe.model_name
+            ),
+            [],
+            |row| row.get(0),
+        )
+        .expect("count frontier rows");
 
-    let region1 = Region::new("2024-01-01", "2024-01-02");
-    let region2 = Region::new("2024-01-02", "2024-01-03");
     assert!(
-        ledger.get(&region1, "{*}").is_some(),
-        "expected a recompute-reset entry for the first recomputed region {region1:?}, \
-         got records={:#?}",
-        ledger.records
+        region_exists("2024-01-01"),
+        "expected a reset entry for the first recomputed region [2024-01-01, 2024-01-02)"
     );
     assert!(
-        ledger.get(&region2, "{*}").is_some(),
-        "expected a recompute-reset entry for the second recomputed region {region2:?}, \
-         got records={:#?}",
-        ledger.records
+        region_exists("2024-01-02"),
+        "expected a reset entry for the second recomputed region [2024-01-02, 2024-01-03)"
     );
     assert_eq!(
-        ledger.records.len(),
-        2,
-        "expected exactly the two recomputed regions' entries, got {:#?}",
-        ledger.records
+        region_count, 2,
+        "expected exactly the two recomputed regions' entries"
     );
 }
 

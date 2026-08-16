@@ -541,4 +541,53 @@ pub trait Backend: Send + Sync {
         self.execute_sql(gc_sql).await?;
         Ok(())
     }
+
+    /// Reset the warehouse-resident frontier record (the reconciliation
+    /// ledger's idempotent grading, `docs/outcomes/20260816-state-residency/
+    /// phases/04-plan.md`) in the SAME backend transaction as `write_group`
+    /// — the caller's own region-recompute write, when the caller has one to
+    /// fuse. `docs/specs/incremental_models.md` §"The frontier record
+    /// (reconciliation ledger)": "a region recompute's reset ... commits in
+    /// the same backend transaction as the recompute's own write."
+    ///
+    /// `write_group` may be an EMPTY [`StatementGroup`] when the caller's
+    /// model write already committed through a different path (e.g. a
+    /// per-batch incremental write dispatched earlier in the same run) — in
+    /// that case this call still gives the reset's own delete+insert one
+    /// atomic commit point, just not fused with a write that already
+    /// happened.
+    ///
+    /// `ensure_sql` creates the frontier table if absent (idempotent DDL);
+    /// `reset_delete_sql`/`insert_sql` come from
+    /// `smelt_state::ddl_duckdb::generate_frontier_reset_delete_sql`/
+    /// `_insert_sql` — the delete of every region-intersecting row followed
+    /// by the insert of the freshly-read frontier state. All
+    /// strings/groups come from a caller with the `smelt-state` dependency
+    /// — this trait does not depend on it, only executes the SQL text a
+    /// caller built, same precedent as [`Backend::fold_ledger_delta`].
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `write_group`, then `reset_delete_sql`, then
+    /// `insert_sql`, as separate statements) for any backend that does not
+    /// override it — the same precedent as
+    /// [`Backend::execute_write_and_refresh_fingerprint_sidecar`]'s default.
+    /// A backend that can wrap the write and the frontier reset in a native
+    /// transaction (DuckDB) should override this so a failed write never
+    /// leaves a stale frontier record behind, and a failed reset never lets
+    /// the write proceed unrecorded.
+    async fn execute_write_and_reset_frontier(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        reset_delete_sql: &str,
+        insert_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        if !write_group.statements.is_empty() {
+            self.execute_statement_group(write_group).await?;
+        }
+        self.execute_sql(reset_delete_sql).await?;
+        self.execute_sql(insert_sql).await?;
+        Ok(())
+    }
 }
