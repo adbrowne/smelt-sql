@@ -1,7 +1,7 @@
 # Outcome: Close the key grain's residues (v2, decision-grown)
 
 **Created:** 2026-08-16
-**Status:** queued
+**Status:** active
 **Source:** `docs/handoffs/2026-08-16-delta-signature-closure-programme.md` (programme outcome 4);
 carries forward `docs/outcomes/20260815-keyed-grain-residue/` (superseded) and adds the scope the
 decision track graduated (`docs/research/20260816-open-questions-triage.md` items 1, 7, 10, 18).
@@ -72,7 +72,7 @@ scope, and the pattern helpers ship as a `smelt.define` template file.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Snapshot-reconcile anti-join delete leg (transactional with the merge) + conformance key-departure staging, red-green against the oracle | pending |
+| 1 | Snapshot-reconcile anti-join delete leg (transactional with the merge) + conformance key-departure staging, red-green against the oracle | planned |
 | 2 | `retain_departed` lattice-point triple in `smelt-logical` (declaration incl. tombstone, quotient oracle, probe) + `ContractRetainDepartedInvalid`; conformance gate consumes the oracle transform | pending |
 | 3 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | pending |
 | 4 | Frontier record for re-run-tolerant models gated on the project's state mode; `--auto` consults it | pending |
