@@ -78,7 +78,7 @@ run shape.
 | 10 | `smelt explain` per-column guarantee ledger (equivalence contract × settle bound per column) and pre-execution refusal surfacing | done |
 | 11 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | done |
 | 12 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | done |
-| 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
+| 13 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | planned |
 
 ## Decision log
 
@@ -424,6 +424,23 @@ run shape.
   composed_model_address_landed_delta_propagates` failed with a missing table, not a lock
   error) — fixed by re-scoping the backend to drop before the execute loop, matching the
   original code's scoping. No reshape of the phase table.
+
+- 2026-08-16 (phase 13 planning): no reshape — this is the last row and phase 12's summary
+  flagged nothing that needs its own phase; its two follow-ups (double-check the
+  scheduler-currency bullet against the new generative scheduler-path evidence, and the
+  live-read backend scoping sharp edge) are close-out material, already folded into row 13.
+  Three things pinned so the implementer does not rediscover them. (1) The scheduler-currency
+  bullet is **narrowed, not deleted**: phase 12's own decision records that a non-keyed-grain
+  downstream of an admitted keyed edge still widens to whole-table in `propagate_with_keys`
+  once its upstream is visited, so interval currency genuinely survives below the dispatch
+  seam — deleting the bullet outright would overclaim. (2) The diagnostics-catalogue residue
+  phase 10 flagged is resolved as a **truth edit, not a new enum variant**: adding
+  `DiagnosticCode` variants for the three refusals would be feature work (a new
+  `file_diagnostics()` path) outside this outcome's criteria, whereas the catalogue's stale
+  claim that the repair family "has no deriving proof, technique, or emitter" is plainly false
+  since `20260809-repair-family` and is what a reader is misled by. (3) `smelt explain`'s
+  refusal codes get a doc-sync test so the catalogue and `render_refusal` cannot drift again —
+  the gap phase 10 found existed precisely because nothing pinned the two together.
 
 ## Blocked
 
