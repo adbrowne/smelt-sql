@@ -68,11 +68,12 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 2 | Approval gate: pure plan hash, approval store, `--json`, CI exit-code contract, `--apply` hash-mismatch/staleness refusal (executes nothing yet) | done |
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
-| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
-| 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
-| 7 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
-| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
-| 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
+| 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | planned |
+| 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | pending |
+| 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
+| 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
+| 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
+| 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -156,6 +157,24 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   the standing ratchet test requires — the page's title/structure/content otherwise stay
   untouched for phase 8's rewrite. `docs/specs/architecture.md` audited: all four occurrences name
   the mechanism/module, no edit needed.
+
+- **2026-08-17 (phase 5 planning). Reshape: old phase 5 split in two; old 6–9 renumbered 7–10.**
+  Reading the harness found that a definition-edit step kind already exists
+  (`ConformanceStep::RewriteModel` + `s_restricted_oracle_sql_with_edit`), but it is only ever
+  hand-driven — `arb_schedule_for` never emits one, so the *generative* suite does not stage
+  definition edits, which is what criterion 4 and `definition_deltas.md` §Constraints claim. That
+  half (a definition-edit schedule generator plus a standing pool gate) is phase 5. The second
+  half — proving the equivalence invariant over the migrate mechanism itself, i.e. rewrite →
+  `smelt migrate --apply` → assert — is blocked on a real production gap: only the full-refresh
+  arm of `execute.rs` calls `save_deployed_schema`, so an incrementally-maintained model has no
+  recorded definition mid-history and `smelt migrate` fails closed with `NoRecordedDefinition`.
+  Closing that (windowed runs record the deployed definition) plus the migrate-driven recovery
+  step is now phase 6; nothing left the outcome. Also decided for phase 5: the definition-edit
+  generator is a NEW sibling strategy, not a widening of `arb_schedule_for` — six other suites
+  (`probes.rs` permutations, `state_deletion.rs`, `contract_points.rs`, the Spark mirrors) consume
+  that generator and a mid-schedule rewrite is order-dependent by construction, so folding it in
+  would silently change their meaning. `is_permutable` gains `RewriteModel` to its exclusion list
+  regardless.
 
 ## Blocked
 
