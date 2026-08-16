@@ -87,6 +87,13 @@ silently maintaining a table whose definition no longer matches its contents; on
 plan is approved and applying, data deltas fold under the rules of §"Mid-migration data
 folds".
 
+The definition is recorded on **first deployment**, regardless of which maintenance route the
+model's run takes — the ordinary windowed route, the cumulative (`grain: key`) route, and the
+key-addressed-dispatch route all record it the same way. It is re-recorded only by a full refresh
+or by `smelt migrate --apply`; a windowed or incrementally-maintained run under changed SQL never
+overwrites the recorded definition, so a pending definition delta survives — visible to `smelt
+migrate` — until it is migrated.
+
 ### `smelt migrate`
 
 ```
@@ -473,6 +480,11 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   sibling specs (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
   `schema_evolution.md`, `diagnostics.md`) and code. Tracked:
   `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` phase 8.
+- **The pending-delta run refusal is not implemented.** §Detection's "`smelt run` refuses to fold
+  data deltas while a non-eclipsed definition delta is pending" is not yet enforced: today a
+  windowed or incrementally-maintained run under changed SQL folds data deltas under the new SQL
+  while the old definition stays recorded, rather than refusing. Tracked as out of scope in
+  `docs/outcomes/20260816-definition-delta-migrate-v2/outcome.md` "Out of scope".
 
 ## Future Extensions
 

@@ -112,24 +112,38 @@ pub fn derive_migration_plan_for_model(
             model: model_name.to_string(),
         })?;
 
-    let before_file = parse_select_file(&deployed.definition_sql).map_err(|reason| {
+    // Both sides are the raw, frontmatter-bearing model text
+    // (`ModelMigrationFacts::after_sql`'s own doc comment: "the same form
+    // `DeployedSchema::definition_sql` records"). `definition_diff` walks
+    // `File::select_stmt()`, which resolves only when the SQL body is the
+    // file's own top-level statement — a leading `---\n...\n---\n`
+    // frontmatter block (every model declaring `refresh: incremental`
+    // carries one) makes that `None`, collapsing every diff to `Opaque`
+    // ("not a plain SELECT statement") regardless of what actually changed.
+    // Strip it from both sides here, once, right before parsing — the
+    // stored/passed-in raw form stays frontmatter-bearing for whichever
+    // other consumer needs it (`facts.after_sql` unchanged; only these local
+    // copies feed the diff and `BackbuildInputs`).
+    let before_sql = smelt_parser::strip_frontmatter(&deployed.definition_sql);
+    let after_sql = smelt_parser::strip_frontmatter(&facts.after_sql);
+
+    let before_file = parse_select_file(&before_sql).map_err(|reason| {
         MigrateError::UnparsableRecordedDefinition {
             model: model_name.to_string(),
             reason,
         }
     })?;
-    let after_file = parse_select_file(&facts.after_sql).map_err(|reason| {
-        MigrateError::UnparsableCurrentSql {
+    let after_file =
+        parse_select_file(&after_sql).map_err(|reason| MigrateError::UnparsableCurrentSql {
             model: model_name.to_string(),
             reason,
-        }
-    })?;
+        })?;
 
     let diff = definition_diff(&before_file, &after_file);
 
     let inputs = BackbuildInputs {
         table: facts.table.clone(),
-        after_sql: facts.after_sql.clone(),
+        after_sql,
         row_identity: facts.row_identity.clone(),
         not_null_columns: not_null_columns(&facts.current_columns),
         added_column_types: added_column_types(&facts.current_columns, &deployed.columns),

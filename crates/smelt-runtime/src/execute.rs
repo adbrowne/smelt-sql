@@ -2740,6 +2740,7 @@ pub async fn execute_project(
                 check_results.extend(outcomes);
                 skip_set.extend(to_skip);
             }
+            record_first_deployment_definition(file_store, db, plan).await;
             return Ok(ModelOutcome::Completed(ModelSuccess {
                 manifest_entries,
                 check_results,
@@ -2880,6 +2881,7 @@ pub async fn execute_project(
                     check_results.extend(outcomes);
                     skip_set.extend(to_skip);
                 }
+                record_first_deployment_definition(file_store, db, plan).await;
                 return Ok(ModelOutcome::Completed(ModelSuccess {
                     manifest_entries,
                     check_results,
@@ -4291,31 +4293,7 @@ pub async fn execute_project(
         // (best-effort, like the full-refresh save) the first time an
         // incremental model executes successfully; `check_and_migrate`
         // takes over versioning from then on.
-        if plan.incremental.is_some() {
-            let db_table_name = plan.model_file.db_name_owned();
-            let already_stored = file_store
-                .load_schema(&db_table_name)
-                .ok()
-                .flatten()
-                .is_some();
-            if !already_stored {
-                let inferred_columns = {
-                    let db_guard = db.lock().await;
-                    crate::schema_evolution::infer_deployed_columns(&db_guard, &plan.model_file)
-                };
-                if !inferred_columns.is_empty() {
-                    if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                        file_store,
-                        &db_table_name,
-                        &plan.sql,
-                        &inferred_columns,
-                        None,
-                    ) {
-                        tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
-                    }
-                }
-            }
-        }
+        record_first_deployment_definition(file_store, db, plan).await;
 
         let model_duration = model_start.elapsed();
         reporter.model_completed(run_id, &plan.name, total_rows, model_duration);
@@ -4688,6 +4666,57 @@ pub async fn execute_project(
         total_rows_overall,
         check_results,
     ))
+}
+
+/// First-deployment schema baseline for an incremental model (best-effort,
+/// like the full-refresh save it mirrors). `smelt migrate` needs a recorded
+/// `definition_sql` to diff against, so every route an incrementally
+/// maintained model can complete through — cumulative, key-addressed, and
+/// the ordinary windowed fall-through — must call this once. `!already_stored`
+/// is load-bearing, not an optimization: a windowed run under *changed* SQL
+/// must never overwrite the recorded definition, or the pending definition
+/// delta would vanish before `smelt migrate` could see it
+/// (`docs/specs/definition_deltas.md` §Detection).
+async fn record_first_deployment_definition(
+    file_store: &FileStore,
+    db: &Arc<tokio::sync::Mutex<smelt_db::Database>>,
+    plan: &ModelPlan,
+) {
+    // No `plan.incremental.is_some()` gate here (unlike the pre-phase-6
+    // single call site this helper replaced): `plan.incremental` is
+    // populated only for a `grain: partition` model with a resolved
+    // window-batch plan — a `grain: key` model (the cumulative arm) NEVER
+    // sets it, so gating on it here would silently skip every keyed model
+    // forever. Every call site already guarantees "this is a non-full-
+    // refresh maintenance route" by construction (the full-refresh branch
+    // saves its own baseline separately, earlier in the same per-model
+    // unit); `!already_stored` below is what actually prevents redundant
+    // work.
+    let db_table_name = plan.model_file.db_name_owned();
+    let already_stored = file_store
+        .load_schema(&db_table_name)
+        .ok()
+        .flatten()
+        .is_some();
+    if already_stored {
+        return;
+    }
+    let inferred_columns = {
+        let db_guard = db.lock().await;
+        crate::schema_evolution::infer_deployed_columns(&db_guard, &plan.model_file)
+    };
+    if inferred_columns.is_empty() {
+        return;
+    }
+    if let Err(e) = crate::schema_evolution::save_deployed_schema(
+        file_store,
+        &db_table_name,
+        &plan.sql,
+        &inferred_columns,
+        None,
+    ) {
+        tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
+    }
 }
 
 /// Parse the run's `[start, end)` event-time window from the request. End is

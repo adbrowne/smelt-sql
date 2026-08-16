@@ -554,3 +554,152 @@ fn apply_refuses_a_skeleton_change_plan() {
         "a skeleton-change plan must execute nothing"
     );
 }
+
+// ── Reachability mid-incremental-history (phase 6) ──────────────────────
+//
+// `smelt migrate` derives its "before" side from the deployed-schema
+// snapshot (`DeployedSchema::definition_sql`). Before phase 6, only the
+// full-refresh execution arm ever saved that snapshot — a windowed
+// incremental build never did, so `smelt migrate` on an incrementally
+// maintained model always failed closed with `NoRecordedDefinition`
+// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+// 06-plan.md`). This fixture is deliberately the plainest incremental
+// shape (`grain: partition`, no keyed/cumulative dispatch) — the ordinary
+// windowed fall-through arm already called
+// `record_first_deployment_definition` before this phase; phase 6 only
+// widened it to the cumulative and key-addressed arms. Proving reachability
+// here still closes the gap `smelt migrate` itself observes.
+
+const EVENTS_SOURCE_INCREMENTAL: &str = "\
+description: events source
+columns:
+  - name: event_id
+    type: INTEGER
+  - name: event_timestamp
+    type: TIMESTAMP
+  - name: user_id
+    type: INTEGER
+";
+
+const DAILY_EVENTS_SQL_V1: &str = "\
+---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  partition_column: event_date
+  event_time_column: event_timestamp
+  granularity: day
+---
+SELECT e.event_id, CAST(e.event_timestamp AS DATE) AS event_date, e.user_id
+FROM smelt.sources.events e
+";
+
+const DAILY_EVENTS_SQL_V2_ADDED_COLUMN: &str = "\
+---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  partition_column: event_date
+  event_time_column: event_timestamp
+  granularity: day
+---
+SELECT e.event_id, CAST(e.event_timestamp AS DATE) AS event_date, e.user_id, \
+e.user_id * 2 AS user_id_doubled
+FROM smelt.sources.events e
+";
+
+/// Stage a one-model incremental project (`daily_events`, `grain:
+/// partition`, one declared source) with a fixed on-disk database path, so
+/// the test can seed source rows directly via `duckdb::Connection` before
+/// running `smelt build`.
+fn stage_incremental_fixture() -> (TempDir, PathBuf, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = tmp.path().join("migrate_incremental_fixture");
+    let db_path = project_dir.join("target/dev.duckdb");
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+    std::fs::create_dir_all(project_dir.join("target")).unwrap();
+    let smelt_yml = format!(
+        "name: migrate_incremental_fixture\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: {}\n    schema: main\n\
+         default_materialization: table\n\
+         state:\n  mode: intervals\n",
+        db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+    std::fs::write(
+        project_dir.join("models/sources/events.yml"),
+        EVENTS_SOURCE_INCREMENTAL,
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/daily_events.sql"),
+        DAILY_EVENTS_SQL_V1,
+    )
+    .unwrap();
+    (tmp, project_dir, db_path)
+}
+
+fn seed_events(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE OR REPLACE TABLE main.sources_events (\n\
+             event_id INTEGER, event_timestamp TIMESTAMP, user_id INTEGER\n\
+         );\n\
+         INSERT INTO main.sources_events VALUES\n\
+             (1, TIMESTAMP '2025-01-10 08:00:00', 1),\n\
+             (2, TIMESTAMP '2025-01-11 09:00:00', 2);\n",
+    )
+    .expect("seed events");
+}
+
+fn run_build_windowed(project_dir: &Path, start: &str, end: &str) -> std::process::Output {
+    Command::new(smelt_bin())
+        .arg("build")
+        .args(["--project-dir", project_dir.to_str().unwrap()])
+        .args(["--event-time-start", start, "--event-time-end", end])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build`: {e}"))
+}
+
+#[test]
+fn migrate_is_reachable_after_incremental_build() {
+    let (_tmp, project_dir, db_path) = stage_incremental_fixture();
+    seed_events(&db_path);
+
+    let build_output = run_build_windowed(&project_dir, "2025-01-10", "2025-01-12");
+    assert!(
+        build_output.status.success(),
+        "windowed build failed: stderr={}",
+        String::from_utf8_lossy(&build_output.stderr)
+    );
+
+    // A definition delta relative to whatever `daily_events` was last
+    // maintained under — an added self-derived column.
+    std::fs::write(
+        project_dir.join("models/daily_events.sql"),
+        DAILY_EVENTS_SQL_V2_ADDED_COLUMN,
+    )
+    .unwrap();
+
+    let migrate_output = run_migrate(&project_dir, "daily_events");
+    let stdout = String::from_utf8_lossy(&migrate_output.stdout);
+    let stderr = String::from_utf8_lossy(&migrate_output.stderr);
+    assert_eq!(
+        migrate_output.status.code(),
+        Some(3),
+        "stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("NoRecordedDefinition") && !stderr.contains("no recorded definition"),
+        "a windowed incremental build must have recorded a deployed definition — `smelt \
+         migrate` refused closed instead: stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("Migration plan for daily_events"),
+        "expected a printed plan: {stdout}"
+    );
+}

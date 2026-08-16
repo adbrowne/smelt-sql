@@ -122,6 +122,19 @@ pub enum ConformanceStep {
     /// the project's absolute path itself changes, catching anything keyed
     /// on the old path that a same-path deletion cannot.
     FreshClone,
+    /// Operator-directed migration recovery (`docs/outcomes/
+    /// 20260816-definition-delta-migrate-v2/phases/06-plan.md`): drives the
+    /// real `smelt migrate <model>` / `smelt migrate <model> --apply`
+    /// subcommands as subprocesses against the staged project, recovering
+    /// equivalence from a preceding [`ConformanceStep::RewriteModel`]
+    /// without an intervening [`ConformanceStep::FullRefreshRun`]. No
+    /// accompanying run of its own — this step only ever follows a
+    /// `RewriteModel` step. Deliberately NOT drawn by any generator in this
+    /// module today: whether `--apply` can execute at all depends on the
+    /// preceding edit's verdict (pure-backfill applies, a skeleton change is
+    /// refused by design), which the generator cannot cheaply predict —
+    /// this variant is for hand-pinned schedules only.
+    MigrateApply,
 }
 
 /// A residency-testing operation, independent of [`ConformanceStep`]'s own
@@ -155,7 +168,9 @@ pub enum StateResidencyOp {
 /// survival it is proving). A [`ConformanceStep::RewriteModel`] step is
 /// likewise NOT eligible: the rewrite must land before whatever run step
 /// observes it, and the recovery step immediately after it is scoped to
-/// recovering FROM that specific rewrite.
+/// recovering FROM that specific rewrite. A [`ConformanceStep::MigrateApply`]
+/// step is likewise NOT eligible, for the same reason as `RewriteModel`: it
+/// is scoped to recovering from a specific preceding rewrite.
 pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
     !schedule.0.iter().any(|s| {
         matches!(
@@ -164,6 +179,7 @@ pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
                 | ConformanceStep::DropStateDir
                 | ConformanceStep::FreshClone
                 | ConformanceStep::RewriteModel { .. }
+                | ConformanceStep::MigrateApply
         )
     })
 }
@@ -712,7 +728,8 @@ mod tests {
                     | ConformanceStep::BackfillRegion { .. }
                     | ConformanceStep::RewriteModel { .. }
                     | ConformanceStep::DropStateDir
-                    | ConformanceStep::FreshClone => {}
+                    | ConformanceStep::FreshClone
+                    | ConformanceStep::MigrateApply => {}
                 }
             }
             assert!(
@@ -1009,6 +1026,28 @@ mod tests {
             checked > 0,
             "no evolvable recipe was reached across the deterministic sample — \
              generator/pool regression"
+        );
+    }
+
+    /// `migrate_apply_step_is_not_permutable` (phase 6 plan test list): a
+    /// schedule containing a `MigrateApply` step is excluded by
+    /// `is_permutable`, mirroring `RewriteModel`'s own exclusion.
+    #[test]
+    fn migrate_apply_step_is_not_permutable() {
+        let schedule = ConformanceSchedule(vec![
+            ConformanceStep::RunWindow {
+                start: base_date(),
+                end: base_date() + chrono::Duration::days(1),
+                rows: vec![],
+            },
+            ConformanceStep::RewriteModel {
+                edit: ModelEdit::AddPayloadColumn,
+            },
+            ConformanceStep::MigrateApply,
+        ]);
+        assert!(
+            !is_permutable(&schedule),
+            "a schedule containing a MigrateApply step must not be permutable: {schedule:?}"
         );
     }
 

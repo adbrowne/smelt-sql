@@ -45,7 +45,7 @@ fn oracle_flags_a_seeded_divergence() {
     );
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let (tracker, k) = rt
+    let (tracker, k, _migrate_apply_exit_codes) = rt
         .block_on(drive_and_assert(&project, &recipe, &schedule))
         .expect("green run must uphold equivalence before corruption");
 

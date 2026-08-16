@@ -28,10 +28,11 @@
 //!   call site (`crates/smelt-runtime/src/maintenance_driver.rs`), and
 //!   `known_bug_incremental_path_skips_schema_snapshot` once the
 //!   deployed-schema snapshot the definition-change trigger reads became
-//!   current on the incremental path too
-//!   (`docs/plans/20260809-sensitivity-precision.md` Phase 6,
-//!   `crates/smelt-runtime/src/execute.rs`'s pre-schema-evolution-gate
-//!   snapshot capture).
+//!   current on every incremental arm — cumulative and key-addressed
+//!   included, not only the ordinary windowed fall-through —
+//!   (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+//!   06-plan.md`'s `record_first_deployment_definition`,
+//!   `crates/smelt-runtime/src/execute.rs`).
 //!
 //! A registry entry that never fired over the deterministic sample is
 //! reported (`eprintln!`), never a test failure — warn-level by design, so
@@ -172,13 +173,6 @@ fn fired_adversarial_ids() -> BTreeSet<&'static str> {
 /// reports (never fails) as a stale entry to prune.
 fn known_bug_still_reproduces(id: &str) -> bool {
     match id {
-        "known_bug_incremental_path_skips_schema_snapshot" => {
-            // `save_deployed_schema` is called from exactly one place in
-            // `execute.rs` (the full-refresh branch) — never a second call
-            // site in the incremental branch.
-            let src = include_str!("../../../smelt-runtime/src/execute.rs");
-            src.matches("save_deployed_schema").count() == 1
-        }
         "known_bug_keyed_upstream_partition_downstream_no_live_dispatch" => {
             // `resolve_live_key_addressed_model_edge_cell` is consulted
             // from exactly one call site in `execute.rs`, inside the

@@ -126,14 +126,18 @@ async fn insert_row(
 /// Drive `schedule` against `project`/`recipe` through the real
 /// `execute_project` pipeline, asserting S-restricted multiset equivalence
 /// after every `RunWindow` step (design §6). Returns the fully-populated
-/// [`STracker`] plus the index of the last recorded run, so
-/// `harness_self_check` can reuse the green end-state without re-driving
-/// the whole schedule.
+/// [`STracker`], the index of the last recorded run (so `harness_self_check`
+/// can reuse the green end-state without re-driving the whole schedule), and
+/// the observed exit code of each `smelt migrate <model> --apply` subprocess
+/// spawned by a [`ConformanceStep::MigrateApply`] step, in schedule order
+/// (empty when the schedule has none) — the caller owns asserting on it,
+/// this driver only records it (`docs/outcomes/
+/// 20260816-definition-delta-migrate-v2/phases/06-plan.md` task 6).
 pub async fn drive_and_assert(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     schedule: &ConformanceSchedule,
-) -> anyhow::Result<(STracker, usize)> {
+) -> anyhow::Result<(STracker, usize, Vec<i32>)> {
     // Local, reassignable handle: `ConformanceStep::FreshClone` replaces it
     // with a clone at a new path mid-loop
     // (`docs/outcomes/20260816-state-residency/phases/08-plan.md` task 3).
@@ -142,6 +146,7 @@ pub async fn drive_and_assert(
     let mut project = project.clone();
     let mut tracker = STracker::new(&recipe.source);
     let mut last_k: Option<usize> = None;
+    let mut migrate_apply_exit_codes: Vec<i32> = Vec::new();
     // The most recent `RewriteModel` step's edit (Phase 9), or `None` before
     // any rewrite — threads into every subsequent assertion so the oracle
     // re-renders against the CURRENT on-disk body, never the pre-rewrite one
@@ -270,12 +275,63 @@ pub async fn drive_and_assert(
                     .join(format!("fresh_clone_{i}"));
                 project = project.fresh_clone(&dest)?;
             }
+            ConformanceStep::MigrateApply => {
+                // Migration recovery (`docs/outcomes/
+                // 20260816-definition-delta-migrate-v2/phases/06-plan.md`
+                // task 6): drives the real `smelt migrate` subcommand as a
+                // subprocess — never `smelt_runtime::migrate::
+                // apply_migration_plan` directly — so the approval store and
+                // the exit-code contract are exercised end to end, the way
+                // an operator actually invokes recovery. No
+                // `duckdb::Connection` is held open across either spawn
+                // (every prior step's connection is already scoped to its
+                // own block and dropped) — the CLI subprocess opens the
+                // same DuckDB file and would contend for its lock otherwise.
+                let model = recipe.model_name.clone();
+                let project_dir = project.project_dir.clone();
+
+                let plan_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+                    .arg("migrate")
+                    .arg(&model)
+                    .arg("--project-dir")
+                    .arg(&project_dir)
+                    .arg("--target")
+                    .arg("dev")
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("spawn `smelt migrate {model}`: {e}"))?;
+                let plan_exit = plan_output.status.code().unwrap_or(-1);
+                let plan_stdout = String::from_utf8_lossy(&plan_output.stdout);
+                anyhow::ensure!(
+                    plan_exit == 3,
+                    "step {i}: `smelt migrate {model}` (plan mode) exited {plan_exit}, \
+                     expected 3 (a non-trivial migration pending): stdout={plan_stdout}\n\
+                     stderr={}",
+                    String::from_utf8_lossy(&plan_output.stderr),
+                );
+                anyhow::ensure!(
+                    plan_stdout.contains(&format!("Migration plan for {model}")),
+                    "step {i}: `smelt migrate {model}` printed no plan: {plan_stdout}"
+                );
+
+                let apply_output = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"))
+                    .arg("migrate")
+                    .arg(&model)
+                    .arg("--project-dir")
+                    .arg(&project_dir)
+                    .arg("--target")
+                    .arg("dev")
+                    .arg("--apply")
+                    .output()
+                    .map_err(|e| anyhow::anyhow!("spawn `smelt migrate {model} --apply`: {e}"))?;
+                let apply_exit = apply_output.status.code().unwrap_or(-1);
+                migrate_apply_exit_codes.push(apply_exit);
+            }
         }
     }
 
     let last_k =
         last_k.ok_or_else(|| anyhow::anyhow!("schedule {schedule:?} had no RunWindow step"))?;
-    Ok((tracker, last_k))
+    Ok((tracker, last_k, migrate_apply_exit_codes))
 }
 
 /// The S-restricted oracle assertion (design §6): materialize `S_k`, then
@@ -4396,6 +4452,169 @@ fn definition_edit_grouping_column_upholds_equivalence() {
         admitted_cases > 0,
         "N={n} deterministic sample admitted zero aggregate cases — \
          generator/derivation regression"
+    );
+}
+
+/// `migrate_apply_recovers_equivalence_after_payload_column_add`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+/// 06-plan.md` test 7): a `PassThrough` recipe's `AddPayloadColumn` edit
+/// recovers equivalence purely through `smelt migrate --apply` — no
+/// intervening run of any kind between the rewrite and the apply (unlike
+/// `column_add_between_runs_recovers_equivalence`'s `FullRefreshRun`
+/// catch-up, and unlike `pure_backfill_column_add_executes_in_place_update`'s
+/// windowed re-run, both of which recover the SAME edit through a different
+/// mechanism). Proves the migrate-gated recovery leg genuinely closes the
+/// gap on its own.
+#[test]
+fn migrate_apply_recovers_equivalence_after_payload_column_add() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::PassThrough],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddPayloadColumn),
+        "PassThrough recipe {recipe:?} must carry AddPayloadColumn in its evolution"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected PassThrough append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: 10,
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: 20,
+            }],
+        },
+        // Definition change: add a derived payload column, same skeleton.
+        ConformanceStep::RewriteModel {
+            edit: ModelEdit::AddPayloadColumn,
+        },
+        // The ONLY recovery mechanism in this schedule — no accompanying
+        // run either side of it.
+        ConformanceStep::MigrateApply,
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (tracker, k, exit_codes) = rt
+        .block_on(drive_and_assert(&project, &recipe, &schedule))
+        .expect("schedule through MigrateApply must succeed");
+    assert_eq!(
+        exit_codes,
+        vec![0],
+        "expected the pure-backfill-in-place plan's --apply to execute cleanly"
+    );
+
+    rt.block_on(assert_equivalence_with_edit(
+        &project,
+        &recipe,
+        &tracker,
+        k,
+        Some(ModelEdit::AddPayloadColumn),
+    ))
+    .expect(
+        "smelt migrate --apply must recover full equivalence against the rewritten body's own \
+         oracle with no accompanying run",
+    );
+}
+
+/// `migrate_refuses_skeleton_change_then_full_refresh_recovers`
+/// (`docs/outcomes/20260816-definition-delta-migrate-v2/phases/
+/// 06-plan.md` test 8): an `AddGroupingColumn` edit (a skeleton change —
+/// `Verdict::SkeletonChange`, never targetable) makes `smelt migrate
+/// --apply` refuse — exit `3`, nothing executed — mirroring
+/// `crates/smelt-cli/tests/migrate.rs::apply_refuses_a_skeleton_change_plan`
+/// at the conformance-gate level. The honest recovery route stays a full
+/// refresh, exactly as `column_add_between_runs_recovers_equivalence`
+/// already proves for the payload-column edit.
+#[test]
+fn migrate_refuses_skeleton_change_then_full_refresh_recovers() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+    assert!(
+        recipe.evolution.contains(&ModelEdit::AddGroupingColumn),
+        "aggregate recipe {recipe:?} must carry AddGroupingColumn in its evolution"
+    );
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected additive-agg append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: 10,
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: 20,
+            }],
+        },
+        // Definition change: widen the GROUP BY skeleton.
+        ConformanceStep::RewriteModel {
+            edit: ModelEdit::AddGroupingColumn,
+        },
+        // Refused — a skeleton-change group admits no candidate.
+        ConformanceStep::MigrateApply,
+        // The honest recovery route.
+        ConformanceStep::FullRefreshRun,
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let (_tracker, _k, exit_codes) = rt
+        .block_on(drive_and_assert(&project, &recipe, &schedule))
+        .expect(
+            "the refused MigrateApply step and the recovering FullRefreshRun step must both \
+             succeed (drive_and_assert asserts the FullRefreshRun step's own equivalence)",
+        );
+    assert_eq!(
+        exit_codes,
+        vec![3],
+        "expected the skeleton-change plan's --apply to refuse (exit 3), executing nothing"
     );
 }
 

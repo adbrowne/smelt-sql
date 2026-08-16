@@ -75,7 +75,7 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 3 | `--apply` execution: run the approved plan's statements against the backend, re-record the deployed definition, resume-on-reinvoke | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep named in success criterion 3 | done |
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
-| 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | planned |
+| 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
 | 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
@@ -211,6 +211,22 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   is met by phase 5's generative definition-edit pool plus phase 6's two pinned migrate legs.
   Also noted: closing this gap makes the conformance registry's
   `known_bug_incremental_path_skips_schema_snapshot` entry stale, so phase 6 prunes it.
+
+- **2026-08-17 (phase 6 implementation).** The extracted `record_first_deployment_definition`
+  helper drops the old single-call-site's `plan.incremental.is_some()` gate — that field is
+  `None` for every `grain: key` model unconditionally (`Config::get_incremental_with_metadata`
+  requires `Grain::Partition`), so keeping it would have made the new cumulative-arm call site a
+  permanent no-op. `!already_stored` alone is the correct guard; every call site already implies
+  "non-full-refresh route" by construction. Also found and fixed a real, previously-undetected bug
+  in `smelt-runtime/src/migrate.rs`: the backbuild diff parser needs a bare `SELECT` at the file's
+  top level, so any frontmatter-bearing model (i.e. any real `refresh: incremental` model) always
+  collapsed to `Opaque`/"not a plain SELECT statement" — undetected because phases 1-3's CLI test
+  fixture carried no frontmatter. Frontmatter is now stripped from both diff sides before parsing.
+  This is the phase's own acceptance target (its own pinned gate test required it), so fixed inline
+  rather than deferred. `ConformanceStep::MigrateApply` is hand-pinned only (no generator draws
+  it) — `drive_and_assert`'s return type widened to a 3-tuple carrying observed `--apply` exit
+  codes; the two destructuring call sites updated, every other call site was already discarding
+  the whole result.
 
 ## Blocked
 

@@ -336,6 +336,17 @@ pub async fn drive_and_assert_spark(
                      downgrade)"
                 );
             }
+            ConformanceStep::MigrateApply => {
+                // `MigrateApply` is a DuckDB-CLI-driven step
+                // (`docs/outcomes/20260816-definition-delta-migrate-v2/
+                // phases/06-plan.md`) — never part of the Spark pool, which
+                // has no `MigrateApply`-emitting generator or pinned
+                // schedule. Fail loud rather than silently skip, so a future
+                // schedule that accidentally reaches this arm is caught
+                // immediately instead of quietly passing over unproven
+                // ground.
+                panic!("ConformanceStep::MigrateApply is not part of the Spark conformance pool");
+            }
         }
     }
 
