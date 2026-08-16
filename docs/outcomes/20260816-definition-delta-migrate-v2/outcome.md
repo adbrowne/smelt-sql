@@ -66,6 +66,13 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   migrate verb, and closing it needs its own equivalence argument. Recorded as a spec Known
   Divergence in phase 6 instead.
 
+- **The `InPlaceUpdate` FROM-alias bug** (phase-7 summary "For the next planner":
+  `resolve_live_in_place_update_cell` carries the model SQL's FROM alias verbatim into the folded
+  `UPDATE ... SET`, invalid for any aliased single-table FROM). It sits on the *maintenance*
+  driver's live-cell resolution, not on `smelt migrate`'s own emission path
+  (`backbuild::classify` requalifies its assignment expressions), so no success criterion here
+  depends on it. Pre-existing and orthogonal; worth its own bug fix.
+
 ## Phases
 
 | # | Phase | Status |
@@ -77,9 +84,10 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
 | 5 | Generative definition-edit schedules: a definition-edit schedule generator + standing pool gate asserting the new-definition oracle mid-history | done |
 | 6 | Make `smelt migrate` reachable mid-incremental-history (windowed runs record the deployed definition) and add a migrate-driven recovery step to the conformance harness | done |
 | 7 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
-| 8 | Diagnostic rename lands in code; surface ahead of a run via LSP and `smelt explain`; sibling-spec sweep | pending |
-| 9 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
-| 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
+| 8 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`, one code across the maintenance and migrate mechanisms) + sibling-spec sweep | planned |
+| 9 | Surface the definition-change refusal ahead of a run: deployed columns become a Salsa input, so LSP diagnostics and `smelt explain` both fire it | pending |
+| 10 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place; update `models.md`/`seeds.md` bullets | pending |
+| 11 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -266,6 +274,27 @@ outcomes), and every `(Open Question)` product decision (decision track). See th
   Discovered, not fixed (pre-existing, orthogonal): the derived `InPlaceUpdate` backfill
   expression carries the model SQL's FROM-alias verbatim, which is invalid inside the folded
   `UPDATE` — every existing fixture in the repo avoids aliasing to route around it.
+
+- **2026-08-17 (phase 8 planning). Reshape: old phase 8 split in two; old 9–10 renumbered 10–11.
+  One item added to "## Out of scope".** The row bundled a mechanical rename with a real plumbing
+  change, and reading the code showed the two have nothing in common. The rename is a
+  string/variant sweep: the refusal→diagnostic mapping already exists in
+  `file_diagnostics()` (`smelt-db/src/lib.rs`), and `ledger::render_refusal` already names the
+  code for `smelt explain`'s refusal block. The *surfacing* half is blocked on an input, not a
+  mapping: `derive_model_maintenance_plan` takes `deployed_column_names`, and `smelt-db`'s own
+  call site passes `&[]` because a Salsa query does no I/O (Salsa-purity rule), so no
+  `Trigger::ColumnAdded` is ever derived ahead of a run and the refusal cannot fire for either
+  the LSP or `smelt explain`. Closing that means a new project-scoped Salsa **input** carrying the
+  deployed column names, populated at the edge by both consumers (workspace-loading-parity rule) —
+  its own phase, phase 9. Nothing left the outcome; criterion 6 is met only when both land.
+  Also decided for phase 8: the rename is of the diagnostic-code *identity* (the `DiagnosticCode`
+  variant, the `ledger.rs` code string, the `diagnostics.md` catalogue row, message text), and it
+  extends to the migrate renderer so the `SkeletonChange` verdict names the same single code — the
+  internal pure `Refusal::SkeletonColumnAdded` / `MaintenanceRefusal::SkeletonColumnAdded` variant
+  names are *not* user-visible and stay, with a doc comment stating which code they map to, to
+  keep the diff bounded to the identity the spec's Known Divergences bullet names.
+  Recorded out of scope: phase 7's carry-forward FROM-alias bug (maintenance driver's live-cell
+  resolution, not `smelt migrate`'s emission path — no criterion depends on it).
 
 ## Blocked
 
