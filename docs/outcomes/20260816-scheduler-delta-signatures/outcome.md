@@ -67,12 +67,13 @@ run shape.
 | 3 | Key-valued dirt-sets in the graph layer: `KeyedDirt` carries resolved key values (distinct from the unresolved-symbolic form); keyed seeds enter `propagate` as pure input; composition projects keys onto each consumer's key scope, widening never narrowing; plumbed through `plan_since_upstream` | done |
 | 4 | Dispatch composition in the run loop: every resolved key-addressed cell dispatches in one tick (lifts phase 2's single-edge substitution gate to a coverage gate); an uncovered inbound input still widens to the ordinary route but reports the downgrade | done |
 | 5 | Propagated key restrictions reach the key-addressed cell: a request-level keyed-restriction channel, unioned (never intersected) into the affected-key relation, with `--since-upstream` passing `keyed_dirty` through | done |
-| 6 | Live consumption: `--since-upstream` reads the recorded observed-delta table live, and keyed seeds are resolved live from the group-grain sidecar diff; settle-bound × observed-delta "delta empty" leg | pending |
-| 7 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
-| 8 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
-| 9 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
-| 10 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
-| 11 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
+| 6 | Live observed-delta consumption: `--since-upstream` reads the recorded `_smelt_observed_delta` table off the backend instead of trusting the command line; the settle-bound × observed-delta "delta empty" leg goes live | planned |
+| 7 | Live keyed-seed resolution: keyed seeds resolved from the group-grain sidecar diff at plan time (unioned across consumers), so `--since-upstream` produces a real non-empty keyed restriction end to end | pending |
+| 8 | Persisted per-source watermark with `state.mode`-aware residency; cross-model runs need no command-line landed-delta declarations | pending |
+| 9 | `smelt explain`: signature headline first, per-column guarantees, derived run shape; pre-execution refusal surfacing | pending |
+| 10 | Walk fix: `group_by_output_keys` matches `GROUP BY` keys against output aliases, not only select-item expression text (unblocks grouped-with-derived-columns recipes) | pending |
+| 11 | Conformance extension: scheduler-driven keyed→partition cross-model recipe(s) in the generative suite | pending |
+| 12 | Validate + close out: divergence bullets removed/narrowed, docs-site updated, full standing-gate sweep | pending |
 
 ## Decision log
 
@@ -205,6 +206,23 @@ run shape.
   row directly (bypassing the sidecar entirely) to prove the restriction alone — not the sidecar
   diff — drives the repair; the union rule itself is proven as a pure unit test rather than
   through a real backend. No reshape of the phase table.
+
+- 2026-08-16 (phase 6 planning): reshape — old row 6 ("live consumption") split into two (6:
+  the observed-delta read; 7: live keyed-seed resolution). They are different seams, not one
+  phase: the observed-delta half is a state-table read whose *pure* consumer already exists and
+  is tested (`plan_since_upstream_with_observed_deltas`), so the work is a read function plus CLI
+  wiring; the keyed-seed half needs a plan-time group-grain sidecar diff, which requires physical
+  table names, the downstream's digest projection, and a union across consumers with differing
+  digest identities — phase 3/5's "one phase cannot honestly carry both" precedent applies.
+  Nothing left the outcome (criterion 2's "value-level discovery feeds the scheduler" is row 7,
+  criterion 3 is row 6); old rows 7–11 renumbered 8–12. Two things pinned for row 6 so the
+  implementer does not rediscover them. (1) Which origins are consulted must stay single-owned:
+  the planner already decides eligibility via `derive_clamp_and_locality`'s `key_locality_slice`,
+  so the live resolver asks the planner module for the key list (a new pure
+  `observed_delta_keys_to_read`) rather than re-deriving "is this origin locality-admitted".
+  (2) The live read runs under `--dry-run` too — it is a read plus the same idempotent
+  `CREATE TABLE IF NOT EXISTS` every other state read performs, and a dry run that printed a
+  different dirty set from the live run it previews would be worse than the write.
 
 ## Blocked
 
