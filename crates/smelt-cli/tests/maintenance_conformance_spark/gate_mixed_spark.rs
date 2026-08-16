@@ -198,8 +198,8 @@ pub(crate) fn classify_mixed(
             target_path.display()
         )
     })?;
-    let plan_result =
-        smelt_db::maintenance_plan_report(&db, workspace, target).ok_or_else(|| {
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "spark")
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "no maintenance plan report for mixed-pool model {:?}",
                 recipe.model_name

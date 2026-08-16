@@ -1392,6 +1392,28 @@ pub struct ExplainMaintenanceJson {
     /// append-stable addition to this JSON shape (`docs/specs/cli.md`
     /// §Constraints item 5).
     pub probes: Vec<ExplainProbeJson>,
+    /// Every cell whose resolved technique was downgraded from its ideal
+    /// against this project's real target availability
+    /// (`docs/specs/state.md` §"The degradation contract"), empty for a
+    /// model with none — mirrors the text report's `state downgrade:` line
+    /// (`crate::explain::build_maintenance_plan_report`); an append-stable
+    /// addition to this JSON shape (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub state_downgrades: Vec<ExplainStateDowngradeJson>,
+}
+
+/// One entry of `state_downgrades`
+/// (`docs/specs/cli.md` §"`smelt explain --json` output schema"): the
+/// resolved (executed) technique alongside the ideal one this cell would
+/// run with the missing structure available, and why it downgraded.
+#[derive(Debug, Serialize)]
+pub struct ExplainStateDowngradeJson {
+    pub cell_group: String,
+    pub trigger: String,
+    pub resolved_technique: String,
+    pub ideal_technique: String,
+    pub missing_structure: String,
+    pub why: String,
 }
 
 /// One entry of a model's declared-fact probe set
@@ -1430,6 +1452,7 @@ pub fn build_maintenance_plan_json(
     cadence: smelt_core::config::ProbeCadence,
     column_groups: &[smelt_logical::maintenance::ColumnGroup],
     contract_cfg: Option<&smelt_core::config::ContractConfig>,
+    state_downgrades: &[smelt_logical::maintenance::availability::StateDowngrade],
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1490,6 +1513,17 @@ pub fn build_maintenance_plan_json(
             }
         })
         .collect();
+    let state_downgrades = state_downgrades
+        .iter()
+        .map(|d| ExplainStateDowngradeJson {
+            cell_group: d.cell_group.clone(),
+            trigger: d.trigger.clone(),
+            resolved_technique: format!("{:?}", d.resolved_technique),
+            ideal_technique: format!("{:?}", d.ideal_technique),
+            missing_structure: format!("{:?}", d.missing_structure),
+            why: d.why.clone(),
+        })
+        .collect();
     ExplainMaintenanceJson {
         model: model_name.to_string(),
         contract: own_contract,
@@ -1498,6 +1532,7 @@ pub fn build_maintenance_plan_json(
         properties,
         state_columns,
         probes,
+        state_downgrades,
     }
 }
 

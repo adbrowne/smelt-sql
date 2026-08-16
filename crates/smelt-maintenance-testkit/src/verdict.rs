@@ -70,8 +70,10 @@ fn build_db_and_target(
     smelt_db::Database,
     smelt_db::Workspace,
     smelt_db::SourceFile,
+    &'static str,
 )> {
     let config = smelt_core::config::Config::load(project_dir)?;
+    let dialect_name = crate::dialect_name_for_config(&config);
     let discovery =
         smelt_core::ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
     let sql_models = discovery.discover_models()?;
@@ -101,7 +103,7 @@ fn build_db_and_target(
             target_path.display()
         )
     })?;
-    Ok((db, workspace, target))
+    Ok((db, workspace, target, dialect_name))
 }
 
 /// Fold an already-derived plan + diagnostics list into a [`Verdict`],
@@ -139,9 +141,10 @@ fn verdict_from_parts(
 /// Classify the staged model `model_name` in `project` through the real
 /// derivation.
 fn classify_model(project: &LinkCProject, model_name: &str) -> anyhow::Result<Verdict> {
-    let (db, workspace, file) = build_db_and_target(&project.project_dir, model_name)?;
+    let (db, workspace, file, dialect_name) =
+        build_db_and_target(&project.project_dir, model_name)?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, file);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, file);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, file, dialect_name);
     verdict_from_parts(plan_result.map(|r| r.plan), &diagnostics, model_name)
 }
 

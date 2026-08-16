@@ -652,8 +652,8 @@ pub fn classify_mixed(
             target_path.display()
         )
     })?;
-    let plan_result =
-        smelt_db::maintenance_plan_report(&db, workspace, target).ok_or_else(|| {
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb")
+        .ok_or_else(|| {
             anyhow::anyhow!(
                 "no maintenance plan report for mixed-pool model {:?}",
                 recipe.model_name
@@ -1183,7 +1183,7 @@ pub fn classify_keyed_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -2524,7 +2524,7 @@ fn classify_keyed_enriched_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -2620,6 +2620,7 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
         &sources,
         &explicitly_mutable,
         &[],
+        smelt_dialect::SqlDialect::DuckDB,
     )
     .expect("resolver must not error")
     .expect(
@@ -3236,7 +3237,7 @@ fn classify_value_enriched_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 
@@ -4712,7 +4713,7 @@ pub fn classify_composed_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 

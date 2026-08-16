@@ -581,12 +581,15 @@ pub async fn run_bakeoff(
     let file = plan_db
         .source_file(&model.path)
         .with_context(|| format!("model file not registered: {}", model.path.display()))?;
-    let result = smelt_db::maintenance_plan_report(&plan_db, ws, file).with_context(|| {
-        format!(
-            "'{model_name}' is not an incremental model with a declared grain — nothing for \
+    // "duckdb" is not a placeholder here — `smelt bakeoff` fails loud below
+    // (§2) on any non-duckdb target, so this is the real backend.
+    let result =
+        smelt_db::maintenance_plan_report(&plan_db, ws, file, "duckdb").with_context(|| {
+            format!(
+                "'{model_name}' is not an incremental model with a declared grain — nothing for \
              bakeoff to measure"
-        )
-    })?;
+            )
+        })?;
 
     let candidates = candidate_cells(&result.plan.cells, &result.column_groups, &selectors)?;
     if candidates.is_empty() {

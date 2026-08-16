@@ -491,12 +491,13 @@ fn recursive_composed_driving_source_reaches_the_same_verdict_as_smelt_explain()
     // The `smelt explain` verdict: the real Salsa-backed derivation
     // `maintenance_plan_report` calls, never re-derived by this test.
     let (db, workspace, target) = build_db_and_target(&project_dir, "user_spend_running_total");
-    let report = smelt_db::maintenance_plan_report(&db, workspace, target).unwrap_or_else(|| {
-        panic!(
-            "user_spend_running_total must derive a maintenance plan (refresh: incremental, \
+    let report = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb")
+        .unwrap_or_else(|| {
+            panic!(
+                "user_spend_running_total must derive a maintenance plan (refresh: incremental, \
              grain: key)"
-        )
-    });
+            )
+        });
     let key_locality = report.plan.key_locality.as_ref().unwrap_or_else(|| {
         panic!(
             "smelt explain must admit key temporal locality for user_spend_running_total via \

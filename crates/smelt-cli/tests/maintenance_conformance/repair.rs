@@ -80,7 +80,7 @@ fn classify_repair_full(
         )
     })?;
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, "duckdb");
     Ok((plan_result.map(|r| r.plan), diagnostics))
 }
 

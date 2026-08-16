@@ -73,7 +73,7 @@ this outcome runs first in the programme.
 | 6 | `DeclaredContractRequiresState`: fail-loud validation for a declared contract point whose semantics require an unavailable state structure (`contract.deferral` ↔ the frontier) | done |
 | 7 | Fuse the frontier reset into the region-recompute's own write transaction (phase 4's flagged gap; closes criterion 2's "transactional with the fold" wording the specs already claim) | done |
 | 8 | State-deletion conformance leg: `.smelt/` deletion and fresh-clone steps in the generative suite, asserted against the oracle, for keyed additive folds *and* idempotent-graded region-recompute models | done |
-| 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | planned |
+| 9 | Backend-aware downgrade visibility: `smelt explain` (text + `--json`) resolves the model's real target dialect into `StateAvailability` instead of `all()`, so a `MaintenanceStateDowngraded` cell is actually visible for a real project; same for the remaining `maintenance_driver`/`propagation` resolvers that can reach a target | done |
 | 10 | Docs-site update for state modes and residency; `/smelt:validate state`; remove/narrow closed Known Divergences bullets across `state.md`/`run_state.md`/`incremental_models.md` (incl. the now-stale "the runtime ignores `state.mode` entirely") | pending |
 | 11 | Close-out: full standing-gate sweep, outcome status flip | pending |
 
@@ -90,6 +90,18 @@ this outcome runs first in the programme.
   outcome as a row rather than being swept under row 10's Known Divergences. It runs *before*
   the sweep because the sweep's wording for the availability bullet depends on whether this
   gap is closed.
+- **2026-08-16 (phase 9 implement).** `smelt_db::maintenance_plan_report` (the actual function
+  feeding `smelt explain`, in `smelt-db/src/lib.rs`) was the real fix site, not the
+  `maintenance_driver.rs:3465`/`:3484` resolver named in the plan's row-9 description — that
+  resolver (`resolve_live_delta_restriction_facts`) is reached only from live-execution paths in
+  `execute.rs`, never from `smelt explain`. `maintenance_plan_report` already called the
+  edge-aware `derive_model_maintenance_plan_with_edges` for every model unconditionally, so
+  threading its `dialect_name` param closed both the plain and edge-having cases in one fix.
+  Also threaded real availability through `maintenance_driver.rs`'s four other resolvers
+  (execution-time, not explain-time) since `execute.rs` genuinely has `backend.dialect()` in
+  scope at every call site — a duckdb-only no-op for the ungated suite, real for a live Spark
+  run. Fixed a latent `HashMap::keys().next()` nondeterminism bug in default-target selection
+  (three sites) that this phase's own golden-fixture test flaked on.
 - **2026-08-16 (phase 9 plan).** The `all()`-passing call sites split into two classes and only
   one is in scope: the two report/graph resolvers `smelt explain` reaches have a target dialect
   in the caller's hand already (`commands/explain.rs` resolves `dialect` from `config.targets`),

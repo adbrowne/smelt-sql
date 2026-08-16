@@ -38,7 +38,7 @@ fn plan_for(files: &[(&str, &str)], model_file: &str) -> MaintenancePlanResult {
         .map(|(f, _)| *f)
         .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
 
-    smelt_db::maintenance_plan_report(&db, ws, file)
+    smelt_db::maintenance_plan_report(&db, ws, file, "duckdb")
         .unwrap_or_else(|| panic!("model {model_file} has no maintenance plan"))
 }
 

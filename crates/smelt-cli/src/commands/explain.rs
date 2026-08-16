@@ -266,7 +266,13 @@ fn build_physical_section(
     use smelt_planner::Transformation;
     use std::collections::BTreeMap;
 
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    // `.min()`, not `.next()`: `targets` is a `HashMap`, so `.keys().next()`
+    // picked a hash-seed-dependent target every process — invisible while
+    // this only fed schema/dialect names that rarely differ across a
+    // project's targets, but a real bug once this phase threads the
+    // resolved dialect into `StateAvailability` (a multi-target project's
+    // `--show-sql` golden fixture flipped between runs on exactly this).
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
 
     // Parse transformations into lookup maps for physical section rendering.
     let mut incremental_overrides: HashMap<String, (String, String)> = HashMap::new();
@@ -424,7 +430,43 @@ async fn explain_maintenance_plan(
         .source_file(&model.path)
         .expect("model file not registered");
 
-    let Some(result) = smelt_db::maintenance_plan_report(&db, ws, file) else {
+    // Target/schema/dialect derivation stays offline — only `smelt.yml`
+    // target metadata, never a live connection (`docs/specs/cli.md`
+    // §"`smelt explain <model>` maintenance-plan report") — so it is safe
+    // to compute up front and reuse for the plan derivation below, the
+    // probe plan, and `--show-sql`'s statement rendering further down.
+    // `.min()`, not `.next()`: `targets` is a `HashMap`, so `.keys().next()`
+    // picked a hash-seed-dependent target every process — invisible while
+    // this only fed schema/dialect names that rarely differ across a
+    // project's targets, but a real bug once this phase threads the
+    // resolved dialect into `StateAvailability` (a multi-target project's
+    // `--show-sql` golden fixture flipped between runs on exactly this).
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
+    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
+    let schema = config
+        .targets
+        .get(&target)
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let backend_type = config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok());
+    let dialect = backend_type
+        .map(backend_type_to_maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+    // The model's real target backend name (`docs/specs/state.md` §"The
+    // degradation contract") — resolves `MaintenanceStateDowngraded`
+    // cells against what THIS project's declared target can actually
+    // execute, instead of the DuckDB-optimistic `StateAvailability::all()`
+    // every call site assumed before this became backend-aware.
+    let dialect_name = match backend_type {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    };
+
+    let Some(result) = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name) else {
         println!(
             "no maintenance plan: `{}` is not an incremental model with a declared grain",
             canonical
@@ -488,25 +530,6 @@ async fn explain_maintenance_plan(
         maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
     let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
     let contract_cfg = model.metadata.as_deref().and_then(|m| m.contract.as_ref());
-
-    // Target/schema/dialect derivation stays offline — only `smelt.yml`
-    // target metadata, never a live connection (`docs/specs/cli.md`
-    // §"`smelt explain <model>` maintenance-plan report") — so it is safe
-    // to compute up front and reuse for both the probe plan below and
-    // `--show-sql`'s statement rendering further down.
-    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
-    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
-    let schema = config
-        .targets
-        .get(&target)
-        .map(|t| t.schema.clone())
-        .unwrap_or_else(|| "main".to_string());
-    let dialect = config
-        .targets
-        .get(&target)
-        .and_then(|t| t.backend_type().ok())
-        .map(backend_type_to_maintenance_dialect)
-        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
     // The declared-fact probe plan (`docs/specs/model_properties.md`
     // §"Probe obligation"): built pure/offline by the shared
@@ -731,6 +754,7 @@ async fn explain_maintenance_plan(
             config.probes.cadence,
             &result.column_groups,
             contract_cfg,
+            &result.state_downgrades,
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

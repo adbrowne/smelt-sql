@@ -547,6 +547,7 @@ pub fn resolve_incremental_strategy(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_default: IncrementalStrategy,
+    dialect: SqlDialect,
 ) -> IncrementalStrategy {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -567,7 +568,13 @@ pub fn resolve_incremental_strategy(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
-        smelt_logical::maintenance::availability::StateAvailability::all(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — this resolver only ever reads a `DeleteInsert`
+        // technique off the creation cell (see the match below), a
+        // technique no availability downgrade touches, so this is a
+        // no-op-today mechanism swap, same rationale as the `None`/`&[]`
+        // postures above.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return backend_default;
     };
@@ -784,6 +791,7 @@ pub fn resolve_cell_technique_with_write_pin(
 /// mapped here to a real `Err` — the fail-loud discipline (root
 /// `CLAUDE.md`) forbids silently falling back to region recompute for a
 /// pin the derived plan does not admit.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -792,6 +800,7 @@ pub fn resolve_live_column_scoped_cell(
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -818,7 +827,10 @@ pub fn resolve_live_column_scoped_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
-        smelt_logical::maintenance::availability::StateAvailability::all(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -1023,6 +1035,7 @@ pub fn resolve_live_in_place_update_cell(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     deployed_column_names: &[String],
+    dialect: SqlDialect,
 ) -> Option<(PlanCell, Vec<(String, String)>)> {
     if deployed_column_names.is_empty() {
         return None;
@@ -1037,7 +1050,10 @@ pub fn resolve_live_in_place_update_cell(
         &[],
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
-        smelt_logical::maintenance::availability::StateAvailability::all(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     )?;
     let cell = result
         .plan
@@ -1152,6 +1168,7 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
+    dialect: SqlDialect,
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -1166,7 +1183,10 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
-        smelt_logical::maintenance::availability::StateAvailability::all(),
+        // The real target backend (`docs/specs/state.md` §"The degradation
+        // contract") — see `resolve_incremental_strategy`'s analogous
+        // comment for why this is backend-aware now.
+        smelt_db::queries::maintenance::state_availability_for(dialect.name()),
     ) else {
         return Ok(None);
     };
@@ -3481,6 +3501,12 @@ pub fn resolve_live_delta_restriction_facts(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        // Not backend-aware at this call site (`docs/outcomes/
+        // 20260816-state-residency/phases/09-plan.md` task 5 audit): this
+        // resolver only reads the model-edge creation cell's closure/
+        // row-identity facts (`restrict_column` below), never its
+        // technique — availability resolution never changes either, so
+        // there is nothing for a real dialect to change here yet.
         smelt_logical::maintenance::availability::StateAvailability::all(),
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {

@@ -1312,7 +1312,13 @@ fn ref_model_source_facts(
         return None;
     }
     let file = resolved.source_file?;
-    let result = maintenance_plan_report(db, workspace, file)?;
+    // "duckdb" (⇒ `StateAvailability::all()`) here, not the downstream
+    // caller's real target: this recursion only reads the upstream's
+    // `key_locality` verdict, which availability resolution never prunes
+    // (locality is a plan-shape fact, not a technique/downgrade one) — no
+    // backend target is threaded through this Salsa-purity-bound recursion
+    // to begin with, so there is nothing more real to pass.
+    let result = maintenance_plan_report(db, workspace, file, "duckdb")?;
     let locality = result.plan.key_locality.as_ref()?;
     let granularity = ref_timeseries_config(
         db,
@@ -1705,10 +1711,20 @@ pub fn maintenance_plan(
 /// re-implements admission, locality, or ledger logic. Returns `None` for a
 /// model with no maintenance plan (not `refresh: incremental`, or no
 /// shape-defining fact declared and no `grain:` to resolve).
+/// `dialect_name` is the model's real target backend name (`smelt.yml`
+/// `targets.*.type`, e.g. `"duckdb"`/`"spark"` — the same vocabulary
+/// [`crate::queries::maintenance::state_availability_for`] matches), so a
+/// `smelt explain` caller with a resolved target sees the SAME downgrade a
+/// live run against that backend would hit
+/// (`docs/specs/state.md` §"The degradation contract"). Pass `"duckdb"` for
+/// an offline/backend-agnostic caller — `state_availability_for("duckdb")`
+/// is `StateAvailability::all()`, the un-downgraded posture every call site
+/// used before this parameter existed.
 pub fn maintenance_plan_report(
     db: &dyn salsa::Database,
     workspace: Workspace,
     file: SourceFile,
+    dialect_name: &str,
 ) -> Option<crate::queries::maintenance::MaintenancePlanResult> {
     let text = file.text(db);
     let Ok(FileMetadata::Single {
@@ -1832,11 +1848,7 @@ pub fn maintenance_plan_report(
         // own call site for the same rationale.
         &[],
         &source_referential_integrity,
-        // Not (yet) backend-aware at this call site — see
-        // `maintenance_plan_diagnostics`'s own `state_downgrade_diagnostics`
-        // call for the per-`active_backends` resolution `smelt explain`'s
-        // report actually surfaces downgrades through.
-        smelt_logical::maintenance::availability::StateAvailability::all(),
+        crate::queries::maintenance::state_availability_for(dialect_name),
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`

@@ -12,6 +12,29 @@ use smelt_cli::{
 };
 use smelt_core::graph::DependencyGraph;
 
+/// The real target backend name for `canonical`'s resolved target
+/// (`docs/specs/state.md` §"The degradation contract") — mirrors
+/// `commands::explain::explain_maintenance_plan`'s own `dialect_name`
+/// resolution so this test helper exercises the same backend-aware plan a
+/// real `smelt explain` invocation would derive.
+fn dialect_name_for(
+    config: &Config,
+    canonical: &str,
+    metadata: Option<&smelt_core::ModelMetadata>,
+) -> &'static str {
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
+    let target = config.get_target(canonical, metadata, &default_target);
+    match config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+    {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    }
+}
+
 /// Run the real discovery + Salsa pipeline for `project_dir` and return the
 /// built maintenance-plan report for `model_name` (mirrors
 /// `explain_maintenance.rs::build_report_for` /
@@ -59,7 +82,8 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
         .source_file(&model.path)
         .expect("model file not registered");
 
-    let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
+    let dialect_name = dialect_name_for(&config, &canonical, model.metadata.as_deref());
+    let result = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name)?;
 
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(&canonical);

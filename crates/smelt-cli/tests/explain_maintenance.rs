@@ -14,6 +14,29 @@ use smelt_cli::{
 };
 use smelt_core::graph::DependencyGraph;
 
+/// The real target backend name for `canonical`'s resolved target
+/// (`docs/specs/state.md` §"The degradation contract") — mirrors
+/// `commands::explain::explain_maintenance_plan`'s own `dialect_name`
+/// resolution so this test helper exercises the same backend-aware plan a
+/// real `smelt explain` invocation would derive.
+fn dialect_name_for(
+    config: &Config,
+    canonical: &str,
+    metadata: Option<&smelt_core::ModelMetadata>,
+) -> &'static str {
+    let default_target = config.targets.keys().min().cloned().unwrap_or_default();
+    let target = config.get_target(canonical, metadata, &default_target);
+    match config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+    {
+        Some(smelt_core::config::BackendType::DuckDB) => "duckdb",
+        Some(smelt_core::config::BackendType::Spark) => "spark",
+        None => "duckdb",
+    }
+}
+
 /// Run the real discovery + Salsa pipeline for `project_dir` and return the
 /// built maintenance-plan report for `model_name`, mirroring
 /// `commands::explain::explain_maintenance_plan`'s own resolution sequence
@@ -63,7 +86,8 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
         .source_file(&model.path)
         .expect("model file not registered");
 
-    let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
+    let dialect_name = dialect_name_for(&config, &canonical, model.metadata.as_deref());
+    let result = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name)?;
 
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(&canonical);
@@ -861,6 +885,199 @@ fn explain_prints_a_downgraded_cell_with_both_techniques() {
     assert!(
         report.contains("ReconciliationLedger"),
         "expected the missing structure named: {report}"
+    );
+}
+
+// =============================================================================
+// Backend-aware downgrade visibility (`docs/outcomes/20260816-state-residency/
+// outcome.md` phase 9): `smelt explain` resolves the model's REAL target
+// dialect into `StateAvailability` instead of `all()`, so a Spark-targeted
+// keyed-fold model's `MaintenanceStateDowngraded` cell is actually visible.
+// =============================================================================
+
+/// Stage [`smelt_maintenance_testkit::dag::keyed_chain_dag`]'s clockless
+/// keyed chain (`dag_kchain_a` → `dag_kchain_b`, the latter a `KeyedFold`
+/// needing the reconciliation ledger) via the ordinary DuckDB [`stage_dag`],
+/// then overwrite `smelt.yml` with a `dialect`-targeted one
+/// ([`smelt_maintenance_testkit::render::render_smelt_yml_for`]). `smelt
+/// explain` never connects to a backend (`docs/specs/cli.md` §"`smelt
+/// explain <model>` maintenance-plan report"), so a Spark target with no
+/// live connection is safe to stage here — only the declared `type:` needs
+/// to be real.
+fn stage_keyed_chain_project_for(
+    tmp: &tempfile::TempDir,
+    target: smelt_maintenance_testkit::recipe::ConformanceTarget,
+) -> std::path::PathBuf {
+    use smelt_maintenance_testkit::dag::{keyed_chain_dag, stage_dag};
+    use smelt_maintenance_testkit::render::render_smelt_yml_for;
+
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    let dag = keyed_chain_dag();
+    stage_dag(&dag, &project_dir, &db_path).expect("stage keyed chain dag");
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        render_smelt_yml_for(target, &db_path),
+    )
+    .expect("overwrite smelt.yml with the target dialect");
+    project_dir
+}
+
+/// `dag_kchain_b`'s `KeyedFold` cell needs the reconciliation ledger
+/// (`docs/specs/state.md` §"The degradation contract") — under a
+/// Spark-only target (`state_availability_for("spark")` == `none()`,
+/// pinned above) it must downgrade, and `smelt explain` must actually show
+/// that: this was the whole point of the phase, since every derivation path
+/// `smelt explain` reached passed `StateAvailability::all()` before this
+/// fix, so a real Spark project printed no downgrade line at all.
+#[test]
+fn spark_target_model_explains_state_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::SparkDelta,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("state downgrade:"),
+        "a Spark-only target has no reconciliation ledger — the KeyedFold cell must print a \
+         state downgrade line: {report}"
+    );
+}
+
+/// Same model, same clockless keyed-fold shape, under a `duckdb` target —
+/// DuckDB carries the reconciliation ledger, so no downgrade must print.
+/// Guards against the fix over-firing (e.g. always resolving `none()`
+/// regardless of dialect).
+#[test]
+fn duckdb_target_model_explains_no_state_downgrade() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::DuckDb,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        !report.contains("state downgrade:"),
+        "a duckdb target has the reconciliation ledger — no cell should downgrade: {report}"
+    );
+}
+
+/// `--json`'s `state_downgrades` array must mirror the text report: non-empty
+/// for the Spark target, empty for DuckDB (`docs/specs/cli.md` §"`smelt
+/// explain --json` output schema").
+#[test]
+fn explain_json_carries_state_downgrades() {
+    use smelt_cli::explain::build_maintenance_plan_json;
+    use smelt_maintenance_testkit::recipe::ConformanceTarget;
+
+    for (target, expect_downgrade) in [
+        (ConformanceTarget::SparkDelta, true),
+        (ConformanceTarget::DuckDb, false),
+    ] {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = stage_keyed_chain_project_for(&tmp, target);
+        let project_dir = find_project_root(&project_dir).expect("find project root");
+        let config = Config::load(&project_dir).expect("load smelt.yml");
+
+        let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let models = discovery.discover_models().expect("discover models");
+        let db = init_db(&project_dir, &models);
+        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let model = models
+            .iter()
+            .find(|m| m.canonical_path() == "dag_kchain_b")
+            .expect("dag_kchain_b discovered");
+        let file = db
+            .source_file(&model.path)
+            .expect("model file not registered");
+
+        let dialect_name = dialect_name_for(&config, "dag_kchain_b", model.metadata.as_deref());
+        let result = smelt_db::maintenance_plan_report(&db, ws, file, dialect_name)
+            .expect("dag_kchain_b has a maintenance plan");
+
+        let statements: Vec<smelt_cli::explain::CellStatements> = Vec::new();
+        let diagnostics_cells: Vec<smelt_cli::explain::PlanCellDiagnostics> = Vec::new();
+        let empty_properties = smelt_runtime::diagnostics::PropertySet {
+            columns: vec![],
+            grain: Default::default(),
+            functional_dependencies: vec![],
+            determinism: vec![],
+            comparability: vec![],
+            discriminants: vec![],
+            literal_columns: vec![],
+            has_set_op_barrier: false,
+            has_fan_out_join: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            source_bounds: Default::default(),
+        };
+        let json = build_maintenance_plan_json(
+            "dag_kchain_b",
+            &[],
+            &statements,
+            smelt_cli::explain::RelationContractView::from_facts(None, None),
+            vec![],
+            &diagnostics_cells,
+            empty_properties,
+            vec![],
+            vec![],
+            smelt_core::config::ProbeCadence::PerRun,
+            &[],
+            None,
+            &result.state_downgrades,
+        );
+
+        if expect_downgrade {
+            assert!(
+                !json.state_downgrades.is_empty(),
+                "{target:?}: expected a non-empty state_downgrades array"
+            );
+        } else {
+            assert!(
+                json.state_downgrades.is_empty(),
+                "{target:?}: expected an empty state_downgrades array, got {:?}",
+                json.state_downgrades
+            );
+        }
+    }
+}
+
+/// The edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`,
+/// reached unconditionally by `smelt_db::maintenance_plan_report` — model
+/// edges are just an empty list for a model with none) must resolve the SAME
+/// real availability as the non-edge case: `dag_kchain_b` has exactly one
+/// inbound maintained-model edge (`dag_kchain_a`), so this pins that having
+/// an edge does not silently drop the downgrade the edge-less case already
+/// proved above.
+#[test]
+fn explain_graph_path_resolves_real_availability() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = stage_keyed_chain_project_for(
+        &tmp,
+        smelt_maintenance_testkit::recipe::ConformanceTarget::SparkDelta,
+    );
+
+    let report = build_report_for(&project_dir, "dag_kchain_b")
+        .expect("dag_kchain_b has a maintenance plan");
+
+    assert!(
+        report.contains("dag_kchain_a (model)"),
+        "sanity: dag_kchain_b must have an inbound model edge for this test to be meaningful: \
+         {report}"
+    );
+    assert!(
+        report.contains("state downgrade:"),
+        "the edge-aware derivation path must still surface the downgrade for a model with an \
+         inbound maintained-model edge: {report}"
     );
 }
 

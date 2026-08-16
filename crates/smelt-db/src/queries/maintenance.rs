@@ -1949,4 +1949,22 @@ mod tests {
             result.plan.refusals
         );
     }
+
+    /// Pins `state_availability_for("spark")` at `none()` — Spark ships
+    /// neither the engine-resident reconciliation ledger nor the frontier
+    /// builder today (`docs/specs/state.md` §"Out of scope"). Without this
+    /// pin, `smelt explain`'s downgrade-visibility tests
+    /// (`crates/smelt-cli/tests/explain_maintenance.rs`) could fail red for
+    /// the wrong reason: a resolver that never became backend-aware, rather
+    /// than one that did but resolved "spark" to `all()` by accident.
+    #[test]
+    fn state_availability_for_spark_withholds_ledger_and_frontier() {
+        let availability = state_availability_for("spark");
+        assert_eq!(
+            availability,
+            smelt_logical::maintenance::availability::StateAvailability::none(),
+            "Spark has no reconciliation ledger or frontier builder — availability must be \
+             none(), not all()"
+        );
+    }
 }

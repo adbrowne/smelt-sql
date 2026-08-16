@@ -206,6 +206,18 @@ With `--json`, the per-model report gains an append-stable `probes` array (§Con
 `{"fact": "...", "probe": "<DiagnosticCode>", "cell": "...", "cadence": "per_run"|"periodic"|"off",
 "cost": "<one line>"}`.
 
+**Backend-aware state downgrade.** The plan derivation resolves against the model's real
+declared target backend (`smelt.yml` `targets.*.type`), not an assumed ideal — a cell whose
+technique needs a state structure the target backend does not carry (`state.md` §"The
+degradation contract") downgrades to its resolved fallback, and the report prints both: the
+executed technique (in the cell's own `technique:` line) plus a `state downgrade: <resolved>
+(ideal: <ideal>, missing <structure>) — <why>` line naming what would have run with the
+missing structure available. A cell that did not downgrade prints no such line. With `--json`,
+the per-model report gains an append-stable `state_downgrades` array (§Constraints item 5),
+one entry per downgraded cell: `{"cell_group": "...", "trigger": "...", "resolved_technique":
+"...", "ideal_technique": "...", "missing_structure": "...", "why": "..."}`; empty when no cell
+downgraded.
+
 **Effective contract.** Each cell's block additionally prints its effective contract lattice point
 (`incremental_models.md` §"The contract lattice") — `default` when no `contract:` applies,
 otherwise the applicable relaxations with their declared intervals: `frozen_horizon: 90 days`

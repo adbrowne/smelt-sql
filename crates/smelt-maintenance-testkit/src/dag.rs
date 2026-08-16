@@ -604,7 +604,8 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
     })?;
 
     let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
-    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    let dialect_name = crate::dialect_name_for_config(&config);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target, dialect_name);
 
     let named: Vec<smelt_db::Diagnostic> = diagnostics
         .iter()

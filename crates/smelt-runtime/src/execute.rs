@@ -1678,6 +1678,7 @@ pub async fn execute_project(
                     metadata,
                     &in_place_sources,
                     &deployed_column_names,
+                    backend.dialect(),
                 )
             })
         } else {
@@ -1894,6 +1895,7 @@ pub async fn execute_project(
                     &explicitly_mutable,
                     backend.capabilities().supports_column_scoped_merge,
                     &request.technique_overrides,
+                    backend.dialect(),
                 )?,
                 None => None,
             };
@@ -1915,6 +1917,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         &request.technique_overrides,
+                        backend.dialect(),
                     )?
                 }
                 None => None,
@@ -2806,6 +2809,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         backend_default_strategy.clone(),
+                        backend.dialect(),
                     ),
                     None => backend_default_strategy,
                 };
@@ -2875,6 +2879,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
                         &request.technique_overrides,
+                        backend.dialect(),
                     )?,
                     None => None,
                 };

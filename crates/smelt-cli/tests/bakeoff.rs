@@ -212,8 +212,8 @@ async fn bakeoff_reports_nothing_to_measure_for_membership_sensitive_cells() {
         db.set_active_target(Some(std::sync::Arc::from("dev")));
         let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
         let file = db.source_file(&model.path).expect("model file registered");
-        let result =
-            smelt_db::maintenance_plan_report(&db, ws, file).expect("maintenance plan report");
+        let result = smelt_db::maintenance_plan_report(&db, ws, file, "duckdb")
+            .expect("maintenance plan report");
         assert!(
             result.plan.cells.iter().any(|c| matches!(
                 &c.trigger,
