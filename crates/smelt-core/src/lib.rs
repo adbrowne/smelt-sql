@@ -14,6 +14,7 @@ pub mod resolver;
 pub mod seeds;
 pub mod selector;
 pub mod sources;
+pub mod sql;
 pub mod text;
 pub mod workspace;
 
@@ -57,5 +58,6 @@ pub use sources::{
     SourceColumn, SourceColumnDef, SourceDef, SourceError, SourceInfo, SourceNameOverride,
     SourceTableDef, SourcesConfig, SourcesError,
 };
+pub use sql::row_set::{build_row_set_table, row_set_body};
 pub use text::{extract_snippet, text_range_to_line_col};
 pub use workspace::{load_workspace, LoadedWorkspace, WorkspaceLoadErrors};

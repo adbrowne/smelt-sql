@@ -1363,6 +1363,76 @@ fn append_only_posture_probe_panics_on_empty_digest_columns() {
     emit_append_only_posture_probe("main.t", "d", &[], &baseline, MaintenanceDialect::DuckDb);
 }
 
+/// The rejection test at the `emit` call site: for
+/// `MaintenanceDialect::BigQuery` the baseline join is never a `FROM
+/// (VALUES …)`/`JOIN (VALUES …)` table-value constructor — GoogleSQL has
+/// none. Asserts the baseline row set in the emitted SQL is byte-for-byte
+/// what `smelt_core::build_row_set_table` itself renders, so a future
+/// hand-rolled (but still VALUES-free) rewrite at this call site would fail
+/// the test rather than pass it vacuously. Uses a two-row baseline — with a
+/// single row the `UNION ALL` join between rows never appears, and an
+/// equality check against the owner's output would hold trivially for
+/// almost any rewrite.
+#[test]
+fn append_only_posture_probe_bigquery_is_not_a_values_constructor() {
+    let baseline = vec![
+        AppendOnlyBaselinePartition {
+            partition_value: "2026-01-01".to_string(),
+            recorded_count: 100,
+            recorded_fingerprint: "abc123".to_string(),
+            check_fingerprint: true,
+        },
+        AppendOnlyBaselinePartition {
+            partition_value: "2026-01-02".to_string(),
+            recorded_count: 42,
+            recorded_fingerprint: "def456".to_string(),
+            check_fingerprint: false,
+        },
+    ];
+    let stmt = emit_append_only_posture_probe(
+        "main.raw_events",
+        "event_date",
+        &["event_id".to_string()],
+        &baseline,
+        MaintenanceDialect::BigQuery,
+    );
+    assert!(
+        !stmt.sql.contains("VALUES"),
+        "BigQuery has no table-value constructor, got: {}",
+        stmt.sql
+    );
+    let expected_baseline_row_set = smelt_core::build_row_set_table(
+        smelt_core::BackendType::BigQuery,
+        "__baseline",
+        &[
+            "partition_value",
+            "recorded_count",
+            "recorded_fingerprint",
+            "check_fingerprint",
+        ],
+        &[
+            vec![
+                "'2026-01-01'".to_string(),
+                "100".to_string(),
+                "'abc123'".to_string(),
+                "TRUE".to_string(),
+            ],
+            vec![
+                "'2026-01-02'".to_string(),
+                "42".to_string(),
+                "'def456'".to_string(),
+                "FALSE".to_string(),
+            ],
+        ],
+    );
+    assert!(
+        stmt.sql.contains(&expected_baseline_row_set),
+        "expected the baseline row set to route through smelt_core::build_row_set_table \
+         verbatim, expected substring: {expected_baseline_row_set}, got: {}",
+        stmt.sql
+    );
+}
+
 #[test]
 #[should_panic(expected = "non-empty recorded baseline")]
 fn append_only_posture_probe_panics_on_empty_baseline() {

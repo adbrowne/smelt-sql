@@ -5,9 +5,13 @@
 //! Live run (2026-08-17): 1/2 passed
 //! (`composed_keyed_admission_rate_stays_above_floor_on_bigquery` — pure
 //! classification, no execution). `composed_keyed_pool_upholds_equivalence_on_bigquery`
-//! fails: the actual COMPILED MODEL SQL (`smelt-runtime`'s `ephemeral_seed_ctes`
-//! path, real product code) emits a `FROM (VALUES ...) AS t(cols)` table
-//! constructor GoogleSQL rejects — see `main.rs`'s doc comment point 2.
+//! failed that run: the actual COMPILED MODEL SQL (`smelt-runtime`'s
+//! `ephemeral_seed_ctes` path, real product code) emitted a `FROM (VALUES
+//! ...) AS t(cols)` table constructor GoogleSQL rejects — see `main.rs`'s
+//! doc comment point 2. That path now routes through
+//! `smelt_core::build_row_set_table`, the single dialect-aware row-set
+//! owner, so the compiled SQL no longer contains the rejected construct;
+//! this has not yet been re-confirmed with a live re-run of this wrapper.
 
 use smelt_maintenance_testkit::families::{gate_composed, ConformanceBackend};
 

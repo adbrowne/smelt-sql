@@ -3004,16 +3004,38 @@ fn repair_group_partition_identity(group_key: &[String], digest_columns: &[Strin
 /// An empty `keys` list yields a well-typed EMPTY relation (`WHERE FALSE`),
 /// never an invalid `VALUES ()` — a repair with no affected keys this run is
 /// a legitimate (if unusual) outcome, not an error.
-pub fn repair_keys_literal_select(keys: &[String]) -> String {
+///
+/// The row-set constructor itself — `VALUES (…)` where `dialect` supports
+/// one, the portable `SELECT … UNION ALL SELECT …` rewrite GoogleSQL
+/// requires otherwise — comes from `smelt_core::build_row_set_table`, the
+/// single dialect-aware owner.
+pub fn repair_keys_literal_select(keys: &[String], dialect: MaintenanceDialect) -> String {
     if keys.is_empty() {
         return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
     }
-    let values = keys
+    let rows: Vec<Vec<String>> = keys
         .iter()
-        .map(|k| format!("('{}')", k.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("SELECT * FROM (VALUES {values}) AS __smelt_repair_group_keys(delta_key)")
+        .map(|k| vec![format!("'{}'", k.replace('\'', "''"))])
+        .collect();
+    let row_set = smelt_core::build_row_set_table(
+        maintenance_dialect_to_backend_type(dialect),
+        "__smelt_repair_group_keys",
+        &["delta_key"],
+        &rows,
+    );
+    format!("SELECT * FROM {row_set}")
+}
+
+/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
+/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
+/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
+/// exactly DuckDB, Spark, and BigQuery.
+fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
+    match dialect {
+        MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
+        MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
+        MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+    }
 }
 
 /// Read-side: the repair family's group-grain affected-key set for a
@@ -3711,6 +3733,50 @@ mod tests {
             run_id: "maintenance-driver-unit-test",
             model_name: "maintenance-driver-unit-test",
             reporter: &NO_OP_REPORTER,
+        }
+    }
+
+    /// The rejection test at the `maintenance_driver` call site: for
+    /// `MaintenanceDialect::BigQuery` the emitted affected-keys relation is
+    /// never a `FROM (VALUES …)` table-value constructor, and for
+    /// DuckDB/Spark it is byte-identical (both route through the shared
+    /// `smelt_core::build_row_set_table` owner).
+    #[test]
+    fn repair_keys_literal_select_bigquery_is_not_a_values_constructor() {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let select = repair_keys_literal_select(&keys, MaintenanceDialect::BigQuery);
+        assert!(
+            !select.contains("VALUES"),
+            "BigQuery has no table-value constructor, got: {select}"
+        );
+        assert!(select.contains("UNION ALL"));
+    }
+
+    #[test]
+    fn repair_keys_literal_select_duckdb_and_spark_are_byte_identical() {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let duckdb = repair_keys_literal_select(&keys, MaintenanceDialect::DuckDb);
+        let spark = repair_keys_literal_select(&keys, MaintenanceDialect::Spark);
+        assert_eq!(duckdb, spark);
+        assert_eq!(
+            duckdb,
+            "SELECT * FROM (VALUES ('a'), ('b')) AS __smelt_repair_group_keys(delta_key)"
+        );
+    }
+
+    #[test]
+    fn repair_keys_literal_select_empty_keys_is_dialect_independent() {
+        let empty: Vec<String> = vec![];
+        for dialect in [
+            MaintenanceDialect::DuckDb,
+            MaintenanceDialect::Spark,
+            MaintenanceDialect::BigQuery,
+        ] {
+            let select = repair_keys_literal_select(&empty, dialect);
+            assert_eq!(
+                select,
+                "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE"
+            );
         }
     }
 

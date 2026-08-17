@@ -104,7 +104,7 @@ fn ephemeral_seed_values_cte_body() {
         },
     ];
 
-    let cte_body = build_values_cte(&seed.columns, &rows);
+    let cte_body = build_values_cte(smelt_core::BackendType::DuckDB, &seed.columns, &rows);
 
     // Must contain VALUES
     assert!(

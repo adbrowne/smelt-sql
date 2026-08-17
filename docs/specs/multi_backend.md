@@ -136,6 +136,20 @@ unconditionally, and is also reachable on demand via the `run-docker-tests` PR l
 regression outside the per-PR path filter still surfaces within one nightly cycle rather than
 sitting unnoticed on `main` indefinitely.
 
+### Inline row-set construction
+Every production path that splices a small literal row set into generated SQL — an ephemeral
+seed's CTE, a repair's affected-key list, an append-only baseline probe's recorded partitions, a
+`smelt.test` mock dataset — renders it through a single dialect-aware owner
+(`smelt_core::build_row_set_table` / `row_set_body`, `crates/smelt-core/src/sql/row_set.rs`)
+rather than formatting `VALUES (…)` itself. DuckDB, Spark, and PostgreSQL accept a `VALUES (…),
+(…)` table-value constructor directly, unchanged. GoogleSQL has none: `FROM (VALUES (1), (2))`
+is a syntax error. The owner renders BigQuery's row set as the portable chained `SELECT … UNION
+ALL SELECT …` instead — column names come from the first branch's aliased projections, since
+that branch is the only one carrying them on a `UNION ALL` chain. Deciding what an *empty* row
+set means (an always-false guard row, a `WHERE FALSE` predicate with no row at all, …) stays a
+per-caller business decision, not a row-set construction detail — the owner requires at least one
+row and callers handle the empty case themselves before reaching it.
+
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
 model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an

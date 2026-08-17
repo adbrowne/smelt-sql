@@ -71,7 +71,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 4b    | done     | a5df9508 | 2026-08-17 |
 | 5     | done     | 7f2e27a9 | 2026-08-17 |
 | 5b    | done     |        | 2026-08-18 |
-| 5c    | pending  |        |      |
+| 5c    | done     |        | 2026-08-18 |
 | 5d    | pending  |        |      |
 | 6     | pending  |        |      |
 

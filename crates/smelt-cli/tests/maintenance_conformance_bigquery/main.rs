@@ -46,13 +46,22 @@
 //!    the leg is non-vacuous, only that it correctly ERRORS on GoogleSQL
 //!    today).
 //! 2. **`smelt-runtime`'s `ephemeral_seed_ctes` compiler path (`execute.rs`/
-//!    `types.rs`) also emits a `FROM (VALUES ...) AS t(cols)` construct** —
-//!    this is real product code, not testkit — confirmed live via
-//!    `composed_keyed_pool_upholds_equivalence_on_bigquery`'s failure, whose
-//!    panic shows the actual *compiled model SQL* (`CREATE TABLE ... AS
-//!    SELECT ... FROM (VALUES (900, DATE '2024-03-02', 10), ...) AS t(id, d,
-//!    val) ...`), not a testkit-internal query. The same GoogleSQL gap as
-//!    point 1, in a different owner.
+//!    `types.rs`) routes its inline row sets through
+//!    `smelt_core::sql::row_set::{row_set_body, build_row_set_table}`, the
+//!    single dialect-aware owner** — for `BackendType::BigQuery` it renders
+//!    the portable `SELECT … UNION ALL SELECT …` form instead of a `FROM
+//!    (VALUES ...) AS t(cols)` table-value constructor, which GoogleSQL does
+//!    not have. This closes the gap `composed_keyed_pool_upholds_equivalence_on_bigquery`'s
+//!    first live run surfaced, whose panic showed the compiled model SQL
+//!    (`CREATE TABLE ... AS SELECT ... FROM (VALUES (900, DATE '2024-03-02',
+//!    10), ...) AS t(id, d, val) ...`) rather than a testkit-internal query.
+//!    Unlike point 1 (the testkit's own `STracker::materialize_s_as_view`),
+//!    this was real product code. The compiled-SQL path is unit-tested as
+//!    dialect-aware (`crates/smelt-runtime/src/execute.rs`,
+//!    `crates/smelt-runtime/src/maintenance_driver.rs`), but this binary's
+//!    live re-run against a real warehouse has not been repeated since — the
+//!    fix is not yet confirmed end-to-end here, only that the SQL it now
+//!    emits no longer contains the rejected construct.
 //! 3. **`families::dags`'s two-project-per-case staging collides on
 //!    BigQuery.** `families::dags::stage_dag_pair`-shaped helpers call
 //!    `b.target(case)` twice (once for the "incremental" project, once for

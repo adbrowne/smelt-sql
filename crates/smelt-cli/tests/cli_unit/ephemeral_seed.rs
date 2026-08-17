@@ -44,7 +44,8 @@ mod ephemeral_seed_cte_injection {
                 let col_names: Vec<&str> = seed.columns.iter().map(|(n, _)| n.as_str()).collect();
                 let alias_with_cols =
                     format!("__smelt_{}({})", canonical_name, col_names.join(", "));
-                let cte_body = build_values_cte(&seed.columns, &rows);
+                let cte_body =
+                    build_values_cte(smelt_core::BackendType::DuckDB, &seed.columns, &rows);
                 seed_ctes.push((canonical_name, alias_with_cols, cte_body));
             }
         }

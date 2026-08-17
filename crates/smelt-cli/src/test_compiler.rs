@@ -246,45 +246,56 @@ fn yaml_value_to_sql(v: &serde_yaml::Value) -> String {
     }
 }
 
-/// Convert YAML rows to a SQL CTE definition using VALUES.
+/// Convert YAML rows to a SQL CTE definition wrapping an inline row-set
+/// derived table — [`smelt_core::build_row_set_table`], the single
+/// dialect-aware owner, picks `VALUES (…)` or the portable `SELECT … UNION
+/// ALL SELECT …` rewrite GoogleSQL requires.
 ///
-/// Example output:
+/// `smelt test` always executes the compiled SQL against an embedded
+/// DuckDB regardless of the project's configured backend target, so every
+/// caller here passes `BackendType::DuckDB`; the dialect parameter exists
+/// so this function does not format its own row-set constructor and drift
+/// from the shared owner if `smelt test` ever gains a target-aware mode.
+///
+/// Example output (DuckDB):
 /// ```sql
 /// mock_data AS (SELECT * FROM (VALUES (1, 100.0, '2024-01-01'::DATE)) AS t(user_id, amount, created_at))
 /// ```
-pub fn yaml_rows_to_sql(name: &str, rows: &[BTreeMap<String, serde_yaml::Value>]) -> String {
+pub fn yaml_rows_to_sql(
+    dialect: smelt_core::BackendType,
+    name: &str,
+    rows: &[BTreeMap<String, serde_yaml::Value>],
+) -> String {
     if rows.is_empty() {
-        return format!(
-            "{} AS (SELECT * FROM (VALUES (NULL)) AS t(__empty) WHERE 1=0)",
-            name
+        let row_set = smelt_core::build_row_set_table(
+            dialect,
+            "t",
+            &["__empty"],
+            &[vec!["NULL".to_string()]],
         );
+        return format!("{} AS (SELECT * FROM {} WHERE 1=0)", name, row_set);
     }
 
     // Derive columns from first row (BTreeMap gives alphabetical order)
     let columns: Vec<&String> = rows[0].keys().collect();
 
-    let value_rows: Vec<String> = rows
+    let value_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
-            let vals: Vec<String> = columns
+            columns
                 .iter()
                 .map(|col| {
                     row.get(*col)
                         .map(yaml_value_to_sql)
                         .unwrap_or_else(|| "NULL".to_string())
                 })
-                .collect();
-            format!("({})", vals.join(", "))
+                .collect()
         })
         .collect();
 
     let col_names: Vec<&str> = columns.iter().map(|c| c.as_str()).collect();
-    format!(
-        "{} AS (SELECT * FROM (VALUES {}) AS t({}))",
-        name,
-        value_rows.join(", "),
-        col_names.join(", ")
-    )
+    let row_set = smelt_core::build_row_set_table(dialect, "t", &col_names, &value_rows);
+    format!("{} AS (SELECT * FROM {})", name, row_set)
 }
 
 // ── AST → row bridge (Phase 5) ─────────────────────────────────────────────
@@ -805,7 +816,11 @@ pub fn compile_cte_test(
     let mut mock_cte_parts: Vec<String> = Vec::new();
     for (cte_name, dot_key) in &external_refs {
         let rows = inputs.get(dot_key).map(|v| v.as_slice()).unwrap_or(&[]);
-        mock_cte_parts.push(yaml_rows_to_sql(cte_name, rows));
+        mock_cte_parts.push(yaml_rows_to_sql(
+            smelt_core::BackendType::DuckDB,
+            cte_name,
+            rows,
+        ));
     }
 
     // Internal chain CTEs (all except the target) go in the WITH clause.
@@ -1057,7 +1072,11 @@ fn compile_whole_model_test_inner(
             .map(String::as_str)
             .unwrap_or(ref_name.as_str());
         let rows = inputs.get(dot_key).map(|v| v.as_slice()).unwrap_or(&[]);
-        mock_cte_parts.push(yaml_rows_to_sql(ref_name, rows));
+        mock_cte_parts.push(yaml_rows_to_sql(
+            smelt_core::BackendType::DuckDB,
+            ref_name,
+            rows,
+        ));
     }
 
     // Add sql_body CTEs if provided
@@ -1385,7 +1404,7 @@ SELECT * FROM step1
             "user_id".to_string(),
             serde_yaml::Value::Number(serde_yaml::Number::from(1)),
         );
-        let result = yaml_rows_to_sql("mock_data", &[row]);
+        let result = yaml_rows_to_sql(smelt_core::BackendType::DuckDB, "mock_data", &[row]);
         assert!(result.contains("mock_data AS"));
         assert!(result.contains("VALUES"));
         assert!(result.contains("t(amount, user_id)"));
@@ -1393,8 +1412,50 @@ SELECT * FROM step1
 
     #[test]
     fn test_yaml_rows_to_sql_empty() {
-        let result = yaml_rows_to_sql("empty", &[]);
+        let result = yaml_rows_to_sql(smelt_core::BackendType::DuckDB, "empty", &[]);
         assert!(result.contains("WHERE 1=0"));
+    }
+
+    /// The rejection test at the `test_compiler` call site: for
+    /// `BackendType::BigQuery` the emitted mock-data CTE is never a `FROM
+    /// (VALUES …)` table-value constructor. Asserts the emitted SQL is
+    /// exactly what `smelt_core::build_row_set_table` renders for the same
+    /// rows, so a future hand-rolled (but still VALUES-free) rewrite here
+    /// would fail rather than pass vacuously. Uses two rows — a single row
+    /// never exercises the `UNION ALL` join between rows, and an equality
+    /// check would hold trivially for almost any rewrite.
+    #[test]
+    fn test_yaml_rows_to_sql_bigquery_is_not_a_values_constructor() {
+        let mut row1 = BTreeMap::new();
+        row1.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        let mut row2 = BTreeMap::new();
+        row2.insert(
+            "user_id".to_string(),
+            serde_yaml::Value::Number(serde_yaml::Number::from(2)),
+        );
+        let result = yaml_rows_to_sql(
+            smelt_core::BackendType::BigQuery,
+            "mock_data",
+            &[row1, row2],
+        );
+        assert!(
+            !result.contains("VALUES"),
+            "BigQuery has no table-value constructor, got: {result}"
+        );
+        let expected_row_set = smelt_core::build_row_set_table(
+            smelt_core::BackendType::BigQuery,
+            "t",
+            &["user_id"],
+            &[vec!["1".to_string()], vec!["2".to_string()]],
+        );
+        let expected = format!("mock_data AS (SELECT * FROM {expected_row_set})");
+        assert_eq!(
+            result, expected,
+            "expected the mock-data CTE to route through smelt_core::build_row_set_table verbatim"
+        );
     }
 
     #[test]
@@ -1404,7 +1465,7 @@ SELECT * FROM step1
             "day".to_string(),
             serde_yaml::Value::String("2024-01-01".to_string()),
         );
-        let result = yaml_rows_to_sql("dates", &[row]);
+        let result = yaml_rows_to_sql(smelt_core::BackendType::DuckDB, "dates", &[row]);
         assert!(result.contains("::DATE"));
     }
 

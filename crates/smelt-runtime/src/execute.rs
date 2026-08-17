@@ -2107,7 +2107,11 @@ pub async fn execute_project(
                                             &clean_sql_for_merge,
                                         )
                                         .await?;
-                                    let select = crate::maintenance_driver::repair_keys_literal_select(&keys);
+                                    let select =
+                                        crate::maintenance_driver::repair_keys_literal_select(
+                                            &keys,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
+                                        );
                                     let refresh = crate::maintenance_driver::RepairSidecarRefresh {
                                         schema,
                                         source_address: &source_address,

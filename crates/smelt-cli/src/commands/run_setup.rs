@@ -55,9 +55,30 @@ pub(super) fn discover_models_for_run(
     Ok((models, function_files))
 }
 
+/// Resolve the configured target's backend dialect — the parameter
+/// [`build_ephemeral_seed_ctes`] needs to pick the right row-set
+/// constructor for the CTE bodies it builds.
+pub(super) fn resolve_target_backend_type(
+    config: &Config,
+    target: &str,
+) -> Result<smelt_core::BackendType> {
+    config
+        .targets
+        .get(target)
+        .ok_or_else(|| anyhow::anyhow!("Target '{}' not found in smelt.yml", target))?
+        .backend_type()
+        .with_context(|| format!("Unrecognized backend type for target '{}'", target))
+}
+
 /// Build ephemeral-seed CTE triples from discovered seeds.
+///
+/// `dialect` selects the row-set constructor the CTE body renders (`VALUES
+/// (…)` where the target backend supports one, the portable `SELECT … UNION
+/// ALL SELECT …` rewrite for GoogleSQL — `smelt_core::sql::row_set`, the
+/// single dialect-aware owner `build_values_cte` routes through).
 pub(super) fn build_ephemeral_seed_ctes(
     seeds: &[smelt_core::SeedInfo],
+    dialect: smelt_core::BackendType,
 ) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
     for seed in seeds.iter().filter(|s| s.is_ephemeral()) {
@@ -66,7 +87,8 @@ pub(super) fn build_ephemeral_seed_ctes(
             let canonical_name = seed.address_segments.join("_");
             let col_names: Vec<&str> = seed.columns.iter().map(|(n, _)| n.as_str()).collect();
             let alias_with_cols = format!("__smelt_{}({})", canonical_name, col_names.join(", "));
-            let cte_body = smelt_core::seeds::ephemeral::build_values_cte(&seed.columns, &rows);
+            let cte_body =
+                smelt_core::seeds::ephemeral::build_values_cte(dialect, &seed.columns, &rows);
             out.push((canonical_name, alias_with_cols, cte_body));
         }
     }

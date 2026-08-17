@@ -1150,6 +1150,18 @@ pub fn emit_recurrence_bound_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
+/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
+/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
+/// exactly DuckDB, Spark, and BigQuery.
+fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
+    match dialect {
+        MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
+        MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
+        MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+    }
+}
+
 /// The unsized string-cast type name for a probe's key-display expression:
 /// DuckDB accepts an unsized `VARCHAR`; Spark SQL requires a length on
 /// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
@@ -1542,24 +1554,39 @@ pub fn emit_append_only_posture_probe(
     let cast_type = probe_dialect_string_type(dialect);
     let snapshot =
         emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
-    let baseline_values = baseline
+    let baseline_rows: Vec<Vec<String>> = baseline
         .iter()
         .map(|b| {
             let value = b.partition_value.replace('\'', "''");
             let fingerprint = b.recorded_fingerprint.replace('\'', "''");
             let check_fingerprint = if b.check_fingerprint { "TRUE" } else { "FALSE" };
-            format!(
-                "('{value}', {}, '{fingerprint}', {check_fingerprint})",
-                b.recorded_count
-            )
+            vec![
+                format!("'{value}'"),
+                b.recorded_count.to_string(),
+                format!("'{fingerprint}'"),
+                check_fingerprint.to_string(),
+            ]
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
+    // The row-set constructor itself — `VALUES (…)` where `dialect`
+    // supports one, the portable `SELECT … UNION ALL SELECT …` rewrite
+    // GoogleSQL requires otherwise — comes from
+    // `smelt_core::build_row_set_table`, the single dialect-aware owner.
+    let baseline_row_set = smelt_core::build_row_set_table(
+        maintenance_dialect_to_backend_type(dialect),
+        "__baseline",
+        &[
+            "partition_value",
+            "recorded_count",
+            "recorded_fingerprint",
+            "check_fingerprint",
+        ],
+        &baseline_rows,
+    );
     let violations_select = format!(
         "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
          FROM ({}) AS __current \
-         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, \
-               recorded_fingerprint, check_fingerprint) \
+         JOIN {baseline_row_set} \
          ON __current.partition_value = __baseline.partition_value \
          WHERE __current.current_count < __baseline.recorded_count \
          OR (__baseline.check_fingerprint AND __current.current_fingerprint IS DISTINCT FROM \
