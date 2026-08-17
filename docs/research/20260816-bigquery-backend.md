@@ -259,7 +259,7 @@ Open Questions below.
 
 The capability column, the type-name surface, and the rate limit were established by executing
 statements against the provisioned project (`scripts/bigquery-probe.sh`, `-probe2`, `-probe3`,
-`-probe4`), not from documentation.
+`-probe4`, `-probe-quota`), not from documentation.
 
 **The per-table modification rate limit binds, and latency is not the governing constraint.**
 Twenty-five sequential `UPDATE`s against one table, spaced by their own ~3 s round trip, all
@@ -269,6 +269,36 @@ operations`. The limit is per table, not per project, and it is reached by burst
 than by total volume. A generative suite must therefore allocate a fresh target table per case;
 that mitigation is required, not optional, and it also means concurrency across cases is the
 right way to absorb latency rather than cutting cases.
+
+**The binding spacing is between 2 s and 3 s, and it is a burst limit, not a volume limit.**
+`scripts/bigquery-probe-quota.sh` repeats `CREATE OR REPLACE TABLE <ds>.<t> AS SELECT <i> AS n`
+against one table name, holding the interval between consecutive *request starts* with an
+explicit sleep so the request's own round trip contributes nothing to the spacing. One fresh
+table per spacing, so a refusal is attributable to that spacing's burst rather than to quota
+carried over. Measured 2026-08-17 against `smelt-bq-test-20260816` (US):
+
+| Spacing | Result |
+|---------|--------|
+| 0 s | 7/8 succeeded; refused at op 6 — `Your table exceeded quota for table update operations` |
+| 2 s | 7/8 succeeded; refused at op 6 — same shape |
+| 3 s | 10/10 succeeded, no refusal |
+| 5 s | 8/8 succeeded, no refusal |
+
+What is measured is the bracket: 2 s spacing is refused, 3 s is not, so a per-step pacing floor
+of 3 s is a number rather than a guess, and it costs nothing when consecutive steps in a sweep
+are already slower than that. That the refusal lands at op 6 under both 0 s and 2 s spacing —
+volume held constant while the interval quadrupled — says the limit is a burst ceiling rather
+than a total-volume one, which is the property the sizing depends on. The exact window is *not*
+measured here: a five-per-ten-seconds ceiling fits these points, but so do other shapes, and
+distinguishing them would need a burst-size sweep this probe does not run. The refusal is a distinct, recognisable shape — the probe fails loud on any other error
+rather than folding it into the finding, which is what makes the number trustworthy.
+
+**Creating and dropping one dataset per case is not rate-limited at the spacing a sweep uses.**
+Ten `POST /datasets` + `DELETE /datasets/<id>?deleteContents=true` pairs back-to-back with no
+spacing all succeeded. Dataset-per-case isolation is therefore affordable, and it is also what
+keeps the daily per-table cap out of reach: a fresh dataset per case means a fresh table per
+case, so no single table accumulates modifications across a sweep, and the per-table daily
+budget is spent only by the steps of one case.
 
 **Type names.** GoogleSQL rejects exactly `VARCHAR`, `TEXT`, `DOUBLE`, `REAL` and `FLOAT`
 (`Type not found`). It accepts the integer aliases (`INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`),
