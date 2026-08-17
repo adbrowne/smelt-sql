@@ -537,6 +537,34 @@ impl LinkCProject {
                     )
                 }
             }
+            ConformanceTarget::BigQuery { dataset } => {
+                #[cfg(feature = "bigquery")]
+                {
+                    let _ = &dataset;
+                    let (db, graph) = self.build_db_and_graph();
+                    let outcome = execute_project(
+                        run_id.to_string(),
+                        request,
+                        Arc::clone(&self.config),
+                        graph,
+                        db,
+                        &self.project_dir,
+                        &BigQueryBackendFactory,
+                        reporter,
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                    Ok(outcome)
+                }
+                #[cfg(not(feature = "bigquery"))]
+                {
+                    let _ = dataset;
+                    unimplemented!(
+                        "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
         }
     }
 
@@ -582,6 +610,20 @@ impl LinkCProject {
                     )
                 }
             }
+            ConformanceTarget::BigQuery { dataset } => {
+                #[cfg(feature = "bigquery")]
+                {
+                    open_bigquery_backend(&dataset).await
+                }
+                #[cfg(not(feature = "bigquery"))]
+                {
+                    let _ = dataset;
+                    unimplemented!(
+                        "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
         }
     }
 }
@@ -611,6 +653,96 @@ pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Ba
     .await
     .map_err(|e| anyhow::anyhow!("Spark backend init failed: {e}"))?;
     Ok(Box::new(backend))
+}
+
+/// Open a BigQuery backend bound to `dataset` — the BigQuery-arm counterpart
+/// of [`open_spark_conformance_backend`], parametrized over the dataset
+/// rather than one fixed schema constant since every case in the pool
+/// isolates in its own fresh dataset
+/// (`crate::recipe::bq_conformance_dataset`). Project/location/token are
+/// read from the environment (`crate::recipe::bq_project`/`bq_location`/
+/// `bq_access_token`) — smelt never falls back to Google
+/// application-default credentials (`docs/specs/multi_backend.md` §Surface).
+#[cfg(feature = "bigquery")]
+pub async fn open_bigquery_backend(dataset: &str) -> Result<Box<dyn Backend>> {
+    use smelt_backend_bigquery::BigQueryBackend;
+
+    let project = crate::recipe::bq_project()
+        .ok_or_else(|| anyhow::anyhow!("BigQuery arm requires SMELT_BQ_PROJECT"))?;
+    let location = crate::recipe::bq_location();
+    let token = crate::recipe::bq_access_token().ok_or_else(|| {
+        anyhow::anyhow!(
+            "BigQuery arm requires SMELT_BQ_ACCESS_TOKEN. Mint one with \
+             `bash scripts/bigquery-auth.sh` then `source scripts/bigquery-env.sh`."
+        )
+    })?;
+
+    let backend = BigQueryBackend::new(&project, dataset, location.as_deref(), &token)
+        .await
+        .map_err(|e| anyhow::anyhow!("BigQuery backend init failed: {e}"))?;
+    Ok(Box::new(backend))
+}
+
+/// Build a fully qualified, backtick-quoted BigQuery table name
+/// `` `project.dataset.name` `` from `SMELT_BQ_PROJECT` and `dataset` — the
+/// staging DDL helpers' shared name-quoting routine
+/// (`smelt-backend-bigquery`'s own `sql::qualified_name` is private to that
+/// crate, so this mirrors its shape rather than reusing it).
+#[cfg(feature = "bigquery")]
+pub(crate) fn bigquery_qualified_name(dataset: &str, name: &str) -> Result<String> {
+    let project = crate::recipe::bq_project()
+        .ok_or_else(|| anyhow::anyhow!("BigQuery arm requires SMELT_BQ_PROJECT"))?;
+    Ok(format!("`{project}.{dataset}.{name}`"))
+}
+
+/// `BackendFactory` that opens a BigQuery backend from whatever `Target`
+/// config `execute_project` resolves for the run's target name — mirrors
+/// `crates/smelt-backends/src/lib.rs::create_backend`'s production BigQuery
+/// arm (project/dataset from the target, access token from
+/// `SMELT_BQ_ACCESS_TOKEN`) so the harness's BigQuery run path exercises the
+/// same field resolution real runs do, the same duplication-over-reuse
+/// convention [`SparkBackendFactory`] already established for the Spark arm
+/// rather than adding a `smelt-backends` dependency to this dev-only crate.
+#[cfg(feature = "bigquery")]
+pub struct BigQueryBackendFactory;
+
+#[cfg(feature = "bigquery")]
+impl BackendFactory for BigQueryBackendFactory {
+    fn create<'a>(
+        &'a self,
+        target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        Box::pin(async move {
+            use smelt_backend_bigquery::BigQueryBackend;
+
+            let project = target_config
+                .project
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("BigQuery target requires 'project' field"))?;
+            let dataset = target_config
+                .dataset
+                .as_deref()
+                .unwrap_or(&target_config.schema);
+            let access_token = std::env::var("SMELT_BQ_ACCESS_TOKEN").map_err(|_| {
+                anyhow::anyhow!(
+                    "BigQuery target {target_name:?} requires SMELT_BQ_ACCESS_TOKEN. Mint one \
+                     with `bash scripts/bigquery-auth.sh` then `source scripts/bigquery-env.sh`."
+                )
+            })?;
+
+            let backend = BigQueryBackend::new(
+                project,
+                dataset,
+                target_config.location.as_deref(),
+                &access_token,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("BigQuery backend init failed: {}", e))?;
+            Ok(Box::new(backend) as Box<dyn Backend>)
+        })
+    }
 }
 
 /// `BackendFactory` that opens a Spark/Delta backend from whatever

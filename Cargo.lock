@@ -4332,6 +4332,7 @@ dependencies = [
  "proptest",
  "rowan",
  "smelt-backend",
+ "smelt-backend-bigquery",
  "smelt-backend-duckdb",
  "smelt-backend-spark",
  "smelt-core",

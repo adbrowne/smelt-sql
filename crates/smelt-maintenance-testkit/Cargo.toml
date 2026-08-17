@@ -19,6 +19,12 @@ smelt-runtime = { path = "../smelt-runtime" }
 # dependency edge ahead of the Spark backend arms a later phase of that plan
 # wires up; nothing in this crate constructs a Spark backend yet.
 smelt-backend-spark = { path = "../smelt-backend-spark", optional = true }
+# Optional: only pulled in behind the `bigquery` feature (off by default) —
+# mirrors the `spark` feature's own comment above. Constructed by
+# `link_c_harness.rs`'s `BigQueryBackendFactory`/`open_bigquery_backend` and
+# `render.rs`/`dag.rs`/`feed.rs`'s BigQuery staging arms
+# (`docs/plans/20260817-bigquery-generative-conformance.md`).
+smelt-backend-bigquery = { path = "../smelt-backend-bigquery", optional = true }
 
 duckdb.workspace = true
 async-trait = "0.1"
@@ -40,6 +46,10 @@ arrow.workspace = true
 # of `docs/plans/20260720-prod-w9-spark-conformance-twin.md` uses it to build
 # the Spark arms of the seams this phase introduces.
 spark = ["dep:smelt-backend-spark"]
+# Off by default (`cargo tree -p smelt-maintenance-testkit --no-default-features
+# -i smelt-backend-bigquery` finds no edge) — the BigQuery arm on the
+# `ConformanceTarget` seam (`docs/plans/20260817-bigquery-generative-conformance.md`).
+bigquery = ["dep:smelt-backend-bigquery"]
 
 [dev-dependencies]
 # Dev-only, test-target-only dependency (`schedule_gen.rs`'s

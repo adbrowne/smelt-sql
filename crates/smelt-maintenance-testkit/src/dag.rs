@@ -645,35 +645,88 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
 /// node/source table from a prior run first — drop-before-seed idempotency,
 /// mirroring [`crate::render::stage_for_target`]'s convention) through a
 /// direct Spark/Delta connection to `crate::recipe::SPARK_CONFORMANCE_SCHEMA`.
-#[cfg(feature = "spark")]
+/// `BigQuery` mirrors `crate::render::stage_for_target`'s BigQuery arm: no
+/// drop-before-seed step, since the case's dataset is fresh.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_dag_for_target(
     dag: &DagRecipe,
     project_dir: &Path,
     db_path: &Path,
     target: crate::recipe::ConformanceTarget,
 ) -> anyhow::Result<LinkCProject> {
-    match target {
+    match &target {
         crate::recipe::ConformanceTarget::DuckDb => stage_dag(dag, project_dir, db_path),
         crate::recipe::ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            for idx in 0..dag.nodes.len() {
+            #[cfg(feature = "spark")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                for idx in 0..dag.nodes.len() {
+                    std::fs::write(
+                        project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
+                        render_node_file(dag, idx),
+                    )?;
+                }
                 std::fs::write(
-                    project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
-                    render_node_file(dag, idx),
+                    project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
+                    dag.source.source_yaml(),
                 )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    crate::render::render_smelt_yml_for(target, db_path),
+                )?;
+
+                reset_and_create_spark_dag_tables(db_path, dag)?;
+
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
             }
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
-                dag.source.source_yaml(),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                crate::render::render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        crate::recipe::ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                for idx in 0..dag.nodes.len() {
+                    std::fs::write(
+                        project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
+                        render_node_file(dag, idx),
+                    )?;
+                }
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
+                    dag.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    crate::render::render_smelt_yml_for(target.clone(), db_path),
+                )?;
 
-            reset_and_create_spark_dag_tables(db_path, dag)?;
+                crate::render::create_bigquery_source_table(
+                    dataset,
+                    &dag.source.name,
+                    &format!(
+                        "{d} DATE, {id} INT64, {val} INT64",
+                        d = dag.source.clock_column,
+                        id = dag.source.key_column,
+                        val = dag.source.payload_column,
+                    ),
+                )?;
 
-            LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
 }

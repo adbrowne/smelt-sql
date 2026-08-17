@@ -225,35 +225,141 @@ pub fn stage_feed_keyed(
 /// `grain: key` model with a fold spec over a `change_feed` source carries a
 /// build-blocking `MaintenanceNoAdmissibleTechnique` diagnostic regardless of
 /// backend, so nothing here is ever executed through `execute_project`.
-#[cfg(feature = "spark")]
+/// `BigQuery` mirrors the same classify-only staging, creating both tables
+/// in the case's own dataset with no drop-before-seed step (the dataset is
+/// fresh).
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_feed_keyed_for_target(
     recipe: &KeyedRecipe,
     project_dir: &std::path::Path,
     db_path: &std::path::Path,
     target: crate::recipe::ConformanceTarget,
 ) -> anyhow::Result<LinkCProject> {
-    match target {
+    match &target {
         crate::recipe::ConformanceTarget::DuckDb => stage_feed_keyed(recipe, project_dir, db_path),
         crate::recipe::ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            std::fs::write(
-                project_dir.join(format!("models/{}.sql", recipe.model_name)),
-                render::render_keyed_model_file(recipe),
-            )?;
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
-                change_feed_source_yaml(&recipe.source),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                render::render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(feature = "spark")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render::render_keyed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    change_feed_source_yaml(&recipe.source),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render::render_smelt_yml_for(target, db_path),
+                )?;
 
-            create_feed_tables_via_backend(db_path, &recipe.source)?;
+                create_feed_tables_via_backend(db_path, &recipe.source)?;
 
-            LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+            }
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        crate::recipe::ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render::render_keyed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    change_feed_source_yaml(&recipe.source),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render::render_smelt_yml_for(target.clone(), db_path),
+                )?;
+
+                create_bigquery_feed_tables(dataset, &recipe.source)?;
+
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
+}
+
+/// [`create_feed_tables_via_backend`] generalised to BigQuery: creates both
+/// the base AND feed tables in `dataset` — no drop-before-seed step (unlike
+/// the Spark arm), since every `dataset` this crate constructs is fresh per
+/// case (`crate::recipe::bq_conformance_dataset`).
+#[cfg(feature = "bigquery")]
+fn create_bigquery_feed_tables(dataset: &str, source: &SourceRecipe) -> anyhow::Result<()> {
+    let dataset = dataset.to_string();
+    let (base_defs, feed_defs) = if is_clocked(source) {
+        (
+            format!(
+                "{d} DATE, {id} INT64, {val} INT64",
+                d = source.clock_column,
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+            format!(
+                "op STRING, {d} DATE, {id} INT64, {val} INT64, seq INT64",
+                d = source.clock_column,
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+        )
+    } else {
+        (
+            format!(
+                "{id} INT64, {val} INT64",
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+            format!(
+                "op STRING, {id} INT64, {val} INT64, seq INT64",
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+        )
+    };
+    let source_name = source.name.clone();
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_bigquery_backend(&dataset).await?;
+        let base_table = crate::link_c_harness::bigquery_qualified_name(
+            &dataset,
+            &format!("sources_{source_name}"),
+        )?;
+        let feed_table = crate::link_c_harness::bigquery_qualified_name(
+            &dataset,
+            &format!("feed_{source_name}"),
+        )?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {base_table} ({base_defs})"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create BigQuery feed base table {base_table}: {e}"))?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {feed_table} ({feed_defs})"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create BigQuery feed log table {feed_table}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 /// [`create_feed_tables`] generalised over `&dyn Backend` (plan Phase 5):

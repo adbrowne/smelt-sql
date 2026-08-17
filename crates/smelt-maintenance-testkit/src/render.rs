@@ -283,7 +283,25 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
                 ),
             )
         }
+        ConformanceTarget::BigQuery { dataset } => ("bq", render_bigquery_target_body(&dataset)),
     }
+}
+
+/// The body of a `bq:` target block for `dataset` (4-space indented, no
+/// leading key) — deliberately the same shape as
+/// `crates/smelt-cli/tests/common/mod.rs::bq_target_body`'s own
+/// `type`/`project`/`dataset`/`schema`/`location` fields, since both render
+/// the same `Target` YAML surface (`docs/specs/multi_backend.md` §Surface).
+/// `project`/`location` are read from the environment
+/// (`crate::recipe::bq_project`/`bq_location`) rather than threaded as
+/// parameters, mirroring [`render_target_block`]'s Spark arm reading
+/// `crate::recipe::spark_connect_url` the same way.
+fn render_bigquery_target_body(dataset: &str) -> String {
+    let project = crate::recipe::bq_project().unwrap_or_default();
+    let location = crate::recipe::bq_location()
+        .map(|l| format!("\n    location: {l}"))
+        .unwrap_or_default();
+    format!("type: bigquery\n    project: {project}\n    dataset: {dataset}\n    schema: {dataset}{location}")
 }
 
 /// A minimal `smelt.yml` targeting `target`: one target block
@@ -385,37 +403,94 @@ pub fn stage(
 /// staging must be idempotent by construction (plan Phase 3 TDD list:
 /// "drop-before-seed idempotency"). `db_path` is still threaded through for
 /// [`crate::link_c_harness::LinkCProject`]'s bookkeeping even though the
-/// Spark arm never opens it as a database file.
-#[cfg(feature = "spark")]
+/// Spark arm never opens it as a database file. `BigQuery` stages the same
+/// model + source YAML + a BigQuery-targeted `smelt.yml` and creates the
+/// staged source table in the case's own dataset
+/// ([`crate::recipe::ConformanceTarget::BigQuery`]'s `dataset` field) — a
+/// fresh dataset per case, so unlike the Spark arm no drop-before-seed step
+/// is needed (nothing from a prior run can collide with it).
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_for_target(
     recipe: &ModelRecipe,
     project_dir: &Path,
     db_path: &Path,
     target: ConformanceTarget,
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
-    match target {
+    match &target {
         ConformanceTarget::DuckDb => stage(recipe, project_dir, db_path),
         ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            std::fs::write(
-                project_dir.join(format!("models/{}.sql", recipe.model_name)),
-                render_model_file(recipe),
-            )?;
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
-                render_source_yaml(recipe),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(feature = "spark")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    render_source_yaml(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target, db_path),
+                )?;
 
-            reset_and_create_spark_source_table(db_path, recipe)?;
+                reset_and_create_spark_source_table(db_path, recipe)?;
 
-            crate::link_c_harness::LinkCProject::load(
-                project_dir.to_path_buf(),
-                db_path.to_path_buf(),
-            )
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    render_source_yaml(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target.clone(), db_path),
+                )?;
+
+                create_bigquery_source_table(
+                    dataset,
+                    &recipe.source.name,
+                    &format!(
+                        "{d} DATE, {id} INT64, {val} INT64",
+                        d = recipe.source.clock_column,
+                        id = recipe.source.key_column,
+                        val = recipe.source.payload_column,
+                    ),
+                )?;
+
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
 }
@@ -509,6 +584,40 @@ fn create_source_table_via_backend(
         smelt_backend::Backend::execute_sql(&backend, &ddl)
             .await
             .map_err(|e| anyhow::anyhow!("create source table {ddl:?}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// Create the staged source table in `dataset` (BigQuery Standard SQL
+/// types, not DuckDB's — `INT64` rather than `INTEGER`) through a direct
+/// BigQuery connection ([`crate::link_c_harness::open_bigquery_backend`]).
+/// No drop-before-seed step: every `dataset` this crate constructs is fresh
+/// per case ([`crate::recipe::bq_conformance_dataset`]), so a `CREATE TABLE`
+/// with no prior table can never collide (mirrors
+/// [`create_source_table_via_backend`]'s DuckDB convention, not the Spark
+/// arm's drop-then-create — that one's persistent warehouse needs it, this
+/// one's fresh dataset doesn't).
+#[cfg(feature = "bigquery")]
+pub(crate) fn create_bigquery_source_table(
+    dataset: &str,
+    source_name: &str,
+    column_defs: &str,
+) -> anyhow::Result<()> {
+    let dataset = dataset.to_string();
+    let source_name = source_name.to_string();
+    let column_defs = column_defs.to_string();
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_bigquery_backend(&dataset).await?;
+        let table = crate::link_c_harness::bigquery_qualified_name(
+            &dataset,
+            &format!("sources_{source_name}"),
+        )?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {table} ({column_defs})"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create BigQuery source table {table}: {e}"))?;
         Ok::<(), anyhow::Error>(())
     })
 }
@@ -709,37 +818,95 @@ pub fn stage_keyed_with_downstream(
 /// through a direct Spark/Delta connection to
 /// `crate::recipe::SPARK_CONFORMANCE_SCHEMA` — the same drop-before-seed
 /// idempotency [`stage_for_target`]'s Spark arm needs, since the Delta
-/// warehouse persists across test invocations.
-#[cfg(feature = "spark")]
+/// warehouse persists across test invocations. `BigQuery` mirrors
+/// [`stage_for_target`]'s BigQuery arm: no drop-before-seed step, since the
+/// case's dataset is fresh.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_keyed_for_target(
     recipe: &KeyedRecipe,
     project_dir: &Path,
     db_path: &Path,
     target: ConformanceTarget,
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
-    match target {
+    match &target {
         ConformanceTarget::DuckDb => stage_keyed(recipe, project_dir, db_path),
         ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            std::fs::write(
-                project_dir.join(format!("models/{}.sql", recipe.model_name)),
-                render_keyed_model_file(recipe),
-            )?;
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
-                recipe.source.source_yaml(),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(feature = "spark")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_keyed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    recipe.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target, db_path),
+                )?;
 
-            reset_and_create_spark_keyed_source_table(db_path, recipe)?;
+                reset_and_create_spark_keyed_source_table(db_path, recipe)?;
 
-            crate::link_c_harness::LinkCProject::load(
-                project_dir.to_path_buf(),
-                db_path.to_path_buf(),
-            )
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_keyed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    recipe.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target.clone(), db_path),
+                )?;
+
+                let column_defs = match recipe.source.posture {
+                    SourcePosture::AppendOnly => format!(
+                        "{d} DATE, {id} INT64, {val} INT64",
+                        d = recipe.source.clock_column,
+                        id = recipe.source.key_column,
+                        val = recipe.source.payload_column,
+                    ),
+                    SourcePosture::MutableSnapshot => format!(
+                        "{id} INT64, {val} INT64",
+                        id = recipe.source.key_column,
+                        val = recipe.source.payload_column,
+                    ),
+                };
+                create_bigquery_source_table(dataset, &recipe.source.name, &column_defs)?;
+
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
 }
@@ -928,47 +1095,101 @@ pub fn stage_composed(
 /// `crate::recipe::SPARK_CONFORMANCE_SCHEMA`, dropping any stale model/source
 /// table from a prior run first (drop-before-seed idempotency, mirroring
 /// [`stage_for_target`]/[`stage_keyed_for_target`]'s convention — the Delta
-/// warehouse persists across test invocations).
-#[cfg(feature = "spark")]
+/// warehouse persists across test invocations). `BigQuery` mirrors
+/// [`stage_for_target`]'s BigQuery arm: no drop-before-seed step, since the
+/// case's dataset is fresh.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_composed_for_target(
     recipe: &ComposedKeyedRecipe,
     project_dir: &Path,
     db_path: &Path,
     target: ConformanceTarget,
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
-    match target {
+    match &target {
         ConformanceTarget::DuckDb => stage_composed(recipe, project_dir, db_path),
         ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            std::fs::write(
-                project_dir.join(format!("models/{}.sql", recipe.model_name)),
-                render_composed_model_file(recipe),
-            )?;
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
-                recipe.source.source_yaml(),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(feature = "spark")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_composed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    recipe.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target, db_path),
+                )?;
 
-            reset_and_create_spark_table_for(
-                db_path,
-                &recipe.source.name,
-                &recipe.model_name,
-                &format!(
-                    "{d} DATE, {id} INT, {val} INT",
-                    d = recipe.source.clock_column,
-                    id = recipe.source.key_column,
-                    val = recipe.source.payload_column,
-                ),
-            )?;
+                reset_and_create_spark_table_for(
+                    db_path,
+                    &recipe.source.name,
+                    &recipe.model_name,
+                    &format!(
+                        "{d} DATE, {id} INT, {val} INT",
+                        d = recipe.source.clock_column,
+                        id = recipe.source.key_column,
+                        val = recipe.source.payload_column,
+                    ),
+                )?;
 
-            crate::link_c_harness::LinkCProject::load(
-                project_dir.to_path_buf(),
-                db_path.to_path_buf(),
-            )
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                    render_composed_model_file(recipe),
+                )?;
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                    recipe.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    render_smelt_yml_for(target.clone(), db_path),
+                )?;
+
+                create_bigquery_source_table(
+                    dataset,
+                    &recipe.source.name,
+                    &format!(
+                        "{d} DATE, {id} INT64, {val} INT64",
+                        d = recipe.source.clock_column,
+                        id = recipe.source.key_column,
+                        val = recipe.source.payload_column,
+                    ),
+                )?;
+
+                crate::link_c_harness::LinkCProject::load(
+                    project_dir.to_path_buf(),
+                    db_path.to_path_buf(),
+                )
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
 }
@@ -1102,6 +1323,78 @@ mod tests {
     use crate::recipe::{arb_recipe, RecipePool};
     use proptest::strategy::{Strategy, ValueTree};
     use proptest::test_runner::TestRunner;
+
+    /// `duckdb_and_spark_rendering_is_unchanged`: the rendered `smelt.yml`
+    /// for `ConformanceTarget::DuckDb` and `ConformanceTarget::SparkDelta`
+    /// stays byte-identical to before the enum gained a `BigQuery` arm —
+    /// adding a variant to `ConformanceTarget` must not perturb either
+    /// existing target's own rendering.
+    #[test]
+    fn duckdb_and_spark_rendering_is_unchanged() {
+        let db_path = std::path::PathBuf::from("/tmp/smelt-testkit-fixture/db.duckdb");
+
+        let duckdb_yaml = render_smelt_yml_for(ConformanceTarget::DuckDb, &db_path);
+        let expected_duckdb = format!(
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+            db = db_path.display(),
+        );
+        assert_eq!(
+            duckdb_yaml, expected_duckdb,
+            "DuckDb rendering must stay byte-identical after ConformanceTarget gained a \
+             BigQuery arm"
+        );
+
+        let spark_yaml = render_smelt_yml_for(ConformanceTarget::SparkDelta, &db_path);
+        let warehouse = crate::recipe::spark_warehouse_dir(&db_path);
+        let connect_url = crate::recipe::spark_connect_url();
+        let expected_spark = format!(
+            "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: {connect_url}\n    catalog: spark_catalog\n    schema: {schema}\n    warehouse: {warehouse}\n    format: delta\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+            schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+            warehouse = warehouse.display(),
+        );
+        assert_eq!(
+            spark_yaml, expected_spark,
+            "SparkDelta rendering must stay byte-identical after ConformanceTarget gained a \
+             BigQuery arm"
+        );
+    }
+
+    /// `bigquery_target_block_matches_the_parity_harness_shape`:
+    /// `render_smelt_yml_for(ConformanceTarget::BigQuery{..}, ..)` emits a
+    /// `bq:` block whose body has the same shape (`type`/`project`/
+    /// `dataset`/`schema`/`location` fields, in that order) as
+    /// `crates/smelt-cli/tests/common/mod.rs::bq_target_body` renders for
+    /// the same dataset.
+    #[test]
+    fn bigquery_target_block_matches_the_parity_harness_shape() {
+        let db_path = std::path::PathBuf::from("/tmp/smelt-testkit-fixture/db.duckdb");
+        let dataset = "smelt_test_conf_additive_123_case0".to_string();
+
+        let yaml = render_smelt_yml_for(
+            ConformanceTarget::BigQuery {
+                dataset: dataset.clone(),
+            },
+            &db_path,
+        );
+
+        let project = crate::recipe::bq_project().unwrap_or_default();
+        let location = crate::recipe::bq_location()
+            .map(|l| format!("\n    location: {l}"))
+            .unwrap_or_default();
+        let expected_block = format!(
+            "type: bigquery\n    project: {project}\n    dataset: {dataset}\n    schema: {dataset}{location}"
+        );
+
+        assert!(
+            yaml.contains(&expected_block),
+            "bq: target block body must match crates/smelt-cli/tests/common/mod.rs::bq_target_body's \
+             shape (type/project/dataset/schema/location) for the same dataset:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("targets:\n  bq:\n"),
+            "target key must be `bq`, matching common::targets_yaml's naming:\n{yaml}"
+        );
+    }
 
     /// `rendered_recipe_stages_cleanly` (plan Phase 1 TDD list): every
     /// generated recipe renders to a staged project whose `file_diagnostics`

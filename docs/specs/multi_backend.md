@@ -105,11 +105,15 @@ beyond what the generic Spark Connect adapter exercises is excluded (see §Known
 (`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by
 fixed-recipe parity tests — on every supported backend, via a single dual-execution harness that
 owns the recipe pool, run schedules, and multiset-comparison oracle; the backend under test is a
-parameter, not a duplicated implementation. On DuckDB this runs per-PR as
-`cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in the gated tier
-(see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark --test
-maintenance_conformance_spark`, with a reduced deterministic case count; rollout across the
-recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
+parameter, not a duplicated implementation. The parameter is a `ConformanceTarget` naming the
+backend a staged case runs against — DuckDB, Spark/Delta, or BigQuery (the last carrying the
+dataset the case isolates in, derived rather than threaded so staging and read-back agree
+without shared state) — which every staging/render/run entry point in the harness accepts, so
+adding a backend widens the harness's target seam rather than duplicating it. On DuckDB this
+runs per-PR as `cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in
+the gated tier (see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark
+--test maintenance_conformance_spark`, with a reduced deterministic case count; rollout across
+the recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
 Divergences until it lands.
 
 **CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
