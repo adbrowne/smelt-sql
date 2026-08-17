@@ -66,9 +66,15 @@
 //!   (quota-refusal vs. auth vs. unrecognised) with bounded retry, for a
 //!   live BigQuery sweep to consume before and during a run
 //!   (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 3).
+//! - [`families`] — the target-parametrized owner of the shared
+//!   maintenance-conformance test families (behind the `spark`/`bigquery`
+//!   features): one `ConformanceBackend` trait, one `run_<family>` per
+//!   family, no per-backend re-derivation
+//!   (`docs/plans/20260817-bigquery-generative-conformance.md`).
 
 pub mod bigquery_session;
 pub mod dag;
+pub mod families;
 pub mod feed;
 pub mod link_c_harness;
 pub mod oracle;

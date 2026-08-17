@@ -66,8 +66,8 @@ You are executing this plan from the start of a new session. Your job is to driv
 |-------|----------|--------|------|
 | 1     | done     | 2538c9af | 2026-08-17 |
 | 2     | done     | 49d5375c | 2026-08-17 |
-| 3     | done     |        | 2026-08-17 |
-| 4     | pending  |        |      |
+| 3     | done     | cc3eda18 | 2026-08-17 |
+| 4     | done     |        | 2026-08-17 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -275,6 +275,16 @@ The Spark binary keeps its `#[test]` functions; each constructs a `SparkConforma
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **`hardening-budget.sh` mis-classifies the testkit crate.** The gate's directory heuristic treats
+  `crates/*/src` as production and `*/tests/*` as test code. `smelt-maintenance-testkit` is
+  test-support code all the way down, so moving the shared families out of
+  `smelt-cli/tests/maintenance_conformance_spark/` and into the testkit's `src/` moved ~126
+  `.expect(` sites from uncounted to counted without changing a line of their behaviour, and the
+  baseline was raised to match. The counts are real but the signal is not: the same relocation
+  would inflate the baseline again as further backends' family code lands. The right fix is an
+  exclusion for the crate (or for `src/families/`) in `.claude/scripts/hardening-budget.sh`, which
+  is a change to the gate itself and outside this plan's scope.
 
 ## Verification
 

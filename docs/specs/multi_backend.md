@@ -109,7 +109,12 @@ parameter, not a duplicated implementation. The parameter is a `ConformanceTarge
 backend a staged case runs against — DuckDB, Spark/Delta, or BigQuery (the last carrying the
 dataset the case isolates in, derived rather than threaded so staging and read-back agree
 without shared state) — which every staging/render/run entry point in the harness accepts, so
-adding a backend widens the harness's target seam rather than duplicating it. On DuckDB this
+adding a backend widens the harness's target seam rather than duplicating it. The test families
+themselves have a single owner: each is written once, target-generically, and a backend supplies
+only what genuinely differs about it — the corruption statement its dialect accepts, the pacing
+its rate limits require, how a case's target and schema are named — through declared hooks. A
+family never branches on which backend it is running against; a family that did would be a
+duplicated implementation wearing a parameter. On DuckDB this
 runs per-PR as `cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in
 the gated tier (see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark
 --test maintenance_conformance_spark`, with a reduced deterministic case count; rollout across
