@@ -67,7 +67,8 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 1     | done     | 2538c9af | 2026-08-17 |
 | 2     | done     | 49d5375c | 2026-08-17 |
 | 3     | done     | cc3eda18 | 2026-08-17 |
-| 4     | done     |        | 2026-08-17 |
+| 4     | done     | f330210d | 2026-08-17 |
+| 4b    | done     |        | 2026-08-17 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -207,6 +208,65 @@ The Spark binary keeps its `#[test]` functions; each constructs a `SparkConforma
 - [ ] Spec edit is timeless
 
 **Commit.** `refactor: one parametrized owner for the shared conformance families`
+
+---
+
+### Phase 4b: Finish the parametrization the families only half-took
+
+**Goal.** No shared family assumes a backend's dialect. The extraction moved the families to one
+owner but left three assumptions frozen inside them, which the "does a family `match` on its
+target?" check passes over precisely because a hardcoded assumption is not a branch.
+
+**Why this exists.** The BigQuery leg cannot run against the warehouse until it lands, and each
+item was found by trying: the equivalence oracle's multiset difference is `EXCEPT ALL`, which
+GoogleSQL does not have; the mixed-dimension and pinned families' source DDL says `USING DELTA`;
+the DAG helpers name `SPARK_CONFORMANCE_SCHEMA` directly, so a non-Spark run targets the wrong
+schema silently rather than failing. A fourth is a plain compile break: those helpers are gated
+`#[cfg(feature = "spark")]` while `families::dags` is gated `any(spark, bigquery)`.
+
+**Pre-conditions.** Phase 4.
+
+**TDD tests to write first.**
+- `crates/smelt-maintenance-testkit/src/families/mod.rs::no_family_hardcodes_a_backend_dialect` — a
+  source-level assertion over the family modules and the oracle: no occurrence of `EXCEPT ALL`,
+  `USING DELTA`, or `SPARK_CONFORMANCE_SCHEMA` outside a `ConformanceBackend` implementation. This
+  is the check Phase 4's "no `match` on target" test should have been; a hardcoded dialect is the
+  same defect as a branch, wearing different clothes.
+- `..::multiset_difference_is_backend_supplied_and_stays_a_multiset` — the oracle's difference is
+  supplied by the backend, and every backend's form detects a *duplicate-only* divergence (two
+  copies of a row on one side, one on the other). `EXCEPT ALL`'s multiset semantics are
+  load-bearing for the oracle — `oracle.rs` documents why — so BigQuery, which has only
+  `EXCEPT DISTINCT`, must emulate the multiset difference (rank the duplicates within each row
+  group and difference on the ranked rows) rather than silently degrade to set semantics. Falling
+  back to `EXCEPT DISTINCT` is admissible only if the emulation is shown impractical, and then
+  only as a §Known Divergences entry naming the class of divergence BigQuery's leg stops
+  detecting — never as an unrecorded weakening.
+- `cargo check -p smelt-cli --features bigquery --tests` compiles — the standing gate the current
+  cfg mismatch fails.
+
+**Implementation shape.** Widen `ConformanceBackend` with the seams the families actually need:
+the set-difference operator, the source-table storage clause (empty for engines without one), and
+the schema a case targets. `open_backend` gains the `case` argument BigQuery's per-case dataset
+requires. `dag.rs`'s backend-driven helpers take their schema and storage clause as arguments and
+are gated `any(feature = "spark", feature = "bigquery")` like their caller.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-maintenance-testkit/src/families/*.rs`, `oracle.rs`, `dag.rs`.
+- `crates/smelt-cli/tests/maintenance_conformance_spark/backend.rs` and
+  `crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs` — trait-impl updates only.
+
+**Docs touched.**
+- `docs/specs/multi_backend.md` §Known Divergences — what BigQuery's set-difference comparison
+  gives up relative to the multiset oracle the other legs run.
+
+**Review checklist** (material findings only):
+- [ ] No family body hardcodes a dialect keyword, asserted by a test rather than by inspection
+- [ ] DuckDB and Spark still get `EXCEPT ALL`; the multiset weakening is BigQuery-only and recorded
+- [ ] The live Spark leg re-runs green — this is a refactor of the code that leg exercises
+- [ ] `cargo check -p smelt-cli --features bigquery --tests` passes
+- [ ] Spec edit is timeless
+
+**Commit.** `refactor: the last backend assumptions out of the shared conformance families`
 
 ---
 

@@ -10,7 +10,7 @@ use smelt_backend::Backend;
 
 use crate::families::ConformanceBackend;
 use crate::link_c_harness::{base_request, LinkCProject};
-use crate::oracle::multiset_equal_via_backend;
+use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::MutableEnrichedRecipe;
 use crate::render;
 use crate::s_tracker::STracker;
@@ -61,18 +61,20 @@ pub async fn stage_mixed_recipe_for(
         render::render_smelt_yml_for(target.clone(), &db_path),
     )?;
 
-    reset_and_seed_mixed_tables(b, &db_path, &schema, recipe).await?;
+    reset_and_seed_mixed_tables(b, case, &db_path, &schema, recipe).await?;
 
     LinkCProject::load(project_dir, db_path)
 }
 
 async fn reset_and_seed_mixed_tables(
     b: &dyn ConformanceBackend,
+    case: usize,
     db_path: &std::path::Path,
     schema: &str,
     recipe: &MutableEnrichedRecipe,
 ) -> Result<()> {
-    let backend = b.open_backend(db_path).await?;
+    let backend = b.open_backend(case, db_path).await?;
+    let storage_clause = b.storage_clause();
 
     backend
         .execute_sql(&format!(
@@ -98,7 +100,7 @@ async fn reset_and_seed_mixed_tables(
 
     backend
         .execute_sql(&format!(
-            "CREATE TABLE {schema}.sources_{fact} ({d} DATE, {id} INT, {val} INT) USING DELTA",
+            "CREATE TABLE {schema}.sources_{fact} ({d} DATE, {id} INT, {val} INT){storage_clause}",
             fact = recipe.fact.name,
             d = recipe.fact.clock_column,
             id = recipe.fact.key_column,
@@ -108,7 +110,7 @@ async fn reset_and_seed_mixed_tables(
         .map_err(|e| anyhow::anyhow!("create mixed fact table: {e}"))?;
     backend
         .execute_sql(&format!(
-            "CREATE TABLE {schema}.sources_{dim} ({dim_id} INT, {attr} INT) USING DELTA",
+            "CREATE TABLE {schema}.sources_{dim} ({dim_id} INT, {attr} INT){storage_clause}",
             dim = recipe.dimension.name,
             dim_id = recipe.dimension.key_column,
             attr = recipe.dimension.payload_column,
@@ -221,6 +223,7 @@ fn fact_window_for_id(
 /// [`STracker::materialize_s_as_view`]); the dimension side always reads its
 /// CURRENT physical state.
 async fn assert_mixed_settled_for(
+    b: &dyn ConformanceBackend,
     schema: &str,
     recipe: &MutableEnrichedRecipe,
     backend: &dyn Backend,
@@ -245,7 +248,11 @@ async fn assert_mixed_settled_for(
             &format!("smelt.sources.{}", recipe.dimension.name),
             &format!("{schema}.sources_{}", recipe.dimension.name),
         );
-    let equal = multiset_equal_via_backend(backend, &maintained_sql, &oracle_sql).await?;
+    let equal =
+        multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
+            b.multiset_diff_sql(l, r)
+        })
+        .await?;
     if !equal {
         anyhow::bail!(
             "settled-point equivalence violated for {:?} at run {k}: maintained \
@@ -302,7 +309,7 @@ pub async fn drive_mixed_and_assert_for(
 
                 match tracker.oracle_mode() {
                     crate::oracle_modes::OracleMode::SRestricted => {
-                        assert_mixed_settled_for(&schema, recipe, backend.as_ref(), &tracker, k)
+                        assert_mixed_settled_for(b, &schema, recipe, backend.as_ref(), &tracker, k)
                             .await?;
                         settled_assertions += 1;
                     }

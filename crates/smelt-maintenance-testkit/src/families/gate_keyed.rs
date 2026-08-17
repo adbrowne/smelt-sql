@@ -11,7 +11,7 @@ use smelt_backend::Backend;
 
 use crate::families::ConformanceBackend;
 use crate::link_c_harness::{base_request, LinkCProject};
-use crate::oracle::multiset_equal_via_backend;
+use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::{
     arb_keyed_schedule, ConformanceTarget, KeyedCombiner, KeyedRecipe, KeyedSchedule,
 };
@@ -58,6 +58,7 @@ pub async fn insert_row_keyed_for(
 /// `S_k` as a temp VIEW (`STracker::materialize_s_as_view`) rather than a
 /// temp table.
 pub async fn assert_keyed_equivalence_for(
+    b: &dyn ConformanceBackend,
     schema: &str,
     recipe: &KeyedRecipe,
     backend: &dyn Backend,
@@ -71,7 +72,11 @@ pub async fn assert_keyed_equivalence_for(
     // `render_keyed_oracle_body_over` expects.
     let oracle_sql =
         render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
-    let equal = multiset_equal_via_backend(backend, &maintained_sql, &oracle_sql).await?;
+    let equal =
+        multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
+            b.multiset_diff_sql(l, r)
+        })
+        .await?;
     if !equal {
         anyhow::bail!(
             "keyed end-state equivalence violated for model {:?} at run {k}: maintained \
@@ -121,7 +126,7 @@ pub async fn drive_keyed_and_assert_for(
             .await?;
 
         let k = tracker.record_run(window.start, window.end, snapshot);
-        assert_keyed_equivalence_for(&schema, recipe, backend.as_ref(), &tracker, k).await?;
+        assert_keyed_equivalence_for(b, &schema, recipe, backend.as_ref(), &tracker, k).await?;
     }
     Ok(())
 }

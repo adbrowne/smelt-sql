@@ -259,7 +259,7 @@ Open Questions below.
 
 The capability column, the type-name surface, and the rate limit were established by executing
 statements against the provisioned project (`scripts/bigquery-probe.sh`, `-probe2`, `-probe3`,
-`-probe4`, `-probe-quota`), not from documentation.
+`-probe4`, `-probe-quota`, `-probe-multiset`), not from documentation.
 
 **The per-table modification rate limit binds, and latency is not the governing constraint.**
 Twenty-five sequential `UPDATE`s against one table, spaced by their own ~3 s round trip, all
@@ -299,6 +299,19 @@ spacing all succeeded. Dataset-per-case isolation is therefore affordable, and i
 keeps the daily per-table cap out of reach: a fresh dataset per case means a fresh table per
 case, so no single table accumulates modifications across a sweep, and the per-table daily
 budget is spent only by the steps of one case.
+
+**The equivalence oracle's multiset difference has to be emulated, and the obvious emulation is
+refused.** GoogleSQL has no `EXCEPT ALL` — `EXCEPT ALL is not supported. Only EXCEPT DISTINCT is
+supported.` — so the dual-execution oracle cannot express multiset difference directly, and
+falling back to `EXCEPT DISTINCT` would silently stop detecting duplicate-only divergences. The
+emulation is to rank each row's duplicate copies within its identical-row group and difference the
+ranked rows; the natural partition key is the whole-row alias, and BigQuery refuses it:
+`Partitioning by expressions of type STRUCT containing FLOAT64 is not allowed`. Partitioning by
+`TO_JSON_STRING(t)` is accepted, and the recipe pool generates FLOAT64 columns, so this is the
+binding form rather than a corner case. Measured 2026-08-17 by dry run
+(`scripts/bigquery-probe-multiset.sh`); a dry run type-checks and plans without reading a table,
+so it rejects invalid SQL at no cost. Worth noting that the rejected shape *is* accepted by DuckDB,
+so a test that exercises the emulation against DuckDB proves nothing about BigQuery.
 
 **Type names.** GoogleSQL rejects exactly `VARCHAR`, `TEXT`, `DOUBLE`, `REAL` and `FLOAT`
 (`Type not found`). It accepts the integer aliases (`INTEGER`, `BIGINT`, `SMALLINT`, `TINYINT`),

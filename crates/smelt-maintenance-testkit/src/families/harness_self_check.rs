@@ -60,7 +60,7 @@ pub async fn run_oracle_flags_a_seeded_divergence(b: &dyn ConformanceBackend) ->
         .await
         .expect("seed a divergence");
 
-    let result = assert_equivalence_for(&schema, &recipe, backend.as_ref(), &tracker, k).await;
+    let result = assert_equivalence_for(b, &schema, &recipe, backend.as_ref(), &tracker, k).await;
     anyhow::ensure!(
         result.is_err(),
         "oracle failed to flag a seeded divergence — the harness would be silently reporting \

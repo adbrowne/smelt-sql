@@ -675,7 +675,12 @@ pub fn stage_dag_for_target(
                     crate::render::render_smelt_yml_for(target, db_path),
                 )?;
 
-                reset_and_create_spark_dag_tables(db_path, dag)?;
+                reset_and_create_spark_dag_tables(
+                    db_path,
+                    dag,
+                    crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+                    " USING DELTA",
+                )?;
 
                 LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
             }
@@ -732,9 +737,15 @@ pub fn stage_dag_for_target(
 }
 
 #[cfg(feature = "spark")]
-fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow::Result<()> {
+fn reset_and_create_spark_dag_tables(
+    db_path: &Path,
+    dag: &DagRecipe,
+    schema: &str,
+    storage_clause: &str,
+) -> anyhow::Result<()> {
     let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let schema = schema.to_string();
+    let storage_clause = storage_clause.to_string();
     let source_table = format!("{schema}.sources_{}", dag.source.name);
     let column_defs = format!(
         "{d} DATE, {id} INT, {val} INT",
@@ -765,7 +776,7 @@ fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow:
         .map_err(|e| anyhow::anyhow!("drop stale Spark DAG source table {source_table}: {e}"))?;
         smelt_backend::Backend::execute_sql(
             backend.as_ref(),
-            &format!("CREATE TABLE {source_table} ({column_defs}) USING DELTA"),
+            &format!("CREATE TABLE {source_table} ({column_defs}){storage_clause}"),
         )
         .await
         .map_err(|e| anyhow::anyhow!("create Spark DAG source table {source_table}: {e}"))?;
@@ -775,13 +786,17 @@ fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow:
 
 /// [`insert_rows`] generalised over `&dyn Backend` (plan Phase 5): appends
 /// `rows` into `dag`'s physical source table via `Backend::execute_sql`
-/// (Delta `INSERT INTO`) rather than a raw `duckdb::Connection` — never a
-/// host-filesystem load path.
-#[cfg(feature = "spark")]
+/// (Delta/BigQuery `INSERT INTO`) rather than a raw `duckdb::Connection` —
+/// never a host-filesystem load path. Takes `schema` explicitly
+/// rather than hardcoding `SPARK_CONFORMANCE_SCHEMA` — `families::dags` (the
+/// only caller) resolves it once per case via `ConformanceBackend::schema`
+/// and threads it through, the same way every other shared family does.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn insert_rows_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,
     rows: &[(chrono::NaiveDate, i64, i64)],
+    schema: &str,
 ) -> anyhow::Result<()> {
     if rows.is_empty() {
         return Ok(());
@@ -792,28 +807,30 @@ pub async fn insert_rows_via_backend(
         .collect();
     backend
         .execute_sql(&format!(
-            "INSERT INTO {}.sources_{} VALUES {}",
-            crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+            "INSERT INTO {schema}.sources_{} VALUES {}",
             dag.source.name,
             values.join(", ")
         ))
         .await
-        .map_err(|e| anyhow::anyhow!("insert DAG source rows on Spark: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("insert DAG source rows: {e}"))?;
     Ok(())
 }
 
 /// [`fetch_node_multiset`] generalised over `&dyn Backend` (plan Phase 5):
 /// same column-exact, no-runtime-introspection comparison primitive, read
-/// back via `Backend::execute_sql` and cast to Spark's unsized `STRING`
+/// back via `Backend::execute_sql` and cast to an unsized string type
 /// (DuckDB's unsized `VARCHAR` is refused by Spark's parser —
 /// `DATATYPE_MISSING_SIZE`, the same dialect gap
-/// `emit_recurrence_bound_probe` had) rather than DuckDB's `VARCHAR`.
-#[cfg(feature = "spark")]
+/// `emit_recurrence_bound_probe` had — `STRING` is accepted by both Spark
+/// and GoogleSQL) rather than DuckDB's `VARCHAR`. Takes `schema` explicitly
+/// for the same reason [`insert_rows_via_backend`] does.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn fetch_node_multiset_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,
     idx: usize,
     where_clause: Option<&str>,
+    schema: &str,
 ) -> anyhow::Result<Vec<Vec<String>>> {
     let node = &dag.nodes[idx];
     let cols = node_output_columns(dag, node);
@@ -822,7 +839,6 @@ pub async fn fetch_node_multiset_via_backend(
         .map(|c| format!("CAST({c} AS STRING) AS {c}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
     let sql = match where_clause {
         Some(w) => format!("SELECT {cast_list} FROM {schema}.{} WHERE {w}", node.name),
         None => format!("SELECT {cast_list} FROM {schema}.{}", node.name),

@@ -81,7 +81,33 @@ pub trait ConformanceBackend: Sync {
     /// Open a backend connection directly against `db_path` (before a
     /// [`crate::link_c_harness::LinkCProject`] exists yet) — needed by
     /// staging helpers that seed physical tables ahead of the first run.
-    async fn open_backend(&self, db_path: &Path) -> Result<Box<dyn Backend>>;
+    /// Takes `case` so a per-case-dataset backend (BigQuery) can
+    /// resolve which case's dataset to connect to, rather than being forced
+    /// to guess — `schema`/`target` already take `case` for the same reason.
+    async fn open_backend(&self, case: usize, db_path: &Path) -> Result<Box<dyn Backend>>;
+
+    /// SQL text for `(left) MINUS (right)` preserving MULTISET semantics — a
+    /// row present N times more on `left` than on `right` must still
+    /// surface as N divergent rows, never degrade to per-value SET
+    /// membership (`oracle.rs`'s own doc comment explains why: plain
+    /// `EXCEPT`/`EXCEPT DISTINCT` is blind to multiplicity, exactly the
+    /// divergence class the oracle exists to catch). Default: native
+    /// `EXCEPT ALL` (DuckDB, Spark/Delta both support it). GoogleSQL has no
+    /// `EXCEPT ALL`; BigQuery overrides this with
+    /// [`crate::oracle::bigquery_multiset_diff_sql`]'s row-ranking
+    /// emulation rather than falling back to plain `EXCEPT DISTINCT`.
+    fn multiset_diff_sql(&self, left_sql: &str, right_sql: &str) -> String {
+        crate::oracle::except_all_diff_sql(left_sql, right_sql)
+    }
+
+    /// The source-table storage clause this backend's `CREATE TABLE` needs,
+    /// INCLUDING its own leading space when non-empty (e.g. `" USING
+    /// DELTA"` for Spark/Delta) so callers can splice it directly after a
+    /// column list — empty for engines with no such clause (BigQuery,
+    /// DuckDB).
+    fn storage_clause(&self) -> &str {
+        ""
+    }
 }
 
 #[cfg(test)]
@@ -167,5 +193,195 @@ mod tests {
                  staged output"
             );
         }
+    }
+
+    /// `no_family_hardcodes_a_backend_dialect`
+    /// a source-level check that no shared family body spells a
+    /// backend's dialect directly — `EXCEPT ALL` (the oracle's diff
+    /// operator, now backend-supplied via `ConformanceBackend::
+    /// multiset_diff_sql`), `USING DELTA` (Spark/Delta's storage clause, now
+    /// `ConformanceBackend::storage_clause`), or `SPARK_CONFORMANCE_SCHEMA`
+    /// (now resolved through `ConformanceBackend::schema`). This is the
+    /// check Phase 4's "no `match` on target" guard should have been: a
+    /// hardcoded dialect assumption is the same defect as a branch on
+    /// `ConformanceTarget`, wearing different clothes — it never shows up as
+    /// a `match`, but it just as surely means the family body is not
+    /// actually target-generic.
+    ///
+    /// Scoped to the family BODY files — `mod.rs` (this file) is the
+    /// `ConformanceBackend` trait's own definition, where `EXCEPT ALL` is
+    /// the documented DEFAULT `multiset_diff_sql` implementation (every
+    /// backend except BigQuery's override), and `oracle.rs` is the general,
+    /// backend-agnostic multiset-comparison primitive (also used directly by
+    /// the DuckDB-only `maintenance_conformance/{gate,pinned}.rs`, outside
+    /// this plan's scope) — neither is a "family body".
+    #[test]
+    fn no_family_hardcodes_a_backend_dialect() {
+        let forbidden = ["EXCEPT ALL", "USING DELTA", "SPARK_CONFORMANCE_SCHEMA"];
+        let family_body_files = [
+            "dags.rs",
+            "feed.rs",
+            "gate.rs",
+            "gate_composed.rs",
+            "gate_keyed.rs",
+            "gate_mixed.rs",
+            "harness_self_check.rs",
+            "pinned.rs",
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/families");
+        for file in family_body_files {
+            let path = dir.join(file);
+            let contents = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read family body file {path:?}: {e}"));
+            for needle in forbidden {
+                assert!(
+                    !contents.contains(needle),
+                    "{path:?} hardcodes {needle:?} — a family body must resolve a backend's \
+                     dialect through ConformanceBackend (multiset_diff_sql/storage_clause/\
+                     schema), never embed it directly, or it is a duplicated implementation \
+                     wearing a parameter"
+                );
+            }
+        }
+    }
+
+    /// `multiset_difference_is_backend_supplied_and_stays_a_multiset`: the
+    /// family-facing plumbing (`oracle::multiset_equal_via_backend_with_diff`
+    /// fed a `ConformanceBackend::multiset_diff_sql`) still detects a
+    /// duplicate-only divergence for the DEFAULT diff operator (`EXCEPT
+    /// ALL`, what DuckDB/Spark's `ConformanceBackend` impls use), executed
+    /// here against a real DuckDB connection through the SAME seam a family
+    /// body reaches (`ConformanceBackend::multiset_diff_sql`, never a
+    /// hardcoded `EXCEPT ALL` in the family itself). BigQuery's row-ranking
+    /// emulation (`crate::oracle::bigquery_multiset_diff_sql`) is asserted
+    /// OFFLINE below (SQL shape only — DuckDB has no `TO_JSON_STRING`, so
+    /// there is no honest local executor for it; `oracle.rs`'s own tests
+    /// carry the same offline-only proof and explain why).
+    #[tokio::test]
+    async fn multiset_difference_is_backend_supplied_and_stays_a_multiset() {
+        use std::path::Path;
+
+        use anyhow::Result;
+        use async_trait::async_trait;
+        use smelt_backend::Backend;
+
+        use crate::families::ConformanceBackend;
+        use crate::oracle::{bigquery_multiset_diff_sql, multiset_equal_via_backend_with_diff};
+        use crate::recipe::ModelRecipe;
+
+        struct DefaultDiffBackend;
+        struct BigQueryLikeDiffBackend;
+
+        #[async_trait]
+        impl ConformanceBackend for DefaultDiffBackend {
+            fn target(&self, _case: usize) -> ConformanceTarget {
+                unimplemented!("not exercised by this test")
+            }
+            fn schema(&self, _case: usize) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            fn engine_name(&self) -> &str {
+                unimplemented!("not exercised by this test")
+            }
+            fn skip_reason(&self) -> Option<String> {
+                unimplemented!("not exercised by this test")
+            }
+            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            async fn before_step(&self) {
+                unimplemented!("not exercised by this test")
+            }
+            async fn open_backend(
+                &self,
+                _case: usize,
+                _db_path: &Path,
+            ) -> Result<Box<dyn Backend>> {
+                unimplemented!("not exercised by this test")
+            }
+            // multiset_diff_sql: uses the trait default (EXCEPT ALL).
+        }
+
+        #[async_trait]
+        impl ConformanceBackend for BigQueryLikeDiffBackend {
+            fn target(&self, _case: usize) -> ConformanceTarget {
+                unimplemented!("not exercised by this test")
+            }
+            fn schema(&self, _case: usize) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            fn engine_name(&self) -> &str {
+                unimplemented!("not exercised by this test")
+            }
+            fn skip_reason(&self) -> Option<String> {
+                unimplemented!("not exercised by this test")
+            }
+            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            async fn before_step(&self) {
+                unimplemented!("not exercised by this test")
+            }
+            async fn open_backend(
+                &self,
+                _case: usize,
+                _db_path: &Path,
+            ) -> Result<Box<dyn Backend>> {
+                unimplemented!("not exercised by this test")
+            }
+            fn multiset_diff_sql(&self, left_sql: &str, right_sql: &str) -> String {
+                bigquery_multiset_diff_sql(left_sql, right_sql)
+            }
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+
+        for stmt in [
+            "CREATE TABLE main.left_t(id BIGINT, val DOUBLE)",
+            "INSERT INTO main.left_t VALUES (1, 10.0), (1, 10.0)",
+            "CREATE TABLE main.right_t(id BIGINT, val DOUBLE)",
+            "INSERT INTO main.right_t VALUES (1, 10.0)",
+        ] {
+            backend
+                .execute_sql(stmt)
+                .await
+                .unwrap_or_else(|e| panic!("seed duplicate-only divergence ({stmt}): {e}"));
+        }
+
+        let left_sql = "SELECT * FROM main.left_t";
+        let right_sql = "SELECT * FROM main.right_t";
+
+        // Executed proof: the default diff operator, reached ONLY through
+        // `ConformanceBackend::multiset_diff_sql` (never a family hardcoding
+        // `EXCEPT ALL` itself), still flags the seeded duplicate.
+        let default_backend: Box<dyn ConformanceBackend> = Box::new(DefaultDiffBackend);
+        let equal = multiset_equal_via_backend_with_diff(&backend, left_sql, right_sql, |l, r| {
+            default_backend.multiset_diff_sql(l, r)
+        })
+        .await
+        .expect("default diff operator's multiset comparison must not error");
+        assert!(
+            !equal,
+            "the default (EXCEPT ALL) diff operator, reached through \
+             ConformanceBackend::multiset_diff_sql, failed to flag a duplicate-only divergence"
+        );
+
+        // Offline proof: BigQuery's `ConformanceBackend` override reaches
+        // the SAME row-ranking emulation `oracle.rs` defines. Not executed
+        // here — see `oracle.rs`'s own offline shape test
+        // (`bigquery_diff_sql_partitions_by_to_json_string_and_differences_ranked_rows`)
+        // for why (DuckDB has no `TO_JSON_STRING`).
+        let bq_backend: Box<dyn ConformanceBackend> = Box::new(BigQueryLikeDiffBackend);
+        let bq_sql = bq_backend.multiset_diff_sql(left_sql, right_sql);
+        assert!(
+            bq_sql.contains("TO_JSON_STRING(t)") && bq_sql.contains("EXCEPT DISTINCT"),
+            "BigQueryLikeDiffBackend's ConformanceBackend override must reach \
+             oracle::bigquery_multiset_diff_sql's row-ranking emulation, not some other \
+             diff shape: {bq_sql:?}"
+        );
     }
 }

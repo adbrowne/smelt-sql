@@ -23,7 +23,7 @@ use crate::families::gate::{drive_and_assert_for, stage_recipe_for};
 use crate::families::gate_keyed::stage_keyed_recipe_for;
 use crate::families::gate_mixed::{classify_mixed, insert_fact_row_for, stage_mixed_recipe_for};
 use crate::families::ConformanceBackend;
-use crate::oracle::multiset_equal_via_backend;
+use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::{
     arb_recipe, BodyConstruct, KeyedCombiner, KeyedRecipe, ModelRecipe, MutableEnrichedRecipe,
     RecipePool,
@@ -284,9 +284,14 @@ mod hazard {
                 &format!("{schema}.sources_{}", recipe.fact.name),
             );
         assert!(
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql)
-                .await
-                .expect("catch-up multiset comparison"),
+            multiset_equal_via_backend_with_diff(
+                backend.as_ref(),
+                &maintained_sql,
+                &oracle_sql,
+                |l, r| b.multiset_diff_sql(l, r)
+            )
+            .await
+            .expect("catch-up multiset comparison"),
             "catch-up run after in-place dimension mutation diverged from a full-refresh \
              oracle over the CURRENT dimension contents"
         );
@@ -349,9 +354,10 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         .expect("write smelt.yml");
 
         let backend = b
-            .open_backend(&db_path)
+            .open_backend(0, &db_path)
             .await
             .expect("open backend for g-10 staging");
+        let storage_clause = b.storage_clause();
         for table in ["facts_enriched", "sources_facts", "sources_dims"] {
             backend
                 .execute_sql(&format!("DROP TABLE IF EXISTS {schema}.{table}"))
@@ -360,8 +366,8 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         }
         backend
             .execute_sql(&format!(
-                "CREATE TABLE {schema}.sources_facts (d DATE, user_id INT, dt INT, val DOUBLE) \
-                 USING DELTA"
+                "CREATE TABLE {schema}.sources_facts (d DATE, user_id INT, dt INT, val \
+                 DOUBLE){storage_clause}"
             ))
             .await
             .expect("create g-10 facts table");
@@ -374,8 +380,8 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
             .expect("seed g-10 facts");
         backend
             .execute_sql(&format!(
-                "CREATE TABLE {schema}.sources_dims (user_id INT, dt INT, payload INT) USING \
-                 DELTA"
+                "CREATE TABLE {schema}.sources_dims (user_id INT, dt INT, payload \
+                 INT){storage_clause}"
             ))
             .await
             .expect("create g-10 dims table");
@@ -412,9 +418,14 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
              DATE '2024-01-01'"
         );
         assert!(
-            multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql)
-                .await
-                .expect("composite-key multiset comparison"),
+            multiset_equal_via_backend_with_diff(
+                backend.as_ref(),
+                &maintained_sql,
+                &oracle_sql,
+                |l, r| b.multiset_diff_sql(l, r)
+            )
+            .await
+            .expect("composite-key multiset comparison"),
             "composite-key (user_id, dt) join fan-out diverged from the full-refresh oracle"
         );
     }

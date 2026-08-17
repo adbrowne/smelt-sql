@@ -95,6 +95,7 @@ fn stage_pair_for(
 
 async fn assert_every_node_equal_for(
     target: crate::recipe::ConformanceTarget,
+    schema: &str,
     dag: &DagRecipe,
     inc: &LinkCProject,
     full: &LinkCProject,
@@ -104,12 +105,14 @@ async fn assert_every_node_equal_for(
     let inc_backend = inc.backend_for_target(target.clone()).await?;
     let full_backend = full.backend_for_target(target).await?;
     for idx in 0..dag.nodes.len() {
-        let inc_rows = fetch_node_multiset_via_backend(inc_backend.as_ref(), dag, idx, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch inc node {idx}: {e}"))?;
-        let full_rows = fetch_node_multiset_via_backend(full_backend.as_ref(), dag, idx, None)
-            .await
-            .map_err(|e| anyhow::anyhow!("fetch full node {idx}: {e}"))?;
+        let inc_rows =
+            fetch_node_multiset_via_backend(inc_backend.as_ref(), dag, idx, None, schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("fetch inc node {idx}: {e}"))?;
+        let full_rows =
+            fetch_node_multiset_via_backend(full_backend.as_ref(), dag, idx, None, schema)
+                .await
+                .map_err(|e| anyhow::anyhow!("fetch full node {idx}: {e}"))?;
         anyhow::ensure!(
             inc_rows == full_rows,
             "case {case} ({context}): node {:?} diverged from the full-refresh oracle \
@@ -146,7 +149,7 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into inc");
         drop(inc_backend);
@@ -166,7 +169,7 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into inc");
         drop(inc_backend);
@@ -202,10 +205,10 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
@@ -219,7 +222,7 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &dag, &inc, &full, i, "chain")
+        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "chain")
             .await
             .expect("compare nodes");
     }
@@ -247,7 +250,7 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into inc");
         drop(inc_backend);
@@ -266,7 +269,7 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into inc");
         drop(inc_backend);
@@ -308,10 +311,10 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
@@ -325,7 +328,7 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &dag, &inc, &full, i, "diamond")
+        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "diamond")
             .await
             .expect("compare nodes");
     }
@@ -361,7 +364,7 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into inc");
         drop(inc_backend);
@@ -398,7 +401,7 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
             .await
             .expect("open inc backend");
         b.before_step().await;
-        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(inc_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into inc");
         drop(inc_backend);
@@ -427,10 +430,10 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
@@ -444,7 +447,7 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &dag, &inc, &full, i, "leak")
+        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "leak")
             .await
             .expect("compare nodes");
     }
@@ -509,7 +512,7 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
             .await
             .expect("open partial backend");
         b.before_step().await;
-        insert_rows_via_backend(partial_backend.as_ref(), &dag, &period.rows)
+        insert_rows_via_backend(partial_backend.as_ref(), &dag, &period.rows, &b.schema(i))
             .await
             .expect("insert period rows into partial");
         drop(partial_backend);
@@ -536,10 +539,10 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &period.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &period.rows, &b.schema(i))
             .await
             .expect("insert period rows into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &outside.rows)
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &outside.rows, &b.schema(i))
             .await
             .expect("insert outside rows into full");
         drop(full_backend);
@@ -562,12 +565,14 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
             .backend_for_target(target.clone())
             .await
             .expect("open full backend for read-back");
+        let schema = b.schema(i);
         for idx in 0..dag.nodes.len() {
             let partial_rows = fetch_node_multiset_via_backend(
                 partial_backend.as_ref(),
                 &dag,
                 idx,
                 Some(&where_clause),
+                &schema,
             )
             .await
             .expect("fetch partial node rows");
@@ -576,6 +581,7 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
                 &dag,
                 idx,
                 Some(&where_clause),
+                &schema,
             )
             .await
             .expect("fetch full node rows");

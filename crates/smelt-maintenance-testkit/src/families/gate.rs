@@ -13,7 +13,7 @@ use smelt_backend::Backend;
 
 use crate::families::ConformanceBackend;
 use crate::link_c_harness::{base_request, LinkCProject};
-use crate::oracle::multiset_equal_via_backend;
+use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::{arb_recipe, ConstructKind, ModelEdit, ModelRecipe, RecipePool};
 use crate::render;
 use crate::s_tracker::STracker;
@@ -64,13 +64,14 @@ pub async fn insert_row_for(
 /// as a temp view ([`STracker::materialize_s_as_view`]), then `EXCEPT
 /// ALL`-compare it against the maintained table `<schema>.<model_name>`.
 pub async fn assert_equivalence_for(
+    b: &dyn ConformanceBackend,
     schema: &str,
     recipe: &ModelRecipe,
     backend: &dyn Backend,
     tracker: &STracker,
     k: usize,
 ) -> Result<()> {
-    assert_equivalence_for_with_edit(schema, recipe, backend, tracker, k, None).await
+    assert_equivalence_for_with_edit(b, schema, recipe, backend, tracker, k, None).await
 }
 
 /// [`assert_equivalence_for`] generalised over an optional post-`RewriteModel`
@@ -78,6 +79,7 @@ pub async fn assert_equivalence_for(
 /// REWRITTEN body (`STracker::s_restricted_oracle_sql_with_edit`) rather than
 /// the original recipe's own body.
 pub async fn assert_equivalence_for_with_edit(
+    b: &dyn ConformanceBackend,
     schema: &str,
     recipe: &ModelRecipe,
     backend: &dyn Backend,
@@ -91,7 +93,11 @@ pub async fn assert_equivalence_for_with_edit(
         Some(edit) => tracker.s_restricted_oracle_sql_with_edit(recipe, edit),
         None => tracker.s_restricted_oracle_sql(recipe),
     };
-    let equal = multiset_equal_via_backend(backend, &maintained_sql, &oracle_sql).await?;
+    let equal =
+        multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
+            b.multiset_diff_sql(l, r)
+        })
+        .await?;
     if !equal {
         anyhow::bail!(
             "S-restricted equivalence violated for model {:?} at run {k} (edit {edit:?}): \
@@ -154,6 +160,7 @@ pub async fn drive_and_assert_for(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
                 assert_equivalence_for_with_edit(
+                    b,
                     &schema,
                     recipe,
                     backend.as_ref(),
@@ -191,6 +198,7 @@ pub async fn drive_and_assert_for(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
                 assert_equivalence_for_with_edit(
+                    b,
                     &schema,
                     recipe,
                     backend.as_ref(),
@@ -225,6 +233,7 @@ pub async fn drive_and_assert_for(
                 let k = tracker.record_full_refresh(snapshot);
                 last_k = Some(k);
                 assert_equivalence_for_with_edit(
+                    b,
                     &schema,
                     recipe,
                     backend.as_ref(),
@@ -257,6 +266,7 @@ pub async fn drive_and_assert_for(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
                 assert_equivalence_for_with_edit(
+                    b,
                     &schema,
                     recipe,
                     backend.as_ref(),

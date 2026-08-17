@@ -30,7 +30,7 @@ use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_mainte
 
 use crate::families::ConformanceBackend;
 use crate::link_c_harness::LinkCProject;
-use crate::oracle::multiset_equal_via_backend;
+use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::{
     arb_composed_route, arb_composed_route3_schedule, ComposedKeyedRecipe, ComposedRoute,
     ComposedRoute3Schedule,
@@ -213,13 +213,18 @@ fn composed_route3_oracle_sql(schema: &str, source_name: &str) -> String {
 }
 
 async fn assert_composed_route3_equivalence_for(
+    b: &dyn ConformanceBackend,
     schema: &str,
     backend: &dyn Backend,
     recipe: &ComposedKeyedRecipe,
 ) -> Result<()> {
     let maintained_sql = format!("SELECT * FROM {schema}.{}", recipe.model_name);
     let oracle_sql = composed_route3_oracle_sql(schema, &recipe.source.name);
-    if !multiset_equal_via_backend(backend, &maintained_sql, &oracle_sql).await? {
+    if !multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
+        b.multiset_diff_sql(l, r)
+    })
+    .await?
+    {
         anyhow::bail!(
             "composed route-3 equivalence violated for {:?}: maintained ({maintained_sql:?}) \
              != oracle ({oracle_sql:?})",
@@ -230,6 +235,7 @@ async fn assert_composed_route3_equivalence_for(
 }
 
 async fn assert_composed_route3_per_slice_for(
+    b: &dyn ConformanceBackend,
     schema: &str,
     backend: &dyn Backend,
     recipe: &ComposedKeyedRecipe,
@@ -253,7 +259,11 @@ async fn assert_composed_route3_per_slice_for(
             "SELECT * FROM ({}) t WHERE last_seen = DATE '{v}'",
             composed_route3_oracle_sql(schema, &recipe.source.name)
         );
-        if !multiset_equal_via_backend(backend, &maintained_sql, &oracle_sql).await? {
+        if !multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
+            b.multiset_diff_sql(l, r)
+        })
+        .await?
+        {
             anyhow::bail!(
                 "composed route-3 per-slice equivalence violated for {:?} at last_seen {v}: \
                  maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})",
@@ -333,8 +343,8 @@ async fn drive_composed_route3_and_assert_for(
             )
         })?;
 
-        assert_composed_route3_equivalence_for(schema, backend, recipe).await?;
-        assert_composed_route3_per_slice_for(schema, backend, recipe).await?;
+        assert_composed_route3_equivalence_for(b, schema, backend, recipe).await?;
+        assert_composed_route3_per_slice_for(b, schema, backend, recipe).await?;
     }
     Ok(())
 }

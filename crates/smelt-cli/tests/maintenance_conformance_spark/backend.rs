@@ -66,7 +66,15 @@ impl ConformanceBackend for SparkConformanceBackend {
         // No pacing needed against a local/dev Spark Connect server.
     }
 
-    async fn open_backend(&self, db_path: &Path) -> anyhow::Result<Box<dyn Backend>> {
+    async fn open_backend(&self, _case: usize, db_path: &Path) -> anyhow::Result<Box<dyn Backend>> {
         open_spark_conformance_backend(db_path).await
+    }
+
+    fn storage_clause(&self) -> &str {
+        // Delta's own storage clause — the mixed-pool/pinned-hazard staging
+        // paths splice this directly after a `CREATE TABLE` column list.
+        // `multiset_diff_sql` uses the trait default (`EXCEPT ALL`, which
+        // Spark SQL supports natively) — no override needed here.
+        " USING DELTA"
     }
 }
