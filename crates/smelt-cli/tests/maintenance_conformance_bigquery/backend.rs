@@ -115,6 +115,21 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         bq_conformance_dataset(self.family, &case.to_string())
     }
 
+    fn twin_target(&self, case: usize) -> ConformanceTarget {
+        // A fresh dataset, distinct from `target(case)`'s
+        // (`docs/plans/20260817-bigquery-generative-conformance.md` Phase
+        // 5b) — `families::dags`'s full-refresh oracle twin must never race
+        // the incremental project to create the same table on the SAME
+        // dataset (`409 Already Exists`).
+        ConformanceTarget::BigQuery {
+            dataset: bq_conformance_dataset(self.family, &format!("{case}-full")),
+        }
+    }
+
+    fn twin_schema(&self, case: usize) -> String {
+        bq_conformance_dataset(self.family, &format!("{case}-full"))
+    }
+
     fn engine_name(&self) -> &str {
         "bq"
     }

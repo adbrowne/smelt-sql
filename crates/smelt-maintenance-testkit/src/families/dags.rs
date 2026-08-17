@@ -74,6 +74,13 @@ fn discover(
     Ok((models, source_infos))
 }
 
+/// Stages the incremental project against `b.target(case)` and its
+/// full-refresh oracle twin against `b.twin_target(case)`
+/// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 5b) —
+/// deliberately NOT the same target for both: a shared-dataset backend
+/// (BigQuery) would otherwise have the twin's first `CREATE TABLE` race the
+/// incremental project's own on the exact same dataset (`409 Already
+/// Exists`).
 fn stage_pair_for(
     b: &dyn ConformanceBackend,
     dag: &DagRecipe,
@@ -88,29 +95,32 @@ fn stage_pair_for(
     let full_dir = tmp.path().join(format!("full-{case}"));
     let full_db = full_dir.join("unused.duckdb");
     std::fs::create_dir_all(&full_dir)?;
-    let full = stage_dag_for_target(dag, &full_dir, &full_db, b.target(case))?;
+    let full = stage_dag_for_target(dag, &full_dir, &full_db, b.twin_target(case))?;
 
     Ok((inc, full))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn assert_every_node_equal_for(
-    target: crate::recipe::ConformanceTarget,
-    schema: &str,
+    inc_target: crate::recipe::ConformanceTarget,
+    inc_schema: &str,
+    full_target: crate::recipe::ConformanceTarget,
+    full_schema: &str,
     dag: &DagRecipe,
     inc: &LinkCProject,
     full: &LinkCProject,
     case: usize,
     context: &str,
 ) -> Result<()> {
-    let inc_backend = inc.backend_for_target(target.clone()).await?;
-    let full_backend = full.backend_for_target(target).await?;
+    let inc_backend = inc.backend_for_target(inc_target).await?;
+    let full_backend = full.backend_for_target(full_target).await?;
     for idx in 0..dag.nodes.len() {
         let inc_rows =
-            fetch_node_multiset_via_backend(inc_backend.as_ref(), dag, idx, None, schema)
+            fetch_node_multiset_via_backend(inc_backend.as_ref(), dag, idx, None, inc_schema)
                 .await
                 .map_err(|e| anyhow::anyhow!("fetch inc node {idx}: {e}"))?;
         let full_rows =
-            fetch_node_multiset_via_backend(full_backend.as_ref(), dag, idx, None, schema)
+            fetch_node_multiset_via_backend(full_backend.as_ref(), dag, idx, None, full_schema)
                 .await
                 .map_err(|e| anyhow::anyhow!("fetch full node {idx}: {e}"))?;
         anyhow::ensure!(
@@ -143,6 +153,7 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
         let tmp = TempDir::new().expect("tempdir");
         let (inc, full) = stage_pair_for(b, &dag, &tmp, i).expect("stage pair");
         let target = b.target(i);
+        let full_target = b.twin_target(i);
 
         let inc_backend = inc
             .backend_for_target(target.clone())
@@ -201,20 +212,20 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
         }
 
         let full_backend = full
-            .backend_for_target(target.clone())
+            .backend_for_target(full_target.clone())
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.twin_schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.twin_schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
         b.before_step().await;
         full.run_with_target(
-            target.clone(),
+            full_target.clone(),
             &format!("{}-chain-{i}-full", b.engine_name()),
             base_request(b.engine_name()),
             &smelt_runtime::NoOpReporter,
@@ -222,9 +233,19 @@ pub async fn run_chain_since_upstream_dirty_set_suffices(
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "chain")
-            .await
-            .expect("compare nodes");
+        assert_every_node_equal_for(
+            target,
+            &b.schema(i),
+            full_target,
+            &b.twin_schema(i),
+            &dag,
+            &inc,
+            &full,
+            i,
+            "chain",
+        )
+        .await
+        .expect("compare nodes");
     }
     Ok(())
 }
@@ -244,6 +265,7 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
         let tmp = TempDir::new().expect("tempdir");
         let (inc, full) = stage_pair_for(b, &dag, &tmp, i).expect("stage pair");
         let target = b.target(i);
+        let full_target = b.twin_target(i);
 
         let inc_backend = inc
             .backend_for_target(target.clone())
@@ -307,20 +329,20 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
         }
 
         let full_backend = full
-            .backend_for_target(target.clone())
+            .backend_for_target(full_target.clone())
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.twin_schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.twin_schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
         b.before_step().await;
         full.run_with_target(
-            target.clone(),
+            full_target.clone(),
             &format!("{}-diamond-{i}-full", b.engine_name()),
             base_request(b.engine_name()),
             &smelt_runtime::NoOpReporter,
@@ -328,9 +350,19 @@ pub async fn run_diamond_propagation_suffices(b: &dyn ConformanceBackend, n: usi
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "diamond")
-            .await
-            .expect("compare nodes");
+        assert_every_node_equal_for(
+            target,
+            &b.schema(i),
+            full_target,
+            &b.twin_schema(i),
+            &dag,
+            &inc,
+            &full,
+            i,
+            "diamond",
+        )
+        .await
+        .expect("compare nodes");
     }
     Ok(())
 }
@@ -358,6 +390,7 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
         let tmp = TempDir::new().expect("tempdir");
         let (inc, full) = stage_pair_for(b, &dag, &tmp, i).expect("stage pair");
         let target = b.target(i);
+        let full_target = b.twin_target(i);
 
         let inc_backend = inc
             .backend_for_target(target.clone())
@@ -426,20 +459,20 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
         }
 
         let full_backend = full
-            .backend_for_target(target.clone())
+            .backend_for_target(full_target.clone())
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.twin_schema(i))
             .await
             .expect("insert w1 into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &w2.rows, &b.twin_schema(i))
             .await
             .expect("insert w2 into full");
         drop(full_backend);
         b.before_step().await;
         full.run_with_target(
-            target.clone(),
+            full_target.clone(),
             &format!("{}-leak-{i}-full", b.engine_name()),
             base_request(b.engine_name()),
             &smelt_runtime::NoOpReporter,
@@ -447,9 +480,19 @@ pub async fn run_upstream_payload_in_downstream_skeleton_position(
         .await
         .unwrap_or_else(|e| panic!("case {i}: full-refresh oracle build failed: {e}"));
 
-        assert_every_node_equal_for(target, &b.schema(i), &dag, &inc, &full, i, "leak")
-            .await
-            .expect("compare nodes");
+        assert_every_node_equal_for(
+            target,
+            &b.schema(i),
+            full_target,
+            &b.twin_schema(i),
+            &dag,
+            &inc,
+            &full,
+            i,
+            "leak",
+        )
+        .await
+        .expect("compare nodes");
     }
 
     anyhow::ensure!(
@@ -480,6 +523,7 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
         let tmp = TempDir::new().expect("tempdir");
         let (partial, full) = stage_pair_for(b, &dag, &tmp, i).expect("stage pair");
         let target = b.target(i);
+        let full_target = b.twin_target(i);
 
         let (models, source_infos) = discover(&partial.project_dir).expect("discover partial");
         let period_interval = DayInterval::new(
@@ -535,20 +579,25 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
         }
 
         let full_backend = full
-            .backend_for_target(target.clone())
+            .backend_for_target(full_target.clone())
             .await
             .expect("open full backend");
         b.before_step().await;
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &period.rows, &b.schema(i))
+        insert_rows_via_backend(full_backend.as_ref(), &dag, &period.rows, &b.twin_schema(i))
             .await
             .expect("insert period rows into full");
-        insert_rows_via_backend(full_backend.as_ref(), &dag, &outside.rows, &b.schema(i))
-            .await
-            .expect("insert outside rows into full");
+        insert_rows_via_backend(
+            full_backend.as_ref(),
+            &dag,
+            &outside.rows,
+            &b.twin_schema(i),
+        )
+        .await
+        .expect("insert outside rows into full");
         drop(full_backend);
         b.before_step().await;
         full.run_with_target(
-            target.clone(),
+            full_target.clone(),
             &format!("{}-resolve-{i}-full", b.engine_name()),
             base_request(b.engine_name()),
             &smelt_runtime::NoOpReporter,
@@ -562,10 +611,11 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
             .await
             .expect("open partial backend for read-back");
         let full_backend = full
-            .backend_for_target(target.clone())
+            .backend_for_target(full_target.clone())
             .await
             .expect("open full backend for read-back");
         let schema = b.schema(i);
+        let full_schema = b.twin_schema(i);
         for idx in 0..dag.nodes.len() {
             let partial_rows = fetch_node_multiset_via_backend(
                 partial_backend.as_ref(),
@@ -581,7 +631,7 @@ pub async fn run_include_upstreams_resolved_slices_suffice(
                 &dag,
                 idx,
                 Some(&where_clause),
-                &schema,
+                &full_schema,
             )
             .await
             .expect("fetch full node rows");
@@ -618,4 +668,189 @@ pub async fn run_keyed_grain_node_excluded_from_generated_graph(
         "a keyed-grain node must never derive a propagation edge in a GENERATED graph: {graph:?}"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use async_trait::async_trait;
+    use smelt_backend::Backend;
+
+    use crate::families::ConformanceBackend;
+    use crate::recipe::{ConformanceTarget, ModelRecipe};
+
+    /// A backend whose `target` derives a fresh dataset per case — mirrors
+    /// `BigQueryConformanceBackend::target`
+    /// (`crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs`)
+    /// closely enough to exercise the collision this test guards against,
+    /// without needing a live BigQuery connection.
+    struct PerCaseDatasetBackend;
+
+    #[async_trait]
+    impl ConformanceBackend for PerCaseDatasetBackend {
+        fn target(&self, case: usize) -> ConformanceTarget {
+            ConformanceTarget::BigQuery {
+                dataset: format!("case_{case}"),
+            }
+        }
+        fn schema(&self, case: usize) -> String {
+            format!("case_{case}")
+        }
+        fn engine_name(&self) -> &str {
+            "bq"
+        }
+        fn skip_reason(&self) -> Option<String> {
+            None
+        }
+        fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            unimplemented!("not exercised by this test")
+        }
+        async fn before_step(&self) {}
+        async fn open_backend(
+            &self,
+            _case: usize,
+            _db_path: &Path,
+        ) -> anyhow::Result<Box<dyn Backend>> {
+            unimplemented!("not exercised by this test")
+        }
+        // twin_target/twin_schema: uses the trait DEFAULT (identical to
+        // target/schema) — this is exactly the pre-Phase-5b bug this test
+        // guards against for a per-case-dataset backend.
+    }
+
+    /// A per-case-dataset backend that overrides `twin_target`/`twin_schema`
+    /// correctly, the way `BigQueryConformanceBackend` does post-fix.
+    struct PerCaseDatasetBackendWithDistinctTwin;
+
+    #[async_trait]
+    impl ConformanceBackend for PerCaseDatasetBackendWithDistinctTwin {
+        fn target(&self, case: usize) -> ConformanceTarget {
+            ConformanceTarget::BigQuery {
+                dataset: format!("case_{case}"),
+            }
+        }
+        fn schema(&self, case: usize) -> String {
+            format!("case_{case}")
+        }
+        fn twin_target(&self, case: usize) -> ConformanceTarget {
+            ConformanceTarget::BigQuery {
+                dataset: format!("case_{case}_full"),
+            }
+        }
+        fn twin_schema(&self, case: usize) -> String {
+            format!("case_{case}_full")
+        }
+        fn engine_name(&self) -> &str {
+            "bq"
+        }
+        fn skip_reason(&self) -> Option<String> {
+            None
+        }
+        fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            unimplemented!("not exercised by this test")
+        }
+        async fn before_step(&self) {}
+        async fn open_backend(
+            &self,
+            _case: usize,
+            _db_path: &Path,
+        ) -> anyhow::Result<Box<dyn Backend>> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    /// `a_cases_incremental_project_and_its_full_refresh_twin_resolve_to_different_targets`
+    /// (plan `docs/plans/20260817-bigquery-generative-conformance.md` Phase
+    /// 5b, TDD test 2): for a per-case-dataset backend that has NOT
+    /// overridden `twin_target` (the trait default — identical to
+    /// `target`), `stage_pair_for`'s incremental project and its
+    /// full-refresh twin must still be distinguishable through the SEAM
+    /// (`ConformanceBackend::target` vs `ConformanceBackend::twin_target`),
+    /// never by a naming convention `stage_pair_for` itself would have to
+    /// invent. This test documents the failure mode the seam exists to
+    /// prevent — see the companion test below for the seam actually closing
+    /// it once a backend overrides `twin_target`.
+    #[test]
+    fn a_backend_that_never_overrides_twin_target_shares_the_incremental_target() {
+        let b = PerCaseDatasetBackend;
+        for case in 0..3 {
+            assert_eq!(
+                ConformanceBackend::target(&b, case),
+                ConformanceBackend::twin_target(&b, case),
+                "case {case}: the trait DEFAULT must reproduce target() unchanged, so a \
+                 backend relying on it is unaffected by this seam existing"
+            );
+        }
+    }
+
+    /// The seam actually closing the collision: a per-case-dataset backend
+    /// that DOES override `twin_target`/`twin_schema`
+    /// (`BigQueryConformanceBackend`'s shape) resolves a DIFFERENT target
+    /// for the full-refresh twin than for the incremental project, for
+    /// every case — by construction, not by a caller-honoured convention.
+    #[test]
+    fn twin_target_is_distinct_from_the_incremental_projects_target_when_overridden() {
+        let b = PerCaseDatasetBackendWithDistinctTwin;
+        for case in 0..3 {
+            let inc_target = ConformanceBackend::target(&b, case);
+            let full_target = ConformanceBackend::twin_target(&b, case);
+            assert_ne!(
+                inc_target, full_target,
+                "case {case}: a per-case-dataset backend's twin target must differ from its \
+                 incremental project's target, or two projects race to create the same table \
+                 on a shared dataset (409 Already Exists on BigQuery)"
+            );
+            assert_ne!(
+                ConformanceBackend::schema(&b, case),
+                ConformanceBackend::twin_schema(&b, case),
+                "case {case}: twin_schema must track twin_target's dataset, not target's"
+            );
+        }
+    }
+
+    /// `stage_pair_for_reaches_twin_target_through_the_seam_not_a_second_target_call`:
+    /// a source-level regression guard for the exact bug Phase 5b's live run
+    /// hit — `stage_pair_for` staged BOTH the incremental project and the
+    /// full-refresh twin with `b.target(case)`, the SAME call, so a
+    /// per-case-dataset backend (BigQuery) collided the two on one dataset
+    /// (`409 Already Exists` on the twin's first `CREATE TABLE`). Scans
+    /// `stage_pair_for`'s own source rather than executing it against a live
+    /// BigQuery target (`ConformanceTarget::BigQuery`'s staging path makes a
+    /// real network call — `dag.rs::stage_dag_for_target`'s
+    /// `create_bigquery_source_table` — no honest offline executor exists
+    /// for it, mirroring `families::mod`'s own
+    /// `no_family_hardcodes_a_backend_dialect`'s source-scan convention for
+    /// the same reason).
+    #[test]
+    fn stage_pair_for_reaches_twin_target_through_the_seam_not_a_second_target_call() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/families/dags.rs");
+        let contents =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let start = contents
+            .find("fn stage_pair_for(")
+            .expect("stage_pair_for must still exist in this file");
+        let body_start = contents[start..]
+            .find('{')
+            .map(|i| start + i)
+            .expect("stage_pair_for must have a body");
+        let body_end = contents[body_start..]
+            .find("\n}\n")
+            .map(|i| body_start + i)
+            .expect("stage_pair_for's body must be closed");
+        let body = &contents[body_start..body_end];
+
+        assert_eq!(
+            body.matches("b.target(case)").count(),
+            1,
+            "stage_pair_for must call b.target(case) exactly ONCE (for the incremental \
+             project) — a second call would re-introduce the collision Phase 5b fixed: {body:?}"
+        );
+        assert_eq!(
+            body.matches("b.twin_target(case)").count(),
+            1,
+            "stage_pair_for must stage the full-refresh twin against b.twin_target(case), the \
+             seam that makes its target distinct BY CONSTRUCTION: {body:?}"
+        );
+    }
 }

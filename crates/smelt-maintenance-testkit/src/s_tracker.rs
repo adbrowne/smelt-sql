@@ -268,15 +268,16 @@ impl STracker {
     /// Spark/Delta-safe counterpart of [`Self::materialize_s`]
     /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 3):
     /// Spark SQL has no `CREATE TEMP TABLE` DDL (a DuckDB-ism) — this
-    /// materializes `S_k` as a `CREATE OR REPLACE TEMPORARY VIEW` over a
-    /// `VALUES` table constructor instead, portable ANSI-ish SQL both
-    /// DuckDB and Spark SQL accept identically (a temp view is scoped to the
-    /// session/connection that created it, exactly like DuckDB's `TEMP
-    /// TABLE`, so the same "same backend creates and queries it" contract
-    /// [`Self::materialize_s`]'s doc comment states still applies). Kept as
-    /// a SEPARATE method rather than replacing [`Self::materialize_s`] — the
-    /// DuckDB gate's existing `TEMP TABLE` path is untouched (plan Phase 3
-    /// review checklist: "DuckDB standing gate untouched").
+    /// materializes `S_k` as a `CREATE OR REPLACE TEMPORARY VIEW` over
+    /// [`Self::s_view_select_sql`]'s row-set query instead, portable ANSI-ish
+    /// SQL DuckDB, Spark SQL, AND GoogleSQL all accept identically (a temp
+    /// view is scoped to the session/connection that created it, exactly
+    /// like DuckDB's `TEMP TABLE`, so the same "same backend creates and
+    /// queries it" contract [`Self::materialize_s`]'s doc comment states
+    /// still applies). Kept as a SEPARATE method rather than replacing
+    /// [`Self::materialize_s`] — the DuckDB gate's existing `TEMP TABLE`
+    /// path is untouched (plan Phase 3 review checklist: "DuckDB standing
+    /// gate untouched").
     pub async fn materialize_s_as_view(
         &self,
         backend: &dyn Backend,
@@ -288,26 +289,7 @@ impl STracker {
             .await
             .map_err(|e| anyhow::anyhow!("drop stale oracle view {view}: {e}"))?;
 
-        let d = &self.source.clock_column;
-        let id = &self.source.key_column;
-        let val = &self.source.payload_column;
-        let rows = self.s_at(k);
-        let select = if rows.is_empty() {
-            // A zero-row `VALUES` list is invalid SQL on both engines; use a
-            // dummy row (typed the same as a real one) then filter it out —
-            // `WHERE 1 = 0` always parses since the query still has a FROM.
-            format!(
-                "SELECT {d}, {id}, {val} FROM (VALUES (DATE '1970-01-01', 0, 0)) \
-                 AS t({d}, {id}, {val}) WHERE 1 = 0"
-            )
-        } else {
-            let values = rows
-                .iter()
-                .map(|r| format!("(DATE '{}', {}, {})", r.d.format("%Y-%m-%d"), r.id, r.val))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("SELECT * FROM (VALUES {values}) AS t({d}, {id}, {val})")
-        };
+        let select = self.s_view_select_sql(&self.s_at(k));
 
         backend
             .execute_sql(&format!(
@@ -316,6 +298,54 @@ impl STracker {
             .await
             .map_err(|e| anyhow::anyhow!("create oracle view {view}: {e}"))?;
         Ok(())
+    }
+
+    /// The row-set query [`Self::materialize_s_as_view`] materializes —
+    /// factored out as a pure, backend-free string builder so its exact
+    /// emitted SQL can be asserted by test without a live connection
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 5b).
+    /// A `FROM (VALUES …) AS t(cols)` table-value constructor — the prior
+    /// shape — is DuckDB/Spark-only: GoogleSQL has no table-value
+    /// constructor in `FROM` position (`400 Syntax error: Expected keyword
+    /// JOIN but got ')'`, measured live against BigQuery 2026-08-17). The
+    /// portable form every dialect accepts is chained
+    /// `SELECT … UNION ALL SELECT …` — column names/types come from the
+    /// FIRST branch's aliased/typed literals, exactly as ANSI SQL's union
+    /// column-naming rule requires, so only the first branch carries
+    /// `AS {d}`/`AS {id}`/`AS {val}`. The zero-row case has no branch to
+    /// union, so it keeps the "one typed row, filtered out" guard from the
+    /// prior shape, minus the `VALUES`-in-`FROM` wrapper: a bare
+    /// `SELECT … WHERE 1 = 0` (no `FROM` needed — DuckDB, Spark SQL, and
+    /// GoogleSQL all accept a `WHERE` clause on a `FROM`-less `SELECT`).
+    fn s_view_select_sql(&self, rows: &[GenRow]) -> String {
+        let d = &self.source.clock_column;
+        let id = &self.source.key_column;
+        let val = &self.source.payload_column;
+        if rows.is_empty() {
+            format!("SELECT DATE '1970-01-01' AS {d}, 0 AS {id}, 0 AS {val} WHERE 1 = 0")
+        } else {
+            rows.iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    if i == 0 {
+                        format!(
+                            "SELECT DATE '{}' AS {d}, {} AS {id}, {} AS {val}",
+                            r.d.format("%Y-%m-%d"),
+                            r.id,
+                            r.val
+                        )
+                    } else {
+                        format!(
+                            "SELECT DATE '{}', {}, {}",
+                            r.d.format("%Y-%m-%d"),
+                            r.id,
+                            r.val
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" UNION ALL ")
+        }
     }
 
     /// The oracle body query for `recipe` evaluated over the materialized
@@ -622,6 +652,68 @@ mod tests {
             sorted(tracker.s_at(k1)),
             sorted(vec![a, b, c]),
             "a windowed run after a full refresh must still union correctly"
+        );
+    }
+
+    /// `s_view_select_sql_emits_chained_union_all_not_a_values_table_constructor`
+    /// (plan `docs/plans/20260817-bigquery-generative-conformance.md` Phase
+    /// 5b, TDD test 1, populated-row branch): the row set
+    /// [`STracker::materialize_s_as_view`] builds must be a portable chained
+    /// `SELECT … UNION ALL SELECT …`, never `FROM (VALUES …) AS t(cols)` —
+    /// GoogleSQL has no table-value constructor in `FROM` position (`400
+    /// Syntax error: Expected keyword JOIN but got ')'`, measured live
+    /// 2026-08-17).
+    #[test]
+    fn s_view_select_sql_emits_chained_union_all_not_a_values_table_constructor() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let a = GenRow {
+            d: w1.0,
+            id: 1,
+            val: 10,
+        };
+        let b = GenRow {
+            d: w1.0,
+            id: 2,
+            val: 20,
+        };
+        let k = tracker.record_run(w1.0, w1.1, vec![a, b]);
+
+        let sql = tracker.s_view_select_sql(&tracker.s_at(k));
+
+        assert_eq!(
+            sql,
+            "SELECT DATE '2024-01-01' AS d, 1 AS id, 10 AS val \
+             UNION ALL SELECT DATE '2024-01-01', 2, 20"
+        );
+        assert!(
+            !sql.to_uppercase().contains("VALUES") && !sql.contains("FROM ("),
+            "emitted row-set SQL must not use a `FROM (VALUES …)` table-value \
+             constructor — GoogleSQL rejects it in FROM position: {sql:?}"
+        );
+    }
+
+    /// `s_view_select_sql_zero_row_guard_uses_a_from_less_where_clause`
+    /// (plan Phase 5b, TDD test 1, zero-row guard branch): with no rows to
+    /// union, the guard must still avoid `FROM (VALUES …)` — a bare
+    /// `SELECT … WHERE 1 = 0` (no `FROM`) is accepted by DuckDB, Spark SQL,
+    /// and GoogleSQL alike.
+    #[test]
+    fn s_view_select_sql_zero_row_guard_uses_a_from_less_where_clause() {
+        let source = events_source();
+        let tracker = STracker::new(&source);
+
+        let sql = tracker.s_view_select_sql(&[]);
+
+        assert_eq!(
+            sql,
+            "SELECT DATE '1970-01-01' AS d, 0 AS id, 0 AS val WHERE 1 = 0"
+        );
+        assert!(
+            !sql.to_uppercase().contains("VALUES") && !sql.contains("FROM ("),
+            "the zero-row guard must not use a `FROM (VALUES …)` table-value \
+             constructor either: {sql:?}"
         );
     }
 }

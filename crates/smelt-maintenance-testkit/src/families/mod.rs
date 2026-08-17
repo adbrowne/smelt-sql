@@ -57,6 +57,39 @@ pub trait ConformanceBackend: Sync {
     /// re-derive it (or match on `target()` to get it).
     fn schema(&self, case: usize) -> String;
 
+    /// The [`ConformanceTarget`] a case's FULL-REFRESH ORACLE TWIN runs
+    /// against (`docs/plans/20260817-bigquery-generative-conformance.md`
+    /// Phase 5b) — `families::dags`'s `stage_pair_for` stages TWO independent
+    /// projects per case (an incremental one and a full-refresh oracle one)
+    /// and needs them landing in different physical storage, or the twin's
+    /// first `CREATE TABLE` collides with the incremental project's own
+    /// (`409 Already Exists` on a shared BigQuery dataset — harmless on
+    /// DuckDB, where each project already gets its own temp-dir `.duckdb`
+    /// file regardless of `target()`'s value, and on Spark's single
+    /// persistent warehouse, which already shares physical tables across
+    /// every case by design). Distinct BY CONSTRUCTION — never a naming
+    /// convention a caller must honour — so a backend that shares physical
+    /// storage across `target(case)` cannot regress into a silent collision
+    /// by forgetting to vary a name somewhere. Default: identical to
+    /// `target(case)`, correct for every backend except a per-case-dataset
+    /// one (BigQuery overrides both this and [`Self::twin_schema`]
+    /// together).
+    fn twin_target(&self, case: usize) -> ConformanceTarget {
+        self.target(case)
+    }
+
+    /// [`Self::twin_target`]'s schema/dataset counterpart — the twin
+    /// backend's [`Self::schema`]. Kept as a SEPARATE method (rather than
+    /// deriving the schema from `twin_target` inside a helper) because
+    /// [`Self::schema`] itself is independent of [`Self::target`] for the
+    /// same reason (Spark's schema is a fixed constant while its target is a
+    /// fixed enum variant — the two just happen to agree). Default:
+    /// identical to `schema(case)`, matching [`Self::twin_target`]'s
+    /// default.
+    fn twin_schema(&self, case: usize) -> String {
+        self.schema(case)
+    }
+
     /// The `ExecuteRequest.target`/`smelt.yml` engine name
     /// (`link_c_harness::base_request`'s parameter) for this backend.
     fn engine_name(&self) -> &str;

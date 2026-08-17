@@ -69,8 +69,8 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 3     | done     | cc3eda18 | 2026-08-17 |
 | 4     | done     | f330210d | 2026-08-17 |
 | 4b    | done     | a5df9508 | 2026-08-17 |
-| 5     | pending  |        |      |
-| 5b    | pending  |        |      |
+| 5     | done     | 7f2e27a9 | 2026-08-17 |
+| 5b    | done     |        | 2026-08-18 |
 | 5c    | pending  |        |      |
 | 5d    | pending  |        |      |
 | 6     | pending  |        |      |
@@ -457,6 +457,18 @@ generator if the construct must be withheld from BigQuery cases.
   would inflate the baseline again as further backends' family code lands. The right fix is an
   exclusion for the crate (or for `src/families/`) in `.claude/scripts/hardening-budget.sh`, which
   is a change to the gate itself and outside this plan's scope.
+
+- **The Spark `dags` family may be comparing a project against itself.** `SparkConformanceBackend`'s
+  `target`/`schema` ignore the case index and return the one fixed `SPARK_CONFORMANCE_SCHEMA`, and
+  the DAG node names in `dag.rs` are fixed literals rather than case-parametrized. So every case's
+  incremental project and its full-refresh twin write the same physical tables in the same shared
+  warehouse schema, and because the full-refresh build runs after the incremental steps, the
+  equality assertion can read one already-overwritten table for both sides — which would pass even
+  if the incremental engine were wrong. This is pre-existing and unchanged by the twin-target seam:
+  the seam's default reproduces the old single-target behaviour exactly, and only BigQuery, whose
+  per-case dataset made the collision fatal rather than silent, overrides it. Making the Spark leg's
+  `dags` assertions non-vacuous means giving Spark per-case schemas (or case-parametrized node
+  names), which is a change to the Spark leg rather than to the BigQuery one.
 
 ## Verification
 
