@@ -61,7 +61,13 @@
 //!   `change_feed` YAML rendering the recompute-only admission gate stages
 //!   against (`docs/plans/20260712-generative-maintenance-conformance.md`
 //!   Phase 8).
+//! - [`bigquery_session`] — token preflight against the expiry stamp
+//!   `scripts/bigquery-auth.sh` writes, and BigQuery error classification
+//!   (quota-refusal vs. auth vs. unrecognised) with bounded retry, for a
+//!   live BigQuery sweep to consume before and during a run
+//!   (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 3).
 
+pub mod bigquery_session;
 pub mod dag;
 pub mod feed;
 pub mod link_c_harness;
