@@ -95,8 +95,14 @@ materializations, ephemeral (CTE-inlined) models, and the `batched`/`keyed`/`ver
 incremental maintenance legs — each exercised on both DuckDB and Spark by the same parametrized
 CLI integration tests, plus the DuckDB-anchored `maintenance_conformance` suite (`smelt-cli`
 crate) for the maintenance legs specifically. BigQuery joins the fixed-recipe suites
-(materialization, seed, lowering, merge, incremental DELETE+INSERT, schema evolution) but not
-`maintenance_conformance`, so its incremental coverage is fixed-recipe rather than generative. `refresh: materialized_view` is excluded: no
+(materialization, seed, lowering, merge, incremental DELETE+INSERT, schema evolution) and, like
+Spark, has its own leg of the generative dual-execution harness
+(`maintenance_conformance_bigquery`, see §"Generative equivalence coverage"), so its incremental
+coverage is generative rather than fixed-recipe-only. Coverage is partial: families whose
+comparison never reaches the harness's row-set materialization step (admission-only
+classification, the per-case dataset lifecycle, and the boundary-row reach check) pass against a
+live warehouse; every family that does reach that step does not yet, on a GoogleSQL gap tracked in
+§Known Divergences. `refresh: materialized_view` is excluded: no
 backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
 mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
@@ -400,6 +406,28 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
+- **The BigQuery generative-conformance leg's row-set materialization step is not GoogleSQL-valid,
+  so most families do not yet pass live.** A first live run against a real warehouse (the
+  `maintenance_conformance_bigquery` binary, `BigQueryConformanceBackend`, and one wrapper per
+  shared family all compile and skip green when `SMELT_BQ_PROJECT` is unset) passed 7 of 21 tests
+  — the ones whose comparison never needs the harness's oracle to materialize a generated row set
+  (admission-only classification, the per-case dataset lifecycle, and the boundary-row reach
+  check). Every other family fails on `STracker::materialize_s_as_view`
+  (`crates/smelt-maintenance-testkit/src/s_tracker.rs`), which builds `SELECT * FROM (VALUES
+  (...), (...)) AS t(cols)` — a table-value-constructor form GoogleSQL's `FROM` clause does not
+  accept. The same construct also appears in `smelt-runtime`'s `ephemeral_seed_ctes` compiler path
+  (`crates/smelt-runtime/src/execute.rs`), which is product code rather than harness code, so one
+  family (the composed-pool route-3 equivalence check) fails on a compiled model statement rather
+  than an oracle query. A second, narrower gap: the recipe pool renders `MEDIAN(val)` for its
+  holistic-aggregate construct unconditionally, which GoogleSQL has no built-in for. A third:
+  the DAG-propagation family stages two projects (an incremental twin and a full-refresh oracle
+  twin) per case through the same per-case dataset name, so the second staging call collides
+  (`409 Already Exists`) — harmless on Spark's single persistent schema but wrong for BigQuery's
+  fresh-per-case design; one of its five tests, which stages only one project, is unaffected and
+  passes. Until the `VALUES` gap closes, the harness self-check
+  (`oracle_flags_a_seeded_divergence_on_bigquery`) itself fails before reaching its corruption
+  step, so BigQuery's leg has not yet demonstrated the oracle is non-vacuous there. Tracked in
+  `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated
   into the capability struct (`crates/smelt-dialect/src/dialect.rs`), matrixed above and asserted

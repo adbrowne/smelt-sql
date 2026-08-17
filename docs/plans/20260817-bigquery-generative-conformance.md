@@ -68,8 +68,11 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 2     | done     | 49d5375c | 2026-08-17 |
 | 3     | done     | cc3eda18 | 2026-08-17 |
 | 4     | done     | f330210d | 2026-08-17 |
-| 4b    | done     |        | 2026-08-17 |
+| 4b    | done     | a5df9508 | 2026-08-17 |
 | 5     | pending  |        |      |
+| 5b    | pending  |        |      |
+| 5c    | pending  |        |      |
+| 5d    | pending  |        |      |
 | 6     | pending  |        |      |
 
 ---
@@ -299,6 +302,115 @@ are gated `any(feature = "spark", feature = "bigquery")` like their caller.
 - [ ] Spec edit is timeless
 
 **Commit.** `test: a BigQuery leg on the generative maintenance-conformance gate`
+
+---
+
+### Phase 5b: The two harness defects the first live run exposed
+
+**Goal.** The conformance harness itself stops emitting SQL BigQuery cannot run, and stops
+colliding two projects onto one dataset.
+
+**Pre-conditions.** Phase 5's live run (7/21 passing, 2026-08-17).
+
+**TDD tests to write first.**
+- `crates/smelt-maintenance-testkit/src/s_tracker.rs` — `materialize_s_as_view` emits a row set
+  every supported dialect accepts. It builds `SELECT * FROM (VALUES …) AS t(cols)` today, and
+  GoogleSQL has no table-value constructor in `FROM` position (`400 Syntax error: Expected
+  keyword JOIN but got ')'`, measured 2026-08-17). The portable form is chained
+  `SELECT … UNION ALL SELECT …`; assert the emitted text for both the populated and the zero-row
+  guard case.
+- `crates/smelt-maintenance-testkit/src/families/dags.rs` — a case's incremental project and its
+  full-refresh twin resolve to *different* targets. Both call `b.target(case)` with the same
+  `case` today, which is harmless where a target is a local file and fatal where it is a shared
+  dataset (`409 Already Exists` on the twin's first table create).
+
+**Critical files.** `crates/smelt-maintenance-testkit/src/s_tracker.rs`,
+`crates/smelt-maintenance-testkit/src/families/dags.rs`, and the `ConformanceBackend` seam in
+`families/mod.rs` if the twin needs its own target hook.
+
+**Review checklist** (material findings only):
+- [ ] The row-set form is asserted portable by test, not by inspection
+- [ ] The twin's target is distinct by construction, not by a naming convention a caller must honour
+- [ ] The live Spark leg re-runs green — this is shared-harness code
+
+**Commit.** `fix: portable row sets and per-twin datasets in the conformance harness`
+
+---
+
+### Phase 5c: One dialect-aware owner for inline row sets
+
+**Goal.** smelt stops emitting `FROM (VALUES …)` to backends that cannot parse it. This is a
+product defect the generative leg caught, not a test-harness one.
+
+**Pre-conditions.** Phase 5b.
+
+**Why a seam rather than four patches.** Four production paths build an inline row set and none is
+dialect-aware: `smelt-core/src/seeds/ephemeral.rs::build_values_cte` (the only shared helper, used
+by ephemeral seeds through `execute_project`), `smelt-runtime/src/maintenance_driver.rs`'s
+repair-keys literal, `smelt-logical/src/maintenance/emit.rs`'s append-only baseline probe, and
+`smelt-cli/src/test_compiler.rs`'s mock-data compiler. Patching them individually would leave the
+fifth author to rediscover the gap, so the row-set constructor gets a single dialect-aware owner
+and the four call sites consume it.
+
+**TDD tests to write first.**
+- A rejection test in the row-set owner: for `SqlDialect::BigQuery` the emitted form is not a
+  `FROM (VALUES …)` constructor, and for DuckDB/Spark it is byte-identical to today's output.
+- A test per call site that its emitted SQL routes through the owner rather than formatting its own.
+
+**Critical files.** `crates/smelt-core/src/seeds/ephemeral.rs` (or wherever the owner lands),
+`crates/smelt-runtime/src/maintenance_driver.rs`, `crates/smelt-logical/src/maintenance/emit.rs`,
+`crates/smelt-cli/src/test_compiler.rs`, `crates/smelt-dialect/src/dialect.rs` if a capability flag
+is the chosen seam (note: `BackendCapabilities` has no `Default`, so a new field is a compile
+error in all five constructors until each is updated — that is the intended forcing function).
+
+**Docs touched.**
+- `docs/specs/multi_backend.md` §"Capability matrix" if a flag is added; §Semantics for the rule
+  that an inline row set has one dialect-aware owner.
+
+**Review checklist** (material findings only):
+- [ ] No production path formats its own `FROM (VALUES …)` after this phase
+- [ ] DuckDB and Spark output is asserted byte-identical
+- [ ] The capability table and its constructors agree (the table is normative)
+- [ ] Spec edit is timeless
+
+**Commit.** `fix: one dialect-aware owner for inline row sets`
+
+---
+
+### Phase 5d: `MEDIAN` on BigQuery — lower it or declare it
+
+**Goal.** Decide, from measurement, whether `MEDIAN` can be lowered faithfully to GoogleSQL, and
+implement whichever answer the warehouse gives.
+
+**Pre-conditions.** `scripts/bigquery-probe-lowering.sh` run against a live token.
+
+**The question.** GoogleSQL has no `MEDIAN`. `PERCENTILE_CONT` is analytic-only, so it cannot
+stand in the `GROUP BY` position the recipe pool generates; `APPROX_QUANTILES` is an aggregate but
+approximate. Substituting an approximate function under an equivalence oracle would make the
+oracle report divergences that are artefacts of the substitution, or hide real ones — a silent
+weakening of exactly the kind the fail-loud discipline forbids. The printer's existing
+`remap_function_name` is rename-only and cannot express either candidate.
+
+**The two admissible outcomes.** Either a faithful lowering exists (an exact, aggregate-position
+form measured to agree with DuckDB's `MEDIAN` on an even-count fixture, where interpolating and
+nearest-rank answers differ), and it lands with that measurement recorded; or it does not, and
+`MEDIAN` becomes a declared unsupported construct on BigQuery that **fails loud at compile time**
+with a diagnostic naming the backend and the function. Silent approximation is not an option.
+
+**Critical files.** `crates/smelt-dialect/src/printer.rs`, `crates/smelt-types/src/signatures.rs`
+if the registry carries the per-dialect availability, plus the recipe pool's holistic-aggregate
+generator if the construct must be withheld from BigQuery cases.
+
+**Docs touched.**
+- `docs/specs/multi_backend.md` §Known Divergences or §Semantics, depending on the outcome.
+
+**Review checklist** (material findings only):
+- [ ] The decision cites a measurement, not documentation
+- [ ] If lowered: agreement with DuckDB shown on a fixture where interpolating and nearest-rank differ
+- [ ] If declared: the failure is loud and names both the backend and the function
+- [ ] Spec edit is timeless
+
+**Commit.** `feat: MEDIAN on BigQuery, lowered or declared`
 
 ---
 
