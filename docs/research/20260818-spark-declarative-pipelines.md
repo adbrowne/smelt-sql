@@ -16,7 +16,7 @@ The three structural gaps, stated as sharply as I can:
 
 1. **The materialization decision is the user's, not the compiler's.** You write `CREATE STREAMING TABLE` or `CREATE MATERIALIZED VIEW`. That is a *physical* choice embedded in the *logical* definition, and it is irreversible without a full refresh. This is precisely the logical/physical conflation smelt exists to undo.
 2. **Where incrementalization *is* automatic (Enzyme), it is a silent, untunable chooser.** It decides per-refresh whether to incrementalize or fully recompute; when it declines, you learn about it *after the run*, from an event-log JSON field. There is no compile-time answer to "will this model be maintained incrementally, and why not?"
-3. **Definition changes are not a first-class delta.** Changing an MV's definition triggers a full recompute; several streaming-table schema changes require a full refresh — which itself only works if the source still retains history.
+3. **Definition changes are not a first-class delta.** Changing an MV's definition triggers a full recompute; several streaming-table schema changes require a full refresh — which itself only works if the source still retains history. Nor is there a manual way out: MVs accept no user DML at all, and schema-modifying DML on a streaming table is unsupported by name (§6).
 
 Where SDP is genuinely ahead of smelt: CDC/SCD2 as a built-in operator (smelt explicitly declines this — `incremental_models.md` §"No smelt-maintained SCD2"), streaming sinks, expectations, and a decade of operational surface.
 
@@ -136,7 +136,7 @@ And the sting: *"A full refresh does not reprocess data unless your source retai
 
 **smelt** treats a definition change as a **definition delta** folded through the same frontier algebra as data deltas, with `smelt migrate` printing a derived migration plan for approval before anything destructive runs (`docs/specs/definition_deltas.md`), plus `smelt diff` classifying column-level changes against the stored schema (`docs/specs/schema_evolution.md`).
 
-**Verdict:** the sharpest capability gap in smelt's favour, and the easiest to demo. "Add a derived column to a 2TB table without rebuilding it, and see the plan first" has no Lakeflow answer.
+**Verdict:** the sharpest capability gap in smelt's favour, and the easiest to demo. "Add a derived column to a 2TB table without rebuilding it, and see the plan first" has no Lakeflow answer — and, per §6, no hand-written one either: DML that modifies a streaming table's schema is explicitly unsupported, and materialized views take no user DML at all.
 
 ### 4.4 Backbuilds / backfill
 
@@ -164,11 +164,88 @@ This is a good, honest primitive — but it is *loading old data*, hand-written.
 
 ---
 
-## 6. Reading for smelt
+## 6. The manual escape hatch
+
+A fair objection to §4.3 and §4.4: the tables are Delta, so can an engineer not simply write to
+them directly — hand-run the migration, hand-seed the backbuild — and make the caveats go away?
+Mostly no, and the *shape* of the "no" is itself evidence for smelt's thesis.
+
+First, the framing. If "a determined human can type the SQL" counted as a capability, every
+framework would tie on every axis — smelt included. The comparison is only meaningful in terms of
+what the framework **derives and verifies**. But in this case the manual route is not even
+uniformly available.
+
+### 6.1 Materialized views take no user DML
+
+A Lakeflow MV is owned outright by its pipeline:
+
+- *"Materialized views are defined and updated by a single pipeline."* ([MV concepts](https://docs.databricks.com/aws/en/ldp/concepts/materialized-views))
+- *"Tables defined by a pipeline can't be changed or updated by any other pipeline."* (same)
+- *"Pipeline datasets can be defined only once. Because of this, they can be the target of only a
+  single operation across all pipelines."* — and the one stated exception is streaming tables with
+  append flows, not MVs ([limitations](https://docs.databricks.com/aws/en/ldp/limitations))
+- *"By default, materialized views and streaming tables can be accessed only by Databricks clients
+  and applications."* (same) — external *reads* are gated, never mind writes.
+
+The [UC-with-pipelines page](https://docs.databricks.com/aws/en/ldp/unity-catalog) permits DML on
+streaming tables and says nothing of the kind for MVs.
+
+### 6.2 Streaming tables allow DML — but not the DML a migration needs
+
+DML on a UC-published streaming table is explicitly supported. Three restrictions gut it for the
+migration use case:
+
+1. *"DML statements that modify the table schema of a streaming table are not supported."* The
+   §4.3 scenario **is** a schema change (`ADD COLUMN` + backfill from stored columns). It is
+   carved out by name.
+2. Downstream streaming consumers break unless they set `skipChangeCommits` — which makes them
+   *ignore* the very rows you corrected ([Delta streaming reads/writes](https://docs.databricks.com/aws/en/structured-streaming/delta-lake)).
+   A hand-fix therefore either fails the pipeline or silently fails to propagate.
+3. *"DML statements that update a streaming table can be run only in a shared Unity Catalog cluster
+   or a SQL warehouse using Databricks Runtime 13.3 LTS and above."*
+
+### 6.3 In open-source SDP the question is moot
+
+The OSS programming guide is silent on ownership, external writes, storage format, and migration
+entirely. What it does establish is the asymmetry: a materialized view is *"a view that is
+precomputed into a table… always has exactly one batch flow writing to it"*, while streaming tables
+*"support incremental processing of data, allowing you to process only new data as it arrives"* via
+checkpoints in `storage`. **The OSS guide never mentions incremental refresh, change data, or
+cost-based incrementalization for materialized views** — Enzyme is the Databricks half.
+
+If that implies (inference, not a quotable line — worth confirming against the SDP source) that an
+OSS MV is overwritten wholesale on every update, then OSS SDP has no incremental MV state to migrate
+in the first place, and any hand-patch is destroyed by the next run. The escape hatch there is not
+blocked so much as pointless.
+
+### 6.4 What is left, and what it costs
+
+The residual manual path is to **unmanage the dataset** — author it as a plain Delta table outside
+the pipeline and hand-write everything. That is not a mitigation but an exit: it surrenders the
+declarative graph, the orchestration, and the checkpointing for that dataset. The in-framework
+alternative, `INSERT INTO ONCE` (§4.4), is append-only and re-fires on full refresh with duplicate
+handling left to the author.
+
+Three things survive intact even where a manual write *is* possible:
+
+- **The derivation is the hard part, not the actuator.** Hand-DML gives you the `UPDATE`. It does
+  not tell you which regions need rewriting, whether the change is output-preserving (smelt's
+  *eclipsed* classification), or whether a reformat in the same commit was semantically inert.
+- **Manual work is not durable under the framework's own recovery.** Full refresh clears data *and*
+  checkpoints — and full refresh is exactly what schema evolution mandates for renames, narrowing,
+  and hard deletes.
+- **No equivalence statement afterwards.** smelt asserts `incremental_state(S) == full_refresh(inputs ∈ S)`
+  with a conformance gate; a hand-migrated table offers "trust me".
+
+**Verdict:** the objection strengthens §4.3 rather than softening it. And note where the asymmetry
+falls — whether you can hand-repair your own table at all depends on the ST-vs-MV choice made at
+*declaration* time. That is §1's structural gap #1 resurfacing as an operational one.
+
+## 7. Reading for smelt
 
 **Sharpen (defensible, demonstrable):**
 1. **Compile-time maintainability answers.** The demo is a diagnostic that says "`x` cannot be incrementally maintained because `NOW()` appears outside a `WHERE`" *before* you run — versus Lakeflow's `planning_information` post-mortem.
-2. **Definition deltas.** No incumbent equivalent. `smelt migrate` plan-and-approve is a five-minute demo with a visceral payoff.
+2. **Definition deltas.** No incumbent equivalent, and no hand-written substitute either (§6). `smelt migrate` plan-and-approve is a five-minute demo with a visceral payoff.
 3. **Plan legibility + overrides that are validated.** "The planner is not a black box" lands harder now that Enzyme's untunable changeset threshold is a documented customer complaint.
 
 **Steal / watch:**
@@ -194,6 +271,9 @@ Primary:
 - [Full refresh for streaming tables](https://docs.databricks.com/aws/en/ldp/full-refresh-st)
 - [Schema evolution in Databricks](https://docs.databricks.com/aws/en/data-engineering/schema-evolution)
 - [Lakeflow pipeline limitations](https://docs.databricks.com/aws/en/ldp/limitations)
+- [Materialized views (concepts)](https://docs.databricks.com/aws/en/ldp/concepts/materialized-views)
+- [Use Unity Catalog with pipelines](https://docs.databricks.com/aws/en/ldp/unity-catalog)
+- [Delta Lake table streaming reads and writes (`skipChangeCommits`)](https://docs.databricks.com/aws/en/structured-streaming/delta-lake)
 - [Lakeflow SDP release notes 2026](https://docs.databricks.com/aws/en/release-notes/dlt/2026)
 - [Optimizing Materialized View Recomputes (Databricks blog)](https://www.databricks.com/blog/optimizing-materialized-views-recomputes)
 
