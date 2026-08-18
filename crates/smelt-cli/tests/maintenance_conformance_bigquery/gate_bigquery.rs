@@ -12,7 +12,8 @@
 //! the S-restricted oracle). The other 4 fail on the `VALUES`-table-
 //! constructor gap in `STracker::materialize_s_as_view` (see `main.rs`'s doc
 //! comment point 1); `append_only_partition_pool_upholds_equivalence_on_bigquery`
-//! additionally hit a `MEDIAN` function gap on one generated case.
+//! additionally hit a `MEDIAN` function gap on one generated case, since
+//! closed by the printer's exact GoogleSQL lowering of `MEDIAN`.
 
 use smelt_maintenance_testkit::families::{gate, ConformanceBackend};
 

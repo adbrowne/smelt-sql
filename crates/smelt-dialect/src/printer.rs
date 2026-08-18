@@ -250,6 +250,14 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
                 // Function name remapping per dialect
                 if let Some(name) = fc.name() {
+                    // `MEDIAN` needs more than a rename on GoogleSQL, which has
+                    // no such built-in — see `print_bigquery_median`.
+                    if matches!(ctx.dialect, SqlDialect::BigQuery)
+                        && name.eq_ignore_ascii_case("MEDIAN")
+                        && print_bigquery_median(node, &fc, ctx, out)
+                    {
+                        return;
+                    }
                     if let Some(new_name) = remap_function_name(ctx.dialect, &name) {
                         print_function_with_renamed(node, ctx, out, new_name);
                         return;
@@ -1687,6 +1695,94 @@ fn split_comma_top_level(s: &str) -> Vec<String> {
         parts.push(current);
     }
     parts
+}
+
+/// Lower `MEDIAN(x)` to GoogleSQL, which has no `MEDIAN` built-in.
+///
+/// Returns `true` when the call was printed here, `false` to fall through to
+/// the normal path (leaving the call verbatim so the engine rejects it loudly
+/// rather than smelt guessing).
+///
+/// Both forms below are **exact**, which is the whole constraint: substituting
+/// an approximate median under the equivalence oracle would make it report
+/// divergences that are artefacts of the substitution, or hide real ones.
+/// `APPROX_QUANTILES` is an aggregate but approximate, so it is not a candidate.
+/// Measured against the live warehouse by `scripts/bigquery-probe-lowering.sh`
+/// on the fixture `val ∈ {1,2,3,4}` — an even count, where an interpolating
+/// median (2.5) and a nearest-rank one (2) differ:
+///
+/// - **Window position** (`MEDIAN(x) OVER w`) → `PERCENTILE_CONT(x, 0.5) OVER w`.
+///   Exact and interpolating; measured 2.5, agreeing with DuckDB's `MEDIAN`.
+///   `PERCENTILE_DISC` returns 2 and is therefore *not* the equivalent.
+/// - **Aggregate position** (`SELECT MEDIAN(x) … GROUP BY …`) →
+///   an `ARRAY_AGG`-indexing expression. `PERCENTILE_CONT` is analytic-only in
+///   GoogleSQL and is rejected outright in a `GROUP BY` query, so it cannot
+///   stand here. Binding the array to a name via `UNNEST([ARRAY_AGG(…)])` is
+///   also rejected (`Aggregate function ARRAY_AGG not allowed in UNNEST`), which
+///   is why the sub-expression is repeated rather than named. Measured on
+///   grouped fixtures against DuckDB's answers: even count → 2.5, odd → 2,
+///   NULLs ignored → 1.5, all-NULL group → NULL.
+///
+/// The aggregate form casts to `FLOAT64`, matching DuckDB's `MEDIAN` return
+/// type for numeric input. A temporal argument — which DuckDB's `MEDIAN` also
+/// accepts — makes BigQuery reject the cast, i.e. it fails loud rather than
+/// returning a wrong value.
+fn print_bigquery_median(
+    node: &SyntaxNode,
+    fc: &FunctionCall,
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    let args = fc.arguments();
+    let [arg] = args.as_slice() else {
+        return false;
+    };
+    let mut arg_sql = String::new();
+    print_node(arg.syntax(), ctx, &mut arg_sql);
+    let arg_sql = arg_sql.trim();
+    if arg_sql.is_empty() {
+        return false;
+    }
+
+    // `OVER` is parsed as a WINDOW_SPEC sibling of the call, not a child.
+    let windowed = node
+        .next_sibling()
+        .map(|sib| sib.kind() == SyntaxKind::WINDOW_SPEC)
+        .unwrap_or(false);
+    if windowed {
+        out.push_str(&format!("PERCENTILE_CONT({arg_sql}, 0.5)"));
+        push_trailing_trivia(node, out);
+        return true;
+    }
+
+    let sorted = format!("ARRAY_AGG({arg_sql} IGNORE NULLS ORDER BY {arg_sql})");
+    let mid = format!("DIV(ARRAY_LENGTH({sorted}), 2)");
+    let at = |index: &str| format!("CAST({sorted}[SAFE_OFFSET({index})] AS FLOAT64)");
+    out.push_str(&format!(
+        "IF(MOD(ARRAY_LENGTH({sorted}), 2) = 1, {upper}, ({lower} + {upper}) / 2)",
+        upper = at(&mid),
+        lower = at(&format!("{mid} - 1")),
+    ));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Re-emit the trivia tokens trailing a node whose text a rewrite replaced,
+/// so a following sibling (an `OVER` clause, the next select item) does not
+/// end up glued to the rewritten text.
+fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
+    let tokens: Vec<_> = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .collect();
+    let trailing: Vec<_> = tokens
+        .into_iter()
+        .rev()
+        .take_while(|t| t.kind().is_trivia())
+        .collect();
+    for token in trailing.into_iter().rev() {
+        out.push_str(token.text());
+    }
 }
 
 /// Print a FUNCTION_CALL node with the function name replaced by `new_name`.

@@ -100,3 +100,58 @@ try "grouped PERCENTILE_CONT via a DISTINCT subquery" \
   "SELECT DISTINCT id, PERCENTILE_CONT(val, 0.5) OVER (PARTITION BY id) AS m FROM (SELECT 1 AS id, 1 AS val)"
 say ""
 say "Report written to ${REPORT}"
+
+say ""
+say "## D. Is there an EXACT lowering that works in aggregate (GROUP BY) position?"
+say "   PERCENTILE_CONT is exact but analytic; APPROX_QUANTILES is an aggregate"
+say "   but approximate. The remaining candidate is an ARRAY_AGG-based exact"
+say "   median expression, which is an aggregate and so is legal in the SELECT"
+say "   list of a GROUP BY query. Fixture groups, and DuckDB's MEDIAN answers:"
+say "     g=1: 1,2,3,4        (even)          -> 2.5"
+say "     g=2: 1,2,3          (odd)           -> 2"
+say "     g=3: 1,NULL,2,NULL  (NULLs ignored) -> 1.5"
+say "     g=4: NULL           (empty)         -> NULL"
+DFIX="SELECT 1 AS g, 1 AS val UNION ALL SELECT 1,2 UNION ALL SELECT 1,3 UNION ALL SELECT 1,4
+UNION ALL SELECT 2,1 UNION ALL SELECT 2,2 UNION ALL SELECT 2,3
+UNION ALL SELECT 3,1 UNION ALL SELECT 3,NULL UNION ALL SELECT 3,2 UNION ALL SELECT 3,NULL
+UNION ALL SELECT 4,NULL"
+MED="(SELECT IF(MOD(ARRAY_LENGTH(a), 2) = 1,
+             CAST(a[OFFSET(DIV(ARRAY_LENGTH(a), 2))] AS FLOAT64),
+             (CAST(a[OFFSET(DIV(ARRAY_LENGTH(a), 2) - 1)] AS FLOAT64)
+              + CAST(a[OFFSET(DIV(ARRAY_LENGTH(a), 2))] AS FLOAT64)) / 2)
+    FROM UNNEST([ARRAY_AGG(val IGNORE NULLS ORDER BY val)]) AS a)"
+run "ARRAY_AGG exact median, grouped   [g, m ordered by g]" \
+  "SELECT STRING_AGG(CONCAT(CAST(g AS STRING), '=', IFNULL(CAST(m AS STRING), 'NULL')), ' ' ORDER BY g) AS r
+   FROM (SELECT g, ${MED} AS m FROM (${DFIX}) GROUP BY g)"
+run "same expression, ungrouped whole-table median of 1,2,3,4" \
+  "SELECT ${MED} AS m FROM (SELECT 1 AS val UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4)"
+
+say ""
+say "   ARRAY_AGG is rejected inside UNNEST, so the array cannot be bound to a"
+say "   name. The remaining form indexes the aggregate's result directly, at the"
+say "   cost of repeating the ARRAY_AGG sub-expression."
+A="ARRAY_AGG(val IGNORE NULLS ORDER BY val)"
+MED2="IF(MOD(ARRAY_LENGTH(${A}), 2) = 1,
+        CAST(${A}[SAFE_OFFSET(DIV(ARRAY_LENGTH(${A}), 2))] AS FLOAT64),
+        (CAST(${A}[SAFE_OFFSET(DIV(ARRAY_LENGTH(${A}), 2) - 1)] AS FLOAT64)
+         + CAST(${A}[SAFE_OFFSET(DIV(ARRAY_LENGTH(${A}), 2))] AS FLOAT64)) / 2)"
+run "repeated-ARRAY_AGG exact median, grouped   [g=m ...]" \
+  "SELECT STRING_AGG(CONCAT(CAST(g AS STRING), '=', IFNULL(CAST(m AS STRING), 'NULL')), ' ' ORDER BY g) AS r
+   FROM (SELECT g, ${MED2} AS m FROM (${DFIX}) GROUP BY g)"
+run "repeated-ARRAY_AGG exact median, ungrouped over 1,2,3,4" \
+  "SELECT ${MED2} AS m FROM (SELECT 1 AS val UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4)"
+
+say ""
+say "## E. The printer's own output, verbatim"
+say "   Exactly what \`smelt-dialect\` emits for the recipe pool's holistic"
+say "   shape (\`SELECT g, MEDIAN(val) ... GROUP BY g\`), run against the same"
+say "   fixture DuckDB answered: 1=2.5 2=2 3=1.5 4=NULL."
+EMITTED="$(cargo run -q -p smelt-dialect --example print_median 2>/dev/null | tail -1)"
+if [[ -z "$EMITTED" ]]; then
+  say "  printer output unavailable (build failed) — skipped"
+else
+  say "  emitted: ${EMITTED}"
+  run "printer output vs DuckDB   [g=m ...]" \
+    "SELECT STRING_AGG(CONCAT(CAST(g AS STRING), '=', IFNULL(CAST(med_val AS STRING), 'NULL')), ' ' ORDER BY g) AS r
+     FROM (${EMITTED/FROM fixture/FROM ($(tr '\n' ' ' <<<"$DFIX")) AS fixture})"
+fi

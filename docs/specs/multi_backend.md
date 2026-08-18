@@ -150,6 +150,22 @@ set means (an always-false guard row, a `WHERE FALSE` predicate with no row at a
 per-caller business decision, not a row-set construction detail — the owner requires at least one
 row and callers handle the empty case themselves before reaching it.
 
+### Exact-median lowering
+`MEDIAN(x)` is an exact, interpolating median on every backend that executes it. DuckDB, Spark,
+and PostgreSQL are emitted unchanged; GoogleSQL has no `MEDIAN` built-in, so the dialect printer
+lowers it, and both lowerings are exact because an approximate substitute would make the
+equivalence oracle report divergences that are artefacts of the substitution — or hide real ones.
+In window position (`MEDIAN(x) OVER w`) the lowering is `PERCENTILE_CONT(x, 0.5) OVER w`, which
+interpolates as DuckDB does; `PERCENTILE_DISC` picks a stored value instead and is therefore not
+the equivalent. In aggregate position (`GROUP BY`) `PERCENTILE_CONT` cannot be used at all —
+GoogleSQL makes it analytic-only — and `APPROX_QUANTILES`, the one aggregate offered, is
+approximate. The lowering there sorts the argument into an array with `ARRAY_AGG(x IGNORE NULLS
+ORDER BY x)` and indexes its middle element, averaging the two middle elements at even counts;
+the array sub-expression is repeated rather than bound to a name because GoogleSQL rejects an
+aggregate inside `UNNEST`. The aggregate form casts to `FLOAT64`, matching the numeric return
+type; a temporal argument, which DuckDB's `MEDIAN` accepts, is refused by the backend rather than
+silently coerced.
+
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
 model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an
@@ -432,10 +448,9 @@ resolves nested widening to a table rewrite.
   accept. The same construct also appears in `smelt-runtime`'s `ephemeral_seed_ctes` compiler path
   (`crates/smelt-runtime/src/execute.rs`), which is product code rather than harness code, so one
   family (the composed-pool route-3 equivalence check) fails on a compiled model statement rather
-  than an oracle query. A second, narrower gap: the recipe pool renders `MEDIAN(val)` for its
-  holistic-aggregate construct unconditionally, which GoogleSQL has no built-in for. A third:
-  the DAG-propagation family stages two projects (an incremental twin and a full-refresh oracle
-  twin) per case through the same per-case dataset name, so the second staging call collides
+  than an oracle query. A second gap: the DAG-propagation family stages two projects (an
+  incremental twin and a full-refresh oracle twin) per case through the same per-case dataset
+  name, so the second staging call collides
   (`409 Already Exists`) — harmless on Spark's single persistent schema but wrong for BigQuery's
   fresh-per-case design; one of its five tests, which stages only one project, is unaffected and
   passes. Until the `VALUES` gap closes, the harness self-check

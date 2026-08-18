@@ -400,6 +400,26 @@ shrinking, each shrink step costing a dry-run round trip — so when first surve
 backend's type surface it is far cheaper to enumerate the whole surface in one pass than to
 iterate fail-fast, one finding per run.
 
+**GoogleSQL has no `MEDIAN`, and only one exact stand-in works where an aggregate is required.**
+`scripts/bigquery-probe-lowering.sh` ran the candidates on the fixture `val ∈ {1,2,3,4}` — an
+even count, so an interpolating median returns 2.5 and a nearest-rank one returns 2, which is
+the whole distinction. `MEDIAN(val)` is refused (`Function not found: MEDIAN`).
+`PERCENTILE_CONT(val, 0.5) OVER ()` returns 2.5 and so is exact, but it is analytic-only:
+in a `GROUP BY` query it is rejected (`SELECT list expression references column val which is
+neither grouped nor aggregated`). `PERCENTILE_DISC` returns 2 — a different function, not an
+alternative spelling. `APPROX_QUANTILES(val, 2)[OFFSET(1)]` is an aggregate and grouped-legal but
+returned 2, i.e. approximate, which under an equivalence oracle would manufacture or mask
+divergences. Binding the sorted array to a name is not available either: `UNNEST([ARRAY_AGG(…)])`
+is refused with `Aggregate function ARRAY_AGG not allowed in UNNEST`. What does work in aggregate
+position is indexing the aggregate's result directly, with the sub-expression repeated:
+`IF(MOD(ARRAY_LENGTH(A), 2) = 1, CAST(A[SAFE_OFFSET(DIV(ARRAY_LENGTH(A), 2))] AS FLOAT64), …)`
+where `A` is `ARRAY_AGG(val IGNORE NULLS ORDER BY val)`. On a grouped fixture it returned
+`1=2.5 2=2 3=1.5 4=NULL` — even count, odd count, NULLs-ignored, and all-NULL group respectively
+— matching DuckDB's `MEDIAN` on the same fixture exactly. The printer's own emitted SQL for
+`SELECT g, MEDIAN(val) … GROUP BY g` was then run verbatim against the warehouse (probe section
+E, which shells out to `cargo run -p smelt-dialect --example print_median`) and returned the same
+four values.
+
 ## Open questions
 
 - **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the

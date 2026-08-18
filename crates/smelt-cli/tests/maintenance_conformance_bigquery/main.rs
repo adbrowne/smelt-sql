@@ -78,7 +78,10 @@
 //! `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`
 //! hit case `recipe_holistic_agg`'s `MEDIAN(val)` aggregate, which GoogleSQL
 //! does not have (`400 Function not found: MEDIAN`) — a construct the shared
-//! recipe pool renders unconditionally regardless of target dialect.
+//! recipe pool renders unconditionally regardless of target dialect. That gap
+//! is closed: the dialect printer now lowers `MEDIAN` to an exact GoogleSQL
+//! form measured to agree with DuckDB (`docs/specs/multi_backend.md`
+//! §"Exact-median lowering"), so the recipe pool needs no dialect awareness.
 //!
 //! None of the above is this phase's own code: `backend.rs` and every
 //! wrapper file are unchanged by this finding, and no fix was attempted
