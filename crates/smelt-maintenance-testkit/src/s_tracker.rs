@@ -26,6 +26,8 @@ use std::collections::HashSet;
 
 use chrono::{Datelike, NaiveDate};
 use smelt_backend::Backend;
+use smelt_core::config::BackendType;
+use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_logical::contract::ContractPoint;
 
 use crate::oracle_modes::OracleMode;
@@ -388,8 +390,32 @@ impl STracker {
     /// `relation = self.oracle_table_name()`, so DuckDB/Spark's default path
     /// (which never calls this directly) is untouched.
     pub fn s_restricted_oracle_sql_over(&self, recipe: &ModelRecipe, relation: &str) -> String {
-        render::render_model_body(recipe)
-            .replace(&format!("smelt.sources.{}", self.source.name), relation)
+        self.s_restricted_oracle_sql_over_for_dialect(recipe, relation, BackendType::DuckDB)
+    }
+
+    /// [`Self::s_restricted_oracle_sql_over`] generalised over an explicit
+    /// target `dialect` (`docs/plans/20260817-bigquery-generative-conformance.md`
+    /// §"Known Divergences": `gate_bigquery::
+    /// append_only_partition_pool_upholds_equivalence_on_bigquery` — `400
+    /// Function not found: MEDIAN`) — the oracle's rendered `HolisticAgg`
+    /// body is routed through smelt's own dialect-aware printer
+    /// ([`print_body_for_dialect`]) rather than this module re-deriving the
+    /// GoogleSQL `MEDIAN` lowering (`docs/specs/multi_backend.md`
+    /// §"Exact-median lowering") a second time. [`Self::
+    /// s_restricted_oracle_sql_over`] is exactly this with
+    /// `dialect = BackendType::DuckDB`; for DuckDB and Spark the printer is
+    /// a verified no-op (`print_for_dialect_is_identity_for_duckdb_and_spark`
+    /// below), so this generalisation changes no byte of the existing
+    /// DuckDB/Spark rendering.
+    pub fn s_restricted_oracle_sql_over_for_dialect(
+        &self,
+        recipe: &ModelRecipe,
+        relation: &str,
+        dialect: BackendType,
+    ) -> String {
+        let body = render::render_model_body(recipe)
+            .replace(&format!("smelt.sources.{}", self.source.name), relation);
+        print_body_for_dialect(&body, dialect)
     }
 
     /// The S-restricted oracle body query for `recipe` AFTER a `RewriteModel`
@@ -416,15 +442,67 @@ impl STracker {
         edit: ModelEdit,
         relation: &str,
     ) -> String {
-        render::render_model_body_with_edit(recipe, edit)
-            .replace(&format!("smelt.sources.{}", self.source.name), relation)
+        self.s_restricted_oracle_sql_with_edit_over_for_dialect(
+            recipe,
+            edit,
+            relation,
+            BackendType::DuckDB,
+        )
     }
+
+    /// [`Self::s_restricted_oracle_sql_with_edit_over`] generalised over an
+    /// explicit target `dialect`, mirroring
+    /// [`Self::s_restricted_oracle_sql_over_for_dialect`]'s reasoning.
+    pub fn s_restricted_oracle_sql_with_edit_over_for_dialect(
+        &self,
+        recipe: &ModelRecipe,
+        edit: ModelEdit,
+        relation: &str,
+        dialect: BackendType,
+    ) -> String {
+        let body = render::render_model_body_with_edit(recipe, edit)
+            .replace(&format!("smelt.sources.{}", self.source.name), relation);
+        print_body_for_dialect(&body, dialect)
+    }
+}
+
+/// Print an S-restricted oracle body through smelt's dialect-aware CST
+/// printer ([`smelt_dialect::print`]) — the single owner of every
+/// backend-specific rewrite (e.g. GoogleSQL's exact-`MEDIAN` lowering,
+/// `crates/smelt-dialect/src/printer.rs::print_bigquery_median`,
+/// `docs/specs/multi_backend.md` §"Exact-median lowering") — rather than
+/// this testkit re-deriving the lowering by hand a second time. The body
+/// has already had its one `smelt.sources.<name>` reference substituted for
+/// a concrete relation by the caller, so no `smelt.<path>` resolver is
+/// needed here; every resolver/expander closure is `None`, matching
+/// `smelt-dialect`'s own "pass through verbatim" convention for contexts
+/// without schema info (`crates/smelt-dialect/src/printer.rs`'s
+/// `PrintContext` doc comments).
+fn print_body_for_dialect(sql: &str, backend_type: BackendType) -> String {
+    let (dialect, capabilities) = match backend_type {
+        BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
+        BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
+    };
+    let parsed = smelt_parser::parse(sql);
+    let ctx = PrintContext {
+        dialect: &dialect,
+        capabilities: &capabilities,
+        schema: "",
+        ephemeral_models: HashSet::new(),
+        cross_engine_refs: std::collections::HashMap::new(),
+        smelt_as_struct: None,
+        smelt_fn: None,
+        smelt_path_ref: None,
+        smelt_path_call: None,
+    };
+    print(&parsed.syntax(), &ctx)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recipe::{KeyShape, SourcePosture};
+    use crate::recipe::{BodyConstruct, GrainDecl, KeyShape, SourcePosture};
 
     fn events_source() -> SourceRecipe {
         SourceRecipe {
@@ -752,6 +830,159 @@ mod tests {
             !sql.to_uppercase().contains("VALUES") && !sql.contains("FROM ("),
             "the zero-row guard must not use a `FROM (VALUES …)` table-value \
              constructor either: {sql:?}"
+        );
+    }
+
+    /// A `HolisticAgg` recipe over `events_source()` — the construct whose
+    /// rendered body contains `MEDIAN(val)`
+    /// (`render::render_model_body`'s `BodyConstruct::HolisticAgg` arm), the
+    /// exact shape `gate_bigquery::
+    /// append_only_partition_pool_upholds_equivalence_on_bigquery` fails on
+    /// live (`400 Function not found: MEDIAN`,
+    /// `docs/specs/multi_backend.md` §"Known Divergences").
+    fn holistic_agg_recipe() -> ModelRecipe {
+        let source = events_source();
+        ModelRecipe {
+            model_name: "recipe_holistic_agg".to_string(),
+            grain: GrainDecl {
+                event_time_column: source.clock_column.clone(),
+                partition_column: source.clock_column.clone(),
+                granularity: "day".to_string(),
+                unique_key: vec![source.clock_column.clone()],
+            },
+            source,
+            construct: BodyConstruct::HolisticAgg,
+            evolution: Vec::new(),
+            contract: None,
+        }
+    }
+
+    /// RED (pre-fix): `STracker::s_restricted_oracle_sql_over` rendered the
+    /// `HolisticAgg` body as raw text with a bare `MEDIAN(val)` call — valid
+    /// on DuckDB/Spark but rejected by BigQuery (`400 Function not found:
+    /// MEDIAN`). GREEN (post-fix): the dialect-aware counterpart
+    /// [`STracker::s_restricted_oracle_sql_over_for_dialect`] routes the
+    /// same body through `smelt_dialect::print`, which lowers `MEDIAN` to
+    /// GoogleSQL's exact `CASE … ARRAY_AGG …` expression
+    /// (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`) — no
+    /// bare `MEDIAN(` survives under the BigQuery dialect.
+    #[test]
+    fn s_restricted_oracle_sql_over_for_dialect_lowers_median_on_bigquery() {
+        let recipe = holistic_agg_recipe();
+        let source = recipe.source.clone();
+        let tracker = STracker::new(&source);
+
+        let bigquery_sql = tracker.s_restricted_oracle_sql_over_for_dialect(
+            &recipe,
+            "oracle_events",
+            BackendType::BigQuery,
+        );
+
+        assert!(
+            !bigquery_sql.to_uppercase().contains("MEDIAN("),
+            "the BigQuery-dialect rendering must not contain a bare MEDIAN( \
+             call — GoogleSQL has no such built-in: {bigquery_sql:?}"
+        );
+        assert!(
+            bigquery_sql.contains("ARRAY_AGG"),
+            "the lowering is expected to route through ARRAY_AGG (the \
+             aggregate-position median lowering, `print_bigquery_median`'s \
+             doc comment): {bigquery_sql:?}"
+        );
+    }
+
+    /// The un-parametrized [`STracker::s_restricted_oracle_sql_over`] (what
+    /// every existing DuckDB/Spark call site still calls) must render
+    /// BYTE-IDENTICAL output to before this change — the dialect-aware
+    /// printer is a verified no-op for DuckDB on this body shape. A hard
+    /// requirement per the task: DuckDB's standing per-PR gate depends on
+    /// this staying unchanged.
+    #[test]
+    fn s_restricted_oracle_sql_over_is_byte_identical_to_the_pre_fix_text_on_duckdb() {
+        let recipe = holistic_agg_recipe();
+        let source = recipe.source.clone();
+        let tracker = STracker::new(&source);
+
+        let sql = tracker.s_restricted_oracle_sql_over(&recipe, "oracle_events");
+
+        assert_eq!(
+            sql,
+            "SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids \
+             FROM oracle_events GROUP BY d",
+            "DuckDB rendering must stay byte-identical to the pre-fix raw-text output"
+        );
+    }
+
+    /// [`STracker::s_restricted_oracle_sql_over_for_dialect`] explicitly at
+    /// `BackendType::Spark` must ALSO stay byte-identical to the pre-fix raw
+    /// text — Spark has a native `MEDIAN` too, so the printer performs no
+    /// rewrite for this dialect either (mirrors the DuckDB byte-identity
+    /// test above; both are a hard requirement per the task).
+    #[test]
+    fn s_restricted_oracle_sql_over_for_dialect_is_byte_identical_on_spark() {
+        let recipe = holistic_agg_recipe();
+        let source = recipe.source.clone();
+        let tracker = STracker::new(&source);
+
+        let sql = tracker.s_restricted_oracle_sql_over_for_dialect(
+            &recipe,
+            "oracle_events",
+            BackendType::Spark,
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids \
+             FROM oracle_events GROUP BY d",
+            "Spark rendering must stay byte-identical to the pre-fix raw-text output"
+        );
+    }
+
+    /// The `RewriteModel`-edit counterpart
+    /// ([`STracker::s_restricted_oracle_sql_with_edit_over_for_dialect`])
+    /// gets the SAME GoogleSQL `MEDIAN` lowering as the un-edited path —
+    /// `(BodyConstruct::HolisticAgg, ModelEdit::AddPayloadColumn)` also
+    /// renders a bare `MEDIAN(val)` in `render::render_model_body_with_edit`.
+    #[test]
+    fn s_restricted_oracle_sql_with_edit_over_for_dialect_lowers_median_on_bigquery() {
+        let recipe = holistic_agg_recipe();
+        let source = recipe.source.clone();
+        let tracker = STracker::new(&source);
+
+        let bigquery_sql = tracker.s_restricted_oracle_sql_with_edit_over_for_dialect(
+            &recipe,
+            ModelEdit::AddPayloadColumn,
+            "oracle_events",
+            BackendType::BigQuery,
+        );
+
+        assert!(
+            !bigquery_sql.to_uppercase().contains("MEDIAN("),
+            "the edited body's BigQuery-dialect rendering must not contain a \
+             bare MEDIAN( call either: {bigquery_sql:?}"
+        );
+    }
+
+    /// [`STracker::s_restricted_oracle_sql_with_edit_over`] (the existing
+    /// un-parametrized entry point every DuckDB/Spark call site still uses)
+    /// stays byte-identical to the pre-fix raw-text output.
+    #[test]
+    fn s_restricted_oracle_sql_with_edit_over_is_byte_identical_on_duckdb() {
+        let recipe = holistic_agg_recipe();
+        let source = recipe.source.clone();
+        let tracker = STracker::new(&source);
+
+        let sql = tracker.s_restricted_oracle_sql_with_edit_over(
+            &recipe,
+            ModelEdit::AddPayloadColumn,
+            "oracle_events",
+        );
+
+        assert_eq!(
+            sql,
+            "SELECT d, MEDIAN(val) AS med_val, COUNT(DISTINCT id) AS distinct_ids, \
+             COUNT(*) AS row_count FROM oracle_events GROUP BY d",
+            "DuckDB rendering must stay byte-identical to the pre-fix raw-text output"
         );
     }
 }

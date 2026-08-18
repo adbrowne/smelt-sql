@@ -14,6 +14,15 @@ smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-runtime = { path = "../smelt-runtime" }
+# `s_tracker.rs`'s S-restricted oracle SQL is rendered through smelt's own
+# dialect-aware printer (`smelt_dialect::print`) rather than re-deriving any
+# backend-specific rewrite (e.g. GoogleSQL's exact-`MEDIAN` lowering) by hand
+# — single ownership, `docs/specs/multi_backend.md` §"Exact-median lowering"
+# (`docs/plans/20260817-bigquery-generative-conformance.md` §"Known
+# Divergences": "harness executes its S-restricted oracle SQL as raw SQL
+# … bypassing smelt's printer").
+smelt-dialect = { path = "../smelt-dialect" }
+smelt-parser = { path = "../smelt-parser" }
 # Optional: only pulled in behind the `spark` feature (off by default) —
 # `docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2 lands the
 # dependency edge ahead of the Spark backend arms a later phase of that plan

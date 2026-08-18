@@ -337,8 +337,18 @@ mod tests {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/families");
         for file in family_body_files {
             let path = dir.join(file);
-            let contents = std::fs::read_to_string(&path)
+            let whole_file = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("read family body file {path:?}: {e}"));
+            // The scan covers the family BODY only. A file's own
+            // `#[cfg(test)] mod tests` legitimately quotes a dialect's
+            // expected output verbatim — `gate_composed.rs` asserts the
+            // DuckDB row set is byte-identical to `(VALUES …) AS t(…)`, which
+            // is the very byte-stability this gate's fix has to preserve.
+            // Scanning it would make asserting the old shape impossible.
+            let contents = match whole_file.find("#[cfg(test)]") {
+                Some(at) => whole_file[..at].to_string(),
+                None => whole_file,
+            };
             for needle in forbidden {
                 assert!(
                     !contents.contains(needle),

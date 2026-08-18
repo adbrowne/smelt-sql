@@ -93,8 +93,13 @@ pub async fn assert_equivalence_for_with_edit(
     let relation = b.oracle_relation(backend, tracker, k).await?;
     let maintained_sql = format!("SELECT * FROM {schema}.{}", recipe.model_name);
     let oracle_sql = match edit {
-        Some(edit) => tracker.s_restricted_oracle_sql_with_edit_over(recipe, edit, &relation),
-        None => tracker.s_restricted_oracle_sql_over(recipe, &relation),
+        Some(edit) => tracker.s_restricted_oracle_sql_with_edit_over_for_dialect(
+            recipe,
+            edit,
+            &relation,
+            b.dialect(),
+        ),
+        None => tracker.s_restricted_oracle_sql_over_for_dialect(recipe, &relation, b.dialect()),
     };
     let equal =
         multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
