@@ -269,9 +269,16 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         SyntaxKind::BINARY_EXPR => {
             // `%` needs more than a rename on GoogleSQL, which has no infix
             // modulo operator — see `print_bigquery_modulo`.
-            if matches!(ctx.dialect, SqlDialect::BigQuery)
-                && print_bigquery_modulo(node, ctx, out)
+            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_modulo(node, ctx, out)
             {
+                return;
+            }
+            // `^` is a strictly more dangerous gap than `%`: GoogleSQL *does*
+            // define infix `^`, but as bitwise XOR, not power — so an
+            // unlowered `^` doesn't fail, it silently computes the wrong
+            // number. `**` shares the same DuckDB "power" semantics and has
+            // no infix form on GoogleSQL at all. See `print_bigquery_power`.
+            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_power(node, ctx, out) {
                 return;
             }
             print_children(node, ctx, out);
@@ -1806,6 +1813,46 @@ fn print_bigquery_modulo(node: &SyntaxNode, ctx: &PrintContext, out: &mut String
     }
 
     out.push_str(&format!("MOD({left_sql}, {right_sql})"));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Lower infix `^` and `**` (power) to GoogleSQL, which has no infix `**`
+/// and defines infix `^` as bitwise XOR — a silent-wrong-answer hazard, not a
+/// syntax error, if left unlowered. Both operators are DuckDB-exact synonyms
+/// for `POWER(x, y)` (measured against DuckDB 1.5.4: `2 ^ 10`, `2 ** 10`, and
+/// `power(2, 10)` all print `1024.0`; the equivalence holds across negative
+/// bases, negative exponents, fractional exponents, and integer-typed
+/// operands — every case always returns `DOUBLE`, matching GoogleSQL's
+/// `POWER`, which always returns `FLOAT64`). The one measured divergence is
+/// `0 ^ (-1)`: DuckDB returns `inf`, GoogleSQL's `POWER` raises a runtime
+/// "invalid argument" error per SQL:2003 — a loud BigQuery-side failure, not
+/// a silent one, so it does not block this lowering.
+///
+/// Returns `true` when the expression was printed here (a `^`/`**`
+/// `BINARY_EXPR` with both operands present), `false` to fall through so
+/// every other `BINARY_EXPR` still prints verbatim.
+fn print_bigquery_power(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+    let Some(bin) = BinaryExpr::cast(node.clone()) else {
+        return false;
+    };
+    if !matches!(bin.operator().as_deref(), Some("^") | Some("**")) {
+        return false;
+    }
+    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+        return false;
+    };
+    let mut left_sql = String::new();
+    print_node(left.syntax(), ctx, &mut left_sql);
+    let mut right_sql = String::new();
+    print_node(right.syntax(), ctx, &mut right_sql);
+    let left_sql = left_sql.trim();
+    let right_sql = right_sql.trim();
+    if left_sql.is_empty() || right_sql.is_empty() {
+        return false;
+    }
+
+    out.push_str(&format!("POWER({left_sql}, {right_sql})"));
     push_trailing_trivia(node, out);
     true
 }
