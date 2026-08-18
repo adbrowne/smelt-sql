@@ -23,6 +23,16 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// Like [`section_body`], but anchored on the LAST occurrence of the heading —
+/// for a heading the spec repeats between its overview and its normative
+/// section.
+fn last_section_body<'a>(doc: &'a str, heading: &str) -> &'a str {
+    let start = doc
+        .rfind(heading)
+        .unwrap_or_else(|| panic!("document must have a {heading:?} heading"));
+    section_body(&doc[start..], heading)
+}
+
 /// Extracts the body of a `### <heading>` section: everything between its
 /// heading and the next `##`/`###` heading.
 fn section_body<'a>(doc: &'a str, heading: &str) -> &'a str {
@@ -188,7 +198,10 @@ fn leaf_seeding_row_is_present() {
 #[test]
 fn graph_layer_states_typed_edges_and_narrowed_refusal() {
     let incremental_models = read("docs/specs/incremental_models.md");
-    let section = section_body(&incremental_models, "### The graph layer");
+    // `### The graph layer` appears twice: once as a one-paragraph entry in the
+    // overview of the layers, and once as the normative section. The normative
+    // one is the later of the two.
+    let section = last_section_body(&incremental_models, "### The graph layer");
 
     assert!(
         section.contains("shape")
@@ -201,14 +214,16 @@ fn graph_layer_states_typed_edges_and_narrowed_refusal() {
         section.contains("MaintenanceGraphUnsupportedNode"),
         "§\"The graph layer\" must still name `MaintenanceGraphUnsupportedNode`"
     );
+    // The spec names delta-signature verdicts in their prose spelling
+    // (`general`, `keyed upsert`), not the Rust variant names.
     assert!(
-        section.contains("General"),
-        "§\"The graph layer\" must scope the keyed-node refusal to a `General` verdict"
+        section.contains("general"),
+        "§\"The graph layer\" must scope the keyed-node refusal to a `general` verdict"
     );
     assert!(
-        section.contains("KeyedUpsert") && section.contains("keyed dirt-set"),
+        section.contains("keyed upsert") && section.contains("keyed dirt-set"),
         "§\"The graph layer\" must describe keyed dirt-set propagation for an admitted \
-         `KeyedUpsert` verdict"
+         `keyed upsert` verdict"
     );
 }
 
