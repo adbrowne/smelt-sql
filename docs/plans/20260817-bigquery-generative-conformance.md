@@ -72,7 +72,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 5     | done     | 7f2e27a9 | 2026-08-17 |
 | 5b    | done     | 4b3aa719 | 2026-08-18 |
 | 5c    | done     | e028596e | 2026-08-18 |
-| 5d    | done     |        | 2026-08-18 |
+| 5d    | done     | 76913b37 | 2026-08-18 |
 | 6     | pending  |        |      |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
