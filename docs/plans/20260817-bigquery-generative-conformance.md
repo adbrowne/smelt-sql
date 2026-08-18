@@ -70,10 +70,14 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 4     | done     | f330210d | 2026-08-17 |
 | 4b    | done     | a5df9508 | 2026-08-17 |
 | 5     | done     | 7f2e27a9 | 2026-08-17 |
-| 5b    | done     |        | 2026-08-18 |
-| 5c    | done     |        | 2026-08-18 |
+| 5b    | done     | 4b3aa719 | 2026-08-18 |
+| 5c    | done     | e028596e | 2026-08-18 |
 | 5d    | pending  |        |      |
 | 6     | pending  |        |      |
+
+Live Spark re-run — the standing gate on every change to shared harness code — is green at
+`e028596e`: all 19 `maintenance_conformance_spark` tests pass in 190s, covering both the
+twin-target seam and the dialect-aware row-set owner.
 
 ---
 
