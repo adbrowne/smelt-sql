@@ -11,7 +11,7 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
-use smelt_parser::ast::{SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
+use smelt_parser::ast::{BinaryExpr, SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall};
 
@@ -263,6 +263,16 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
                         return;
                     }
                 }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::BINARY_EXPR => {
+            // `%` needs more than a rename on GoogleSQL, which has no infix
+            // modulo operator — see `print_bigquery_modulo`.
+            if matches!(ctx.dialect, SqlDialect::BigQuery)
+                && print_bigquery_modulo(node, ctx, out)
+            {
+                return;
             }
             print_children(node, ctx, out);
         }
@@ -1764,6 +1774,38 @@ fn print_bigquery_median(
         upper = at(&mid),
         lower = at(&format!("{mid} - 1")),
     ));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Lower infix `%` (modulo) to GoogleSQL, which has no infix modulo operator
+/// — only the `MOD(x, y)` function (verified live: BigQuery rejects `id % 2`
+/// with `Syntax error: Expected ")" but got "%"`, the failure this closes).
+///
+/// Returns `true` when the expression was printed here (a `%` `BINARY_EXPR`
+/// with both operands present), `false` to fall through to the normal path
+/// so every other `BINARY_EXPR` (`+`, `-`, `AND`, …) still prints verbatim.
+fn print_bigquery_modulo(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+    let Some(bin) = BinaryExpr::cast(node.clone()) else {
+        return false;
+    };
+    if bin.operator().as_deref() != Some("%") {
+        return false;
+    }
+    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+        return false;
+    };
+    let mut left_sql = String::new();
+    print_node(left.syntax(), ctx, &mut left_sql);
+    let mut right_sql = String::new();
+    print_node(right.syntax(), ctx, &mut right_sql);
+    let left_sql = left_sql.trim();
+    let right_sql = right_sql.trim();
+    if left_sql.is_empty() || right_sql.is_empty() {
+        return false;
+    }
+
+    out.push_str(&format!("MOD({left_sql}, {right_sql})"));
     push_trailing_trivia(node, out);
     true
 }
