@@ -184,6 +184,27 @@ aggregate inside `UNNEST`. The aggregate form casts to `FLOAT64`, matching the n
 type; a temporal argument, which DuckDB's `MEDIAN` accepts, is refused by the backend rather than
 silently coerced.
 
+### Operator lowering
+An infix operator smelt's grammar accepts but a backend's SQL does not is lowered by the dialect
+printer, never emitted verbatim and left to the engine. Two operators need this on GoogleSQL, and
+they need it for opposite reasons. `%` (modulo) has no infix form there at all, so an unlowered
+`a % b` is a syntax error; it lowers to `MOD(a, b)`. `^` is worse: GoogleSQL *does* define infix
+`^`, as bitwise XOR, while smelt's grammar reads it as DuckDB does — a synonym for `**`, power.
+An unlowered `^` therefore does not fail on BigQuery, it silently returns a different number, so
+`^` and `**` both lower to `POWER(a, b)`. Every other dialect prints all three unchanged. The
+lowerings are exact: DuckDB's power operator returns a double for every operand type, negative
+base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They diverge only
+at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure, not a wrong
+answer.
+
+`//` (floor division) is deliberately **not** lowered. DuckDB's `//` truncates toward zero when
+both operands are integers, but degrades to plain division the moment either is floating point,
+and the printer carries no operand types with which to tell those cases apart. GoogleSQL's `DIV`
+matches only the integer case, so substituting it unconditionally would silently floor a result
+that should not have been floored. GoogleSQL has no infix `//` either, so leaving it alone makes
+it a loud syntax error instead — the correct outcome under fail-loud discipline until the printer
+can see operand types.
+
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
 model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an
@@ -497,11 +518,30 @@ resolves nested widening to a table rewrite.
     each independent staging in the family now carries its own case through the existing
     target/schema seam.
   - `dags_bigquery::diamond_propagation_suffices_on_bigquery` and
-    `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` — cause **not
-    yet characterised**; the sweep log's failure text scrolled off before it was captured.
-    Diagnosing these needs a fresh live run.
+    `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` — both
+    characterised by the 2026-08-19 sweep. `composed_keyed_pool` **passes**; it was collateral
+    from the gaps already closed. `diamond_propagation` failed with `400 Syntax error: Expected
+    ")" but got "%"` — a model body's `id % 2` reaching GoogleSQL unlowered, now fixed
+    (§"Operator lowering") but not yet confirmed live.
   A targeted re-run of just the `gate_bigquery` module independently measured 3 passed / 3 failed
   in 200.75s, consistent with the full-sweep numbers above. Tracked in
+  `docs/plans/20260817-bigquery-generative-conformance.md`.
+- **Re-measured live 2026-08-19: 14 passed / 7 failed / 0 ignored, 1265.89s** — but five of the
+  seven failures are the credential window expiring mid-sweep (474s remaining against a 600s
+  estimated need), not defects: `gate_mixed`, both `pinned` cases, and two `harness_self_check`
+  cases were refused by the token preflight and never ran, so the `pinned` staging-collision fix
+  remains unconfirmed. The `INSERT ROW` dialect gap and both `DROP`-type-mismatch cases now pass
+  live, as does `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery`.
+  Two genuine failures remain: `dags_bigquery::diamond_propagation_suffices_on_bigquery` (the
+  unlowered `%`, since fixed) and
+  `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`, which now clears
+  the `MEDIAN` error and fails instead on a real S-restricted equivalence violation at the first
+  run whose `ColumnScopedMerge` takes the `MATCHED` arm rather than inserting a new partition.
+  BigQuery is the only backend whose matched arm is an explicit `SET c = source.c, …` column list
+  rather than `SET *` (GoogleSQL has no star form — §"Whole-row MERGE"), and the identical
+  recipe and schedule pass on DuckDB. Cause unconfirmed: distinguishing a stale row from a
+  partial column update from a duplicated row needs a live re-run, which now reports the
+  differing rows rather than only the two queries. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The keyed-fold `MERGE`'s not-matched arm ignores the target dialect on BigQuery, emitting
   `INSERT *` where GoogleSQL needs `INSERT ROW`.** §"Whole-row MERGE" documents the `INSERT ROW`

@@ -76,6 +76,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 6     | done     | a683054b | 2026-08-18 |
 | 7     | done     | aee11375 | 2026-08-18 |
 | 8     | done     | 4ad7a898 | 2026-08-19 |
+| 9     | done     | 6dd2e78c | 2026-08-19 |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
 `MEDIAN` gap closed (and with it a `_col2` gap the lowering exposed in the compiler's type-cast
@@ -588,6 +589,41 @@ sweep confirms the six fixed cases pass.
 **Commit.** `fix: thread the target dialect into the keyed-fold MERGE` + `fix: honour DROP ... IF
 EXISTS across an object-type mismatch on BigQuery` + `fix: dialect-aware S-restricted oracle and
 per-case staging in the harness`
+
+---
+
+### Phase 9: The 2026-08-19 live sweep and the operator-lowering gap
+
+**Goal.** Re-measure the leg against the live warehouse with the Phase 8 fixes in, characterise
+whatever remains, and close what the measurement newly exposes.
+
+**Measured result.** `bash scripts/bigquery-conformance.sh`, `--test-threads=1`: **14 passed / 7
+failed / 0 ignored, 1265.89s**. Five of the seven failures are the credential window expiring
+mid-sweep — the token preflight refused `gate_mixed`, both `pinned` cases and two
+`harness_self_check` cases (474s remaining against a 600s estimate), so they never ran and the
+Phase 8 `pinned` fix is still unconfirmed. Confirmed fixed live: the `INSERT ROW` dialect gap,
+both `DROP`-type-mismatch cases, and `gate_composed_bigquery::composed_keyed_pool_upholds_
+equivalence_on_bigquery` (one of Phase 7's two uncharacterised failures — it was collateral from
+the gaps already closed).
+
+**What the sweep newly exposed.** `dags_bigquery::diamond_propagation_suffices_on_bigquery`, the
+other uncharacterised failure, is `400 Syntax error: Expected ")" but got "%"` — a model body's
+`id % 2` reaching GoogleSQL unlowered. Chasing it found a second, worse instance of the same
+class: smelt's grammar reads `^` as DuckDB does (power), while GoogleSQL defines infix `^` as
+bitwise XOR, so an unlowered `^` returns a *different number* instead of failing. Both are closed
+in the printer (`docs/specs/multi_backend.md` §"Operator lowering"); `//` is deliberately left
+unlowered, since the printer cannot see operand types and DuckDB's `//` is truncating on integers
+but plain division on floats.
+
+**Still open.** `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery` clears
+the `MEDIAN` error and fails on a genuine S-restricted equivalence violation, at the first run
+whose `ColumnScopedMerge` takes the `MATCHED` arm. The two candidate causes an offline diagnosis
+could not separate — a stale row, a partial `SET` column list, or a duplicate row from a
+mismatched `ON` — need a live re-run; the assertion now prints the differing rows, which is why
+this failure survived two sessions uncharacterised.
+
+**Commit.** `fix: lower infix modulo to MOD() on BigQuery` + `fix: lower the power operators to
+POWER() on BigQuery` + `test: name the rows an equivalence violation diverges on`
 
 ---
 
