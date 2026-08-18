@@ -193,6 +193,24 @@ impl BigQueryBackend {
     }
 }
 
+/// Whether a drop failure is BigQuery's "wrong object type" shape
+/// (`sql::is_wrong_object_type_for_drop`) rather than a genuine failure.
+///
+/// Only [`BackendError::ExecutionFailed`] carries a message worth
+/// inspecting; every other variant (connection failure, configuration
+/// error, …) is a different failure family entirely and must propagate
+/// unchanged — this is deliberately not a blanket string sniff over
+/// `Display`, to avoid ever swallowing an error this classifier was not
+/// built to recognise (CLAUDE.md §"Fail-loud discipline").
+fn is_wrong_object_type_error(err: &BackendError) -> bool {
+    match err {
+        BackendError::ExecutionFailed { message, .. } => {
+            sql::is_wrong_object_type_for_drop(message)
+        }
+        _ => false,
+    }
+}
+
 #[async_trait]
 impl Backend for BigQueryBackend {
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
@@ -227,13 +245,21 @@ impl Backend for BigQueryBackend {
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_table(&table_name))
+        match self
+            .py_execute_no_result(&sql::drop_table(&table_name))
             .await
+        {
+            Err(e) if is_wrong_object_type_error(&e) => Ok(()),
+            other => other,
+        }
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_view(&view_name)).await
+        match self.py_execute_no_result(&sql::drop_view(&view_name)).await {
+            Err(e) if is_wrong_object_type_error(&e) => Ok(()),
+            other => other,
+        }
     }
 
     async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
