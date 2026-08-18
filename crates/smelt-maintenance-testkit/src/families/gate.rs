@@ -107,9 +107,24 @@ pub async fn assert_equivalence_for_with_edit(
         })
         .await?;
     if !equal {
+        // The two SQL texts alone don't say which rows actually diverged —
+        // fetch a bounded sample so a panic message names the offending
+        // values instead of leaving the reader to re-run both queries by
+        // hand (`crate::oracle::describe_multiset_diff_via_backend`'s own
+        // doc comment: this is the gap that made a live BigQuery
+        // equivalence failure hard to triage from the log alone).
+        let diff_desc = crate::oracle::describe_multiset_diff_via_backend(
+            backend,
+            &maintained_sql,
+            &oracle_sql,
+            |l, r| b.multiset_diff_sql(l, r),
+            20,
+        )
+        .await
+        .unwrap_or_else(|e| format!("(failed to fetch a differing-row sample: {e})"));
         anyhow::bail!(
             "S-restricted equivalence violated for model {:?} at run {k} (edit {edit:?}): \
-             maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})",
+             maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})\n{diff_desc}",
             recipe.model_name
         );
     }

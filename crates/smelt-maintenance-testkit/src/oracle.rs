@@ -205,6 +205,56 @@ pub async fn multiset_equal_via_backend_with_diff(
     )
 }
 
+/// Diagnostic-only counterpart to [`multiset_equal_via_backend_with_diff`]:
+/// fetches a bounded sample of the actual rows that make `left`/`right`
+/// diverge, formatted for a human, rather than only the count the equality
+/// check itself uses. Never used to decide equality — a caller that already
+/// knows `multiset_equal_via_backend_with_diff` returned `false` calls this
+/// afterward to explain *which* rows, since a bare SQL-text mismatch in a
+/// panic message gives no way to tell a genuine value divergence from a
+/// dialect-rendering quirk (the gap that made a live BigQuery equivalence
+/// failure hard to triage from the log alone — `assert_equivalence_for_with_edit`
+/// in `crates/smelt-maintenance-testkit/src/families/gate.rs`). `limit`
+/// bounds each direction's row fetch so a large divergence does not flood
+/// the panic message.
+pub async fn describe_multiset_diff_via_backend(
+    backend: &dyn Backend,
+    left_sql: &str,
+    right_sql: &str,
+    diff_sql: impl Fn(&str, &str) -> String,
+    limit: usize,
+) -> anyhow::Result<String> {
+    let left_extra = fetch_diff_sample(backend, &diff_sql(left_sql, right_sql), limit).await?;
+    let right_extra = fetch_diff_sample(backend, &diff_sql(right_sql, left_sql), limit).await?;
+    Ok(format!(
+        "rows present in left but not right (up to {limit}):\n{left_extra}\n\
+         rows present in right but not left (up to {limit}):\n{right_extra}"
+    ))
+}
+
+/// [`describe_multiset_diff_via_backend`]'s one-direction row fetch: runs
+/// `diff_query` (already the excess-of-left-over-right shape a `diff_sql`
+/// closure produces), caps it with `LIMIT limit`, and pretty-prints the
+/// resulting batches. `"  (none)"` when the direction has no divergent rows
+/// (an empty result set, or a query that returned zero record batches).
+async fn fetch_diff_sample(
+    backend: &dyn Backend,
+    diff_query: &str,
+    limit: usize,
+) -> anyhow::Result<String> {
+    let sql = format!("SELECT * FROM ({diff_query}) AS d LIMIT {limit}");
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("multiset diff sample query: {e}"))?;
+    if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+        return Ok("  (none)".to_string());
+    }
+    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+        .map_err(|e| anyhow::anyhow!("format diff sample batches: {e}"))?;
+    Ok(formatted.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -474,6 +524,83 @@ mod tests {
         assert!(
             !sql.contains("EXCEPT ALL"),
             "must never emit EXCEPT ALL — GoogleSQL does not support it: {sql:?}"
+        );
+    }
+
+    /// `describe_multiset_diff_via_backend_names_the_offending_rows`: the
+    /// diagnostic helper must surface the ACTUAL divergent row values (not
+    /// just a count) in both directions, and report "(none)" for a
+    /// direction with no divergence — the gap that made a live BigQuery
+    /// equivalence failure ("maintained SQL != oracle SQL") hard to triage
+    /// from the panic message alone, since only the two SQL texts were
+    /// printed, never the rows they actually returned.
+    #[tokio::test]
+    async fn describe_multiset_diff_via_backend_names_the_offending_rows() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+
+        for stmt in [
+            "CREATE TABLE main.left_t(id BIGINT, val DOUBLE)",
+            // left is missing the recomputed (1, -284.5) row a partition
+            // re-run should have produced and instead still carries the
+            // stale (1, -576.0) — the exact "matched-arm didn't write"
+            // shape this helper needs to make legible.
+            "INSERT INTO main.left_t VALUES (1, -576.0), (2, 503.0)",
+            "CREATE TABLE main.right_t(id BIGINT, val DOUBLE)",
+            "INSERT INTO main.right_t VALUES (1, -284.5), (2, 503.0)",
+        ] {
+            backend
+                .execute_sql(stmt)
+                .await
+                .unwrap_or_else(|e| panic!("seed offending-row fixture ({stmt}): {e}"));
+        }
+
+        let left_sql = "SELECT * FROM main.left_t";
+        let right_sql = "SELECT * FROM main.right_t";
+
+        let desc = describe_multiset_diff_via_backend(
+            &backend,
+            left_sql,
+            right_sql,
+            except_all_diff_sql,
+            20,
+        )
+        .await
+        .expect("describe_multiset_diff_via_backend must not error");
+
+        assert!(
+            desc.contains("-576"),
+            "must name the stale left-only row's actual value, not just report a count: {desc}"
+        );
+        assert!(
+            desc.contains("-284.5"),
+            "must name the missing right-only row's actual value: {desc}"
+        );
+        assert!(
+            !desc.contains("503"),
+            "the (2, 503.0) row is present on both sides and must not appear in either \
+             direction's sample: {desc}"
+        );
+
+        // Equal multisets must report "(none)" in both directions rather
+        // than an empty/blank sample that reads as "the helper found
+        // nothing to show" ambiguously.
+        let equal_desc = describe_multiset_diff_via_backend(
+            &backend,
+            right_sql,
+            right_sql,
+            except_all_diff_sql,
+            20,
+        )
+        .await
+        .expect("describe_multiset_diff_via_backend on equal relations must not error");
+        assert!(
+            equal_desc.contains("(none)"),
+            "an empty divergence direction must read as \"(none)\", not a blank sample: \
+             {equal_desc}"
         );
     }
 }

@@ -47,7 +47,10 @@ rowan.workspace = true
 # Arrow record-batch access for the `Backend::execute_sql` count-extraction
 # helper (`oracle.rs::except_all_row_count_via_backend`) — mirrors the same
 # pattern already used by `crates/smelt-runtime/tests/statement_parity.rs`.
-arrow.workspace = true
+# `prettyprint` additionally powers `oracle.rs::describe_multiset_diff_via_backend`'s
+# human-readable row dump — the same feature `smelt-cli`'s `Cargo.toml` already
+# enables for its own `arrow::util::pretty::pretty_format_batches` call sites.
+arrow = { workspace = true, features = ["prettyprint"] }
 
 [features]
 # Off by default (`cargo tree -p smelt-maintenance-testkit --no-default-features
