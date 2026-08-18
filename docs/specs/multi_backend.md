@@ -448,7 +448,11 @@ resolves nested widening to a table rewrite.
   accept. The same construct also appears in `smelt-runtime`'s `ephemeral_seed_ctes` compiler path
   (`crates/smelt-runtime/src/execute.rs`), which is product code rather than harness code, so one
   family (the composed-pool route-3 equivalence check) fails on a compiled model statement rather
-  than an oracle query. A second gap: the DAG-propagation family stages two projects (an
+  than an oracle query. A second gap: the harness materializes its S-restricted oracle
+  relation with `CREATE OR REPLACE TEMPORARY VIEW`, which BigQuery refuses
+  outright (`400 CREATE TEMP VIEW is unsupported`); the oracle relation needs a
+  backend-chosen shape the same way the row set does. A third: the
+  DAG-propagation family stages two projects (an
   incremental twin and a full-refresh oracle twin) per case through the same per-case dataset
   name, so the second staging call collides
   (`409 Already Exists`) — harmless on Spark's single persistent schema but wrong for BigQuery's

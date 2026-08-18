@@ -13,6 +13,7 @@
 use std::collections::{HashMap, HashSet};
 
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_parser::ast::File;
 use smelt_parser::parse;
 
 fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
@@ -88,6 +89,41 @@ fn bigquery_lowers_median_over_an_expression_argument() {
         out.contains("ARRAY_AGG(a + b IGNORE NULLS ORDER BY a + b)"),
         "the argument expression, not just a bare column, is aggregated: {out}"
     );
+}
+
+/// The compiler's type-cast wrapper re-parses printed SQL to name its columns
+/// (`smelt_runtime::compile::SqlCompiler::apply_type_casts`), so a lowering that
+/// smelt's own parser cannot read back silently loses the alias and the wrapper
+/// invents a positional `_col2` the backend does not have. Both lowerings must
+/// therefore round-trip: `IF(...)` did not (smelt reserves `IF` for its own
+/// conditional), which is why the aggregate form is spelled `CASE WHEN`.
+#[test]
+fn the_lowered_sql_parses_back_with_its_alias_intact() {
+    for sql in [
+        "SELECT d, MEDIAN(val) AS med_val FROM events GROUP BY d",
+        "SELECT MEDIAN(val) OVER (PARTITION BY id) AS med_val FROM events",
+    ] {
+        let out = bigquery(sql);
+        let parsed = parse(&out);
+        assert!(
+            parsed.errors.is_empty(),
+            "{out}\nmust parse back cleanly, got: {:?}",
+            parsed.errors
+        );
+
+        let file = File::cast(parsed.syntax()).expect("file");
+        let select = file.select_stmt().expect("select");
+        let aliases: Vec<_> = select
+            .select_list()
+            .expect("select list")
+            .items()
+            .filter_map(|item| item.alias())
+            .collect();
+        assert!(
+            aliases.iter().any(|a| a == "med_val"),
+            "{out}\nmust keep its `med_val` alias, got aliases {aliases:?}"
+        );
+    }
 }
 
 #[test]

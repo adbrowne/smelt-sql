@@ -82,6 +82,12 @@
 //! is closed: the dialect printer now lowers `MEDIAN` to an exact GoogleSQL
 //! form measured to agree with DuckDB (`docs/specs/multi_backend.md`
 //! §"Exact-median lowering"), so the recipe pool needs no dialect awareness.
+//! Re-running that wrapper live afterwards surfaced the NEXT gap in the same
+//! path, unrelated to `MEDIAN`: `STracker::materialize_s_as_view` creates its
+//! oracle relation with `CREATE OR REPLACE TEMPORARY VIEW`, and BigQuery
+//! refuses it outright (`400 CREATE TEMP VIEW is unsupported`). The oracle
+//! relation needs a backend-chosen shape (a per-case table, or an inlined
+//! subquery) the same way the row set itself did.
 //!
 //! None of the above is this phase's own code: `backend.rs` and every
 //! wrapper file are unchanged by this finding, and no fix was attempted

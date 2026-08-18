@@ -1613,6 +1613,19 @@ impl<'a> super::Parser<'a> {
         // call clause, not keyed to any specific function name.
         self.parse_null_treatment_if_present();
 
+        // Ordered aggregate: `ARRAY_AGG(x ORDER BY y)`,
+        // `STRING_AGG(x, ',' ORDER BY y DESC)` — the argument list's own
+        // `ORDER BY`, which fixes the order the aggregate consumes its input in.
+        // Valid in DuckDB, PostgreSQL, Spark SQL, and GoogleSQL, and generic
+        // like the clause above rather than keyed to a function name. Reuses
+        // the SELECT-level `ORDER BY` clause parser, so the sort items are the
+        // same `ORDER_BY_ITEM` nodes everywhere.
+        self.skip_trivia();
+        if self.at(ORDER_KW) {
+            self.parse_order_by_clause();
+            self.skip_trivia();
+        }
+
         self.expect(RPAREN);
         self.finish_node();
     }

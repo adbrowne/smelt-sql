@@ -3053,6 +3053,64 @@ WHERE event_type = 'click'
         );
     }
 
+    /// The type-cast wrapper names its columns by re-parsing the printed SQL,
+    /// so every dialect lowering has to round-trip through smelt's own parser.
+    /// BigQuery's `MEDIAN` lowering emits `ARRAY_AGG(x IGNORE NULLS ORDER BY x)`
+    /// inside a `CASE`; when that did not parse, the alias was lost and the
+    /// wrapper emitted a positional `_col2` the warehouse rejected
+    /// (`Unrecognized name: _col2`, seen live).
+    #[test]
+    fn bigquery_median_lowering_keeps_its_alias_through_the_cast_wrapper() {
+        // The `CAST` gives the wrapper a concrete type to engage on.
+        let sql = "SELECT CAST(d AS DATE) AS d, MEDIAN(val) AS med_val \
+                   FROM raw.events GROUP BY d";
+
+        let model = ModelFile {
+            name: "holistic".to_string(),
+            path: "models/holistic.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("holistic.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let target = Target {
+            target_type: "bigquery".to_string(),
+            database: None,
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: Some("p".to_string()),
+            dataset: Some("main".to_string()),
+            location: Some("US".to_string()),
+        };
+        let compiled = SqlCompiler::new(make_test_config(), &target)
+            .compile(&model, "main")
+            .unwrap();
+
+        assert!(
+            !compiled.sql.contains("_col"),
+            "no positional fallback name may reach the backend: {}",
+            compiled.sql
+        );
+        assert!(
+            compiled.sql.contains("med_val"),
+            "the model's own alias must survive: {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains("MEDIAN("),
+            "the BigQuery lowering must still apply: {}",
+            compiled.sql
+        );
+    }
+
     #[test]
     fn test_join_type_inference_no_wrong_casts() {
         // When a model JOINs source + seed, the type wrapper should not apply wrong types

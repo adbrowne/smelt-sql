@@ -412,13 +412,18 @@ returned 2, i.e. approximate, which under an equivalence oracle would manufactur
 divergences. Binding the sorted array to a name is not available either: `UNNEST([ARRAY_AGG(…)])`
 is refused with `Aggregate function ARRAY_AGG not allowed in UNNEST`. What does work in aggregate
 position is indexing the aggregate's result directly, with the sub-expression repeated:
-`IF(MOD(ARRAY_LENGTH(A), 2) = 1, CAST(A[SAFE_OFFSET(DIV(ARRAY_LENGTH(A), 2))] AS FLOAT64), …)`
+`CASE WHEN MOD(ARRAY_LENGTH(A), 2) = 1 THEN CAST(A[SAFE_OFFSET(DIV(ARRAY_LENGTH(A), 2))] AS
+FLOAT64) ELSE … END`
 where `A` is `ARRAY_AGG(val IGNORE NULLS ORDER BY val)`. On a grouped fixture it returned
 `1=2.5 2=2 3=1.5 4=NULL` — even count, odd count, NULLs-ignored, and all-NULL group respectively
 — matching DuckDB's `MEDIAN` on the same fixture exactly. The printer's own emitted SQL for
 `SELECT g, MEDIAN(val) … GROUP BY g` was then run verbatim against the warehouse (probe section
 E, which shells out to `cargo run -p smelt-dialect --example print_median`) and returned the same
-four values.
+four values. The branch is spelled `CASE WHEN … THEN … ELSE … END` rather than GoogleSQL's
+`IF(cond, a, b)` because smelt's own parser reserves `IF` for its conditional, and the compiler's
+type-cast wrapper re-parses printed SQL to name its columns: an unparseable lowering costs the
+column its alias and the wrapper then emits a positional `_col2` the warehouse rejects. Ordered
+aggregates (`ARRAY_AGG(x ORDER BY x)`) were a genuine parser gap and now parse.
 
 ## Open questions
 

@@ -1759,7 +1759,8 @@ fn print_bigquery_median(
     let mid = format!("DIV(ARRAY_LENGTH({sorted}), 2)");
     let at = |index: &str| format!("CAST({sorted}[SAFE_OFFSET({index})] AS FLOAT64)");
     out.push_str(&format!(
-        "IF(MOD(ARRAY_LENGTH({sorted}), 2) = 1, {upper}, ({lower} + {upper}) / 2)",
+        "CASE WHEN MOD(ARRAY_LENGTH({sorted}), 2) = 1 THEN {upper} \
+         ELSE ({lower} + {upper}) / 2 END",
         upper = at(&mid),
         lower = at(&format!("{mid} - 1")),
     ));
