@@ -74,7 +74,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 5c    | done     | e028596e | 2026-08-18 |
 | 5d    | done     | 76913b37 | 2026-08-18 |
 | 6     | done     | a683054b | 2026-08-18 |
-| 7     | pending  |          |            |
+| 7     | done     | aee11375 | 2026-08-18 |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
 `MEDIAN` gap closed (and with it a `_col2` gap the lowering exposed in the compiler's type-cast
