@@ -98,11 +98,14 @@ crate) for the maintenance legs specifically. BigQuery joins the fixed-recipe su
 (materialization, seed, lowering, merge, incremental DELETE+INSERT, schema evolution) and, like
 Spark, has its own leg of the generative dual-execution harness
 (`maintenance_conformance_bigquery`, see §"Generative equivalence coverage"), so its incremental
-coverage is generative rather than fixed-recipe-only. Coverage is partial: families whose
-comparison never reaches the harness's row-set materialization step (admission-only
+coverage is generative rather than fixed-recipe-only. Coverage is partial, measured live
+2026-08-18 (`bash scripts/bigquery-conformance.sh`): 10 of 21 cases pass. Families whose
+comparison never reaches the harness's oracle-relation materialization step (admission-only
 classification, the per-case dataset lifecycle, and the boundary-row reach check) pass against a
-live warehouse; every family that does reach that step does not yet, on a GoogleSQL gap tracked in
-§Known Divergences. `refresh: materialized_view` is excluded: no
+live warehouse; ten of the eleven failing families fail because they materialize the
+S-restricted oracle relation, a GoogleSQL gap tracked in §Known Divergences. The eleventh fails
+for a distinct, harness-local reason tracked separately in the same section. `refresh:
+materialized_view` is excluded: no
 backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
 mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
@@ -135,6 +138,15 @@ full Spark job set (including the corpus-driven `spark-integration` parser-compa
 unconditionally, and is also reachable on demand via the `run-docker-tests` PR label. A Spark
 regression outside the per-PR path filter still surfaces within one nightly cycle rather than
 sitting unnoticed on `main` indefinitely.
+
+BigQuery's fixed-recipe suites and its generative-conformance leg
+(`maintenance_conformance_bigquery`) have neither tier: both run only when a developer executes
+them by hand, via `scripts/bigquery-parity.sh` and `scripts/bigquery-conformance.sh`
+respectively, against their own GCP project and a freshly minted token
+(`scripts/bigquery-auth.sh`). This is not an oversight — it keeps cloud credentials, and the
+short-lived credential window a BigQuery session runs under, out of CI entirely — but it means a
+BigQuery regression does not surface on `main` on any schedule the way a Spark one does. See
+§Known Divergences for the credential-window constraint this bounds.
 
 ### Inline row-set construction
 Every production path that splices a small literal row set into generated SQL — an ephemeral
@@ -436,30 +448,54 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
-- **The BigQuery generative-conformance leg's row-set materialization step is not GoogleSQL-valid,
-  so most families do not yet pass live.** A first live run against a real warehouse (the
-  `maintenance_conformance_bigquery` binary, `BigQueryConformanceBackend`, and one wrapper per
-  shared family all compile and skip green when `SMELT_BQ_PROJECT` is unset) passed 7 of 21 tests
-  — the ones whose comparison never needs the harness's oracle to materialize a generated row set
-  (admission-only classification, the per-case dataset lifecycle, and the boundary-row reach
-  check). Every other family fails on `STracker::materialize_s_as_view`
-  (`crates/smelt-maintenance-testkit/src/s_tracker.rs`), which builds `SELECT * FROM (VALUES
-  (...), (...)) AS t(cols)` — a table-value-constructor form GoogleSQL's `FROM` clause does not
-  accept. The same construct also appears in `smelt-runtime`'s `ephemeral_seed_ctes` compiler path
-  (`crates/smelt-runtime/src/execute.rs`), which is product code rather than harness code, so one
-  family (the composed-pool route-3 equivalence check) fails on a compiled model statement rather
-  than an oracle query. A second gap: the harness materializes its S-restricted oracle
-  relation with `CREATE OR REPLACE TEMPORARY VIEW`, which BigQuery refuses
-  outright (`400 CREATE TEMP VIEW is unsupported`); the oracle relation needs a
-  backend-chosen shape the same way the row set does. A third: the
-  DAG-propagation family stages two projects (an
-  incremental twin and a full-refresh oracle twin) per case through the same per-case dataset
-  name, so the second staging call collides
-  (`409 Already Exists`) — harmless on Spark's single persistent schema but wrong for BigQuery's
-  fresh-per-case design; one of its five tests, which stages only one project, is unaffected and
-  passes. Until the `VALUES` gap closes, the harness self-check
-  (`oracle_flags_a_seeded_divergence_on_bigquery`) itself fails before reaching its corruption
-  step, so BigQuery's leg has not yet demonstrated the oracle is non-vacuous there. Tracked in
+- **The BigQuery generative-conformance leg's S-restricted oracle relation is not GoogleSQL-valid,
+  so most families do not yet pass live.** `STracker::materialize_s_as_view`
+  (`crates/smelt-maintenance-testkit/src/s_tracker.rs:296`) materializes the oracle relation with
+  `CREATE OR REPLACE TEMPORARY VIEW`, and BigQuery refuses it outright (`400 CREATE TEMP VIEW is
+  unsupported`, measured live). Measured 2026-08-18 (`bash scripts/bigquery-conformance.sh`, 10
+  passed / 11 failed, 886.60s wall-clock): 10 of the 11 failing tests fail on exactly this gap —
+  `dags_bigquery::diamond_propagation_suffices_on_bigquery`,
+  `gate_bigquery::{append_only_partition_pool_upholds_equivalence,
+  column_add_between_runs_recovers_equivalence, full_refresh_interleave_resets_state_correctly,
+  redelivery_of_processed_window_is_idempotent}_on_bigquery`,
+  `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery`,
+  `gate_mixed_bigquery::mutable_pool_settles_to_full_refresh_on_bigquery`,
+  `harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery`,
+  `pinned_bigquery::{hazard_schedules_are_pinned,
+  pinned_recipes_reproduce_catalogue_coverage}_on_bigquery`. Only families whose comparison never
+  needs the oracle relation (admission-only classification, the per-case dataset lifecycle, and
+  the boundary-row reach check) pass against a live warehouse today. The oracle relation needs a
+  backend-chosen shape (a per-case table, or an inlined subquery) the same way the row-set literal
+  itself did (see §"Inline row-set construction", now GoogleSQL-portable on every path). Until
+  this gap closes, the harness self-check (`oracle_flags_a_seeded_divergence_on_bigquery`) itself
+  cannot reach its corruption step, so BigQuery's leg has not yet demonstrated the oracle is
+  non-vacuous there. Tracked in `docs/plans/20260817-bigquery-generative-conformance.md`.
+- **`gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` fails on a
+  second, distinct GoogleSQL gap: a harness-local hand-rolled row set, not the temp-view gap
+  above.** `composed_delta_values_sql`
+  (`crates/smelt-maintenance-testkit/src/families/gate_composed.rs:201`) builds the model SQL it
+  stages by formatting `format!("(VALUES {}) AS t(id, d, val)", …)` directly, instead of going
+  through the dialect-aware row-set owner (`smelt_core::build_row_set_table` /
+  `crates/smelt-core/src/sql/row_set.rs`, see §"Inline row-set construction"). Measured live
+  2026-08-18: `400 Syntax error: Expected keyword JOIN but got ","`. This is **harness code**, not
+  a production path — every production path that splices a row set into generated SQL already
+  routes through the owner, so §"Inline row-set construction" remains true as written for
+  production code; this entry is the one remaining test-harness caller that still hand-rolls the
+  construct it describes. Tracked in `docs/plans/20260817-bigquery-generative-conformance.md`.
+- **The BigQuery generative-conformance leg is bounded by a one-hour credential window.** The
+  service account's OAuth access token (`scripts/bigquery-auth.sh`) is short-lived and cannot be
+  refreshed without a human re-entering the passphrase, so one session can drive at most one
+  token's worth of wall-clock against the live warehouse — a sweep that outlives the window stops
+  mid-case rather than degrading gracefully. `scripts/bigquery-conformance.sh` refuses to start a
+  sweep it cannot see through: it fails loud, naming the missing thing and the fix, when
+  `SMELT_BQ_PROJECT` is unset (an unset project would otherwise skip green, proving nothing) or
+  when no valid token is on disk (`bash scripts/bigquery-auth.sh` mints one). Measured 2026-08-18:
+  the full 21-case shared-family sweep (`bash scripts/bigquery-conformance.sh`,
+  `--test-threads=1`) takes 886.60s (~14.8 minutes) wall-clock — about a quarter of the one-hour
+  token window, with large headroom. The credential-window constraint itself remains real (the
+  window still bounds a session to one token's worth of wall-clock, and a larger case pool or a
+  slower network day could still exhaust it), but no concurrency or case-count reduction is needed
+  to fit today's sweep inside one window. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated

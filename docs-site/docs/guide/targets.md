@@ -171,6 +171,16 @@ smelt compiles the same logical models to GoogleSQL, handling dialect difference
 (BigQuery has no `INSERT OVERWRITE`), and type names GoogleSQL does not recognise (`VARCHAR`,
 `TEXT`, `DOUBLE`) are emitted as `STRING` and `FLOAT64`.
 
+BigQuery is verified against a live warehouse: the fixed-recipe parity suites (materialization,
+seeding, dialect lowering, `MERGE`, incremental refresh, schema evolution) run against a real
+BigQuery project, and incremental-model correctness is additionally checked generatively — the
+same recipe pool, run schedules, and equivalence oracle the other backends use, parametrized to
+target BigQuery. Generative coverage is partial: families that materialize the equivalence
+oracle's restricted relation do not yet run on GoogleSQL, so BigQuery's incremental verification
+is narrower than DuckDB's or Spark's today (see the multi-backend spec's known divergences). Both
+suites run locally against your own GCP project rather than in CI, since that keeps cloud
+credentials out of the build pipeline.
+
 #### Credentials
 
 The BigQuery backend authenticates from a short-lived OAuth access token read from

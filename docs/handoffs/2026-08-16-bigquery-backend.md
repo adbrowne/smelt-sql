@@ -2,6 +2,10 @@
 
 **Date:** 2026-08-16
 **Updated:** 2026-08-17 — type oracle and divergence registry landed
+**Updated:** 2026-08-18 — generative maintenance-conformance leg (`maintenance_conformance_bigquery`),
+`scripts/bigquery-conformance.sh`, and the row-set/MEDIAN dialect gaps it found are landed. The
+live sweep was run: 10 passed / 11 failed in 886.60s, on two distinct GoogleSQL gaps. See
+"Generative maintenance-conformance" below.
 **Worktree:** `/home/andrew/smelt-sql/.claude/worktrees/bigquery`
 **Branch:** `bigquery-backend-research` (clean descendant of `main`; no PR yet)
 
@@ -10,6 +14,11 @@
 BigQuery has a leg in every fixed-recipe parity suite, and **all eight pass against the live
 warehouse**: `dual_target_harness`, `source_seed`, `seed_parity`, `materialization_parity`,
 `lowering_parity`, `merge_parity`, `incremental_parity`, `schema_evolution_parity`.
+
+BigQuery also has a leg on the generative maintenance-conformance gate now
+(`crates/smelt-cli/tests/maintenance_conformance_bigquery/`, run via
+`scripts/bigquery-conformance.sh`) — see "Generative maintenance-conformance" below for what
+passes live today and what still doesn't.
 
 The type oracle now has a BigQuery leg too, backed by dry-run schema queries against the live
 warehouse, with a divergence registry in place. A 512-case sweep against 285 live-compared
@@ -167,19 +176,73 @@ and the registered-divergence detail are in `docs/research/20260816-bigquery-bac
 ## Session workflow
 
 ```
-bash scripts/bigquery-venv.sh     # once: uv-based client venv (system python has no pip)
-bash scripts/bigquery-auth.sh     # per session: prompts for the passphrase, 1h token
-bash scripts/bigquery-parity.sh   # the parity sweep (8 suites)
-bash scripts/bigquery-test.sh     # defaults to the smoke suite; takes cargo args
+bash scripts/bigquery-venv.sh        # once: uv-based client venv (system python has no pip)
+bash scripts/bigquery-auth.sh        # per session: prompts for the passphrase, 1h token
+bash scripts/bigquery-parity.sh      # the fixed-recipe parity sweep (8 suites)
+bash scripts/bigquery-conformance.sh # the generative maintenance-conformance leg (21 cases)
+bash scripts/bigquery-test.sh        # defaults to the smoke suite; takes cargo args
 ```
+
+`bigquery-conformance.sh` is deliberately not invoked by `bigquery-parity.sh` — the parity sweep
+is a bounded routine check, while the conformance leg is slow (every statement is a network round
+trip) and may want the whole one-hour token window to itself. It fails loud, before starting any
+sweep, if `SMELT_BQ_PROJECT` is unset or no valid token is on disk — see
+`docs/specs/multi_backend.md` §Known Divergences for why that matters (a sweep with a project set
+but no token would otherwise die mid-case having burned real quota).
+
+## Generative maintenance-conformance
+
+The `maintenance_conformance_bigquery` binary drives the same recipe pools, schedule driver, and
+S-restricted multiset oracle the DuckDB and Spark legs use
+(`docs/plans/20260817-bigquery-generative-conformance.md`), against a live BigQuery warehouse.
+Three dialect gaps the first live run found are closed: the shared families no longer hardcode a
+Spark dialect assumption (`EXCEPT ALL`, `USING DELTA`, a fixed Spark schema name), inline row sets
+compile through one dialect-aware owner that emits a portable `UNION ALL` chain instead of a
+`FROM (VALUES …)` constructor GoogleSQL rejects, and `MEDIAN` lowers to an exact GoogleSQL form
+rather than tripping `Function not found`.
+
+**Measured live, 2026-08-18** (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`): **10
+passed, 11 failed, 0 ignored**, in **886.60s** (~14.8 minutes) wall-clock. That is about a
+quarter of the one-hour credential window (`docs/specs/multi_backend.md` §Known Divergences
+records the constraint), so the full sweep fits comfortably today — no concurrency or reduced case
+count is needed to size a session against it.
+
+**What blocks a fully green run — two distinct causes, not one:**
+
+1. **10 of the 11 failures** are the S-restricted oracle relation gap anticipated below:
+   `STracker::materialize_s_as_view` (`crates/smelt-maintenance-testkit/src/s_tracker.rs:296`)
+   materializes with `CREATE OR REPLACE TEMPORARY VIEW`, and BigQuery refuses it outright (`400
+   CREATE TEMP VIEW is unsupported`). This is `dags_bigquery::diamond_propagation_suffices_on_bigquery`,
+   the five `gate_bigquery::*_on_bigquery` cases, `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery`,
+   `gate_mixed_bigquery::mutable_pool_settles_to_full_refresh_on_bigquery`,
+   `harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery`, and both
+   `pinned_bigquery::*_on_bigquery` cases. It blocks every family whose comparison reaches the
+   oracle step, including the harness self-check that proves the oracle is non-vacuous. Fixing it
+   needs the same kind of backend-chosen-shape treatment the row-set gap got — not attempted as
+   part of this work.
+2. **The 11th failure is a different, newly-identified gap**:
+   `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` fails with `400
+   Syntax error: Expected keyword JOIN but got ","`, because `composed_delta_values_sql`
+   (`crates/smelt-maintenance-testkit/src/families/gate_composed.rs:201`) hand-rolls
+   `format!("(VALUES {}) AS t(id, d, val)", …)` into the model SQL it stages, instead of going
+   through the dialect-aware row-set owner (`crates/smelt-core/src/sql/row_set.rs`). This is
+   **harness** code, not a production path — every production path already routes through the
+   owner, so the spec's §"Inline row-set construction" claim stays true as written. (The prior
+   Known Divergences entry in `docs/specs/multi_backend.md` attributed this kind of failure to
+   `smelt-runtime`'s `ephemeral_seed_ctes` product path; that was wrong — this measurement
+   supersedes it and there is no evidence any production path is affected.)
+
+Both are recorded in `docs/specs/multi_backend.md` §Known Divergences, each with its own entry.
+Neither is fixed yet.
 
 ## Next steps, in order
 
 1. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
    `true` and no parity fixture writes a pipe query, so the printer's emit-pipes-natively path
    is the one BigQuery-relevant path still unexercised. A fixture with a `|>` query closes it.
-2. **Generative conformance** — needs the fresh-table-per-case allocation above. BigQuery has no
-   `maintenance_conformance` leg, so its incremental coverage is fixed-recipe only.
+2. **Close the S-restricted oracle relation's `CREATE OR REPLACE TEMPORARY VIEW` gap** — see
+   "Generative maintenance-conformance" above. This is what stands between the conformance leg
+   and a fully green live run.
 3. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
    between two live engines rather than looping over `targets_to_run`, so extending them means a
    new engine *pair*, not a third leg. Sized separately from the work above.
