@@ -157,8 +157,9 @@ impl WindowedKeyedRule for CumulativeClassification {
         delta_sql: &str,
         slice: Option<&TargetSlicePredicate>,
         suppression: &WriteSuppression,
+        dialect: MaintenanceDialect,
     ) -> String {
-        build_cumulative_merge_sql(schema, table, delta_sql, self, slice, suppression)
+        build_cumulative_merge_sql(schema, table, delta_sql, self, slice, suppression, dialect)
     }
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
@@ -561,6 +562,7 @@ pub async fn execute_snapshot_reconcile(
             classification,
             None,
             &suppression,
+            smelt_backend::maintenance_dialect(backend.dialect()),
         );
         backend
             .execute_sql(&merge_sql)
@@ -625,6 +627,7 @@ pub fn build_cumulative_merge_sql(
     classification: &CumulativeClassification,
     slice: Option<&TargetSlicePredicate>,
     suppression: &WriteSuppression,
+    dialect: MaintenanceDialect,
 ) -> String {
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
@@ -641,7 +644,7 @@ pub fn build_cumulative_merge_sql(
             delta_sql,
             slice,
             compared_columns,
-            MaintenanceDialect::DuckDb,
+            dialect,
         ),
         WriteSuppression::Unconditional { .. } => emit_keyed_fold(
             &schema_table,
@@ -649,7 +652,7 @@ pub fn build_cumulative_merge_sql(
             &folds,
             delta_sql,
             slice,
-            MaintenanceDialect::DuckDb,
+            dialect,
         ),
     };
     group.statements[0].sql.clone()
@@ -805,6 +808,7 @@ mod tests {
             &classification,
             None,
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
         assert!(sql.contains("MERGE INTO main.device_user_edges"));
         assert!(sql.contains("target.device_id = delta.device_id"));
@@ -838,6 +842,64 @@ mod tests {
         assert_eq!(
             sql, expected.statements[0].sql,
             "build_cumulative_merge_sql must be byte-identical to a direct emitter call"
+        );
+    }
+
+    /// `build_cumulative_merge_sql` must honour the caller-supplied target
+    /// dialect rather than hardcoding `MaintenanceDialect::DuckDb`
+    /// (`docs/specs/multi_backend.md` §"Whole-row MERGE"): the not-matched
+    /// arm on BigQuery spells `INSERT ROW`, not `INSERT *`
+    /// (`smelt_logical::maintenance::emit::whole_row_insert_arm`). The
+    /// DuckDB leg of this same call must stay byte-identical to
+    /// `test_build_cumulative_merge_sql` above — dialect-threading must not
+    /// perturb the existing default-target output.
+    #[test]
+    fn build_cumulative_merge_sql_honours_target_dialect() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+                state: None,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.silver.events_parsed".to_string(),
+                timeseries: Some(dummy_ts()),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY 1";
+
+        let bigquery_sql = build_cumulative_merge_sql(
+            "main",
+            "device_edges",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+            MaintenanceDialect::BigQuery,
+        );
+        assert!(
+            bigquery_sql.contains("WHEN NOT MATCHED THEN INSERT ROW"),
+            "BigQuery target must emit `INSERT ROW`, got: {bigquery_sql}"
+        );
+        assert!(
+            !bigquery_sql.contains("INSERT *"),
+            "BigQuery target must not emit `INSERT *`, got: {bigquery_sql}"
+        );
+
+        let duckdb_sql = build_cumulative_merge_sql(
+            "main",
+            "device_edges",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            duckdb_sql.contains("WHEN NOT MATCHED THEN INSERT *"),
+            "DuckDB target must keep emitting `INSERT *`, got: {duckdb_sql}"
         );
     }
 
@@ -875,6 +937,7 @@ mod tests {
             &classification,
             None,
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
         let with_slice = build_cumulative_merge_sql(
             "main",
@@ -883,6 +946,7 @@ mod tests {
             &classification,
             Some(&slice),
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
         assert!(
             with_slice.contains("AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'"),
@@ -932,6 +996,7 @@ mod tests {
             &classification,
             Some(&slice),
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
         assert!(
             with_slice.contains(
@@ -979,6 +1044,7 @@ mod tests {
             &classification,
             None,
             &suppression,
+            MaintenanceDialect::DuckDb,
         );
 
         let expected = emit_keyed_fold_suppressed(
@@ -1039,6 +1105,7 @@ mod tests {
             &classification,
             None,
             &suppression,
+            MaintenanceDialect::DuckDb,
         );
         assert!(
             bare.contains("IS DISTINCT FROM"),
@@ -1062,6 +1129,7 @@ mod tests {
             &classification,
             Some(&slice),
             &suppression,
+            MaintenanceDialect::DuckDb,
         );
         assert!(
             composed.contains("AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'"),
@@ -1470,6 +1538,7 @@ mod tests {
             &classification,
             None,
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
 
         let expected = emit_keyed_fold(
@@ -1528,6 +1597,7 @@ mod tests {
             &classification,
             None,
             &unconditional(),
+            MaintenanceDialect::DuckDb,
         );
         let expected = emit_keyed_fold(
             "main.device_daily",

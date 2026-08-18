@@ -1474,6 +1474,7 @@ fn max_by_merge_renders_incumbent_comparison() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(
@@ -1531,6 +1532,7 @@ fn once_write_renders_coalesce_target_first() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(
@@ -1581,6 +1583,7 @@ fn snapshot_reconcile_merges_whole_source_no_window() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(

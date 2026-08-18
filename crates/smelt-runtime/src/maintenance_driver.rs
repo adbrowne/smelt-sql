@@ -143,6 +143,14 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// slice) — the composition itself lives in the single-owner emitter
     /// (`smelt_logical::maintenance::emit::emit_keyed_fold_suppressed`),
     /// this method only threads the two already-resolved values to it.
+    ///
+    /// `dialect` is the target's maintenance-statement dialect (`docs/specs/
+    /// multi_backend.md` §"Whole-row MERGE"), resolved once by the driver
+    /// from `backend.dialect()` — the same resolution every other
+    /// maintenance statement in this driver uses (`smelt_backend::
+    /// maintenance_dialect`). Implementors thread it straight to their own
+    /// single-owner emitter call; this trait method never hardcodes a
+    /// dialect of its own.
     fn merge_sql(
         &self,
         schema: &str,
@@ -150,6 +158,7 @@ pub trait WindowedKeyedRule: Send + Sync {
         delta_sql: &str,
         slice: Option<&TargetSlicePredicate>,
         suppression: &WriteSuppression,
+        dialect: MaintenanceDialect,
     ) -> String;
 
     /// The reconciliation ledger's storage grading for this rule's cell
@@ -319,6 +328,7 @@ pub async fn run_windowed_keyed_maintenance(
                 &delta_sql,
                 slice_predicate.as_ref(),
                 suppression,
+                smelt_backend::maintenance_dialect(backend.dialect()),
             ),
         };
 
@@ -3831,6 +3841,7 @@ mod tests {
             _delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             unreachable!("merge_sql must not be called once refuse() fires")
         }
@@ -3994,6 +4005,7 @@ mod tests {
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -4015,6 +4027,7 @@ mod tests {
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -4213,6 +4226,7 @@ mod tests {
             delta_sql: &str,
             slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             self.captured.lock().unwrap().push(slice.cloned());
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
