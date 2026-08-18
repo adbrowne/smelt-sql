@@ -75,6 +75,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 5d    | done     | 76913b37 | 2026-08-18 |
 | 6     | done     | a683054b | 2026-08-18 |
 | 7     | done     | aee11375 | 2026-08-18 |
+| 8     | done     | 4ad7a898 | 2026-08-19 |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
 `MEDIAN` gap closed (and with it a `_col2` gap the lowering exposed in the compiler's type-cast
@@ -541,6 +542,52 @@ smelt's `MEDIAN` lowering, one harness-side gap where the default `Backend::exec
 cause was not captured live (needs a fresh run). Full breakdown in
 `docs/specs/multi_backend.md` §Known Divergences and `docs/handoffs/2026-08-16-bigquery-backend.md`.
 None of the eight was fixed as part of this phase — recording them was the scope.
+
+---
+
+### Phase 8: Close the four characterised causes
+
+**Goal.** Land an offline fix for each of the four causes Phase 7 characterised, leaving only the
+two uncharacterised failures, which need a fresh live sweep to diagnose.
+
+**Pre-conditions.** Phase 7's recorded breakdown.
+
+**What landed.**
+- *Product-side.* `build_cumulative_merge_sql` no longer hardcodes `MaintenanceDialect::DuckDb`:
+  the dialect threads from `run_windowed_keyed_maintenance` through a new parameter on
+  `WindowedKeyedRule::merge_sql`, resolved once via `smelt_backend::maintenance_dialect
+  (backend.dialect())` — the same resolution the driver already uses for `emit_create_table_as`
+  and `emit_recurrence_bound_probe`. `INSERT ROW` on BigQuery, byte-identical `INSERT *` on
+  DuckDB.
+- *Product-side.* BigQuery's `drop_table_if_exists`/`drop_view_if_exists` classify the
+  wrong-object-type `400` as "already absent", restoring the `IF EXISTS` contract at the backend
+  that deviates rather than changing the shared default `execute_model` (which would put the
+  byte-stable DuckDB and Spark paths at risk). The classifier is an allow-list over the two
+  measured GoogleSQL error shapes; every other error, including quota refusals, still propagates.
+- *Harness-side.* `STracker`'s S-restricted oracle body round-trips through `smelt_dialect::print`
+  under the target's own dialect, so the exact-`MEDIAN` GoogleSQL lowering reaches the oracle
+  instead of only compiled models. DuckDB and Spark output is asserted byte-identical.
+- *Harness-side.* Each independent physical staging in the `pinned` family carries its own case
+  index through the existing `ConformanceBackend::target`/`schema` seam. Phase 5b's fix covered
+  two writers sharing one target; `pinned`'s bug was the N-writers-one-target generalisation,
+  closed the same way rather than by a new seam method.
+- The `no_family_hardcodes_a_backend_dialect` scan reads a family file's production body only. It
+  was red at `HEAD`: Phase 7's own byte-identity test quotes DuckDB's `(VALUES …)` output
+  verbatim, which the whole-file scan could not distinguish from the hand-rolled constructor it
+  exists to forbid. A body-level violation is still caught.
+
+**Verification.** `bash .claude/scripts/verify-phase.sh` — all green. No live BigQuery access in
+this phase; the live re-run belongs to the orchestrator.
+
+**Not closed.** The two uncharacterised failures
+(`dags_bigquery::diamond_propagation_suffices_on_bigquery`,
+`gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery`) still need a fresh
+live sweep that captures full failure text, and no §Known Divergences entry retires until a live
+sweep confirms the six fixed cases pass.
+
+**Commit.** `fix: thread the target dialect into the keyed-fold MERGE` + `fix: honour DROP ... IF
+EXISTS across an object-type mismatch on BigQuery` + `fix: dialect-aware S-restricted oracle and
+per-case staging in the harness`
 
 ---
 

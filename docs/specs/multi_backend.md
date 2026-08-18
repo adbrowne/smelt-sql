@@ -107,7 +107,9 @@ fails on either any more. The remaining eight failures span one product-side Goo
 oracle's raw-SQL rendering bypasses smelt's `MEDIAN` lowering; a shared default `execute_model`
 issues a `DROP VIEW` against an existing `TABLE`, which BigQuery refuses unlike DuckDB and Spark),
 a per-case dataset staging collision in the `pinned` family, and two cases whose live failure text
-was not captured and needs a fresh run to diagnose. Full breakdown and evidence in §Known
+was not captured and needs a fresh run to diagnose. Six of the eight carry a landed fix whose
+effect no live sweep has confirmed yet; the pass count above is the last measured one, not a
+current one. Full breakdown and evidence in §Known
 Divergences. `refresh:
 materialized_view` is excluded: no
 backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
@@ -468,7 +470,9 @@ resolves nested widening to a table rewrite.
     not found: MEDIAN`. The harness executes its S-restricted oracle SQL as raw SQL
     (`STracker`), bypassing smelt's printer, so the exact-`MEDIAN` GoogleSQL lowering
     (§"Exact-median lowering") that applies to compiled models does not apply to the oracle's own
-    rendering of a `HolisticAgg` body. **Harness-side.**
+    rendering of a `HolisticAgg` body. **Harness-side.** *Fixed, unconfirmed live:* the oracle body
+    now round-trips through the dialect-aware printer, so the lowering applies to it exactly as it
+    does to a compiled model.
   - `gate_bigquery::column_add_between_runs_recovers_equivalence_on_bigquery` and
     `gate_bigquery::full_refresh_interleave_resets_state_correctly_on_bigquery` — `400 Cannot
     drop <project>:<dataset>.recipe_additive_agg which has type TABLE. A view was expected.` The
@@ -477,16 +481,21 @@ resolves nested widening to a table rewrite.
     "in case the materialization type changed" — a no-op on DuckDB and Spark when the object is
     the other kind, but BigQuery's `DROP VIEW IF EXISTS` errors on a type mismatch instead of
     treating it as absent. **Product-side** (the default `execute_model` implementation shared by
-    every backend).
+    every backend). *Fixed, unconfirmed live:* the BigQuery backend now classifies that one error
+    shape as "already absent" and honours the `IF EXISTS` contract every other backend keeps;
+    every other error still propagates.
   - `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery` — `400 Syntax
     error: Expected keyword ROW or keyword VALUES but got "*"` on a compiled `MERGE … WHEN NOT
     MATCHED THEN INSERT *` statement. **Product-side**; recorded as its own divergence below
-    (`build_cumulative_merge_sql` hardcodes the DuckDB dialect).
+    (`build_cumulative_merge_sql` hardcodes the DuckDB dialect). *Fixed, unconfirmed live:* the
+    dialect now threads from the driver through `WindowedKeyedRule::merge_sql`.
   - `pinned_bigquery::hazard_schedules_are_pinned_on_bigquery` and
     `pinned_bigquery::pinned_recipes_reproduce_catalogue_coverage_on_bigquery` — `409 Already
     Exists: Table …sources_events`. A case stages its source table twice into one per-case
     dataset — structurally the same twin-target collision shape the `dags` family already fixed,
-    in a family (`pinned`) that did not get that fix. **Harness-side.**
+    in a family (`pinned`) that did not get that fix. **Harness-side.** *Fixed, unconfirmed live:*
+    each independent staging in the family now carries its own case through the existing
+    target/schema seam.
   - `dags_bigquery::diamond_propagation_suffices_on_bigquery` and
     `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` — cause **not
     yet characterised**; the sweep log's failure text scrolled off before it was captured.
@@ -507,7 +516,11 @@ resolves nested widening to a table rewrite.
   Syntax error: Expected keyword ROW or keyword VALUES but got "*"` on
   `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery`. This is a genuine
   **product-side** dialect gap, not merely a test-harness issue: it affects any real user model
-  using `refresh: keyed` with a cumulative aggregate on BigQuery. Tracked in
+  using `refresh: keyed` with a cumulative aggregate on BigQuery. The dialect now threads from the
+  maintenance driver through `WindowedKeyedRule::merge_sql` and into
+  `build_cumulative_merge_sql`, resolved once via `smelt_backend::maintenance_dialect`, so the
+  not-matched arm spells `INSERT ROW` on BigQuery and stays byte-identical on DuckDB — asserted
+  offline; no live sweep has confirmed the case passes yet. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The BigQuery generative-conformance leg is bounded by a one-hour credential window.** The
   service account's OAuth access token (`scripts/bigquery-auth.sh`) is short-lived and cannot be
