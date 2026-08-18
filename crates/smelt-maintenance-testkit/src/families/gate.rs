@@ -60,9 +60,12 @@ pub async fn insert_row_for(
 }
 
 /// The S-restricted oracle assertion (mirrors
-/// `maintenance_conformance/gate.rs::assert_equivalence`): materialize `S_k`
-/// as a temp view ([`STracker::materialize_s_as_view`]), then `EXCEPT
-/// ALL`-compare it against the maintained table `<schema>.<model_name>`.
+/// `maintenance_conformance/gate.rs::assert_equivalence`): resolve `S_k`'s
+/// oracle relation through [`ConformanceBackend::oracle_relation`] — a temp
+/// view for DuckDB/Spark, an inline derived table for BigQuery
+/// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7) — then
+/// multiset-compares it (`ConformanceBackend::multiset_diff_sql`) against
+/// the maintained table `<schema>.<model_name>`.
 pub async fn assert_equivalence_for(
     b: &dyn ConformanceBackend,
     schema: &str,
@@ -87,11 +90,11 @@ pub async fn assert_equivalence_for_with_edit(
     k: usize,
     edit: Option<ModelEdit>,
 ) -> Result<()> {
-    tracker.materialize_s_as_view(backend, k).await?;
+    let relation = b.oracle_relation(backend, tracker, k).await?;
     let maintained_sql = format!("SELECT * FROM {schema}.{}", recipe.model_name);
     let oracle_sql = match edit {
-        Some(edit) => tracker.s_restricted_oracle_sql_with_edit(recipe, edit),
-        None => tracker.s_restricted_oracle_sql(recipe),
+        Some(edit) => tracker.s_restricted_oracle_sql_with_edit_over(recipe, edit, &relation),
+        None => tracker.s_restricted_oracle_sql_over(recipe, &relation),
     };
     let equal =
         multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {

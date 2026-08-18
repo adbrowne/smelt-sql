@@ -181,7 +181,13 @@ impl STracker {
         self.runs.len().checked_sub(1)
     }
 
-    fn oracle_table_name(&self) -> String {
+    /// The oracle relation's bare name, `oracle_<source_name>` — public so a
+    /// [`crate::families::ConformanceBackend::oracle_relation`] override
+    /// (BigQuery's inline-derived-table shape,
+    /// `docs/plans/20260817-bigquery-generative-conformance.md` Phase 7) can
+    /// alias its derived table to the SAME name every family body already
+    /// substitutes for `smelt.sources.<name>`.
+    pub fn oracle_table_name(&self) -> String {
         format!("oracle_{}", self.source.name)
     }
 
@@ -317,6 +323,16 @@ impl STracker {
     /// prior shape, minus the `VALUES`-in-`FROM` wrapper: a bare
     /// `SELECT … WHERE 1 = 0` (no `FROM` needed — DuckDB, Spark SQL, and
     /// GoogleSQL all accept a `WHERE` clause on a `FROM`-less `SELECT`).
+    /// Public wrapper over [`Self::s_view_select_sql`] for `S_k` at `k` —
+    /// the SQL text a [`crate::families::ConformanceBackend::oracle_relation`]
+    /// override needs to build an inline derived table (BigQuery's
+    /// no-DDL shape, plan Phase 7) without duplicating the row-set-building
+    /// logic. Reproduces exactly what [`Self::materialize_s_as_view`]
+    /// would materialize, minus the DDL.
+    pub fn s_select_sql(&self, k: usize) -> String {
+        self.s_view_select_sql(&self.s_at(k))
+    }
+
     fn s_view_select_sql(&self, rows: &[GenRow]) -> String {
         let d = &self.source.clock_column;
         let id = &self.source.key_column;
@@ -358,10 +374,22 @@ impl STracker {
     /// edit scope, plan Critical files) but reuses `render_model_body` so
     /// the body itself is still rendered exactly once.
     pub fn s_restricted_oracle_sql(&self, recipe: &ModelRecipe) -> String {
-        render::render_model_body(recipe).replace(
-            &format!("smelt.sources.{}", self.source.name),
-            &self.oracle_table_name(),
-        )
+        self.s_restricted_oracle_sql_over(recipe, &self.oracle_table_name())
+    }
+
+    /// [`Self::s_restricted_oracle_sql`] generalised over an explicit
+    /// `relation` reference rather than always splicing
+    /// [`Self::oracle_table_name`]'s bare identifier
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7) —
+    /// the seam a [`crate::families::ConformanceBackend::oracle_relation`]
+    /// override (BigQuery's inline derived table) threads through instead of
+    /// this crate re-deriving the oracle relation's shape itself.
+    /// [`Self::s_restricted_oracle_sql`] is exactly this with
+    /// `relation = self.oracle_table_name()`, so DuckDB/Spark's default path
+    /// (which never calls this directly) is untouched.
+    pub fn s_restricted_oracle_sql_over(&self, recipe: &ModelRecipe, relation: &str) -> String {
+        render::render_model_body(recipe)
+            .replace(&format!("smelt.sources.{}", self.source.name), relation)
     }
 
     /// The S-restricted oracle body query for `recipe` AFTER a `RewriteModel`
@@ -376,10 +404,20 @@ impl STracker {
         recipe: &ModelRecipe,
         edit: ModelEdit,
     ) -> String {
-        render::render_model_body_with_edit(recipe, edit).replace(
-            &format!("smelt.sources.{}", self.source.name),
-            &self.oracle_table_name(),
-        )
+        self.s_restricted_oracle_sql_with_edit_over(recipe, edit, &self.oracle_table_name())
+    }
+
+    /// [`Self::s_restricted_oracle_sql_with_edit`]'s `relation`-generalised
+    /// counterpart, mirroring [`Self::s_restricted_oracle_sql_over`] (plan
+    /// Phase 7).
+    pub fn s_restricted_oracle_sql_with_edit_over(
+        &self,
+        recipe: &ModelRecipe,
+        edit: ModelEdit,
+        relation: &str,
+    ) -> String {
+        render::render_model_body_with_edit(recipe, edit)
+            .replace(&format!("smelt.sources.{}", self.source.name), relation)
     }
 }
 

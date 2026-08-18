@@ -6,6 +6,10 @@
 `scripts/bigquery-conformance.sh`, and the row-set/MEDIAN dialect gaps it found are landed. The
 live sweep was run: 10 passed / 11 failed in 886.60s, on two distinct GoogleSQL gaps. See
 "Generative maintenance-conformance" below.
+**Updated:** 2026-08-18 (later same day) — the oracle-relation seam (`ConformanceBackend::oracle_relation`)
+closed both of those gaps. Live re-run: 13 passed / 8 failed / 0 ignored, 1142.10s. Eight cases
+still fail, for four distinct causes — one product-side, three harness-side/uncharacterised. See
+"Generative maintenance-conformance" below, which now supersedes the paragraph above it.
 **Worktree:** `/home/andrew/smelt-sql/.claude/worktrees/bigquery`
 **Branch:** `bigquery-backend-research` (clean descendant of `main`; no PR yet)
 
@@ -201,52 +205,82 @@ compile through one dialect-aware owner that emits a portable `UNION ALL` chain 
 `FROM (VALUES …)` constructor GoogleSQL rejects, and `MEDIAN` lowers to an exact GoogleSQL form
 rather than tripping `Function not found`.
 
-**Measured live, 2026-08-18** (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`): **10
-passed, 11 failed, 0 ignored**, in **886.60s** (~14.8 minutes) wall-clock. That is about a
-quarter of the one-hour credential window (`docs/specs/multi_backend.md` §Known Divergences
-records the constraint), so the full sweep fits comfortably today — no concurrency or reduced case
-count is needed to size a session against it.
+**First measured live, 2026-08-18** (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`):
+10 passed, 11 failed, 0 ignored, in 886.60s. Ten of the eleven failures were the S-restricted
+oracle relation's `CREATE OR REPLACE TEMPORARY VIEW` (BigQuery refuses it: `400 CREATE TEMP VIEW
+is unsupported`); the eleventh was the composed family's hand-rolled `(VALUES …) AS t(id, d,
+val)` row set bypassing the dialect-aware owner.
 
-**What blocks a fully green run — two distinct causes, not one:**
+**Both gaps closed** by a `ConformanceBackend::oracle_relation` seam: DuckDB/Spark's default
+still materializes the temp view byte-for-byte; BigQuery's override issues no DDL and returns an
+inline derived table instead. The composed family's row set now routes through
+`smelt_core::build_row_set_table` like every other caller.
 
-1. **10 of the 11 failures** are the S-restricted oracle relation gap anticipated below:
-   `STracker::materialize_s_as_view` (`crates/smelt-maintenance-testkit/src/s_tracker.rs:296`)
-   materializes with `CREATE OR REPLACE TEMPORARY VIEW`, and BigQuery refuses it outright (`400
-   CREATE TEMP VIEW is unsupported`). This is `dags_bigquery::diamond_propagation_suffices_on_bigquery`,
-   the five `gate_bigquery::*_on_bigquery` cases, `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery`,
-   `gate_mixed_bigquery::mutable_pool_settles_to_full_refresh_on_bigquery`,
-   `harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery`, and both
-   `pinned_bigquery::*_on_bigquery` cases. It blocks every family whose comparison reaches the
-   oracle step, including the harness self-check that proves the oracle is non-vacuous. Fixing it
-   needs the same kind of backend-chosen-shape treatment the row-set gap got — not attempted as
-   part of this work.
-2. **The 11th failure is a different, newly-identified gap**:
-   `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` fails with `400
-   Syntax error: Expected keyword JOIN but got ","`, because `composed_delta_values_sql`
-   (`crates/smelt-maintenance-testkit/src/families/gate_composed.rs:201`) hand-rolls
-   `format!("(VALUES {}) AS t(id, d, val)", …)` into the model SQL it stages, instead of going
-   through the dialect-aware row-set owner (`crates/smelt-core/src/sql/row_set.rs`). This is
-   **harness** code, not a production path — every production path already routes through the
-   owner, so the spec's §"Inline row-set construction" claim stays true as written. (The prior
-   Known Divergences entry in `docs/specs/multi_backend.md` attributed this kind of failure to
-   `smelt-runtime`'s `ephemeral_seed_ctes` product path; that was wrong — this measurement
-   supersedes it and there is no evidence any production path is affected.)
+**Re-measured live, 2026-08-18 (later same day)** (`bash scripts/bigquery-conformance.sh`,
+`--test-threads=1`): **13 passed, 8 failed, 0 ignored**, in **1142.10s** (~19 minutes)
+wall-clock — about a third of the one-hour credential window, with headroom to spare.
+`harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery` now **passes** — the
+first live proof that BigQuery's leg has a non-vacuous oracle. A targeted re-run of just the
+`gate_bigquery` module independently measured 3 passed / 3 failed in 200.75s.
 
-Both are recorded in `docs/specs/multi_backend.md` §Known Divergences, each with its own entry.
-Neither is fixed yet.
+**The remaining eight failures, by cause:**
+
+1. **Product-side — the keyed-fold `MERGE` ignores the target dialect.**
+   `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery` fails with `400
+   Syntax error: Expected keyword ROW or keyword VALUES but got "*"` on a compiled `MERGE … WHEN
+   NOT MATCHED THEN INSERT *` statement. The emitter that spells `INSERT ROW` for BigQuery
+   (`whole_row_insert_arm`, `crates/smelt-logical/src/maintenance/emit.rs:293`) is correct; its
+   caller, `build_cumulative_merge_sql` (`crates/smelt-runtime/src/cumulative.rs:621`), takes no
+   dialect parameter and hardcodes `MaintenanceDialect::DuckDb` at both call sites
+   (`:644`, `:652`), so a keyed model's cumulative-aggregate `MERGE` always emits `INSERT *`
+   regardless of backend. This affects real `refresh: keyed` models with a cumulative aggregate
+   on BigQuery, not just the harness — highest-priority fix.
+2. **Harness-side — the oracle bypasses smelt's `MEDIAN` lowering.**
+   `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery` fails with `400
+   Function not found: MEDIAN`, raised from `STracker`'s raw-SQL oracle query rather than a
+   compiled model — the oracle renders its own `HolisticAgg` body without going through smelt's
+   printer, so the exact-`MEDIAN` GoogleSQL lowering never applies there.
+3. **Product-side — a shared default `DROP VIEW`s an existing `TABLE`.**
+   `gate_bigquery::column_add_between_runs_recovers_equivalence_on_bigquery` and
+   `gate_bigquery::full_refresh_interleave_resets_state_correctly_on_bigquery` fail with `400
+   Cannot drop <project>:<dataset>.recipe_additive_agg which has type TABLE. A view was expected.`
+   The default `Backend::execute_model` (`crates/smelt-backend/src/lib.rs:216`, `:222`-`223`)
+   unconditionally drops both kinds "in case the materialization type changed" — harmless on
+   DuckDB/Spark, a hard error on BigQuery when the existing object is the other type.
+4. **Harness-side — a staging collision in the `pinned` family.**
+   `pinned_bigquery::hazard_schedules_are_pinned_on_bigquery` and
+   `pinned_bigquery::pinned_recipes_reproduce_catalogue_coverage_on_bigquery` fail with `409
+   Already Exists: Table …sources_events` — a case stages its source table twice into one
+   per-case dataset, the same twin-target collision shape the `dags` family already had fixed.
+5. **Uncharacterised.** `dags_bigquery::diamond_propagation_suffices_on_bigquery` and
+   `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` failed but their
+   failure text scrolled off the tailed sweep log before it was captured. Needs a fresh live run
+   to diagnose — no cause should be assumed.
+
+All eight are recorded in `docs/specs/multi_backend.md` §Known Divergences. None is fixed yet.
 
 ## Next steps, in order
 
-1. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
+1. **Fix the product-side `INSERT ROW` dialect-threading gap** (cause 1 above) — thread the
+   target dialect into `build_cumulative_merge_sql` instead of hardcoding
+   `MaintenanceDialect::DuckDb`. Highest value: it's the only remaining gap that affects real
+   user models, not just the harness.
+2. **Diagnose the two uncharacterised failures** (`dags_bigquery::diamond_propagation_suffices`,
+   `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence`) with a fresh live run that
+   captures full failure text.
+3. Fix the `pinned` family's twin-target staging collision (cause 4), applying the same fix the
+   `dags` family already got.
+4. Fix or accept the harness-side gaps: route the S-restricted oracle's `MEDIAN` aggregate
+   through smelt's printer (cause 2), and make the shared `execute_model` default tolerant of a
+   type-mismatched `DROP VIEW`/`DROP TABLE` on BigQuery (cause 3) — the latter may want a
+   BigQuery-specific override rather than a change to the shared default.
+5. **`supports_pipe_syntax` has no live coverage.** BigQuery is the only backend reporting
    `true` and no parity fixture writes a pipe query, so the printer's emit-pipes-natively path
    is the one BigQuery-relevant path still unexercised. A fixture with a `|>` query closes it.
-2. **Close the S-restricted oracle relation's `CREATE OR REPLACE TEMPORARY VIEW` gap** — see
-   "Generative maintenance-conformance" above. This is what stands between the conformance leg
-   and a fully green live run.
-3. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
+6. **Cross-engine pairs.** `cross_engine_parity` / `cross_engine_types_parity` assert handoff
    between two live engines rather than looping over `targets_to_run`, so extending them means a
    new engine *pair*, not a third leg. Sized separately from the work above.
-4. **`/smelt:plan`** if the remaining work is taken as one programme rather than piecemeal.
+7. **`/smelt:plan`** if the remaining work is taken as one programme rather than piecemeal.
 
 ## Loose ends
 

@@ -41,6 +41,7 @@ use smelt_maintenance_testkit::families::ConformanceBackend;
 use smelt_maintenance_testkit::recipe::{
     bq_conformance_dataset, bq_project, ConformanceTarget, ModelRecipe,
 };
+use smelt_maintenance_testkit::s_tracker::STracker;
 
 /// Coarse per-test ceiling passed to [`preflight`] before any wrapper starts
 /// its sweep. Not a tight measured bound (Phase 1 measured per-STATEMENT
@@ -173,5 +174,38 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         // (never a degraded `EXCEPT DISTINCT`, which would go blind to a
         // duplicate-only divergence).
         smelt_maintenance_testkit::oracle::bigquery_multiset_diff_sql(left_sql, right_sql)
+    }
+
+    fn dialect(&self) -> smelt_core::config::BackendType {
+        // GoogleSQL has no `VALUES` table-value constructor in `FROM`
+        // position — `gate_composed.rs`'s route-3 delta query routes
+        // through `smelt_core::sql::row_set::build_row_set_table`'s portable
+        // `UNION ALL` rewrite for this dialect
+        // (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7).
+        smelt_core::config::BackendType::BigQuery
+    }
+
+    async fn oracle_relation(
+        &self,
+        _backend: &dyn Backend,
+        tracker: &STracker,
+        k: usize,
+    ) -> anyhow::Result<String> {
+        // `CREATE OR REPLACE TEMPORARY VIEW` is refused outright by
+        // GoogleSQL (`400 CREATE TEMP VIEW is unsupported`, measured live
+        // 2026-08-17) — issue NO DDL at all and return an inline derived
+        // table over the SAME portable `S_k` row-set query
+        // `STracker::materialize_s_as_view` would have materialized
+        // (`STracker::s_select_sql`), aliased to the SAME bare name every
+        // family body already substitutes for `smelt.sources.<name>`
+        // (`STracker::oracle_table_name`) — strictly better than the
+        // DuckDB/Spark default even on principle: no round trip, nothing to
+        // clean up (`docs/plans/20260817-bigquery-generative-conformance.md`
+        // Phase 7).
+        Ok(format!(
+            "({}) AS {}",
+            tracker.s_select_sql(k),
+            tracker.oracle_table_name()
+        ))
     }
 }

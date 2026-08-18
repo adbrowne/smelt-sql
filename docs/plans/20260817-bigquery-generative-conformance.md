@@ -74,6 +74,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 5c    | done     | e028596e | 2026-08-18 |
 | 5d    | done     | 76913b37 | 2026-08-18 |
 | 6     | done     | a683054b | 2026-08-18 |
+| 7     | pending  |          |            |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
 `MEDIAN` gap closed (and with it a `_col2` gap the lowering exposed in the compiler's type-cast
@@ -451,6 +452,95 @@ generator if the construct must be withheld from BigQuery cases.
 - [ ] Spec and user-doc edits are timeless
 
 **Commit.** `docs: BigQuery generative conformance coverage and runner`
+
+---
+
+### Phase 7: The S-restricted oracle relation and the composed family's row set
+
+**Goal.** Close the two remaining GoogleSQL gaps a live sweep on 2026-08-18 measured as the ONLY
+causes of the leg's 11 failures (10 passed / 11 failed / 886.60 s): `STracker::materialize_s_as_view`'s
+`CREATE OR REPLACE TEMPORARY VIEW` (10 of the 11) and `gate_composed.rs`'s hand-rolled
+`(VALUES …) AS t(id, d, val)` row set (the 11th). Both are test-harness code in
+`crates/smelt-maintenance-testkit/`; no production path is implicated.
+
+**Pre-conditions.** Phase 6's live sweep result (2026-08-18), which isolated these as the only two
+remaining defects.
+
+**Gap 1 — the S-restricted oracle relation.** `STracker::materialize_s_as_view`
+(`crates/smelt-maintenance-testkit/src/s_tracker.rs`) issues `CREATE OR REPLACE TEMPORARY VIEW
+oracle_<source>`; BigQuery refuses this outright (`400 CREATE TEMP VIEW is unsupported`). Its
+callers (`families/gate.rs`, `families/gate_keyed.rs`, `families/gate_mixed.rs`) then reference the
+relation by the unqualified name `oracle_<source>`. Closed with a seam on `ConformanceBackend`
+(`oracle_relation`), not a rewrite of the existing path: DuckDB/Spark's default implementation
+reproduces today's behaviour byte-for-byte (materialize the temp view, return its bare name);
+BigQuery's override issues no DDL at all and returns an inline derived table `(<the S_k SELECT>)
+AS oracle_<source>` instead, built from `STracker::s_select_sql` — the same portable row-set query
+`materialize_s_as_view` already uses (Phase 5b), now exposed as a public accessor rather than
+duplicated. `gate_mixed.rs`'s fact-join template supplies its own trailing alias (`f`) immediately
+after the substitution point, so splicing in a second `AS oracle_<name>` alias would double-alias;
+that one call site strips the derived table's `AS oracle_<name>` suffix back to a bare `(...)`
+before splicing (`bare_relation_for_alias`) rather than pushing the generic form through unmodified.
+
+**Gap 2 — the composed family's hand-rolled row set.** `gate_composed.rs`'s
+`composed_delta_values_sql` builds `format!("(VALUES {}) AS t(id, d, val)", …)` directly into the
+staged model SQL, so BigQuery fails with `400 Syntax error: Expected keyword JOIN but got ","`.
+Routed through the existing dialect-aware owner
+`smelt_core::sql::row_set::build_row_set_table` (Phase 5c) instead, parametrized over a new
+`ConformanceBackend::dialect` accessor (DuckDB by default; Spark and BigQuery override it).
+DuckDB/Spark output stays byte-identical.
+
+**TDD tests to write first.**
+- `families/mod.rs` — the trait default `oracle_relation` still materializes the temp view and
+  returns the bare name (executed against a real DuckDB backend); a BigQuery-shaped override
+  issues NO backend calls at all (a call-counting/panicking `Backend` double) and returns a
+  parenthesised derived table, which is itself valid queryable SQL.
+- `gate_composed.rs` — `composed_delta_values_sql` is byte-identical for DuckDB/Spark and contains
+  no `(VALUES ` under the BigQuery dialect.
+- `families/mod.rs`'s existing `no_family_hardcodes_a_backend_dialect` gate extended with a
+  `"(VALUES "` needle, so a hand-rolled table-value constructor in a family body fails the same
+  gate `EXCEPT ALL`/`USING DELTA` already fail.
+
+**Implementation shape.** No live BigQuery access in this phase (`gcloud`/`bq` denied to agents,
+per the handoff) — the offline tests above carry the weight; the live re-run is the orchestrator's
+job in Verification.
+
+**Critical files.** `crates/smelt-maintenance-testkit/src/s_tracker.rs`,
+`crates/smelt-maintenance-testkit/src/families/mod.rs`,
+`crates/smelt-maintenance-testkit/src/families/{gate,gate_keyed,gate_mixed,gate_composed}.rs`,
+`crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs`,
+`crates/smelt-cli/tests/maintenance_conformance_spark/backend.rs`.
+
+**Docs touched.** None — the §Known Divergences entries these gaps map to in
+`docs/specs/multi_backend.md` describe measured live behaviour and are retired only once the
+orchestrator's live re-run confirms both gaps closed, which is outside this phase.
+
+**Review checklist** (material findings only):
+- [ ] DuckDB's standing gate (`cargo test -p smelt-cli --test maintenance_conformance`) is
+      byte-identical, not merely green
+- [ ] The Spark leg's default `oracle_relation`/`dialect` reproduce prior behaviour exactly
+- [ ] `gate_mixed.rs`'s trailing-alias adaptation is tested, not asserted by inspection
+- [ ] The BigQuery override issues no backend calls (proven, not assumed)
+- [ ] `no_family_hardcodes_a_backend_dialect`'s new needle actually would have caught the
+      pre-fix `gate_composed.rs`
+
+**Commit.** `fix: portable S-restricted oracle relation and composed row set for BigQuery`
+
+**Measured result.** Before (2026-08-18, Phase 6's live sweep): 10 passed / 11 failed, 886.60s.
+After (2026-08-18, `bash scripts/bigquery-conformance.sh`, `--test-threads=1`): **13 passed / 8
+failed / 0 ignored, 1142.10s**. Both targeted gaps are confirmed closed — no case fails on
+`CREATE OR REPLACE TEMPORARY VIEW` or the composed family's hand-rolled `(VALUES …)` row set any
+more, and `harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery` now passes,
+the first live proof BigQuery's leg has a non-vacuous oracle. Eight cases still fail, none on
+either gap this phase targeted: one product-side dialect gap
+(`build_cumulative_merge_sql`, `crates/smelt-runtime/src/cumulative.rs:621`, hardcodes
+`MaintenanceDialect::DuckDb` so a keyed-fold `MERGE`'s not-matched arm emits `INSERT *` instead of
+`INSERT ROW` on BigQuery), one harness-side gap where the oracle's raw-SQL rendering bypasses
+smelt's `MEDIAN` lowering, one harness-side gap where the default `Backend::execute_model`
+(`crates/smelt-backend/src/lib.rs:216`) unconditionally issues `DROP VIEW IF EXISTS` against a
+`TABLE`, one harness-side staging collision in the `pinned` family, and two cases whose failure
+cause was not captured live (needs a fresh run). Full breakdown in
+`docs/specs/multi_backend.md` §Known Divergences and `docs/handoffs/2026-08-16-bigquery-backend.md`.
+None of the eight was fixed as part of this phase — recording them was the scope.
 
 ---
 

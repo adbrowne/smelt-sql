@@ -54,9 +54,12 @@ pub async fn insert_row_keyed_for(
     Ok(())
 }
 
-/// The end-state equivalence assertion for a [`KeyedRecipe`] — materializes
-/// `S_k` as a temp VIEW (`STracker::materialize_s_as_view`) rather than a
-/// temp table.
+/// The end-state equivalence assertion for a [`KeyedRecipe`] — resolves
+/// `S_k`'s oracle relation through
+/// [`ConformanceBackend::oracle_relation`]: a session-scoped temp VIEW
+/// (`STracker::materialize_s_as_view`) for DuckDB/Spark, an inline derived
+/// table for BigQuery
+/// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7).
 pub async fn assert_keyed_equivalence_for(
     b: &dyn ConformanceBackend,
     schema: &str,
@@ -65,13 +68,9 @@ pub async fn assert_keyed_equivalence_for(
     tracker: &STracker,
     k: usize,
 ) -> Result<()> {
-    tracker.materialize_s_as_view(backend, k).await?;
+    let relation = b.oracle_relation(backend, tracker, k).await?;
     let maintained_sql = format!("SELECT * FROM {schema}.{}", recipe.model_name);
-    // `tracker.materialize_s_as_view` creates an unqualified (session-scoped)
-    // temp view named `oracle_<source_name>` — the same name
-    // `render_keyed_oracle_body_over` expects.
-    let oracle_sql =
-        render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
+    let oracle_sql = render::render_keyed_oracle_body_over(recipe, &relation);
     let equal =
         multiset_equal_via_backend_with_diff(backend, &maintained_sql, &oracle_sql, |l, r| {
             b.multiset_diff_sql(l, r)

@@ -175,11 +175,12 @@ BigQuery is verified against a live warehouse: the fixed-recipe parity suites (m
 seeding, dialect lowering, `MERGE`, incremental refresh, schema evolution) run against a real
 BigQuery project, and incremental-model correctness is additionally checked generatively — the
 same recipe pool, run schedules, and equivalence oracle the other backends use, parametrized to
-target BigQuery. Generative coverage is partial: families that materialize the equivalence
-oracle's restricted relation do not yet run on GoogleSQL, so BigQuery's incremental verification
-is narrower than DuckDB's or Spark's today (see the multi-backend spec's known divergences). Both
-suites run locally against your own GCP project rather than in CI, since that keeps cloud
-credentials out of the build pipeline.
+target BigQuery. Generative coverage is partial: most of the suite passes against a live
+warehouse, but a handful of cases still fail — a dialect gap in a `MERGE` statement's whole-row
+insert arm, plus a few test-harness gaps and cases still being diagnosed — so BigQuery's
+incremental verification is narrower than DuckDB's or Spark's today (see the multi-backend spec's
+known divergences). Both suites run locally against your own GCP project rather than in CI, since
+that keeps cloud credentials out of the build pipeline.
 
 #### Credentials
 

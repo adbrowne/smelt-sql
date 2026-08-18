@@ -193,18 +193,34 @@ fn composed_route3_suppression() -> WriteSuppression {
     }
 }
 
-fn composed_delta_values_sql(rows: &[GenRow]) -> String {
-    let values: Vec<String> = rows
+/// The route-3 delta's inline row set, dialect-aware
+/// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7) —
+/// routed through `smelt_core::sql::row_set::build_row_set_table`, the
+/// single dialect-aware owner, rather than hand-formatting a table-value
+/// constructor directly: GoogleSQL has no table-value constructor in `FROM` position
+/// (`400 Syntax error: Expected keyword JOIN but got ","`, measured live
+/// against BigQuery). `dialect` comes from
+/// [`ConformanceBackend::dialect`] — DuckDB/Spark keep today's `(VALUES
+/// …) AS t(id, d, val)` shape byte-identical; BigQuery gets the portable
+/// `(SELECT … UNION ALL SELECT …) AS t` rewrite instead.
+fn composed_delta_values_sql(dialect: smelt_core::config::BackendType, rows: &[GenRow]) -> String {
+    let rows_sql: Vec<Vec<String>> = rows
         .iter()
-        .map(|r| format!("({}, DATE '{}', {})", r.id, r.d.format("%Y-%m-%d"), r.val))
+        .map(|r| {
+            vec![
+                r.id.to_string(),
+                format!("DATE '{}'", r.d.format("%Y-%m-%d")),
+                r.val.to_string(),
+            ]
+        })
         .collect();
-    format!("(VALUES {}) AS t(id, d, val)", values.join(", "))
+    smelt_core::sql::row_set::build_row_set_table(dialect, "t", &["id", "d", "val"], &rows_sql)
 }
 
-fn composed_route3_delta_sql(rows: &[GenRow]) -> String {
+fn composed_route3_delta_sql(dialect: smelt_core::config::BackendType, rows: &[GenRow]) -> String {
     format!(
         "SELECT id, MAX(d) AS last_seen FROM {} GROUP BY id",
-        composed_delta_values_sql(rows)
+        composed_delta_values_sql(dialect, rows)
     )
 }
 
@@ -304,6 +320,7 @@ async fn drive_composed_route3_and_assert_for(
 ) -> Result<()> {
     let classification = composed_route3_classification(recipe);
     let slice = composed_route3_slice();
+    let dialect = b.dialect();
 
     for (i, window) in schedule.0.iter().enumerate() {
         b.before_step().await;
@@ -311,7 +328,7 @@ async fn drive_composed_route3_and_assert_for(
 
         let rows = window.rows.clone();
         let compile_step = move |_step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
-            Ok(composed_route3_delta_sql(&rows))
+            Ok(composed_route3_delta_sql(dialect, &rows))
         };
         let run_date_str = window.run_date.format("%Y-%m-%d").to_string();
         let next_day_str = (window.run_date + chrono::Duration::days(1))
@@ -436,4 +453,86 @@ pub async fn run_composed_keyed_admission_rate_stays_above_floor(
          ({admitted}/{n} admitted)"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_rows() -> Vec<GenRow> {
+        vec![
+            GenRow {
+                d: chrono::NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid date"),
+                id: 900,
+                val: 10,
+            },
+            GenRow {
+                d: chrono::NaiveDate::from_ymd_opt(2024, 3, 2).expect("valid date"),
+                id: 5000,
+                val: 1,
+            },
+        ]
+    }
+
+    /// `composed_delta_values_sql_is_byte_identical_for_duckdb_and_spark`
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7,
+    /// Gap 2): the dialect-aware rewrite must reproduce today's hand-rolled
+    /// `(VALUES …) AS t(id, d, val)` shape EXACTLY for DuckDB (and Spark,
+    /// which shares DuckDB's arm in `row_set::build_row_set_table`) — the
+    /// standing DuckDB gate and the Spark leg's own re-run both depend on
+    /// this staying unchanged.
+    #[test]
+    fn composed_delta_values_sql_is_byte_identical_for_duckdb_and_spark() {
+        let rows = sample_rows();
+        let duckdb = composed_delta_values_sql(smelt_core::config::BackendType::DuckDB, &rows);
+        let spark = composed_delta_values_sql(smelt_core::config::BackendType::Spark, &rows);
+        assert_eq!(duckdb, spark);
+        assert_eq!(
+            duckdb,
+            "(VALUES (900, DATE '2024-03-01', 10), (5000, DATE '2024-03-02', 1)) AS t(id, d, val)",
+            "DuckDB/Spark's row set must stay byte-identical to the pre-Phase-7 hand-rolled shape"
+        );
+    }
+
+    /// `composed_delta_values_sql_under_bigquery_dialect_has_no_values_table_constructor`
+    /// (plan Phase 7, Gap 2 TDD test): GoogleSQL rejects a `(VALUES …)`
+    /// table-value constructor in `FROM` position (`400 Syntax error:
+    /// Expected keyword JOIN but got ","`, measured live against BigQuery)
+    /// — the BigQuery-dialect row set must contain no `VALUES` at all and
+    /// must be the portable chained `UNION ALL` rewrite instead.
+    #[test]
+    fn composed_delta_values_sql_under_bigquery_dialect_has_no_values_table_constructor() {
+        let rows = sample_rows();
+        let bq = composed_delta_values_sql(smelt_core::config::BackendType::BigQuery, &rows);
+        assert!(
+            !bq.to_uppercase().contains("VALUES"),
+            "BigQuery's route-3 delta row set must not use a VALUES table-value \
+             constructor, got: {bq:?}"
+        );
+        assert!(
+            bq.contains("UNION ALL"),
+            "expected a chained UNION ALL rewrite, got: {bq:?}"
+        );
+        assert_eq!(
+            bq,
+            "(SELECT 900 AS id, DATE '2024-03-01' AS d, 10 AS val UNION ALL \
+             SELECT 5000, DATE '2024-03-02', 1) AS t"
+        );
+    }
+
+    /// `composed_route3_delta_sql_is_byte_identical_for_duckdb_under_the_staged_query_shape`
+    /// (plan Phase 7, Gap 2): the full delta query (row set plus the
+    /// `SELECT id, MAX(d) ... GROUP BY id` wrapper) staged into
+    /// `run_windowed_keyed_maintenance`'s `compile_step` must stay
+    /// byte-identical for DuckDB post-fix.
+    #[test]
+    fn composed_route3_delta_sql_is_byte_identical_for_duckdb_under_the_staged_query_shape() {
+        let rows = sample_rows();
+        let sql = composed_route3_delta_sql(smelt_core::config::BackendType::DuckDB, &rows);
+        assert_eq!(
+            sql,
+            "SELECT id, MAX(d) AS last_seen FROM (VALUES (900, DATE '2024-03-01', 10), \
+             (5000, DATE '2024-03-02', 1)) AS t(id, d, val) GROUP BY id"
+        );
+    }
 }

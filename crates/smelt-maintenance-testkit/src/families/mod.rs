@@ -141,6 +141,60 @@ pub trait ConformanceBackend: Sync {
     fn storage_clause(&self) -> &str {
         ""
     }
+
+    /// This backend's SQL dialect, for a family that needs to build a
+    /// dialect-aware inline row set
+    /// (`smelt_core::sql::row_set::build_row_set_table`,
+    /// `docs/plans/20260817-bigquery-generative-conformance.md` Phase 7) —
+    /// `gate_composed.rs`'s route-3 delta query is the one family body that
+    /// needs this today. Default: `BackendType::DuckDB`, matching every
+    /// backend except Spark/BigQuery, which override it.
+    fn dialect(&self) -> smelt_core::config::BackendType {
+        smelt_core::config::BackendType::DuckDB
+    }
+
+    /// The SQL relation reference for `S_k` (design §6's "materializes `S_k`
+    /// into temp tables") — the seam every family's oracle-relation call
+    /// site goes through instead of calling
+    /// [`crate::s_tracker::STracker::materialize_s_as_view`] directly
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7).
+    ///
+    /// Default implementation reproduces today's DuckDB/Spark behaviour
+    /// EXACTLY: materialize `S_k` as a session-scoped temp view via
+    /// [`crate::s_tracker::STracker::materialize_s_as_view`] and return its
+    /// bare unqualified name (`oracle_<source>`) — DuckDB's standing per-PR
+    /// gate and the Spark leg's own re-run both depend on this staying
+    /// byte-identical, so this default must never change.
+    ///
+    /// BigQuery overrides this: `CREATE OR REPLACE TEMPORARY VIEW` is
+    /// refused outright by GoogleSQL (`400 CREATE TEMP VIEW is
+    /// unsupported`, measured live 2026-08-17) — its implementation issues
+    /// NO DDL at all and returns an inline derived table `(<the S_k
+    /// SELECT>) AS oracle_<source>` instead (the SELECT itself comes from
+    /// [`crate::s_tracker::STracker::s_select_sql`], the same portable
+    /// `UNION ALL` row-set builder [`crate::s_tracker::STracker::materialize_s_as_view`]
+    /// already uses) — strictly better even on a dialect that DID support
+    /// temp views: no round trip, nothing to clean up.
+    ///
+    /// The returned relation is meant for splicing into a BARE (no
+    /// trailing alias) `FROM` position — every family call site that
+    /// substitutes `smelt.sources.<name>` for this value satisfies that
+    /// shape EXCEPT `gate_mixed.rs`'s fact-join template, whose body
+    /// already supplies its own trailing alias (`f`) immediately after the
+    /// substitution point; that call site strips a derived table's `AS
+    /// oracle_<name>` suffix back down to a bare `(...)` before splicing
+    /// (`gate_mixed.rs`'s `bare_relation_for_alias`) — the bare-identifier
+    /// default form needs no such stripping (an identifier followed by an
+    /// alias is ordinary SQL either way).
+    async fn oracle_relation(
+        &self,
+        backend: &dyn Backend,
+        tracker: &crate::s_tracker::STracker,
+        k: usize,
+    ) -> Result<String> {
+        tracker.materialize_s_as_view(backend, k).await?;
+        Ok(tracker.oracle_table_name())
+    }
 }
 
 #[cfg(test)]
@@ -248,9 +302,28 @@ mod tests {
     /// backend-agnostic multiset-comparison primitive (also used directly by
     /// the DuckDB-only `maintenance_conformance/{gate,pinned}.rs`, outside
     /// this plan's scope) — neither is a "family body".
+    ///
+    /// `"(VALUES "` joined this list in
+    /// `docs/plans/20260817-bigquery-generative-conformance.md` Phase 7:
+    /// this exact gate existed before that phase and did NOT catch
+    /// `gate_composed.rs`'s hand-rolled `format!("(VALUES {}) AS
+    /// t(id, d, val)", …)` — a hardcoded table-value constructor is the
+    /// SAME class of defect as a hardcoded `EXCEPT ALL`/`USING DELTA`
+    /// (a dialect assumption baked into a family body instead of resolved
+    /// through `ConformanceBackend`), it just happened not to be a bare
+    /// string literal this test already knew to look for. Any family body
+    /// that needs an inline row set must build it through
+    /// `smelt_core::sql::row_set::build_row_set_table`, parametrized over
+    /// `ConformanceBackend::dialect`, the way `gate_composed.rs`'s
+    /// `composed_delta_values_sql` does post-fix.
     #[test]
     fn no_family_hardcodes_a_backend_dialect() {
-        let forbidden = ["EXCEPT ALL", "USING DELTA", "SPARK_CONFORMANCE_SCHEMA"];
+        let forbidden = [
+            "EXCEPT ALL",
+            "USING DELTA",
+            "SPARK_CONFORMANCE_SCHEMA",
+            "(VALUES ",
+        ];
         let family_body_files = [
             "dags.rs",
             "feed.rs",
@@ -415,6 +488,347 @@ mod tests {
             "BigQueryLikeDiffBackend's ConformanceBackend override must reach \
              oracle::bigquery_multiset_diff_sql's row-ranking emulation, not some other \
              diff shape: {bq_sql:?}"
+        );
+    }
+
+    /// `oracle_relation_default_reproduces_materialize_s_as_view_and_returns_bare_name`
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7,
+    /// Gap 1): the trait's DEFAULT `oracle_relation` implementation — the
+    /// one DuckDB and Spark both use — must still call
+    /// `STracker::materialize_s_as_view` and return the bare
+    /// `oracle_<source>` name unchanged, executed here against a real
+    /// DuckDB backend so this is a byte-for-byte behavioural guard, not
+    /// just a read of the source.
+    #[tokio::test]
+    async fn oracle_relation_default_reproduces_materialize_s_as_view_and_returns_bare_name() {
+        use std::path::Path;
+
+        use anyhow::Result;
+        use smelt_backend::Backend;
+        use smelt_runtime::check_runner::batches_to_rows;
+
+        use crate::families::ConformanceBackend;
+        use crate::recipe::{KeyShape, ModelRecipe, SourcePosture, SourceRecipe};
+        use crate::s_tracker::STracker;
+
+        struct DefaultRelationBackend;
+
+        #[async_trait::async_trait]
+        impl ConformanceBackend for DefaultRelationBackend {
+            fn target(&self, _case: usize) -> ConformanceTarget {
+                unimplemented!("not exercised by this test")
+            }
+            fn schema(&self, _case: usize) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            fn engine_name(&self) -> &str {
+                unimplemented!("not exercised by this test")
+            }
+            fn skip_reason(&self) -> Option<String> {
+                unimplemented!("not exercised by this test")
+            }
+            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            async fn before_step(&self) {
+                unimplemented!("not exercised by this test")
+            }
+            async fn open_backend(
+                &self,
+                _case: usize,
+                _db_path: &Path,
+            ) -> Result<Box<dyn Backend>> {
+                unimplemented!("not exercised by this test")
+            }
+            // target/schema/dialect/oracle_relation: trait defaults.
+        }
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let duckdb = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+
+        let source = SourceRecipe {
+            name: "events".to_string(),
+            clock_column: "d".to_string(),
+            key_column: "id".to_string(),
+            payload_column: "val".to_string(),
+            key_shape: KeyShape::Single,
+            posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
+        };
+        let mut tracker = STracker::new(&source);
+        let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+        let k = tracker.record_run(
+            d,
+            d + chrono::Duration::days(1),
+            vec![crate::schedule_gen::GenRow { d, id: 1, val: 10 }],
+        );
+
+        let backend = DefaultRelationBackend;
+        let relation = backend
+            .oracle_relation(&duckdb, &tracker, k)
+            .await
+            .expect("default oracle_relation must succeed");
+        assert_eq!(
+            relation,
+            tracker.oracle_table_name(),
+            "the default oracle_relation must return the bare oracle_<source> name, unchanged \
+             from today's behaviour"
+        );
+
+        // The relation must actually be queryable — proof the default
+        // really did materialize the view via `materialize_s_as_view`
+        // rather than merely returning a name nothing backs.
+        let batches = duckdb
+            .execute_sql(&format!("SELECT COUNT(*) AS n FROM {relation}"))
+            .await
+            .unwrap_or_else(|e| panic!("query materialized oracle relation {relation:?}: {e}"));
+        let rows = batches_to_rows(&batches);
+        assert_eq!(
+            rows.first().and_then(|r| r.get("n")).cloned(),
+            Some("1".to_string()),
+            "materialized oracle view must contain exactly the one recorded row"
+        );
+    }
+
+    /// `oracle_relation_bigquery_shape_emits_no_ddl_and_returns_a_derived_table`
+    /// (plan Phase 7, Gap 1): a BigQuery-shaped override — built the same
+    /// way `BigQueryConformanceBackend::oracle_relation`
+    /// (`crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs`)
+    /// is — must issue NO backend calls at all (proven with a call-counting
+    /// `Backend` double that panics if touched) and must return an inline
+    /// parenthesised derived table (`(<select>) AS oracle_<name>`), never a
+    /// `CREATE`/`DROP` DDL statement. The returned relation is additionally
+    /// executed against a real DuckDB connection (DuckDB accepts the same
+    /// portable `UNION ALL` shape GoogleSQL requires) to prove it is valid,
+    /// queryable SQL, not just a string shape.
+    #[tokio::test]
+    async fn oracle_relation_bigquery_shape_emits_no_ddl_and_returns_a_derived_table() {
+        use std::path::Path;
+
+        use anyhow::Result;
+        use smelt_backend::{Backend, BackendCapabilities};
+
+        use crate::families::ConformanceBackend;
+        use crate::recipe::{KeyShape, ModelRecipe, SourcePosture, SourceRecipe};
+        use crate::s_tracker::STracker;
+
+        /// Panics on any DDL/query call — proves a caller never reaches the
+        /// backend at all.
+        struct PanicIfTouchedBackend;
+
+        #[async_trait::async_trait]
+        impl Backend for PanicIfTouchedBackend {
+            async fn execute_sql(
+                &self,
+                sql: &str,
+            ) -> std::result::Result<
+                Vec<arrow::record_batch::RecordBatch>,
+                smelt_backend::BackendError,
+            > {
+                panic!("BigQuery's oracle_relation must issue NO backend calls, got: {sql:?}")
+            }
+            async fn create_table_as(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no create_table_as call")
+            }
+            async fn create_view_as(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no create_view_as call")
+            }
+            async fn drop_table_if_exists(
+                &self,
+                _schema: &str,
+                _name: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no drop_table_if_exists call")
+            }
+            async fn drop_view_if_exists(
+                &self,
+                _schema: &str,
+                _name: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no drop_view_if_exists call")
+            }
+            async fn get_row_count(
+                &self,
+                _schema: &str,
+                _name: &str,
+            ) -> std::result::Result<usize, smelt_backend::BackendError> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn get_preview(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _limit: usize,
+            ) -> std::result::Result<
+                Vec<arrow::record_batch::RecordBatch>,
+                smelt_backend::BackendError,
+            > {
+                unimplemented!("not exercised by this test")
+            }
+            async fn table_exists(
+                &self,
+                _schema: &str,
+                _name: &str,
+            ) -> std::result::Result<bool, smelt_backend::BackendError> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn ensure_schema(
+                &self,
+                _schema: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                unimplemented!("not exercised by this test")
+            }
+            fn dialect(&self) -> smelt_backend::SqlDialect {
+                unimplemented!("not exercised by this test")
+            }
+            fn capabilities(&self) -> BackendCapabilities {
+                unimplemented!("not exercised by this test")
+            }
+            async fn load_table(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _arrow_schema: arrow::datatypes::SchemaRef,
+                _batches: Vec<arrow::record_batch::RecordBatch>,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn delete_partitions(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _partition: &smelt_backend::PartitionRange,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no delete_partitions call")
+            }
+            async fn insert_into_from_query(
+                &self,
+                _schema: &str,
+                _name: &str,
+                _sql: &str,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no insert_into_from_query call")
+            }
+            async fn insert_overwrite(
+                &self,
+                _schema: &str,
+                _table: &str,
+                _sql: &str,
+                _partition: &smelt_backend::PartitionRange,
+            ) -> std::result::Result<(), smelt_backend::BackendError> {
+                panic!("BigQuery's oracle_relation must issue no insert_overwrite call")
+            }
+        }
+
+        struct BigQueryLikeRelationBackend;
+
+        #[async_trait::async_trait]
+        impl ConformanceBackend for BigQueryLikeRelationBackend {
+            fn target(&self, _case: usize) -> ConformanceTarget {
+                unimplemented!("not exercised by this test")
+            }
+            fn schema(&self, _case: usize) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            fn engine_name(&self) -> &str {
+                unimplemented!("not exercised by this test")
+            }
+            fn skip_reason(&self) -> Option<String> {
+                unimplemented!("not exercised by this test")
+            }
+            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+                unimplemented!("not exercised by this test")
+            }
+            async fn before_step(&self) {
+                unimplemented!("not exercised by this test")
+            }
+            async fn open_backend(
+                &self,
+                _case: usize,
+                _db_path: &Path,
+            ) -> Result<Box<dyn Backend>> {
+                unimplemented!("not exercised by this test")
+            }
+            fn dialect(&self) -> smelt_core::config::BackendType {
+                smelt_core::config::BackendType::BigQuery
+            }
+            async fn oracle_relation(
+                &self,
+                _backend: &dyn Backend,
+                tracker: &STracker,
+                k: usize,
+            ) -> Result<String> {
+                Ok(format!(
+                    "({}) AS {}",
+                    tracker.s_select_sql(k),
+                    tracker.oracle_table_name()
+                ))
+            }
+        }
+
+        let source = SourceRecipe {
+            name: "events".to_string(),
+            clock_column: "d".to_string(),
+            key_column: "id".to_string(),
+            payload_column: "val".to_string(),
+            key_shape: KeyShape::Single,
+            posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
+        };
+        let mut tracker = STracker::new(&source);
+        let d = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+        let k = tracker.record_run(
+            d,
+            d + chrono::Duration::days(1),
+            vec![crate::schedule_gen::GenRow { d, id: 1, val: 10 }],
+        );
+
+        let backend = BigQueryLikeRelationBackend;
+        let panic_backend = PanicIfTouchedBackend;
+        let relation = backend
+            .oracle_relation(&panic_backend, &tracker, k)
+            .await
+            .expect("BigQuery-shaped oracle_relation must succeed without touching the backend");
+
+        assert!(
+            relation.starts_with('(') && relation.ends_with(&tracker.oracle_table_name()),
+            "expected a parenthesised derived table aliased to oracle_<source>, got: {relation:?}"
+        );
+        let upper = relation.to_uppercase();
+        assert!(
+            !upper.contains("CREATE") && !upper.contains("DROP"),
+            "the BigQuery shape must issue no DDL text at all, got: {relation:?}"
+        );
+
+        // Prove it's actually valid, queryable SQL (DuckDB accepts the same
+        // portable UNION ALL shape GoogleSQL requires).
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let duckdb = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+        let batches = duckdb
+            .execute_sql(&format!("SELECT COUNT(*) AS n FROM {relation}"))
+            .await
+            .unwrap_or_else(|e| panic!("query inline derived-table relation {relation:?}: {e}"));
+        let rows = smelt_runtime::check_runner::batches_to_rows(&batches);
+        assert_eq!(
+            rows.first().and_then(|r| r.get("n")).cloned(),
+            Some("1".to_string()),
+            "the inline derived table must contain exactly the one recorded row"
         );
     }
 }

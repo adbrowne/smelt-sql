@@ -218,10 +218,33 @@ fn fact_window_for_id(
     })
 }
 
+/// [`ConformanceBackend::oracle_relation`]'s bare-identifier default form
+/// (`oracle_<name>`) is valid whether or not a trailing alias immediately
+/// follows it in the caller's `FROM` position — `oracle_x f` parses as
+/// "identifier, then alias `f`" either way. Its BigQuery derived-table form
+/// (`(<select>) AS oracle_<name>`) is NOT: [`MutableEnrichedRecipe::model_body`]'s
+/// fact-join template already supplies its own trailing alias (`f`)
+/// immediately after the substitution point, so splicing in a SECOND `AS
+/// oracle_<name>` alias would double-alias (a syntax error on every
+/// dialect). This strips a derived table's `) AS oracle_<name>` suffix back
+/// down to a bare `)`, leaving the bare-identifier form untouched — the
+/// one call site the plan's Phase 7 "confirm this holds for gate_mixed"
+/// instruction flagged as needing adaptation rather than a straight
+/// substitution.
+fn bare_relation_for_alias(relation: &str, oracle_table_name: &str) -> String {
+    let aliased_suffix = format!(") AS {oracle_table_name}");
+    match relation.strip_suffix(&aliased_suffix) {
+        Some(prefix) => format!("{prefix})"),
+        None => relation.to_string(),
+    }
+}
+
 /// The settled-point oracle assertion: the fact side reads the S-restricted
-/// temp view (`tracker`'s `S_k`, materialized via
-/// [`STracker::materialize_s_as_view`]); the dimension side always reads its
-/// CURRENT physical state.
+/// oracle relation (`tracker`'s `S_k`, resolved through
+/// [`ConformanceBackend::oracle_relation`] — a temp view for DuckDB/Spark,
+/// an inline derived table for BigQuery,
+/// `docs/plans/20260817-bigquery-generative-conformance.md` Phase 7); the
+/// dimension side always reads its CURRENT physical state.
 async fn assert_mixed_settled_for(
     b: &dyn ConformanceBackend,
     schema: &str,
@@ -230,19 +253,18 @@ async fn assert_mixed_settled_for(
     tracker: &STracker,
     k: usize,
 ) -> Result<()> {
-    tracker.materialize_s_as_view(backend, k).await?;
+    let relation = b.oracle_relation(backend, tracker, k).await?;
+    let fact_relation = bare_relation_for_alias(&relation, &tracker.oracle_table_name());
     let maintained_sql = format!("SELECT * FROM {schema}.{}", recipe.model_name);
-    // `STracker::materialize_s_as_view` names its view `oracle_<source_name>`
-    // — mirrored here rather than exposed as a public accessor. Built by
-    // hand here rather than via `MutableEnrichedRecipe::oracle_body_over` —
-    // that method hardcodes the dimension's physical table reference to
-    // `main.sources_<name>` (the DuckDB-only schema), so it cannot be reused
-    // for a `schema`-qualified table.
+    // Built by hand here rather than via `MutableEnrichedRecipe::
+    // oracle_body_over` — that method hardcodes the dimension's physical
+    // table reference to `main.sources_<name>` (the DuckDB-only schema), so
+    // it cannot be reused for a `schema`-qualified table.
     let oracle_sql = recipe
         .model_body()
         .replace(
             &format!("smelt.sources.{}", recipe.fact.name),
-            &format!("oracle_{}", recipe.fact.name),
+            &fact_relation,
         )
         .replace(
             &format!("smelt.sources.{}", recipe.dimension.name),

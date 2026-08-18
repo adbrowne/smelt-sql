@@ -77,4 +77,12 @@ impl ConformanceBackend for SparkConformanceBackend {
         // Spark SQL supports natively) — no override needed here.
         " USING DELTA"
     }
+
+    fn dialect(&self) -> smelt_core::config::BackendType {
+        // Spark SQL keeps the `VALUES` table-value constructor
+        // (`smelt_core::sql::row_set::row_set_body`'s DuckDB/Spark arm) —
+        // `gate_composed.rs`'s route-3 delta query stays byte-identical to
+        // today for this backend.
+        smelt_core::config::BackendType::Spark
+    }
 }
