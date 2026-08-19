@@ -938,6 +938,15 @@ pub enum DiagnosticCode {
     /// `smelt_logical::contract::deferral::validate_deferral`. Anchored at
     /// the top of the file (line 0, column 0).
     ContractDeferralInvalid,
+
+    /// A user-written top-level SELECT-item alias begins with the reserved
+    /// `_smelt_` prefix (`multi_backend.md` §"Output-schema type
+    /// conformance"). The prefix is reserved for smelt's own generated
+    /// identifiers — most visibly the synthesized `_smelt_col{n}` alias a
+    /// nameless projection item receives — and a user alias colliding with
+    /// it would make that synthesis ambiguous. Anchored at the alias token.
+    /// Error severity.
+    ReservedProjectionAliasPrefix,
 }
 
 /// Structured metadata attached to diagnostics for code actions

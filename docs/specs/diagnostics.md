@@ -232,6 +232,16 @@ Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.
 
 ---
 
+### Multi-backend projection
+
+Owned by `docs/specs/multi_backend.md` §"Output-schema type conformance".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `ReservedProjectionAliasPrefix` | Error | A top-level SELECT-item alias begins with the reserved `_smelt_` prefix. The prefix is reserved for smelt's own generated identifiers — including the synthesized `_smelt_col{n}` alias bound to an unaliased projection item whose name is not a valid bare identifier. |
+
+---
+
 ### Python models
 
 Owned by `docs/specs/models.md` (Python model section).

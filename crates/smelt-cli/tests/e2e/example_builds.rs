@@ -55,13 +55,10 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
     (
         // In-model list spread now expands at build (P5/BUG-006a, verified by
         // `crates/smelt-cli/tests/meta_lists_e2e.rs`): the emitted SQL is
-        // `SELECT id, 1, 2, 3 FROM raw.users`. The remaining blocker is no
-        // longer a codegen gap — `raw.users` is an unseeded source in the
+        // `SELECT id, 1, 2, 3 FROM raw.users`, with each bare literal column
+        // now bound to a real `_smelt_col{n}` alias. The remaining blocker is
+        // no longer a codegen gap — `raw.users` is an unseeded source in the
         // standalone build env (same category as timeseries/web_analytics).
-        // (Latent, separate from spread: the `list_literal` model's bare
-        // integer-literal columns would also hit the `apply_type_casts`
-        // unaliased-literal defect were the source seeded; reproducible with no
-        // spread at all, so tracked apart from diagnostic parity.)
         "meta_lists",
         "Error: Failed to execute model: list_literal \
          (Catalog Error: Table \"raw.users\" does not exist — unseeded source in \
@@ -293,7 +290,16 @@ const NEVER_BUILD: &[(&str, &str)] = &[
 /// `ModelDefDuplicateName` is an `Error` (expansion.md structural file check),
 /// so the parity gate now correctly rejects the build. It is handled by the
 /// `broken` category (analyzer `Error`) instead.
-const BROKEN_BUILDS_CLEAN: &[&str] = &[];
+///
+/// `meta_hofs_broken_config_var_null_coercion` genuinely belongs here:
+/// `smelt.config.var('region')` resolving a YAML `~` to an empty string is a
+/// `ConfigVarNullCoercion` **Warning**, not an Error, so the diagnostic-parity
+/// gate does not refuse the build. Before the projection's column names and
+/// types were derived from the source select list, the single unaliased
+/// select item tripped the unrelated invented-`_colN`-reference defect and
+/// the build failed for the wrong reason, masking that this scenario was
+/// always meant to build clean.
+const BROKEN_BUILDS_CLEAN: &[&str] = &["meta_hofs_broken_config_var_null_coercion"];
 
 /// Max workspaces whose full failure detail is dumped in the assert message; the
 /// rest are summarized by name + count. Bounds the assert size when a regression

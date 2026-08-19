@@ -373,6 +373,8 @@ GROUP BY 1
 
 smelt compiles SQL to the target's dialect automatically. You write standard SQL with `smelt.<name>` and `smelt.sources.<name>`, and smelt translates function calls, types, and syntax to match the target backend.
 
+Where a backend's native return type for an expression differs from smelt's inferred type, output columns are reconciled to the inferred type with a `CAST`, so a model writes the same schema — same column names, same types — to every warehouse regardless of engine. Column names follow the rule in [Output column names](../reference/language.md#output-column-names): an explicit alias or a bare column reference keeps its own name; anything else (a function call, an expression, a literal) gets a synthesized, dialect-invariant `_smelt_col{n}` name.
+
 !!! note
     Not all SQL features are available on all backends. If you use a backend-specific function, smelt will report an error when targeting a backend that does not support it.
 

@@ -12,15 +12,14 @@
 //! `smelt` binary, and opens the produced DuckDB file to assert on the
 //! materialised values — same pattern as `meta_workspace_e2e.rs`.
 //!
-//! The consumer model folds the loaded `region` fields with `reduce(map(...),
-//! concat_with(', '))` into a single aliased scalar. The bare-spread form
-//! (`SELECT ...load_yaml(...) |> map(fn c => c.region)`) lowers correctly — its
-//! compile-time lowering is covered by the `meta_eval` unit tests — but produces
-//! unaliased string-literal columns that trip a pre-existing, orthogonal
-//! `apply_type_casts` defect (the same disposition recorded for the literal
-//! list-spread case in the diagnostic-parity plan, P5). The fold form exercises
-//! the same loader evaluation end-to-end on DuckDB without depending on that
-//! orthogonal defect.
+//! The `cohort_regions` consumer model uses the bare-spread form (`SELECT
+//! ...load_yaml(...) |> map(fn c => c.region)`) directly: its compile-time
+//! lowering (to one string-literal select item per loaded record) is covered
+//! by the `meta_eval` unit tests, and each unaliased literal item receives a
+//! real, bound `_smelt_col{n}` alias (`docs/specs/multi_backend.md`
+//! §"Output-schema type conformance"). `threshold_total` still folds its
+//! numeric field with `reduce(map(...), plus_chain)`, since summation has no
+//! bare-spread equivalent.
 //!
 //! The `examples/meta_config/` workspace is NOT on the `example_builds`
 //! `KNOWN_UNBUILDABLE` allow-list: its `tenants` model demonstrates a
@@ -86,9 +85,10 @@ default_materialization: table
 }
 
 /// A model that loads a `List<{name, region, threshold}>` from a YAML file,
-/// projects each loaded record's `region`, and folds the regions into a single
-/// `Text` column. The loader must be materialised at build so the fold collapses
-/// to a concrete string of the loaded values.
+/// projects each loaded record's `region`, and bare-spreads the regions
+/// directly into the select list. The loader must be materialised at build
+/// so the spread lowers to one concrete string-literal column per loaded
+/// record.
 #[test]
 fn e2e_config_loader_list_executes_against_duckdb() {
     let tmp = TempDir::new().expect("tempdir");
@@ -105,11 +105,12 @@ fn e2e_config_loader_list_executes_against_duckdb() {
                  - name: us_east\n  region: us-east-1\n  threshold: 200\n\
                  - name: eu\n  region: eu-west-1\n  threshold: 50\n",
             ),
-            // Consumer: load the cohorts, map each to its region, fold to a
-            // single scalar 'us-west-2, us-east-1, eu-west-1'.
+            // Consumer: load the cohorts and bare-spread each record's region
+            // directly into the select list — three unaliased string-literal
+            // columns: 'us-west-2', 'us-east-1', 'eu-west-1'.
             (
                 "models/cohort_regions.sql",
-                "SELECT reduce(\n  map(\n    smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>),\n    fn c => c.region\n  ),\n  concat_with(', ')\n) AS regions\n",
+                "SELECT ...smelt.config.load_yaml('configs/cohorts.yaml', List<{name: Text, region: Text, threshold: Integer}>) |> map(fn c => c.region)\n",
             ),
             // Consumer: fold the numeric thresholds with plus_chain → 350.
             (
@@ -122,10 +123,17 @@ fn e2e_config_loader_list_executes_against_duckdb() {
     run_smelt_build(proj, "dev");
     let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
 
-    let regions: String = conn
-        .query_row("SELECT regions FROM main.cohort_regions", [], |r| r.get(0))
+    let (r1, r2, r3): (String, String, String) = conn
+        .query_row(
+            "SELECT _smelt_col1, _smelt_col2, _smelt_col3 FROM main.cohort_regions",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .expect("query cohort_regions");
-    assert_eq!(regions, "us-west-2, us-east-1, eu-west-1");
+    assert_eq!(
+        (r1.as_str(), r2.as_str(), r3.as_str()),
+        ("us-west-2", "us-east-1", "eu-west-1")
+    );
 
     let total: i64 = conn
         .query_row("SELECT total FROM main.threshold_total", [], |r| r.get(0))

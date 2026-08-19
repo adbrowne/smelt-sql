@@ -44,6 +44,7 @@ mod phase_d_wiring;
 mod provenance_validator;
 mod registry_consistency;
 mod registry_inference;
+mod reserved_alias_prefix;
 mod seed_temporal_inference;
 mod session_rollup;
 mod smelt_fn_call_check;

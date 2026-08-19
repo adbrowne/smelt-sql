@@ -220,3 +220,26 @@ fn gate_allows_clean_workspace() {
         "expected a clean workspace to build, but `smelt build` failed.\n{output}"
     );
 }
+
+/// A user-written projection alias claiming the reserved `_smelt_` prefix
+/// emits `ReservedProjectionAliasPrefix` (Error) in `file_diagnostics` —
+/// `smelt build` must refuse and name the code, the same diagnostic the
+/// LSP would publish for the identical model
+/// (`docs/specs/multi_backend.md` §"Output-schema type conformance").
+#[test]
+fn gate_blocks_reserved_smelt_alias_prefix() {
+    let ws = make_workspace(&[
+        ("smelt.yml", DEV_SMELT_YML),
+        ("models/bad_alias.sql", "SELECT 1 AS _smelt_foo\n"),
+    ]);
+    let (ok, output) = run_build(ws.path());
+    assert!(
+        !ok,
+        "expected `smelt build` to FAIL on a user alias claiming the reserved \
+         `_smelt_` prefix, but it succeeded.\n{output}"
+    );
+    assert!(
+        output.contains("ReservedProjectionAliasPrefix"),
+        "build failed but did not name the ReservedProjectionAliasPrefix diagnostic.\n{output}"
+    );
+}

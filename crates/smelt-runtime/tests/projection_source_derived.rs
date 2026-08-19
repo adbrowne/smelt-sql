@@ -601,11 +601,12 @@ fn struct_spread_select_item_yields_empty_output_columns() {
 /// concrete, named column, so `has_concrete` is true and
 /// `apply_type_casts` *would* proceed to wrap the SELECT with CASTs if
 /// `derive_projection` treated this select list as statically enumerable.
-/// The struct-spread item has no alias, so `ProjectionColumn::name` is
+/// The struct-spread item is deliberately never touched by
+/// `synthesize_projection_aliases` either, so `ProjectionColumn::name` is
 /// `None` for it; `apply_type_casts` falls back to a synthesized
-/// `_col{i+1}` name for any nameless column when it does wrap — a name
-/// that does not correspond to anything the printer actually emits for an
-/// un-fanned-out `smelt.<path>(args).*` call. The
+/// `_smelt_col{i+1}` name for any nameless column when it does wrap — a
+/// name that does not correspond to anything the printer actually emits
+/// for an un-fanned-out `smelt.<path>(args).*` call. The
 /// `is_struct_spread_call` disjunct is what stops `derive_projection`
 /// from ever reaching that state: it must make the *whole* projection
 /// unresolvable (`columns: None`), so `apply_type_casts` takes its early
@@ -641,6 +642,120 @@ fn struct_spread_select_item_suppresses_cast_wrap_even_with_a_concrete_sibling_c
         !compiled.sql.contains("_col2"),
         "no synthesized positional fallback name may be emitted for the \
          struct-spread item: {}",
+        compiled.sql
+    );
+}
+
+/// Case 3 of the alias-synthesis rule (`docs/specs/multi_backend.md`
+/// §"Output-schema type conformance"): a nameless projection item (here,
+/// three bare integer literals) gets a real, bound `_smelt_col{n}` alias
+/// spliced into the *source* SQL before printing — never an invented name
+/// referenced against an inner query that never exposed it. Compiling AND
+/// executing on a real DuckDB proves the spliced alias is a name the printed
+/// SQL actually binds, not merely a string the cast wrap happens to agree
+/// with.
+#[test]
+fn unaliased_literal_columns_execute_on_duckdb_with_synthesized_aliases() {
+    let registry = registry();
+    let compiler = registry.get("duckdb");
+    let model = make_model("literal_cols", "SELECT id, 1, 2, 3 FROM raw.users");
+
+    let compiled = compiler
+        .compile(&model, "main")
+        .expect("compile should succeed");
+
+    let expected = vec![
+        "id".to_string(),
+        "_smelt_col2".to_string(),
+        "_smelt_col3".to_string(),
+        "_smelt_col4".to_string(),
+    ];
+    assert_eq!(compiled.output_columns, expected, "sql = {}", compiled.sql);
+
+    let conn = duckdb::Connection::open_in_memory().expect("open duckdb");
+    conn.execute_batch("CREATE SCHEMA raw; CREATE TABLE raw.users (id INTEGER)")
+        .expect("seed raw.users schema");
+    conn.execute_batch("INSERT INTO raw.users VALUES (1), (2)")
+        .expect("seed raw.users data");
+
+    let mut stmt = conn.prepare(&compiled.sql).unwrap_or_else(|e| {
+        panic!(
+            "compiled SQL must execute on DuckDB: {e}\nsql = {}",
+            compiled.sql
+        )
+    });
+    let mut rows = stmt.query([]).expect("execute compiled sql");
+    let mut row_count = 0;
+    while rows.next().expect("row iteration").is_some() {
+        row_count += 1;
+    }
+    assert_eq!(row_count, 2, "expected both seeded rows to come back");
+    let column_names = rows
+        .as_ref()
+        .expect("statement must still be available after iteration")
+        .column_names();
+    assert_eq!(
+        column_names, expected,
+        "the columns DuckDB actually names for the executed SQL must match \
+         the synthesized aliases exactly: sql = {}",
+        compiled.sql
+    );
+}
+
+/// The same model compiled for BigQuery must synthesize the identical
+/// `_smelt_col{n}` names — the alias-synthesis rule derives from source
+/// position only, so it is dialect-invariant like every other part of the
+/// projection.
+#[test]
+fn unaliased_literal_columns_synthesize_identical_aliases_on_bigquery() {
+    let registry = registry();
+    let duckdb_compiler = registry.get("duckdb");
+    let bigquery_compiler = registry.get("bigquery");
+    let sql = "SELECT id, 1, 2, 3 FROM raw.users";
+
+    let duckdb_compiled = duckdb_compiler
+        .compile(&make_model("literal_cols_duckdb", sql), "main")
+        .expect("duckdb compile should succeed");
+    let bigquery_compiled = bigquery_compiler
+        .compile(&make_model("literal_cols_bigquery", sql), "main")
+        .expect("bigquery compile should succeed");
+
+    let expected = vec![
+        "id".to_string(),
+        "_smelt_col2".to_string(),
+        "_smelt_col3".to_string(),
+        "_smelt_col4".to_string(),
+    ];
+    assert_eq!(duckdb_compiled.output_columns, expected);
+    assert_eq!(
+        bigquery_compiled.output_columns, expected,
+        "bigquery sql = {}",
+        bigquery_compiled.sql
+    );
+}
+
+/// Case 2 of the alias-synthesis rule: a bare (qualified) column reference
+/// with no explicit alias keeps its own name — no `AS` is spliced in, since
+/// every dialect already agrees on that name.
+#[test]
+fn bare_qualified_column_ref_keeps_its_own_name_no_alias_spliced() {
+    let registry = registry();
+    let compiler = registry.get("duckdb");
+    let model = make_model("bare_ref_model", "SELECT t.user_id FROM t");
+
+    let compiled = compiler
+        .compile(&model, "main")
+        .expect("compile should succeed");
+
+    assert_eq!(
+        compiled.output_columns,
+        vec!["user_id".to_string()],
+        "sql = {}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("_smelt_col"),
+        "a bare column reference must not receive a synthesized alias: {}",
         compiled.sql
     );
 }

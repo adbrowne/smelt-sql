@@ -3144,6 +3144,31 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     if let Some(expr) = item.expression() {
                         queries::check_types::check_expression_types(&expr, db);
                     }
+                    // The `_smelt_` alias prefix is reserved for smelt's own
+                    // generated identifiers (`multi_backend.md` §"Output-schema
+                    // type conformance") — most visibly the synthesized
+                    // `_smelt_col{n}` alias bound to a nameless projection
+                    // item. Emitted here (the analyzer) rather than only at
+                    // build time so the LSP and the CLI build path agree
+                    // (`architecture.md` §"Diagnostic parity rule").
+                    if let Some(alias) = item.alias() {
+                        if alias.starts_with("_smelt_") {
+                            let range = item.alias_range().unwrap_or_else(|| item.range());
+                            DiagnosticAcc(Diagnostic {
+                                severity: DiagnosticSeverity::Error,
+                                message: format!(
+                                    "column alias `{alias}` uses the reserved `_smelt_` prefix; \
+                                     smelt uses this prefix for its own generated identifiers \
+                                     (e.g. the synthesized name for an unaliased expression \
+                                     column) — choose a different alias"
+                                ),
+                                range,
+                                code: Some(DiagnosticCode::ReservedProjectionAliasPrefix),
+                                data: None,
+                            })
+                            .accumulate(db);
+                        }
+                    }
                 }
             }
 

@@ -454,6 +454,88 @@ struct ProjectionColumn {
     typed: TypedColumn,
 }
 
+/// Whether `expr`'s inferred name is a **valid bare identifier** — a bare or
+/// qualified column reference, or a `CAST` of one — case 2 of the
+/// alias-synthesis rule in `docs/specs/multi_backend.md` §"Output-schema
+/// type conformance". Every dialect agrees on this name, so an item meeting
+/// this predicate needs no synthesized alias.
+fn expr_yields_bare_identifier(expr: &smelt_parser::ast::Expr) -> bool {
+    if expr.as_column_ref().is_some() {
+        return true;
+    }
+    if let Some(cast) = expr.as_cast() {
+        if let Some(inner) = cast.expression() {
+            return expr_yields_bare_identifier(&inner);
+        }
+    }
+    false
+}
+
+/// Splice ` AS _smelt_col{n}` into every top-level select item of `sql` that
+/// falls under case 3 of the alias-synthesis rule in
+/// `docs/specs/multi_backend.md` §"Output-schema type conformance": no
+/// explicit alias, and an expression that is not a bare/qualified column
+/// reference (or a `CAST` of one). `n` is the item's 1-based position, so
+/// the synthesized name is deterministic and independent of source
+/// formatting. An item with an explicit alias, a wildcard, or a struct-spread
+/// call is left untouched.
+///
+/// Operates by text-range splice directly over `sql`, which must be
+/// **source** smelt SQL — never dialect-printed output. Splicing into
+/// printed SQL would reintroduce the re-parse-printed-output hazard this
+/// projection redesign removes; see
+/// `docs/plans/20260819-source-derived-projection.md`. Once spliced, the
+/// alias is a real, bound name — every downstream consumer (the projection
+/// derivation, the dialect printer, the executing backend) sees and emits it
+/// the same way any user-written alias would.
+fn synthesize_projection_aliases(sql: &str) -> String {
+    let parse = smelt_parser::parse(sql);
+    let Some(file) = File::cast(parse.syntax()) else {
+        return sql.to_string();
+    };
+    let Some(select_stmt) = file.select_stmt() else {
+        return sql.to_string();
+    };
+    let Some(select_list) = select_stmt.select_list() else {
+        return sql.to_string();
+    };
+
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    for (i, item) in select_list.items().enumerate() {
+        if item.alias().is_some() {
+            continue;
+        }
+        if item.is_wildcard() || item.is_struct_spread_call() {
+            continue;
+        }
+        let Some(expr) = item.expression() else {
+            continue;
+        };
+        if expr_yields_bare_identifier(&expr) {
+            continue;
+        }
+        // Splice immediately after the *expression's* own text range, not
+        // the select item's — the item node's range can extend across
+        // trailing whitespace up to the next token (e.g. the `FROM`
+        // keyword) when the item has no alias, which would otherwise glue
+        // the synthesized alias directly onto that keyword.
+        let end: usize = expr.text_range().end().into();
+        insertions.push((end, format!(" AS _smelt_col{}", i + 1)));
+    }
+
+    if insertions.is_empty() {
+        return sql.to_string();
+    }
+
+    // Splice from the end backward so earlier insertion offsets stay valid.
+    insertions.sort_by_key(|(pos, _)| std::cmp::Reverse(*pos));
+    let mut out = sql.to_string();
+    for (pos, text) in insertions {
+        out.insert_str(pos, &text);
+    }
+    out
+}
+
 /// Derive a model's [`Projection`] from its **pre-print** source `SelectStmt`.
 ///
 /// Reads the same notion of "output column name" the analyzer's `model_schema`
@@ -1473,6 +1555,11 @@ impl SqlCompiler {
         // text (before printing rewrites them to physical table names) —
         // see `hide_state_columns`.
         let clean_content = self.hide_state_columns(&clean_content)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let clean_content = synthesize_projection_aliases(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
 
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -1582,10 +1669,23 @@ impl SqlCompiler {
             return sql.to_string();
         }
 
+        // Every statically-resolved item now carries a real name: an explicit
+        // alias, its own bare/qualified column name, or (for anything else)
+        // the `_smelt_col{n}` alias `synthesize_projection_aliases` already
+        // spliced into the source SQL before this projection was derived —
+        // see `docs/specs/multi_backend.md` §"Output-schema type
+        // conformance". The `_smelt_col{n}` fallback below is therefore
+        // defensive only: it can be reached only if an item's expression is
+        // itself unparseable, in which case the name matches what the
+        // splice would have bound anyway.
         let col_names: Vec<String> = columns
             .iter()
             .enumerate()
-            .map(|(i, col)| col.name.clone().unwrap_or_else(|| format!("_col{}", i + 1)))
+            .map(|(i, col)| {
+                col.name
+                    .clone()
+                    .unwrap_or_else(|| format!("_smelt_col{}", i + 1))
+            })
             .collect();
         let col_name_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
         let col_type_refs: Vec<DataType> =
@@ -1610,6 +1710,11 @@ impl SqlCompiler {
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let sql = synthesize_projection_aliases(&sql);
         let parse = smelt_parser::parse(&sql);
         // The projection is derived here, from `parse` — the pre-print
         // source AST — never from `compiled_sql` below. See
@@ -1679,6 +1784,11 @@ impl SqlCompiler {
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let sql = synthesize_projection_aliases(&sql);
         let parse = smelt_parser::parse(&sql);
         // The projection is derived here, from `parse` — the pre-print
         // source AST, before both dialect lowering AND the ephemeral-CTE
@@ -2238,6 +2348,11 @@ impl SqlCompiler {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let clean_content = synthesize_projection_aliases(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
         // The projection is derived here, from `parse` — the pre-print
         // source AST, before both dialect lowering AND the ephemeral-CTE
