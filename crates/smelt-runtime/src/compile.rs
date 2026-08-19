@@ -3109,6 +3109,29 @@ WHERE event_type = 'click'
             "the BigQuery lowering must still apply: {}",
             compiled.sql
         );
+        // Regression (measured live 2026-08-19, `gate_bigquery::
+        // append_only_partition_pool_upholds_equivalence_on_bigquery`,
+        // `recipe_holistic_agg`): the type-cast wrapper re-parses the
+        // ALREADY dialect-lowered SQL (this MEDIAN call has already become
+        // an `ARRAY_AGG`/`CASE`/`CAST(... AS FLOAT64)` expression by the time
+        // `apply_type_casts` runs). `FLOAT64` is a GoogleSQL spelling
+        // `smelt_types::parse_type` doesn't recognise, so the median
+        // expression's own type was unresolved — and an unsound fallback in
+        // `type_inference::binary::promote_numeric_operands_for_op` let the
+        // division's unresolved operand silently adopt the OTHER, known
+        // operand's type (the literal `2`'s `SmallInt`), emitting
+        // `CAST(med_val AS SMALLINT)` around an exact-median value and
+        // rounding interpolated medians (e.g. `-284.5` -> `-285`) before they
+        // ever left BigQuery. No cast at all is the correct, sound output:
+        // smelt could not determine med_val's type from the lowered SQL, so
+        // it must not cast it to a guessed one — BigQuery's own FLOAT64
+        // arithmetic is left to stand.
+        assert!(
+            !compiled.sql.contains("CAST(med_val AS"),
+            "an unresolved median type must not be cast to a guessed integer \
+             type, silently rounding interpolated medians: {}",
+            compiled.sql
+        );
     }
 
     #[test]

@@ -489,6 +489,43 @@ fn median_integer_infers_double() {
     );
 }
 
+/// Regression: `/` (division) with one operand of genuinely unresolved type
+/// (e.g. a `CAST(... AS <type the portable parser doesn't recognise>)`, which
+/// `infer_cast_type` reports as `None`, not `Unknown` — the two are different:
+/// `None` means "could not determine", `Unknown` means "determined to be
+/// dynamic") must NOT silently adopt the *other*, known operand's type. The
+/// unsound fallback in `promote_numeric_operands_for_op`'s catch-all match
+/// (`(Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => ...`)
+/// matched on the known side regardless of whether the other side was `None`,
+/// so `<unresolved> / 2` inferred as `SmallInt` — a concrete, wrong answer
+/// asserted with total confidence.
+///
+/// This is exactly the shape BigQuery's `MEDIAN` lowering produces
+/// (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`): `(CAST(x
+/// AS FLOAT64) + CAST(y AS FLOAT64)) / 2`. `smelt-types::parse_type` does not
+/// recognise `FLOAT64` (a GoogleSQL spelling), so both operands infer `None`,
+/// and the division fallback used to produce `SmallInt` (matching the
+/// literal `2`) instead of leaving the whole expression `None` →
+/// `DataType::Unknown` at the column level. Downstream, `smelt-runtime`'s
+/// `apply_type_casts` treats `Unknown` columns as "don't cast" but a
+/// concrete `SmallInt` as "cast to it" — so the wrapper emitted
+/// `CAST(med_val AS SMALLINT)` around an exact-median expression, rounding
+/// interpolated medians like `-284.5` to `-285` before the value ever left
+/// BigQuery. Measured live 2026-08-19
+/// (`gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`,
+/// `recipe_holistic_agg`).
+#[test]
+fn division_with_one_unresolved_operand_infers_unknown_not_the_known_sides_type() {
+    let types =
+        infer_sql("SELECT (CAST(x AS NOT_A_REAL_TYPE) + CAST(y AS NOT_A_REAL_TYPE)) / 2 FROM t");
+    assert!(
+        matches!(types[0].data_type, DataType::Unknown(_)),
+        "division with an unresolved operand must not silently adopt the \
+         other, known operand's type; got {:?}",
+        types[0].data_type
+    );
+}
+
 /// Parse a SQL SELECT and return the inferred types of all columns.
 fn infer_sql(sql: &str) -> Vec<TypedColumn> {
     infer_sql_with_ctx(sql, &TypeContext::new())
