@@ -216,6 +216,28 @@ regardless of engine. This is the multi-backend instance of the canonical-return
 (`spark.ceil(...)`, `postgres.sum(...)`) is the explicit per-call opt-out that inherits the
 engine-native type and marks the model non-portable.
 
+The column names and inferred types the cast wrap uses are derived from the model's **source**
+select list — the CST as written, before dialect lowering. The dialect printer's rendered output
+is never re-read to recover a projection: a backend-lowered expression (a BigQuery `MEDIAN`
+rewritten to an `ARRAY_AGG`-indexing form, `%` rewritten to `MOD()`, and so on) does not parse
+back as the SQL smelt's own grammar accepts, so reconstructing names or types from it is not a
+source of truth smelt can rely on. The projection is derived once, from the pre-print CST, and
+every consumer — the cast wrap and the output column list alike — reads that single derivation.
+
+Each top-level select item resolves to an output name by one rule, applied in order:
+
+1. An explicit alias is used unchanged.
+2. Absent an alias, if the item's inferred name is a valid bare identifier — a bare or qualified
+   column reference, or a `CAST` of one — that name is used. Every dialect agrees on this name,
+   so nothing is synthesized.
+3. Otherwise (a function call, an arithmetic expression, a literal, a `CASE`, …), the name
+   `_smelt_col{n}` is synthesized, where `n` is the item's 1-based position in the select list,
+   and bound to the item as a real alias rather than merely inferred at reference time.
+
+The `_smelt_` prefix is reserved for smelt's own generated identifiers. A user-written projection
+alias beginning with `_smelt_` is a diagnostic, which is what makes a synthesized `_smelt_col{n}`
+name collision-free.
+
 Expressions whose smelt-inferred (DuckDB-canonical) type diverges from Spark's native type, all
 reconciled at the output boundary by the cast wrap: `CEIL`/`FLOOR(Double)` (Spark native BigInt),
 `AVG(Decimal)` (Spark native Decimal), `SIGN(x)` (Spark native Double/Integer/BigInt/Decimal). The
@@ -290,7 +312,7 @@ error, and the whole-row insert is spelled `INSERT ROW`. So BigQuery's matched a
 column by column, `c = source.c`, over the model's output projection.
 
 That projection is carried on the compiled model (`CompiledModel::output_columns`), derived from
-the compiled SQL's select list using the same notion of an output column name the analyzer's
+the model's source select list using the same notion of an output column name the analyzer's
 `model_schema` query uses — so the build path and the editor agree on what a model's columns are.
 It is **inert** wherever a star form exists: passing it never perturbs DuckDB's or Spark's
 emitted text.
@@ -559,10 +581,7 @@ resolves nested widening to a table rewrite.
   unresolved — and division's promotion rule then adopted the one type it could see, the literal
   `2`'s. The wrap emitted `CAST(med_val AS SMALLINT)` and an exact median left the warehouse
   rounded (`-284.5` measured as `-285`). Division with exactly one unresolved operand now yields
-  no type, so no cast is emitted and the backend's own arithmetic stands. The general hazard
-  remains recorded here rather than fixed: the cast wrap types a model's output columns from
-  dialect-lowered SQL, so any future lowering that emits a backend-native type spelling declines
-  the cast for that column instead of asserting a portable type.
+  no type, so no cast is emitted and the backend's own arithmetic stands.
 - **The keyed-fold `MERGE`'s not-matched arm ignores the target dialect on BigQuery, emitting
   `INSERT *` where GoogleSQL needs `INSERT ROW`.** §"Whole-row MERGE" documents the `INSERT ROW`
   spelling, and the emitter that spells it
