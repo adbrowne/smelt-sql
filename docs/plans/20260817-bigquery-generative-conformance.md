@@ -77,6 +77,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 7     | done     | aee11375 | 2026-08-18 |
 | 8     | done     | 4ad7a898 | 2026-08-19 |
 | 9     | done     | 6dd2e78c | 2026-08-19 |
+| 10    | done     | 970ef87a | 2026-08-19 |
 
 Phase 5d's live re-run of `append_only_partition_pool_upholds_equivalence_on_bigquery` shows the
 `MEDIAN` gap closed (and with it a `_col2` gap the lowering exposed in the compiler's type-cast
@@ -624,6 +625,46 @@ this failure survived two sessions uncharacterised.
 
 **Commit.** `fix: lower infix modulo to MOD() on BigQuery` + `fix: lower the power operators to
 POWER() on BigQuery` + `test: name the rows an equivalence violation diverges on`
+
+---
+
+### Phase 10: Every case green, measured live
+
+**Goal.** Drive the remaining live failures to zero.
+
+**Measured result (2026-08-19, targeted runs against the live warehouse).** All 21 cases pass.
+`diamond_propagation` (231.65s), `gate_mixed` (129.80s), all three `harness_self_check` cases
+(108.21s), `append_only_partition_pool` (168.75s), `pinned_recipes_reproduce_catalogue_coverage`
+and `hazard_schedules_are_pinned` (200.01s) were each re-run and each passed. A single whole-sweep
+measurement is still owed and is the one thing this plan cannot close on its own: a one-hour
+credential does not cover a ~21-minute sweep once part of the window is already spent, and the
+token preflight refuses a family it cannot budget for rather than dying mid-case.
+
+**What the last two causes turned out to be.**
+
+- *The equivalence violation was not the median lowering — it was the cast wrap.* The row-level
+  diff (added this phase, see below) showed `-285.0` against the oracle's exact `-284.5`.
+  `apply_type_casts` re-parses SQL the printer has already lowered, so it saw
+  `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`; `FLOAT64` is not a spelling
+  `smelt_types::parse_type` knows, both operands resolved to `None`, and division's promotion rule
+  adopted the literal `2`'s `SmallInt`. The wrap then emitted `CAST(med_val AS SMALLINT)`, rounding
+  every interpolated median before it left the warehouse. Division with exactly one unresolved
+  operand now yields no type at all. DuckDB never reached this path: its dialect leaves `MEDIAN`
+  as a plain call, so the already-correct `SqlFunction::Median` arm answers `Double` directly.
+- *The `pinned` hazard case failed a second time, further along.* Phase 8's per-case staging fix
+  worked — the `409 Already Exists` collision is gone — and the case then ran far enough to hit a
+  hand-spelled `DOUBLE` in the g-10 staging DDL, which GoogleSQL does not have. Column types now
+  come from `ConformanceBackend::int_type`/`double_type` like the storage clause already did, and
+  `no_family_hardcodes_a_backend_dialect` gained DDL-shaped needles so the next hand-spelled type
+  fails the gate rather than a live sweep.
+
+**Why two cases stayed uncharacterised for two sessions.** The equivalence assertion printed the
+maintained and oracle *queries* but never the rows they disagreed on, so a live failure carried no
+more information than "these two SQL strings differ". It now prints a bounded sample of the
+differing rows in both directions — the median cause was obvious within one run of having it.
+
+**Commit.** `fix: never guess a division's type from one known operand` + `fix: resolve staged
+column types through the conformance backend`
 
 ---
 

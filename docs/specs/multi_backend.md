@@ -475,8 +475,17 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
-- **Eight of the BigQuery generative-conformance leg's 21 cases still fail live, for four
-  distinct causes.** Measured 2026-08-18 (`bash scripts/bigquery-conformance.sh`,
+- **Every one of the BigQuery generative-conformance leg's 21 cases passes live, but no single
+  sweep has yet measured them together.** Measured 2026-08-19 as a set of targeted runs, after the
+  causes below were closed: the last failing cases
+  (`gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`, both
+  `pinned_bigquery` cases, `dags_bigquery::diamond_propagation_suffices_on_bigquery`,
+  `gate_mixed_bigquery::mutable_pool_settles_to_full_refresh_on_bigquery`, all three
+  `harness_self_check_bigquery` cases) each pass. A whole-sweep re-measurement is still owed,
+  because a one-hour credential cannot cover a ~21-minute sweep plus the token preflight's
+  per-family budget once a session has already spent part of the window. The history below records
+  what each failure taught, since the fixes are what the entries now describe.
+- **Eight of the leg's 21 cases failed live on 2026-08-18, for four distinct causes.** Measured 2026-08-18 (`bash scripts/bigquery-conformance.sh`,
   `--test-threads=1`: 13 passed / 8 failed / 0 ignored, 1142.10s wall-clock). The two gaps
   previously recorded in this section — the S-restricted oracle relation's `CREATE OR REPLACE
   TEMPORARY VIEW` (`STracker::materialize_s_as_view`,
@@ -543,6 +552,17 @@ resolves nested widening to a table rewrite.
   partial column update from a duplicated row needs a live re-run, which now reports the
   differing rows rather than only the two queries. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
+- **The exact median was silently rounded on BigQuery, by the output-schema cast wrap rather than
+  by the lowering.** `apply_type_casts` re-parses SQL that the dialect printer has *already*
+  lowered, so a BigQuery median arrives as `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`.
+  `FLOAT64` is a GoogleSQL spelling smelt's type parser does not recognise, leaving both operands
+  unresolved — and division's promotion rule then adopted the one type it could see, the literal
+  `2`'s. The wrap emitted `CAST(med_val AS SMALLINT)` and an exact median left the warehouse
+  rounded (`-284.5` measured as `-285`). Division with exactly one unresolved operand now yields
+  no type, so no cast is emitted and the backend's own arithmetic stands. The general hazard
+  remains recorded here rather than fixed: the cast wrap types a model's output columns from
+  dialect-lowered SQL, so any future lowering that emits a backend-native type spelling declines
+  the cast for that column instead of asserting a portable type.
 - **The keyed-fold `MERGE`'s not-matched arm ignores the target dialect on BigQuery, emitting
   `INSERT *` where GoogleSQL needs `INSERT ROW`.** §"Whole-row MERGE" documents the `INSERT ROW`
   spelling, and the emitter that spells it
