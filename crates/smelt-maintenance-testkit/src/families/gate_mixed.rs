@@ -75,6 +75,7 @@ async fn reset_and_seed_mixed_tables(
 ) -> Result<()> {
     let backend = b.open_backend(case, db_path).await?;
     let storage_clause = b.storage_clause();
+    let int_type = b.int_type();
 
     backend
         .execute_sql(&format!(
@@ -100,7 +101,8 @@ async fn reset_and_seed_mixed_tables(
 
     backend
         .execute_sql(&format!(
-            "CREATE TABLE {schema}.sources_{fact} ({d} DATE, {id} INT, {val} INT){storage_clause}",
+            "CREATE TABLE {schema}.sources_{fact} ({d} DATE, {id} {int_type}, {val} \
+             {int_type}){storage_clause}",
             fact = recipe.fact.name,
             d = recipe.fact.clock_column,
             id = recipe.fact.key_column,
@@ -110,7 +112,8 @@ async fn reset_and_seed_mixed_tables(
         .map_err(|e| anyhow::anyhow!("create mixed fact table: {e}"))?;
     backend
         .execute_sql(&format!(
-            "CREATE TABLE {schema}.sources_{dim} ({dim_id} INT, {attr} INT){storage_clause}",
+            "CREATE TABLE {schema}.sources_{dim} ({dim_id} {int_type}, {attr} \
+             {int_type}){storage_clause}",
             dim = recipe.dimension.name,
             dim_id = recipe.dimension.key_column,
             attr = recipe.dimension.payload_column,

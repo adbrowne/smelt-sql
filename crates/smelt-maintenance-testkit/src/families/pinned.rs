@@ -385,6 +385,8 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
             .await
             .expect("open backend for g-10 staging");
         let storage_clause = b.storage_clause();
+        let int_type = b.int_type();
+        let double_type = b.double_type();
         for table in ["facts_enriched", "sources_facts", "sources_dims"] {
             backend
                 .execute_sql(&format!("DROP TABLE IF EXISTS {schema}.{table}"))
@@ -393,8 +395,8 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
         }
         backend
             .execute_sql(&format!(
-                "CREATE TABLE {schema}.sources_facts (d DATE, user_id INT, dt INT, val \
-                 DOUBLE){storage_clause}"
+                "CREATE TABLE {schema}.sources_facts (d DATE, user_id {int_type}, dt \
+                 {int_type}, val {double_type}){storage_clause}"
             ))
             .await
             .expect("create g-10 facts table");
@@ -407,8 +409,8 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
             .expect("seed g-10 facts");
         backend
             .execute_sql(&format!(
-                "CREATE TABLE {schema}.sources_dims (user_id INT, dt INT, payload \
-                 INT){storage_clause}"
+                "CREATE TABLE {schema}.sources_dims (user_id {int_type}, dt {int_type}, \
+                 payload {int_type}){storage_clause}"
             ))
             .await
             .expect("create g-10 dims table");

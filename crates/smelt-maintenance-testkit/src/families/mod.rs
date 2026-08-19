@@ -142,6 +142,29 @@ pub trait ConformanceBackend: Sync {
         ""
     }
 
+    /// This backend's DDL spelling for a whole-number column
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 8 —
+    /// the g-10 hazard staging's hand-rolled `DOUBLE` DDL surfaced live as
+    /// `400 Type not found: DOUBLE`). Default `"INT"`: DuckDB, Spark SQL,
+    /// and GoogleSQL (where `INT`/`INTEGER`/`BIGINT` are documented aliases
+    /// of `INT64`) all accept it, so no backend needs to override this
+    /// today — it exists as the same seam [`Self::double_type`] uses, so a
+    /// family body never has to hand-spell an integer column type either.
+    fn int_type(&self) -> &str {
+        "INT"
+    }
+
+    /// This backend's DDL spelling for a floating-point column
+    /// (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 8) —
+    /// GoogleSQL has no `DOUBLE` type (`400 Type not found: DOUBLE`,
+    /// measured live 2026-08-19 staging `families::pinned`'s g-10 hazard
+    /// facts table); it spells the IEEE double-precision type `FLOAT64`.
+    /// Default `"DOUBLE"`, correct for DuckDB and Spark SQL; BigQuery
+    /// overrides this with `"FLOAT64"`.
+    fn double_type(&self) -> &str {
+        "DOUBLE"
+    }
+
     /// This backend's SQL dialect, for a family that needs to build a
     /// dialect-aware inline row set
     /// (`smelt_core::sql::row_set::build_row_set_table`,
@@ -316,6 +339,25 @@ mod tests {
     /// `smelt_core::sql::row_set::build_row_set_table`, parametrized over
     /// `ConformanceBackend::dialect`, the way `gate_composed.rs`'s
     /// `composed_delta_values_sql` does post-fix.
+    ///
+    /// `" DOUBLE,"`/`" DOUBLE)"`/`" INT,"`/`" INT)"` joined this list in
+    /// Phase 8 (measured live 2026-08-19:
+    /// `pinned_bigquery::hazard_schedules_are_pinned_on_bigquery` failed
+    /// with `400 Type not found: DOUBLE` staging `families::pinned`'s g-10
+    /// hazard facts/dims tables) — a hand-spelled DuckDB/Spark DDL type
+    /// (`DOUBLE`, GoogleSQL's `FLOAT64`) is the same class of defect as a
+    /// hand-spelled `(VALUES `: a dialect assumption baked into a family
+    /// body's `CREATE TABLE` column list instead of resolved through
+    /// `ConformanceBackend::double_type`/`ConformanceBackend::int_type`.
+    /// Matched on the DDL shape (a space, then the type keyword, then the
+    /// column-list separator `,` or terminator `)`) rather than the bare
+    /// keyword so this never fires on `INTEGER`/`BIGINT` (no `,`/`)`
+    /// immediately follows `INT` in those spellings) or on a legitimate
+    /// identifier like `POINT)` (no space immediately precedes `INT` there)
+    /// or on the source-YAML `type: DOUBLE\n` declaration a couple of
+    /// family bodies also embed (a smelt-level `DataType` keyword, uniform
+    /// across every backend and NOT the dialect assumption this gate polices
+    /// — followed by `\n`, not `,`/`)`).
     #[test]
     fn no_family_hardcodes_a_backend_dialect() {
         let forbidden = [
@@ -323,6 +365,10 @@ mod tests {
             "USING DELTA",
             "SPARK_CONFORMANCE_SCHEMA",
             "(VALUES ",
+            " DOUBLE,",
+            " DOUBLE)",
+            " INT,",
+            " INT)",
         ];
         let family_body_files = [
             "dags.rs",

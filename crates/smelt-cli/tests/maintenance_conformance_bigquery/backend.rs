@@ -185,6 +185,13 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         smelt_core::config::BackendType::BigQuery
     }
 
+    fn double_type(&self) -> &str {
+        // GoogleSQL has no `DOUBLE` type (`400 Type not found: DOUBLE`,
+        // measured live 2026-08-19 staging `families::pinned`'s g-10 hazard
+        // facts table) — it spells IEEE double precision `FLOAT64`.
+        "FLOAT64"
+    }
+
     async fn oracle_relation(
         &self,
         _backend: &dyn Backend,
