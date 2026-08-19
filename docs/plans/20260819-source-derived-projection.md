@@ -104,7 +104,7 @@ The rule, applied to each top-level select item:
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
 | 1     | done    | 284459da | 2026-08-19 |
-| 2     | done    |        | 2026-08-20 |
+| 2     | done    | 55eee2b8 | 2026-08-20 |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
 | 5     | pending |        |      |
