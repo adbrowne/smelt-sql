@@ -2506,6 +2506,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="SELECT statement">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output-column-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output column names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -2970,6 +2987,23 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="SELECT statement">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output-column-names" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output column names
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
         <li class="md-nav__item">
@@ -3308,6 +3342,15 @@
 <p><code>ORDER BY ALL</code> orders by every select-list item, left to right; an optional
 direction and NULLS placement apply to the whole ordering (<code>ORDER BY ALL DESC</code>).</p>
 <p>A model file contains at most one query body. Any content after it — a second <code>SELECT</code>, stray tokens, or the tail of an unsupported construct — is an error, surfaced as a <code>trailing-top-level-content</code> diagnostic; it is never silently ignored.</p>
+<h3 id="output-column-names">Output column names<a class="headerlink" href="#output-column-names" title="Permanent link">&para;</a></h3>
+<p>Every top-level select item resolves to an output column name by one rule, applied in order:</p>
+<ol>
+<li>An explicit alias (<code>AS name</code>, or the implicit <code>expr name</code> form) is used unchanged.</li>
+<li>Absent an alias, if the item is a bare or qualified column reference (or a <code>CAST</code> of one), that name is used — <code>SELECT t.user_id FROM t</code> yields <code>user_id</code>.</li>
+<li>Otherwise — a function call, an arithmetic expression, a literal, a <code>CASE</code>, or anything else without an inferable identifier name — smelt synthesizes the name <code>_smelt_col{n}</code>, where <code>n</code> is the item's 1-based position in the select list. <code>SELECT id, 1, 2, 3 FROM raw.users</code> yields columns <code>id, _smelt_col2, _smelt_col3, _smelt_col4</code>.</li>
+</ol>
+<p>The synthesized name is a real, bound alias — it is the name the compiled SQL actually binds, the same on every backend, so a model writes the same output schema to every warehouse regardless of engine.</p>
+<p>The <code>_smelt_</code> prefix is reserved for smelt's own generated identifiers. Writing a projection alias that begins with <code>_smelt_</code> (e.g. <code>SELECT 1 AS _smelt_foo</code>) is rejected with a diagnostic.</p>
 <h2 id="smelt-extensions">smelt extensions<a class="headerlink" href="#smelt-extensions" title="Permanent link">&para;</a></h2>
 <h3 id="smeltpath">smelt.&lt;path&gt;<a class="headerlink" href="#smeltpath" title="Permanent link">&para;</a></h3>
 <p>Reference another model in the project:</p>

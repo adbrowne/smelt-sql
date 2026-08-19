@@ -3585,6 +3585,7 @@ multiset-equivalence oracle as the DuckDB leg. What is <strong>not</strong> cove
 </div>
 <h2 id="cross-engine-sql-compilation">Cross-engine SQL compilation<a class="headerlink" href="#cross-engine-sql-compilation" title="Permanent link">&para;</a></h2>
 <p>smelt compiles SQL to the target's dialect automatically. You write standard SQL with <code>smelt.&lt;name&gt;</code> and <code>smelt.sources.&lt;name&gt;</code>, and smelt translates function calls, types, and syntax to match the target backend.</p>
+<p>Where a backend's native return type for an expression differs from smelt's inferred type, output columns are reconciled to the inferred type with a <code>CAST</code>, so a model writes the same schema — same column names, same types — to every warehouse regardless of engine. Column names follow the rule in <a href="../../reference/language/#output-column-names">Output column names</a>: an explicit alias or a bare column reference keeps its own name; anything else (a function call, an expression, a literal) gets a synthesized, dialect-invariant <code>_smelt_col{n}</code> name.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>Not all SQL features are available on all backends. If you use a backend-specific function, smelt will report an error when targeting a backend that does not support it.</p>
