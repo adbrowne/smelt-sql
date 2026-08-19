@@ -1,17 +1,20 @@
-//! Pins Phase 2 of `docs/plans/20260819-source-derived-projection.md`: a
-//! model's projection (its output column names and their inferred types) is
-//! derived once from the **source** `SelectStmt`, before dialect lowering —
-//! never recovered by re-parsing the dialect-printed SQL. See
+//! A model's projection (its output column names and their inferred types)
+//! is derived once from the **source** `SelectStmt`, before dialect
+//! lowering — never recovered by re-parsing the dialect-printed SQL. See
 //! `docs/specs/multi_backend.md` §"Output-schema type conformance" and
 //! §"Whole-row MERGE".
 //!
-//! These tests exercise `SqlCompiler::compile` (the one entry point Phase 2
-//! routes through the new single-owner projection) via the public
-//! `CompilerRegistry`.
+//! These tests exercise every public compile entry point on `SqlCompiler`
+//! (`compile`, `compile_with_sql_and_ephemerals`, `compile_with_ephemerals`)
+//! via the public `CompilerRegistry` — each routes through the same
+//! source-derived projection, so the same invariants must hold for all of
+//! them, including across the ephemeral-CTE `WITH` prepend (which operates
+//! on already-printed SQL, by design, but must not disturb the projection
+//! derived from source before it).
 
 use smelt_core::config::{Config, Materialization, Target};
 use smelt_core::ModelFile;
-use smelt_runtime::CompilerRegistry;
+use smelt_runtime::{CompilerRegistry, EphemeralResolver};
 use std::collections::HashMap;
 
 fn duckdb_target() -> Target {
@@ -286,6 +289,358 @@ fn qualify_lowering_does_not_erase_output_columns() {
         vec!["id".to_string(), "rn".to_string()],
         "the QUALIFY-to-subquery lowering's outer `SELECT *` must not make \
          a statically-known source projection look unknown: sql = {}",
+        compiled.sql
+    );
+}
+
+/// The `CAST(d AS DATE)` gives the type-cast wrapper a concrete type to
+/// engage on for `d` too, so the wrap actually fires (mirrors
+/// `bigquery_median_emits_no_narrowing_cast`'s fixture above).
+const MEDIAN_HOLISTIC_SQL: &str =
+    "SELECT CAST(d AS DATE) AS d, MEDIAN(val) AS med_val FROM raw.events GROUP BY d";
+/// Exercises `%` (MOD) and `**` (POWER) lowering, alongside `MEDIAN`.
+const MOD_POW_MODEL_SQL: &str =
+    "SELECT d, (val % 3) AS remainder, (val ** 2) AS squared FROM events";
+
+/// A lowered construct's `output_columns` must be dialect-invariant through
+/// `compile_with_sql_and_ephemerals`, exactly as `compile` already proves
+/// above.
+#[test]
+fn compile_with_sql_and_ephemerals_yields_dialect_invariant_output_columns() {
+    let registry = registry();
+    let model = make_model("median_model", MEDIAN_MODEL_SQL);
+    let resolver = EphemeralResolver::empty();
+
+    let duckdb = registry
+        .get("duckdb")
+        .compile_with_sql_and_ephemerals(&model, "main", MEDIAN_MODEL_SQL, &resolver)
+        .expect("duckdb compile should succeed");
+    let spark = registry
+        .get("spark")
+        .compile_with_sql_and_ephemerals(&model, "main", MEDIAN_MODEL_SQL, &resolver)
+        .expect("spark compile should succeed");
+    let bigquery = registry
+        .get("bigquery")
+        .compile_with_sql_and_ephemerals(&model, "main", MEDIAN_MODEL_SQL, &resolver)
+        .expect("bigquery compile should succeed");
+
+    let expected = vec!["d".to_string(), "med_val".to_string()];
+    assert_eq!(duckdb.output_columns, expected);
+    assert_eq!(
+        duckdb.output_columns, spark.output_columns,
+        "duckdb vs spark: {:?} vs {:?}",
+        duckdb.output_columns, spark.output_columns
+    );
+    assert_eq!(
+        duckdb.output_columns, bigquery.output_columns,
+        "duckdb vs bigquery: {:?} vs {:?}; sql = {}",
+        duckdb.output_columns, bigquery.output_columns, bigquery.sql
+    );
+}
+
+/// Same invariant, through the other public ephemeral-aware entry point.
+#[test]
+fn compile_with_ephemerals_yields_dialect_invariant_output_columns() {
+    let registry = registry();
+    let model = make_model("median_model", MEDIAN_MODEL_SQL);
+    let resolver = EphemeralResolver::empty();
+
+    let duckdb = registry
+        .get("duckdb")
+        .compile_with_ephemerals(&model, "main", &resolver)
+        .expect("duckdb compile should succeed");
+    let bigquery = registry
+        .get("bigquery")
+        .compile_with_ephemerals(&model, "main", &resolver)
+        .expect("bigquery compile should succeed");
+
+    let expected = vec!["d".to_string(), "med_val".to_string()];
+    assert_eq!(duckdb.output_columns, expected);
+    assert_eq!(
+        duckdb.output_columns, bigquery.output_columns,
+        "duckdb vs bigquery: {:?} vs {:?}; sql = {}",
+        duckdb.output_columns, bigquery.output_columns, bigquery.sql
+    );
+}
+
+/// `%`/`**` lowering (MOD/POWER) must not disturb `output_columns` either.
+#[test]
+fn compile_with_sql_and_ephemerals_mod_and_pow_are_dialect_invariant() {
+    let registry = registry();
+    let model = make_model("mod_pow_model", MOD_POW_MODEL_SQL);
+    let resolver = EphemeralResolver::empty();
+
+    let duckdb = registry
+        .get("duckdb")
+        .compile_with_sql_and_ephemerals(&model, "main", MOD_POW_MODEL_SQL, &resolver)
+        .expect("duckdb compile should succeed");
+    let bigquery = registry
+        .get("bigquery")
+        .compile_with_sql_and_ephemerals(&model, "main", MOD_POW_MODEL_SQL, &resolver)
+        .expect("bigquery compile should succeed");
+
+    let expected = vec![
+        "d".to_string(),
+        "remainder".to_string(),
+        "squared".to_string(),
+    ];
+    assert_eq!(duckdb.output_columns, expected);
+    assert_eq!(
+        duckdb.output_columns, bigquery.output_columns,
+        "duckdb vs bigquery: {:?} vs {:?}; sql = {}",
+        duckdb.output_columns, bigquery.output_columns, bigquery.sql
+    );
+}
+
+/// Regression guard for `970ef87a` (the same one pinned above for `compile`
+/// in `bigquery_median_emits_no_narrowing_cast`), exercised through
+/// `compile_with_sql_and_ephemerals`: the type-cast wrapper must derive
+/// `med_val`'s type from the source `MEDIAN(val)` expression, never from the
+/// printed `ARRAY_AGG`/`CASE`/`FLOAT64` lowering — a re-parse of the latter
+/// leaves the type unresolved and lets division promotion narrow the cast to
+/// the other, known operand's `SmallInt`.
+#[test]
+fn compile_with_sql_and_ephemerals_median_emits_no_narrowing_cast() {
+    let registry = registry();
+    let model = make_model("holistic", MEDIAN_HOLISTIC_SQL);
+    let resolver = EphemeralResolver::empty();
+
+    let compiled = registry
+        .get("bigquery")
+        .compile_with_sql_and_ephemerals(&model, "main", MEDIAN_HOLISTIC_SQL, &resolver)
+        .expect("compile should succeed");
+
+    assert!(
+        !compiled.sql.contains("_col"),
+        "no positional fallback name may reach the backend: {}",
+        compiled.sql
+    );
+    assert!(
+        compiled.sql.contains("med_val"),
+        "the model's own alias must survive: {}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("CAST(med_val AS SMALLINT")
+            && !compiled.sql.contains("CAST(med_val AS INT")
+            && !compiled.sql.contains("CAST(med_val AS NUMERIC")
+            && !compiled.sql.contains("CAST(med_val AS BIGNUMERIC"),
+        "an unresolved median type must not be cast to a guessed narrower \
+         integer/fixed-point type, silently rounding interpolated medians: {}",
+        compiled.sql
+    );
+    assert!(
+        compiled.sql.contains("CAST(med_val AS FLOAT64)"),
+        "MEDIAN's registry-declared Double return type should still surface \
+         as an exact-width FLOAT64 cast on BigQuery: {}",
+        compiled.sql
+    );
+}
+
+/// The case most likely to regress: the ephemeral-CTE prepend happens on
+/// already-printed SQL, textually merging a `WITH` preamble in front of the
+/// model's own top-level SELECT. `output_columns` must still come out right
+/// — proving the projection derived before printing survives a
+/// transformation applied entirely after it.
+#[test]
+fn ephemeral_cte_prepend_does_not_disturb_output_columns() {
+    let registry = registry();
+    let ephemeral_sql = "SELECT id, name FROM raw_users WHERE active = true";
+    let sql = "SELECT d, MEDIAN(val) AS med_val FROM smelt.staging_users GROUP BY d";
+    let model = make_model("final_model", sql);
+
+    let bigquery_compiler = registry.get("bigquery");
+    let resolver = bigquery_compiler.build_ephemeral_resolver(
+        &[("staging_users".to_string(), ephemeral_sql.to_string())],
+        "main",
+    );
+
+    let compiled = bigquery_compiler
+        .compile_with_sql_and_ephemerals(&model, "main", sql, &resolver)
+        .expect("compile should succeed");
+
+    assert!(
+        compiled.sql.contains("WITH"),
+        "the ephemeral CTE prepend must actually have run: {}",
+        compiled.sql
+    );
+    assert_eq!(
+        compiled.output_columns,
+        vec!["d".to_string(), "med_val".to_string()],
+        "output_columns must survive the post-print WITH-clause merge: sql = {}",
+        compiled.sql
+    );
+}
+
+/// Same case, through `compile_with_ephemerals`.
+#[test]
+fn ephemeral_cte_prepend_does_not_disturb_output_columns_via_compile_with_ephemerals() {
+    let registry = registry();
+    let ephemeral_sql = "SELECT id, name FROM raw_users WHERE active = true";
+    let sql = "SELECT d, MEDIAN(val) AS med_val FROM smelt.staging_users GROUP BY d";
+    let model = make_model("final_model", sql);
+
+    let bigquery_compiler = registry.get("bigquery");
+    let resolver = bigquery_compiler.build_ephemeral_resolver(
+        &[("staging_users".to_string(), ephemeral_sql.to_string())],
+        "main",
+    );
+
+    let compiled = bigquery_compiler
+        .compile_with_ephemerals(&model, "main", &resolver)
+        .expect("compile should succeed");
+
+    assert!(
+        compiled.sql.contains("WITH"),
+        "the ephemeral CTE prepend must actually have run: {}",
+        compiled.sql
+    );
+    assert_eq!(
+        compiled.output_columns,
+        vec!["d".to_string(), "med_val".to_string()],
+        "output_columns must survive the post-print WITH-clause merge: sql = {}",
+        compiled.sql
+    );
+}
+
+/// A concrete, independently-reproduced instance of the same defect pinned
+/// above for `compile` (`qualify_lowering_does_not_erase_output_columns`),
+/// through the ephemeral-aware entry point: Spark's `supports_qualify =
+/// false` lowers `QUALIFY` to an outer `SELECT * FROM (<original>) _q WHERE
+/// <predicate>` — a wildcard select item. Reading `output_columns` off
+/// *that* printed form makes a perfectly well-named source projection
+/// (`id, rn`) look unknowable.
+#[test]
+fn compile_with_sql_and_ephemerals_qualify_lowering_does_not_erase_output_columns() {
+    let registry = registry();
+    let sql = "SELECT id, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts DESC) AS rn \
+               FROM t QUALIFY rn = 1";
+    let model = make_model("qualify_model", sql);
+    let resolver = EphemeralResolver::empty();
+
+    let compiled = registry
+        .get("spark")
+        .compile_with_sql_and_ephemerals(&model, "main", sql, &resolver)
+        .expect("compile should succeed");
+
+    assert_eq!(
+        compiled.output_columns,
+        vec!["id".to_string(), "rn".to_string()],
+        "the QUALIFY-to-subquery lowering's outer `SELECT *` must not make a \
+         statically-known source projection look unknown: sql = {}",
+        compiled.sql
+    );
+}
+
+/// Same regression, through `compile_with_ephemerals`.
+#[test]
+fn compile_with_ephemerals_qualify_lowering_does_not_erase_output_columns() {
+    let registry = registry();
+    let sql = "SELECT id, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts DESC) AS rn \
+               FROM t QUALIFY rn = 1";
+    let model = make_model("qualify_model", sql);
+    let resolver = EphemeralResolver::empty();
+
+    let compiled = registry
+        .get("spark")
+        .compile_with_ephemerals(&model, "main", &resolver)
+        .expect("compile should succeed");
+
+    assert_eq!(
+        compiled.output_columns,
+        vec!["id".to_string(), "rn".to_string()],
+        "the QUALIFY-to-subquery lowering's outer `SELECT *` must not make a \
+         statically-known source projection look unknown: sql = {}",
+        compiled.sql
+    );
+}
+
+/// A `smelt.<path>(args).*` struct-spread select item must make the whole
+/// projection unresolvable (empty `output_columns`), exactly like a bare
+/// `*` (`bare_wildcard_projection_still_yields_empty_output_columns`
+/// above): the spread's field count/names are only known once the call is
+/// resolved and printed, not from this source select list alone. No
+/// downstream item's position may be reinterpreted, and no cast wrap may
+/// invent a column name for the un-fanned-out call. The function need not
+/// resolve for this check to fire — `derive_projection` runs before any
+/// function-body lookup — so an unresolvable `smelt.functions.*` call is
+/// enough to exercise it; see `is_struct_spread_call` in
+/// `crates/smelt-parser/src/ast.rs`.
+#[test]
+fn struct_spread_select_item_yields_empty_output_columns() {
+    let registry = registry();
+    let compiler = registry.get("duckdb");
+    let sql = "SELECT id, smelt.functions.parse_event_payload(payload).* FROM events";
+    let model = make_model("struct_spread_model", sql);
+
+    let compiled = compiler
+        .compile(&model, "main")
+        .expect("compile should succeed");
+
+    assert!(
+        compiled.output_columns.is_empty(),
+        "a struct-spread select item must yield an empty (unknown) \
+         output_columns list, not a partial or guessed one: {:?}",
+        compiled.output_columns
+    );
+    assert!(
+        !compiled.sql.contains("_smelt_typed"),
+        "no cast wrap may be emitted over an unresolvable projection \
+         (it would have to invent a column name for the spread): {}",
+        compiled.sql
+    );
+}
+
+/// Load-bearing companion to the test above: without a concrete type
+/// anywhere in the select list, `apply_type_casts`'s own `has_concrete`
+/// check already suppresses the cast wrap regardless of the
+/// `is_struct_spread_call` disjunct in `derive_projection` — so that test
+/// alone cannot tell whether the disjunct does anything.
+///
+/// Here `CAST(id AS BIGINT) AS id` gives the projection a genuinely
+/// concrete, named column, so `has_concrete` is true and
+/// `apply_type_casts` *would* proceed to wrap the SELECT with CASTs if
+/// `derive_projection` treated this select list as statically enumerable.
+/// The struct-spread item has no alias, so `ProjectionColumn::name` is
+/// `None` for it; `apply_type_casts` falls back to a synthesized
+/// `_col{i+1}` name for any nameless column when it does wrap — a name
+/// that does not correspond to anything the printer actually emits for an
+/// un-fanned-out `smelt.<path>(args).*` call. The
+/// `is_struct_spread_call` disjunct is what stops `derive_projection`
+/// from ever reaching that state: it must make the *whole* projection
+/// unresolvable (`columns: None`), so `apply_type_casts` takes its early
+/// `Some(columns) = &projection.columns else { return sql unchanged }`
+/// exit before `has_concrete` is even evaluated.
+#[test]
+fn struct_spread_select_item_suppresses_cast_wrap_even_with_a_concrete_sibling_column() {
+    let registry = registry();
+    let compiler = registry.get("duckdb");
+    let sql = "SELECT CAST(id AS BIGINT) AS id, \
+               smelt.functions.parse_event_payload(payload).* FROM events";
+    let model = make_model("struct_spread_concrete_model", sql);
+
+    let compiled = compiler
+        .compile(&model, "main")
+        .expect("compile should succeed");
+
+    assert!(
+        compiled.output_columns.is_empty(),
+        "a struct-spread select item must yield an empty (unknown) \
+         output_columns list even when a sibling column has a concrete \
+         type: {:?}",
+        compiled.output_columns
+    );
+    assert!(
+        !compiled.sql.contains("_smelt_typed"),
+        "the presence of a concrete-typed sibling column (`id`) must not \
+         make apply_type_casts wrap the SELECT — that would require \
+         inventing a `_col2`-style name for the unresolved spread item: {}",
+        compiled.sql
+    );
+    assert!(
+        !compiled.sql.contains("_col2"),
+        "no synthesized positional fallback name may be emitted for the \
+         struct-spread item: {}",
         compiled.sql
     );
 }

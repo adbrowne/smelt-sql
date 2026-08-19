@@ -502,3 +502,124 @@ fn show_sql_statements_unaffected_by_observed_delta_report_rows() {
          (empty) report-row section: {stdout}"
     );
 }
+
+/// On the `explain --json` path, a concrete `--period` routes through
+/// `build_delete_insert_period_statement_group`
+/// (`crates/smelt-cli/src/explain.rs`), which compiles the model body via
+/// `SqlCompiler::compile_with_sql_and_ephemerals`. On BigQuery, `MEDIAN`
+/// lowers to a nested `ARRAY_AGG`/`CASE`/`CAST(... AS FLOAT64)` expression
+/// that does not read back as smelt SQL; recovering `output_columns` by
+/// re-parsing that printed form leaves the median expression's type
+/// unresolved, letting division promotion narrow the wrapper's cast to the
+/// OTHER, known operand's type (regression `970ef87a`). `explain --json`'s
+/// reported statement must still carry the model's own `med_val` alias and
+/// the correct, exact-width `FLOAT64` cast — the same columns/types a real
+/// run would compile. See `docs/specs/multi_backend.md` §"Output-schema
+/// type conformance".
+#[test]
+fn json_show_sql_reports_source_derived_columns_for_a_bigquery_median_model() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+
+    let yml = "name: bq_median_fixture\n\
+               version: 1\n\
+               paths:\n  - models\n\
+               targets:\n  bq:\n    type: bigquery\n    project: p\n    dataset: main\n    schema: main\n    location: US\n\
+               default_materialization: table\n";
+    std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
+
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/events.yml"),
+        "description: events\n\
+         columns:\n\
+         - name: event_date\n  type: DATE\n\
+         - name: val\n  type: DOUBLE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n",
+    )
+    .unwrap();
+
+    let model_sql = "---\n\
+                      materialization: table\n\
+                      refresh: incremental\n\
+                      grain: partition\n\
+                      timeseries:\n\
+                      \x20\x20partition_column: event_date\n\
+                      \x20\x20event_time_column: event_date\n\
+                      \x20\x20granularity: day\n\
+                      ---\n\
+                      SELECT event_date AS event_date, MEDIAN(val) AS med_val \
+                      FROM smelt.sources.events GROUP BY event_date\n";
+    std::fs::write(tmp.path().join("models/daily_median.sql"), model_sql).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("daily_median")
+        .arg("--show-sql")
+        .arg("--json")
+        .arg("--period")
+        .arg("2024-01-01..2024-01-03")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain daily_median --show-sql --json");
+
+    assert!(
+        output.status.success(),
+        "smelt explain daily_median --show-sql --json failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json_stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: serde_json::Value = serde_json::from_str(&json_stdout)
+        .unwrap_or_else(|e| panic!("invalid JSON: {e}: {json_stdout}"));
+
+    let cells = parsed
+        .get("cells")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("expected a top-level 'cells' array: {json_stdout}"));
+
+    let mut found_insert = false;
+    for cell in cells {
+        let Some(statements) = cell.get("statements").and_then(|s| s.as_array()) else {
+            continue;
+        };
+        for stmt in statements {
+            let sql = stmt
+                .get("sql")
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| panic!("expected a 'sql' string field: {stmt}"));
+            if !sql.contains("INSERT INTO") {
+                continue;
+            }
+            found_insert = true;
+            assert!(
+                !sql.contains("_col"),
+                "no positional fallback name may reach the backend: {sql}"
+            );
+            assert!(
+                sql.contains("med_val"),
+                "the model's own alias must survive: {sql}"
+            );
+            assert!(
+                !sql.contains("CAST(med_val AS SMALLINT")
+                    && !sql.contains("CAST(med_val AS INT")
+                    && !sql.contains("CAST(med_val AS NUMERIC")
+                    && !sql.contains("CAST(med_val AS BIGNUMERIC"),
+                "an unresolved median type must not be cast to a guessed narrower \
+                 integer/fixed-point type, silently rounding interpolated medians: {sql}"
+            );
+            assert!(
+                sql.contains("CAST(med_val AS FLOAT64)"),
+                "MEDIAN's registry-declared Double return type should still surface as an \
+                 exact-width FLOAT64 cast on BigQuery, reported through explain --json: {sql}"
+            );
+        }
+    }
+    assert!(
+        found_insert,
+        "expected at least one INSERT statement in the JSON output: {json_stdout}"
+    );
+}

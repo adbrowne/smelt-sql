@@ -469,7 +469,21 @@ fn derive_projection(select_stmt: &SelectStmt, ctx: &TypeContext) -> Projection 
         return Projection { columns: None };
     };
     let items: Vec<_> = select_list.items().collect();
-    if items.iter().any(|item| item.is_wildcard()) {
+    // A bare `*`, OR a `smelt.<path>(args).*` struct-spread call: both
+    // expand to however many columns the underlying schema/struct return
+    // type has, a count this source-level select list cannot state on its
+    // own (the struct-spread call's field count is only known once its
+    // signature is resolved, and — unlike a plain aliased/bare column
+    // item — the printer fans it out into N columns, not one). Treating
+    // either as making the whole projection unresolvable (rather than
+    // just skipping that one item) keeps every downstream item's position
+    // aligned with what the printer will actually emit; see
+    // `docs/specs/multi_backend.md` §"Whole-row MERGE" for why "unknown"
+    // is the correct, fail-closed reading of an empty `output_columns`.
+    if items
+        .iter()
+        .any(|item| item.is_wildcard() || item.is_struct_spread_call())
+    {
         return Projection { columns: None };
     }
     let column_types = infer_select_column_types(select_stmt, ctx);
@@ -499,36 +513,6 @@ fn output_column_names(projection: &Projection) -> Vec<String> {
     for col in columns {
         match &col.name {
             Some(name) => names.push(name.clone()),
-            None => return Vec::new(),
-        }
-    }
-    names
-}
-
-/// Legacy, printed-SQL-based sibling of [`output_column_names`], retained only
-/// for the three compile entry points (`compile_with_sql`,
-/// `compile_with_sql_and_ephemerals`, `compile_with_ephemerals`) that don't
-/// yet route through the source-derived [`Projection`] — that migration is
-/// tracked in `docs/plans/20260819-source-derived-projection.md` Phase 3.
-/// Do not add new callers.
-fn output_column_names_from_printed_sql(sql: &str) -> Vec<String> {
-    let parse = smelt_parser::parse(sql);
-    let Some(file) = File::cast(parse.syntax()) else {
-        return Vec::new();
-    };
-    let Some(select_stmt) = file.select_stmt() else {
-        return Vec::new();
-    };
-    let Some(select_list) = select_stmt.select_list() else {
-        return Vec::new();
-    };
-    let mut names = Vec::new();
-    for item in select_list.items() {
-        if item.is_wildcard() {
-            return Vec::new();
-        }
-        match item.column_name() {
-            Some(name) => names.push(name),
             None => return Vec::new(),
         }
     }
@@ -1511,13 +1495,7 @@ impl SqlCompiler {
         // column list) reads this single derivation; neither re-parses the
         // dialect-printed SQL below. See `docs/specs/multi_backend.md`
         // §"Output-schema type conformance".
-        let projection = File::cast(parse.syntax())
-            .and_then(|file| {
-                let select_stmt = file.select_stmt()?;
-                let type_ctx = self.build_projection_type_context(&file);
-                Some(derive_projection(&select_stmt, &type_ctx))
-            })
-            .unwrap_or(Projection { columns: None });
+        let projection = self.derive_projection_for(&parse.syntax());
 
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
 
@@ -1566,6 +1544,25 @@ impl SqlCompiler {
         ctx
     }
 
+    /// Derive this compiler's [`Projection`] from a parsed, **pre-print**
+    /// source AST — the single call every compile entry point uses so the
+    /// projection is always read off the model's own select list, never off
+    /// dialect-lowered output. `syntax` must be the root of a
+    /// `smelt_parser::parse` call over source smelt SQL (never over already
+    /// dialect-printed SQL). Returns an unresolvable (`columns: None`)
+    /// projection when the syntax doesn't cast to a `File`/`SelectStmt` at
+    /// all (e.g. a non-SELECT top level), mirroring `derive_projection`'s
+    /// own wildcard/non-SELECT fail-closed behaviour.
+    fn derive_projection_for(&self, syntax: &smelt_parser::syntax_kind::SyntaxNode) -> Projection {
+        File::cast(syntax.clone())
+            .and_then(|file| {
+                let select_stmt = file.select_stmt()?;
+                let type_ctx = self.build_projection_type_context(&file);
+                Some(derive_projection(&select_stmt, &type_ctx))
+            })
+            .unwrap_or(Projection { columns: None })
+    }
+
     /// Wrap SELECT columns with CASTs based on the already-derived [`Projection`].
     ///
     /// Returns `sql` unchanged if the projection has no statically-known
@@ -1597,58 +1594,6 @@ impl SqlCompiler {
         wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
     }
 
-    /// Legacy, printed-SQL-based sibling of [`SqlCompiler::apply_type_casts`],
-    /// retained only for the three compile entry points that don't yet route
-    /// through the source-derived [`Projection`] — see
-    /// `docs/plans/20260819-source-derived-projection.md` Phase 3. Do not add
-    /// new callers.
-    fn apply_type_casts_from_printed_sql(&self, sql: &str) -> String {
-        let parse = smelt_parser::parse(sql);
-        let file = match File::cast(parse.syntax()) {
-            Some(f) => f,
-            None => return sql.to_string(),
-        };
-        let select_stmt = match file.select_stmt() {
-            Some(s) => s,
-            None => return sql.to_string(),
-        };
-
-        let ctx = self.build_projection_type_context(&file);
-        let column_types = infer_select_column_types(&select_stmt, &ctx);
-
-        let select_list = match select_stmt.select_list() {
-            Some(sl) => sl,
-            None => return sql.to_string(),
-        };
-        let items: Vec<_> = select_list.items().collect();
-
-        // Only apply casts if we have concrete types for at least one column
-        let has_concrete = column_types
-            .iter()
-            .any(|tc| !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null));
-        if !has_concrete {
-            return sql.to_string();
-        }
-
-        let col_names: Vec<String> = items
-            .iter()
-            .enumerate()
-            .map(|(i, item)| {
-                item.alias().unwrap_or_else(|| {
-                    // Fallback: infer name from expression (e.g. bare column ref "user_id")
-                    item.expression()
-                        .and_then(|e| e.infer_name())
-                        .unwrap_or_else(|| format!("_col{}", i + 1))
-                })
-            })
-            .collect();
-        let col_name_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
-        let col_type_refs: Vec<DataType> =
-            column_types.iter().map(|tc| tc.data_type.clone()).collect();
-
-        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
-    }
-
     /// Compile a model with custom SQL (e.g., for transformed queries).
     ///
     /// Restricted to crate-internal use: external callers must use
@@ -1666,6 +1611,11 @@ impl SqlCompiler {
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
         let parse = smelt_parser::parse(&sql);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST — never from `compiled_sql` below. See
+        // `derive_projection_for` and `docs/specs/multi_backend.md`
+        // §"Output-schema type conformance".
+        let projection = self.derive_projection_for(&parse.syntax());
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -1690,7 +1640,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
-            output_columns: output_column_names_from_printed_sql(&compiled_sql),
+            output_columns: output_column_names(&projection),
             sql: compiled_sql,
             materialization,
         })
@@ -1730,6 +1680,15 @@ impl SqlCompiler {
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
         let parse = smelt_parser::parse(&sql);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST, before both dialect lowering AND the ephemeral-CTE
+        // prepend below. `prepend_ephemeral_ctes` only adds a `WITH`
+        // preamble in front of the existing top-level SELECT; it never
+        // touches that SELECT's own item list, so this projection is still
+        // exactly right for `final_sql`'s output columns. See
+        // `derive_projection_for` and `docs/specs/multi_backend.md`
+        // §"Output-schema type conformance".
+        let projection = self.derive_projection_for(&parse.syntax());
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -1747,7 +1706,7 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
-        let compiled_sql = self.apply_type_casts_from_printed_sql(&compiled_sql);
+        let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
         // Multi-segment refs (e.g. `smelt.lookup.regions`) have a canonical
@@ -1771,6 +1730,13 @@ impl SqlCompiler {
         } else {
             let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
             let cte_list = resolver.get_cte_list(&referenced_refs);
+            // `prepend_ephemeral_ctes` still operates on printed SQL — that
+            // stays deferred by design (`docs/plans/20260819-source-derived-
+            // projection.md` Scope → Explicitly deferred: `WITH` spelling is
+            // dialect-invariant, so this textual merge is a style problem,
+            // not a projection-correctness one). Nothing downstream of it
+            // re-parses the result: `output_columns` below reads `projection`,
+            // derived above from source, not from `final_sql`.
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 
@@ -1782,7 +1748,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
-            output_columns: output_column_names_from_printed_sql(&final_sql),
+            output_columns: output_column_names(&projection),
             sql: final_sql,
             materialization,
         })
@@ -2273,6 +2239,11 @@ impl SqlCompiler {
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
         let parse = smelt_parser::parse(&clean_content);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST, before both dialect lowering AND the ephemeral-CTE
+        // prepend below; see the identical note in
+        // `compile_with_sql_and_ephemerals`.
+        let projection = self.derive_projection_for(&parse.syntax());
 
         // Build ephemeral set for the printer
         let ephemeral_refs: HashSet<&str> = resolver
@@ -2299,7 +2270,7 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
-        let compiled_sql = self.apply_type_casts_from_printed_sql(&compiled_sql);
+        let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
         //
@@ -2321,7 +2292,10 @@ impl SqlCompiler {
             })
             .collect();
 
-        // Prepend ephemeral CTEs if any
+        // Prepend ephemeral CTEs if any. This still operates on printed SQL
+        // — deferred by design, see the identical note in
+        // `compile_with_sql_and_ephemerals`. `output_columns` below reads
+        // `projection`, derived above from source, not from `final_sql`.
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
@@ -2338,7 +2312,7 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
-            output_columns: output_column_names_from_printed_sql(&final_sql),
+            output_columns: output_column_names(&projection),
             sql: final_sql,
             materialization,
         })
@@ -3095,6 +3069,57 @@ WHERE event_type = 'click'
         assert_eq!(parts.ctes[1].0, "b");
         assert_eq!(parts.ctes[1].1, "SELECT 2 FROM a");
         assert_eq!(parts.main_body, "SELECT * FROM b");
+    }
+
+    /// The `compile_with_sql` entry point (crate-internal, so unit-tested
+    /// here rather than from `tests/`) must derive `output_columns` from the
+    /// model's source select list, never from dialect-printed SQL: Spark's
+    /// `supports_qualify = false` lowers `QUALIFY` to an outer `SELECT *
+    /// FROM (<original>) _q WHERE <predicate>` — a wildcard select item.
+    /// `output_columns` must still resolve from the model's own, perfectly
+    /// well-named source projection (`id, rn`), not from that printed
+    /// wildcard form — the same regression the ephemeral-aware entry points
+    /// guard against in `tests/projection_source_derived.rs`.
+    #[test]
+    fn compile_with_sql_qualify_lowering_does_not_erase_output_columns() {
+        let sql = "SELECT id, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts DESC) AS rn \
+                   FROM t QUALIFY rn = 1";
+        let model = ModelFile {
+            name: "qualify_model".to_string(),
+            path: "models/qualify_model.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("qualify_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let target = Target {
+            target_type: "spark".to_string(),
+            database: None,
+            schema: "default".to_string(),
+            connect_url: Some("sc://localhost".to_string()),
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+        };
+        let compiled = SqlCompiler::new(make_test_config(), &target)
+            .compile_with_sql(&model, "main", sql)
+            .unwrap();
+
+        assert_eq!(
+            compiled.output_columns,
+            vec!["id".to_string(), "rn".to_string()],
+            "the QUALIFY-to-subquery lowering's outer `SELECT *` must not make \
+             a statically-known source projection look unknown: sql = {}",
+            compiled.sql
+        );
     }
 
     #[test]
