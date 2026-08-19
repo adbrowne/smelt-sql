@@ -106,7 +106,7 @@ The rule, applied to each top-level select item:
 | 1     | done    | 284459da | 2026-08-19 |
 | 2     | done    | 55eee2b8 | 2026-08-20 |
 | 3     | done    | 611a44ad | 2026-08-20 |
-| 4     | done    |        | 2026-08-20 |
+| 4     | done    | 565263ad | 2026-08-20 |
 | 5     | pending |        |      |
 | 6     | pending |        |      |
 
