@@ -1266,6 +1266,52 @@ pub fn emit_count_preservation_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// Find the `SelectStmt` whose own `FROM` clause carries a join against
+/// `enrichment_source` — either `select` itself, or, when `select`'s `FROM`
+/// is exactly one derived-table source with no joins of its own, the
+/// `SelectStmt` inside that derived table. Recurses through that single
+/// shape only (a type-cast wrap nests once, never repeatedly): structural
+/// navigation of the one parse tree `emit_count_preservation_probe_from_body`
+/// already built from `body_sql`, over text ranges that remain valid
+/// offsets into that same string — never a second parse of a separately
+/// reconstructed substring.
+///
+/// Returns `None` (fail-closed, matching the caller) when `select`'s `FROM`
+/// has joins that don't match `enrichment_source` (a genuine miss — no
+/// deeper source could still contain the join the caller is scoped to), or
+/// when the single non-joined source isn't a derived table at all.
+fn select_with_enrichment_join(
+    select: &smelt_parser::SelectStmt,
+    enrichment_source: &str,
+) -> Option<smelt_parser::SelectStmt> {
+    let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let target_last = last_segment(enrichment_source);
+    let matches = |from: &smelt_parser::FromClause| {
+        from.joins().any(|join| {
+            join.table_ref()
+                .and_then(|table_ref| table_ref.bare_path_text())
+                .is_some_and(|path| path == enrichment_source || last_segment(&path) == target_last)
+        })
+    };
+
+    let from_clause = select.from_clause()?;
+    if matches(&from_clause) {
+        return Some(select.clone());
+    }
+    if from_clause.joins().next().is_some() {
+        // Has joins, just none against `enrichment_source` — a genuine
+        // structural miss, not a wrapped body.
+        return None;
+    }
+    let mut sources = from_clause.table_refs();
+    let only_source = sources.next()?;
+    if sources.next().is_some() {
+        return None;
+    }
+    let inner = only_source.subquery()?.select_stmt()?;
+    select_with_enrichment_join(&inner, enrichment_source)
+}
+
 /// Build [`emit_count_preservation_probe`]'s `driving_select`/`enriched_select`
 /// pair directly from a model's own already-compiled `body_sql`, for a
 /// caller (`smelt-runtime`'s `execute_delete_insert_with_delta_restriction`)
@@ -1291,14 +1337,20 @@ pub fn emit_count_preservation_probe(
 ///
 /// Fail-closed to `None` — never a best-effort guess — when `body_sql` has
 /// no top-level `SELECT`, no `FROM` clause, or no join against
-/// `enrichment_source` found in that `FROM` clause's own joins.
+/// `enrichment_source` found either in that `FROM` clause's own joins or
+/// (see [`select_with_enrichment_join`]) one level inside a single
+/// derived-table source — the shape a type-cast wrap produces. A caller
+/// that has the model's own pre-wrap body available should still prefer
+/// passing that directly; this widening exists so a body that happens to
+/// arrive already wrapped is not a spurious miss.
 pub fn emit_count_preservation_probe_from_body(
     body_sql: &str,
     enrichment_source: &str,
 ) -> Option<MaintenanceStatement> {
     let parse = smelt_parser::parse(body_sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
-    let select = file.select_stmt()?;
+    let top_select = file.select_stmt()?;
+    let select = select_with_enrichment_join(&top_select, enrichment_source)?;
     let from_clause = select.from_clause()?;
 
     let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();

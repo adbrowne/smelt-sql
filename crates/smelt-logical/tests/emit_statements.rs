@@ -1465,6 +1465,34 @@ fn count_preservation_probe_from_body_splices_out_the_enrichment_join() {
     );
 }
 
+/// A body wrapped exactly the way a type-cast wrap produces it —
+/// `SELECT CAST(..) AS c FROM ( <body> ) _smelt_typed` — must still locate
+/// the enrichment join, one level inside the derived table
+/// (`docs/plans/20260819-source-derived-projection.md` Phase 5). Before
+/// this widening `from_clause.joins()` only ever looked at the outer
+/// `SELECT`'s own joins, which a cast-wrapped body never has — the probe
+/// silently found nothing on every dialect, every run.
+#[test]
+fn count_preservation_probe_from_body_locates_the_join_inside_a_cast_wrap() {
+    let inner = "SELECT f.id, f.amount, d.category FROM main.fact f JOIN main.dim d ON \
+                 f.dim_id = d.id WHERE f.amount > 0";
+    let wrapped = format!(
+        "SELECT CAST(id AS BIGINT) AS id, CAST(amount AS DOUBLE) AS amount, \
+         CAST(category AS VARCHAR) AS category FROM (\n  {inner}\n) _smelt_typed"
+    );
+    let stmt = emit_count_preservation_probe_from_body(&wrapped, "main.dim").expect(
+        "a cast-wrapped body must still locate the enrichment join one level inside the \
+         derived table",
+    );
+    assert_eq!(
+        stmt.sql,
+        "SELECT (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f  WHERE f.amount > 0\n) AS \
+         __smelt_driving) AS driving_count, (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f \
+         JOIN main.dim d ON f.dim_id = d.id  WHERE f.amount > 0\n) AS __smelt_enriched) AS \
+         enriched_count"
+    );
+}
+
 /// Fail-closed: no top-level `SELECT`, no `FROM` clause, or no join against
 /// the named source all yield `None` rather than a best-effort guess
 /// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test 3).
@@ -1480,4 +1508,39 @@ fn count_preservation_probe_from_body_refuses_when_unreconstructable() {
         "main.dim"
     )
     .is_none());
+}
+
+/// The cast-wrap widening ([`select_with_enrichment_join`]) is itself
+/// fail-closed: a cast-wrapped body whose inner select joins a different
+/// source, or whose outer `FROM` isn't a single derived table at all,
+/// still yields `None` rather than a best-effort guess. This is what makes
+/// the widening a genuinely wider *contract*, not a loosened one — it
+/// finds a join that's really there one level down, it does not paper over
+/// a genuine miss.
+#[test]
+fn count_preservation_probe_from_body_cast_wrap_widening_still_fails_closed() {
+    // Wrapped, but the inner join is against a different table.
+    let wrapped_wrong_join = "SELECT CAST(id AS BIGINT) AS id FROM (\n  SELECT f.id FROM \
+                               main.fact f JOIN main.other o ON f.id = o.id\n) _smelt_typed";
+    assert!(
+        emit_count_preservation_probe_from_body(wrapped_wrong_join, "main.dim").is_none(),
+        "a cast-wrapped body whose inner join targets a different source must still refuse"
+    );
+
+    // Wrapped, but the outer FROM has two sources rather than one derived
+    // table — not the cast-wrap shape at all.
+    let wrapped_two_sources = "SELECT a.id FROM (SELECT 1 AS id) a, (SELECT 2 AS id) b";
+    assert!(
+        emit_count_preservation_probe_from_body(wrapped_two_sources, "main.dim").is_none(),
+        "an outer FROM with more than one source must not be treated as a cast wrap"
+    );
+
+    // Wrapped, but the single derived-table source isn't a subquery at all
+    // (a plain table alias) — nothing to recurse into.
+    let plain_alias = "SELECT a.id FROM main.fact a";
+    assert!(
+        emit_count_preservation_probe_from_body(plain_alias, "main.dim").is_none(),
+        "a single plain table source with no join must still refuse, not be mistaken for a \
+         wrapped body"
+    );
 }

@@ -3353,6 +3353,7 @@ pub async fn execute_project(
                                 &partition.column,
                                 &region,
                                 &compiled.sql,
+                                &compiled.body_sql,
                                 facts.restrict_column.as_deref(),
                                 facts.skeleton_source_closure.as_ref(),
                                 &facts.upstream_model,

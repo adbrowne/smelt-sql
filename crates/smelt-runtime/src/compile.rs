@@ -426,6 +426,18 @@ pub struct CompiledModel {
     /// without it (`smelt_backend::require_merge_columns`), because GoogleSQL
     /// has no `UPDATE SET *` to fall back to.
     pub output_columns: Vec<String>,
+    /// This model's own compiled body — dialect-printed (source `smelt.<path>`
+    /// refs already resolved to physical `schema.table` names), but before
+    /// the type-cast wrap `apply_type_casts` applies. `sql` above is what a
+    /// backend executes; `body_sql` is what a consumer that needs this
+    /// model's own top-level `FROM`/`JOIN` text reads — the count-
+    /// preservation probe (`smelt_logical::maintenance::emit::
+    /// emit_count_preservation_probe_from_body`) in particular. Carrying it
+    /// here means that consumer is never asked to recover it by unwrapping
+    /// `sql`'s `_smelt_typed` derived table, which is the same source-vs-
+    /// printed-SQL mistake `docs/plans/20260819-source-derived-
+    /// projection.md` exists to retire everywhere else.
+    pub body_sql: String,
 }
 
 /// A model's projection — the ordered list of output columns, derived once
@@ -1585,6 +1597,8 @@ impl SqlCompiler {
         let projection = self.derive_projection_for(&parse.syntax());
 
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
 
         // Type-conforming cast insertion: wrap SELECT columns with CASTs so
         // backend output types match smelt's type inference exactly.
@@ -1602,6 +1616,7 @@ impl SqlCompiler {
             name: model.db_name_owned(),
             output_columns: output_column_names(&projection),
             sql: compiled_sql,
+            body_sql,
             materialization,
         })
     }
@@ -1746,6 +1761,8 @@ impl SqlCompiler {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
             output_columns: output_column_names(&projection),
+            // No cast wrap in this entry point — see `CompiledModel::body_sql`.
+            body_sql: compiled_sql.clone(),
             sql: compiled_sql,
             materialization,
         })
@@ -1816,6 +1833,8 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
@@ -1860,6 +1879,7 @@ impl SqlCompiler {
             name: model.db_name_owned(),
             output_columns: output_column_names(&projection),
             sql: final_sql,
+            body_sql,
             materialization,
         })
     }
@@ -2385,6 +2405,8 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
@@ -2429,6 +2451,7 @@ impl SqlCompiler {
             name: model.db_name_owned(),
             output_columns: output_column_names(&projection),
             sql: final_sql,
+            body_sql,
             materialization,
         })
     }

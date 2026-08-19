@@ -3264,6 +3264,14 @@ pub fn build_delete_insert_group_dispatched(
 /// Returns the [`StatementGroup`] actually executed, mirroring
 /// `execute_column_scoped_write_with_observed_delta`'s shape so a caller
 /// (and a test) can assert on exactly what ran.
+///
+/// `body` and `probe_body` are deliberately two different strings: `body`
+/// is what the emitted DELETE/INSERT actually executes (a caller compiling
+/// through `SqlCompiler` passes its type-cast-wrapped `CompiledModel::sql`),
+/// while `probe_body` is the pre-wrap body the count-preservation probe
+/// below reads its enrichment join from (`CompiledModel::body_sql`). Never
+/// derive one from the other here — see
+/// `docs/plans/20260819-source-derived-projection.md` Phase 5.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -3272,6 +3280,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     partition_col: &str,
     region: &Region,
     body: &str,
+    probe_body: &str,
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
     upstream_model: &str,
@@ -3325,7 +3334,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
             ) {
                 smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
                 smelt_logical::maintenance::ProbeDispatch::Dispatch => {
-                    match emit_count_preservation_probe_from_body(body, source) {
+                    match emit_count_preservation_probe_from_body(probe_body, source) {
                         Some(probe) => {
                             let batches = backend.execute_sql(&probe.sql).await?;
                             let rows = crate::check_runner::batches_to_rows(&batches);
