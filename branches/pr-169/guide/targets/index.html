@@ -3400,12 +3400,10 @@ DuckDB's <code>database</code> or Spark's <code>connect_url</code>.</p>
 seeding, dialect lowering, <code>MERGE</code>, incremental refresh, schema evolution) run against a real
 BigQuery project, and incremental-model correctness is additionally checked generatively — the
 same recipe pool, run schedules, and equivalence oracle the other backends use, parametrized to
-target BigQuery. Generative coverage is partial: most of the suite passes against a live
-warehouse, but a handful of cases still fail — a dialect gap in a <code>MERGE</code> statement's whole-row
-insert arm, plus a few test-harness gaps and cases still being diagnosed — so BigQuery's
-incremental verification is narrower than DuckDB's or Spark's today (see the multi-backend spec's
-known divergences). Both suites run locally against your own GCP project rather than in CI, since
-that keeps cloud credentials out of the build pipeline.</p>
+target BigQuery. Every case in that generative suite passes against a live warehouse. Both suites
+run locally against your own GCP project rather than in CI, since that keeps cloud credentials out
+of the build pipeline — which also means a BigQuery regression surfaces when someone runs the
+suites by hand, not on a schedule.</p>
 <h4 id="credentials">Credentials<a class="headerlink" href="#credentials" title="Permanent link">&para;</a></h4>
 <p>The BigQuery backend authenticates from a short-lived OAuth access token read from
 <code>SMELT_BQ_ACCESS_TOKEN</code>, and <strong>never</strong> falls back to Google application-default credentials. This
