@@ -7,6 +7,13 @@
 use crate::SqlDialect;
 use smelt_types::DataType;
 
+/// The alias `wrap_with_type_casts` gives the wrapped subquery. Structural
+/// navigation elsewhere in the codebase (e.g. `smelt-logical`'s
+/// count-preservation probe) that needs to recognise "this derived table is
+/// specifically a type-cast wrap, not arbitrary user SQL" matches on this
+/// constant rather than a second hardcoded copy of the literal.
+pub const TYPE_CAST_WRAP_ALIAS: &str = "_smelt_typed";
+
 /// Wrap `sql` in a subquery that CASTs each column to its smelt-inferred type.
 ///
 /// Produces:
@@ -51,7 +58,7 @@ pub fn wrap_with_type_casts(
     }
 
     format!(
-        "SELECT {} FROM (\n  {}\n) _smelt_typed",
+        "SELECT {} FROM (\n  {}\n) {TYPE_CAST_WRAP_ALIAS}",
         select_items.join(", "),
         sql
     )

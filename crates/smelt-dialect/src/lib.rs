@@ -12,4 +12,4 @@ pub use printer::{
     print, AsStructEmitter, PrintContext, SmeltFnExpander, SmeltPathCallExpander,
     SmeltPathRefResolver,
 };
-pub use type_conformance::wrap_with_type_casts;
+pub use type_conformance::{wrap_with_type_casts, TYPE_CAST_WRAP_ALIAS};

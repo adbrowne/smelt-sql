@@ -1544,3 +1544,44 @@ fn count_preservation_probe_from_body_cast_wrap_widening_still_fails_closed() {
          wrapped body"
     );
 }
+
+/// The single-derived-table widening is gated on the wrap marker alias
+/// (`_smelt_typed`, [`smelt_dialect::TYPE_CAST_WRAP_ALIAS`]) — the exact
+/// shape `wrap_with_type_casts` produces — not on "any single non-joined
+/// derived-table FROM source". A user's own legitimate subquery with the
+/// same outer shape (`SELECT ... FROM (SELECT ... JOIN ...) sub WHERE
+/// <outer filter>`) must fail closed rather than being mistaken for a cast
+/// wrap: matching it would silently drop the outer `WHERE` (the caller
+/// would build driving/enriched selects from the INNER select's `WHERE`,
+/// discarding the outer filter that actually scopes the write), verifying
+/// count-preservation over a different row set than the model actually
+/// writes (`docs/plans/20260819-source-derived-projection.md` Phase 5
+/// review finding).
+#[test]
+fn count_preservation_probe_from_body_refuses_a_user_subquery_that_is_not_a_cast_wrap() {
+    let body = "SELECT sub.id, sub.amount, sub.category FROM (SELECT f.id, f.amount, \
+                d.category FROM main.fact f JOIN main.dim d ON f.dim_id = d.id) sub WHERE \
+                sub.amount > 0";
+    assert!(
+        emit_count_preservation_probe_from_body(body, "main.dim").is_none(),
+        "a derived-table source aliased something other than the cast-wrap marker must not be \
+         treated as a wrapped body, even though its inner select does join main.dim"
+    );
+}
+
+/// The cast-wrap widening recurses exactly one level, matching the doc
+/// comment's "a type-cast wrap nests once, never repeatedly": a doubly
+/// nested cast-wrap-shaped body (the marker alias two levels deep, with the
+/// real join only reachable by recursing twice) must still fail closed
+/// rather than the function recursing further to find it.
+#[test]
+fn count_preservation_probe_from_body_does_not_recurse_past_one_cast_wrap_level() {
+    let inner_join = "SELECT f.id, f.amount, d.category FROM main.fact f JOIN main.dim d ON \
+                       f.dim_id = d.id WHERE f.amount > 0";
+    let once_wrapped = format!("SELECT * FROM (\n  {inner_join}\n) _smelt_typed");
+    let twice_wrapped = format!("SELECT * FROM (\n  {once_wrapped}\n) _smelt_typed");
+    assert!(
+        emit_count_preservation_probe_from_body(&twice_wrapped, "main.dim").is_none(),
+        "a doubly-nested cast wrap must fail closed rather than recursing past one level"
+    );
+}

@@ -107,7 +107,7 @@ The rule, applied to each top-level select item:
 | 2     | done    | 55eee2b8 | 2026-08-20 |
 | 3     | done    | 611a44ad | 2026-08-20 |
 | 4     | done    | 565263ad | 2026-08-20 |
-| 5     | done (reviewer pass outstanding) | f95b01fa | 2026-08-20 |
+| 5     | done    | f95b01fa | 2026-08-20 |
 | 6     | pending |        |      |
 
 ---

@@ -1268,18 +1268,34 @@ pub fn emit_count_preservation_probe(
 
 /// Find the `SelectStmt` whose own `FROM` clause carries a join against
 /// `enrichment_source` — either `select` itself, or, when `select`'s `FROM`
-/// is exactly one derived-table source with no joins of its own, the
-/// `SelectStmt` inside that derived table. Recurses through that single
-/// shape only (a type-cast wrap nests once, never repeatedly): structural
-/// navigation of the one parse tree `emit_count_preservation_probe_from_body`
-/// already built from `body_sql`, over text ranges that remain valid
-/// offsets into that same string — never a second parse of a separately
-/// reconstructed substring.
+/// is exactly one derived-table source with no joins of its own AND that
+/// source is aliased [`smelt_dialect::TYPE_CAST_WRAP_ALIAS`] (the exact
+/// marker `wrap_with_type_casts` emits), the `SelectStmt` inside that
+/// derived table. This widening exists to see through *that one shape* — a
+/// type-cast wrap — and no other: gating on the wrap's own alias, rather
+/// than on "any single non-joined derived-table source", is what keeps a
+/// user's own legitimate subquery (`SELECT ... FROM (SELECT ... JOIN ...)
+/// sub WHERE ...`) from being mistaken for a wrapped body. Matching that
+/// shape by accident would have the caller build its driving/enriched
+/// selects from the INNER select — silently discarding the OUTER select's
+/// own `WHERE`, verifying count-preservation over a different row set than
+/// the model actually writes (`docs/plans/20260819-source-derived-projection.md`
+/// Phase 5 review finding).
+///
+/// Recurses through that single shape only, and — matching the "a type-cast
+/// wrap nests once, never repeatedly" contract literally, not just in
+/// prose — only ever one level deep: the recursive call below is not
+/// itself recursive, so a doubly-wrapped body still fails closed. This is
+/// structural navigation of the one parse tree
+/// `emit_count_preservation_probe_from_body` already built from `body_sql`,
+/// over text ranges that remain valid offsets into that same string — never
+/// a second parse of a separately reconstructed substring.
 ///
 /// Returns `None` (fail-closed, matching the caller) when `select`'s `FROM`
 /// has joins that don't match `enrichment_source` (a genuine miss — no
-/// deeper source could still contain the join the caller is scoped to), or
-/// when the single non-joined source isn't a derived table at all.
+/// deeper source could still contain the join the caller is scoped to),
+/// when the single non-joined source isn't a derived table at all, or when
+/// that derived table isn't aliased the wrap marker.
 fn select_with_enrichment_join(
     select: &smelt_parser::SelectStmt,
     enrichment_source: &str,
@@ -1308,8 +1324,21 @@ fn select_with_enrichment_join(
     if sources.next().is_some() {
         return None;
     }
+    if only_source.alias().as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS) {
+        // Not the cast-wrap shape — some other single-derived-table FROM
+        // (a user's own subquery, most commonly). Fail closed rather than
+        // guess it's a wrap.
+        return None;
+    }
     let inner = only_source.subquery()?.select_stmt()?;
-    select_with_enrichment_join(&inner, enrichment_source)
+    let inner_from = inner.from_clause()?;
+    if matches(&inner_from) {
+        return Some(inner);
+    }
+    // Bounded to one level: a wrap nests once, never repeatedly. Do not
+    // recurse into `inner` a second time even if it happens to look like
+    // another wrap.
+    None
 }
 
 /// Build [`emit_count_preservation_probe`]'s `driving_select`/`enriched_select`
