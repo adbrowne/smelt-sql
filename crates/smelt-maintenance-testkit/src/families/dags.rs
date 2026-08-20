@@ -135,6 +135,125 @@ async fn assert_every_node_equal_for(
     Ok(())
 }
 
+/// `oracle_flags_a_seeded_divergence` — this family's own non-vacuity
+/// self-check, the `dags` counterpart of
+/// `families::harness_self_check`'s oracle probe.
+///
+/// Every other case in this family asserts an equality and passes. That is
+/// only evidence if the assertion is *capable* of failing, and on a backend
+/// whose projects share one physical store it was not: with the incremental
+/// project and its full-refresh twin resolving to the same schema, every
+/// per-node comparison read one table twice and would have passed no matter
+/// what the incremental engine produced. This case seeds a divergence into
+/// the incremental side after both builds and requires
+/// [`assert_every_node_equal_for`] to REFUSE it.
+///
+/// The corruption is `INSERT INTO <node> SELECT * FROM <node>` — a row
+/// duplication that needs no knowledge of a node's column shape and changes
+/// the multiset without changing the schema. It only registers on a
+/// non-empty table, so the emptiness precondition is asserted rather than
+/// assumed; an empty node would otherwise make this self-check silently
+/// vacuous in exactly the way it exists to detect.
+pub async fn run_oracle_flags_a_seeded_divergence(b: &dyn ConformanceBackend) -> Result<()> {
+    let mut runner = TestRunner::deterministic();
+    let w1 = arb_window(0, 2)
+        .new_tree(&mut runner)
+        .map_err(|e| anyhow::anyhow!("generate window: {e}"))?
+        .current();
+
+    let dag = chain_dag();
+    let tmp = TempDir::new()?;
+    let case = 0usize;
+    let (inc, full) = stage_pair_for(b, &dag, &tmp, case)?;
+    let target = b.target(case);
+    let full_target = b.twin_target(case);
+
+    let inc_backend = inc.backend_for_target(target.clone()).await?;
+    b.before_step().await;
+    insert_rows_via_backend(inc_backend.as_ref(), &dag, &w1.rows, &b.schema(case)).await?;
+    drop(inc_backend);
+    b.before_step().await;
+    inc.run_with_target(
+        target.clone(),
+        &format!("{}-selfcheck-inc", b.engine_name()),
+        base_request(b.engine_name()),
+        &smelt_runtime::NoOpReporter,
+    )
+    .await?;
+
+    let full_backend = full.backend_for_target(full_target.clone()).await?;
+    b.before_step().await;
+    insert_rows_via_backend(full_backend.as_ref(), &dag, &w1.rows, &b.twin_schema(case)).await?;
+    drop(full_backend);
+    b.before_step().await;
+    full.run_with_target(
+        full_target.clone(),
+        &format!("{}-selfcheck-full", b.engine_name()),
+        base_request(b.engine_name()),
+        &smelt_runtime::NoOpReporter,
+    )
+    .await?;
+
+    // Precondition: the two sides agree BEFORE the seeded divergence, so a
+    // later refusal is attributable to the corruption and nothing else.
+    assert_every_node_equal_for(
+        target.clone(),
+        &b.schema(case),
+        full_target.clone(),
+        &b.twin_schema(case),
+        &dag,
+        &inc,
+        &full,
+        case,
+        "self-check (pre-corruption)",
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("the two sides must agree before any corruption: {e}"))?;
+
+    // Seed the divergence into node 0 of the INCREMENTAL project only.
+    let node = &dag.nodes[0].name;
+    let inc_table = format!("{}.{}", b.schema(case), node);
+    let inc_backend = inc.backend_for_target(target.clone()).await?;
+    let before =
+        fetch_node_multiset_via_backend(inc_backend.as_ref(), &dag, 0, None, &b.schema(case))
+            .await?;
+    anyhow::ensure!(
+        !before.is_empty(),
+        "self-check needs a non-empty node to corrupt, or the seeded divergence would be a \
+         no-op and this test would pass vacuously — the very failure mode it exists to catch"
+    );
+    b.before_step().await;
+    smelt_backend::Backend::execute_sql(
+        inc_backend.as_ref(),
+        &format!("INSERT INTO {inc_table} SELECT * FROM {inc_table}"),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("seed divergence into {inc_table}: {e}"))?;
+    drop(inc_backend);
+
+    let verdict = assert_every_node_equal_for(
+        target,
+        &b.schema(case),
+        full_target,
+        &b.twin_schema(case),
+        &dag,
+        &inc,
+        &full,
+        case,
+        "self-check (post-corruption)",
+    )
+    .await;
+
+    anyhow::ensure!(
+        verdict.is_err(),
+        "the dags oracle accepted a seeded divergence: node {node} was duplicated in the \
+         incremental project but the per-node comparison still reported equality. This means \
+         the incremental and full-refresh sides resolve to the SAME physical storage, so \
+         every other case in this family is passing vacuously."
+    );
+    Ok(())
+}
+
 /// `chain_since_upstream_dirty_set_suffices` — the twin of
 /// `maintenance_conformance::dags::chain_since_upstream_dirty_set_suffices`.
 pub async fn run_chain_since_upstream_dirty_set_suffices(

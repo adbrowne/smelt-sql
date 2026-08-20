@@ -656,9 +656,13 @@ pub fn stage_dag_for_target(
 ) -> anyhow::Result<LinkCProject> {
     match &target {
         crate::recipe::ConformanceTarget::DuckDb => stage_dag(dag, project_dir, db_path),
-        crate::recipe::ConformanceTarget::SparkDelta => {
+        crate::recipe::ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
             #[cfg(feature = "spark")]
             {
+                let schema = schema.clone();
                 std::fs::create_dir_all(project_dir.join("models/sources"))?;
                 for idx in 0..dag.nodes.len() {
                     std::fs::write(
@@ -675,12 +679,12 @@ pub fn stage_dag_for_target(
                     crate::render::render_smelt_yml_for(target, db_path),
                 )?;
 
-                reset_and_create_spark_dag_tables(
-                    db_path,
-                    dag,
-                    crate::recipe::SPARK_CONFORMANCE_SCHEMA,
-                    " USING DELTA",
-                )?;
+                // The target's own schema, never the shared constant: a
+                // paired family stages its full-refresh oracle twin into a
+                // DIFFERENT schema, and the twin's drop-before-seed must
+                // reset the twin's tables rather than the incremental
+                // project's.
+                reset_and_create_spark_dag_tables(db_path, dag, &schema, " USING DELTA")?;
 
                 LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
             }
@@ -759,7 +763,11 @@ fn reset_and_create_spark_dag_tables(
         .map(|n| format!("{schema}.{}", n.name))
         .collect();
     crate::link_c_harness::block_on_isolated(async move {
-        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        // Open IN `schema` (not the shared constant) so `SparkBackend::new`'s
+        // `CREATE DATABASE IF NOT EXISTS` provisions a twin schema the first
+        // time one is staged into.
+        let backend =
+            crate::link_c_harness::open_spark_conformance_backend_in(&db_path, &schema).await?;
         for table in &node_tables {
             smelt_backend::Backend::execute_sql(
                 backend.as_ref(),

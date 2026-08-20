@@ -704,6 +704,22 @@ column types through the conformance backend`
   `dags` assertions non-vacuous means giving Spark per-case schemas (or case-parametrized node
   names), which is a change to the Spark leg rather than to the BigQuery one.
 
+  **Resolved 2026-08-21, and it was not a "may" — the vacuity was real and is now proven both
+  ways.** `ConformanceTarget::SparkDelta` gained the schema it stages into (mirroring `BigQuery`'s
+  `dataset`), and `SparkConformanceBackend` overrides `twin_target`/`twin_schema` onto
+  `smelt_conf_gen_twin`. The demonstration is a new non-vacuity self-check,
+  `dags::run_oracle_flags_a_seeded_divergence`, which duplicates the rows of one node in the
+  incremental project *after* both builds and requires the per-node comparison to refuse it.
+  Measured live against Spark: with the twin schema reverted to the shared one it FAILS — "node
+  `dag_chain_a` was duplicated in the incremental project but the per-node comparison still
+  reported equality" — and with the override in place it passes. So every `dags` assertion on the
+  Spark leg had been passing vacuously, and the leg's earlier green runs carried no evidence about
+  the incremental engine at all. Per-case schemas turned out NOT to be needed: staging is
+  drop-before-seed, so consecutive cases reusing one schema is safe; it was only the twin sharing
+  it that was fatal. The schema is now threaded from the target through every Spark staging path
+  (`gate`, `keyed`, `composed`, `feed`, `dags`) rather than read from the constant, so a future
+  paired family cannot silently re-share storage.
+
 ## Verification
 
 - `bash scripts/bigquery-auth.sh` (human), then `bash scripts/bigquery-conformance.sh` — green against the live warehouse.

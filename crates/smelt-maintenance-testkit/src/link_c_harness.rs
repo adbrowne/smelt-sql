@@ -511,7 +511,14 @@ impl LinkCProject {
     ) -> Result<RunOutcome> {
         match target {
             ConformanceTarget::DuckDb => self.run(run_id, request, reporter).await,
-            ConformanceTarget::SparkDelta => {
+            ConformanceTarget::SparkDelta { schema } => {
+                // The schema reaches the run through the project's own
+                // `smelt.yml` (`render::render_smelt_yml_for` wrote it from
+                // this same target), exactly as the BigQuery arm's dataset
+                // does — the factory reads config, not this binding. Bound
+                // outside the `cfg` so the no-`spark` build does not see an
+                // unused variable.
+                let _ = &schema;
                 #[cfg(feature = "spark")]
                 {
                     let (db, graph) = self.build_db_and_graph();
@@ -597,10 +604,13 @@ impl LinkCProject {
     pub async fn backend_for_target(&self, target: ConformanceTarget) -> Result<Box<dyn Backend>> {
         match target {
             ConformanceTarget::DuckDb => self.backend().await,
-            ConformanceTarget::SparkDelta => {
+            ConformanceTarget::SparkDelta { schema } => {
+                // Bound outside the `cfg` so the no-`spark` build, whose arm
+                // never reads it, does not see an unused variable.
+                let _ = &schema;
                 #[cfg(feature = "spark")]
                 {
-                    open_spark_conformance_backend(&self.db_path).await
+                    open_spark_conformance_backend_in(&self.db_path, &schema).await
                 }
                 #[cfg(not(feature = "spark"))]
                 {
@@ -635,6 +645,24 @@ impl LinkCProject {
 /// env-unset fallback; the Spark arm never opens it as a file.
 #[cfg(feature = "spark")]
 pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Backend>> {
+    open_spark_conformance_backend_in(db_path, crate::recipe::SPARK_CONFORMANCE_SCHEMA).await
+}
+
+/// [`open_spark_conformance_backend`] parametrized over the schema — the
+/// Spark-arm counterpart of [`open_bigquery_conformance_backend`]'s dataset
+/// parameter, and the seam that lets a case's full-refresh oracle twin land
+/// in different physical storage than its incremental project.
+///
+/// Spark's warehouse is ONE persistent Delta store shared by every project
+/// in a binary, so unlike DuckDB (a private `.duckdb` file per project) the
+/// schema is the only thing separating two projects' tables. `SparkBackend::
+/// new` issues `CREATE DATABASE IF NOT EXISTS`, so a twin schema needs no
+/// separate provisioning step.
+#[cfg(feature = "spark")]
+pub async fn open_spark_conformance_backend_in(
+    db_path: &Path,
+    schema: &str,
+) -> Result<Box<dyn Backend>> {
     use smelt_backend_spark::SparkBackend;
 
     let connect_url = crate::recipe::spark_connect_url();
@@ -646,7 +674,7 @@ pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Ba
     let backend = SparkBackend::new(
         &connect_url,
         "spark_catalog",
-        crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+        schema,
         Some(warehouse_str),
         true,
     )

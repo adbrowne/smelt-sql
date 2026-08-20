@@ -18,6 +18,22 @@ fn case_count() -> usize {
         .unwrap_or(DEFAULT_CASES)
 }
 
+/// `dags_oracle_flags_a_seeded_divergence_on_spark` — this family's
+/// non-vacuity self-check. Proves the per-node equality assertion is capable
+/// of FAILING on Spark, which it was not while a case's incremental project
+/// and its full-refresh twin shared one schema.
+#[test]
+fn dags_oracle_flags_a_seeded_divergence_on_spark() {
+    let b = SparkConformanceBackend;
+    if let Some(reason) = b.skip_reason() {
+        eprintln!("{reason} — skipping dags_oracle_flags_a_seeded_divergence_on_spark");
+        return;
+    }
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(dags::run_oracle_flags_a_seeded_divergence(&b))
+        .expect("the dags oracle failed to flag a seeded divergence on Spark");
+}
+
 /// `chain_since_upstream_dirty_set_suffices_on_spark`.
 #[test]
 fn chain_since_upstream_dirty_set_suffices_on_spark() {

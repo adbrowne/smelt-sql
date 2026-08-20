@@ -127,6 +127,21 @@ the gated tier (see "CI tiering" below) as `cargo test -p smelt-cli --features s
 the recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
 Divergences until it lands.
 
+**A comparison against a full-refresh oracle must reach two distinct stores.** Where a family
+stages a case twice — an incremental project and a full-refresh oracle twin — the two must resolve
+to different physical storage, and the harness expresses that through a declared seam
+(`ConformanceBackend`'s `twin_target`/`twin_schema`) rather than a naming convention a caller is
+trusted to honour. The requirement is not cosmetic: two projects sharing one store make the
+comparison read a single table twice, so the assertion passes regardless of what the incremental
+engine computed, and the twin's own source seeding lands on top of the incremental project's
+rather than beside it. Backends satisfy this differently — DuckDB incidentally, since each staged
+project owns a private database file; BigQuery and Spark explicitly, because both address one
+shared store where only the dataset or schema separates two projects' tables. Because a
+comparison that has gone vacuous is indistinguishable from a passing one, the property is asserted
+rather than assumed: the paired family carries a self-check that seeds a divergence into the
+incremental side after both builds and requires the comparison to refuse it. Its coverage is
+recorded in §Known Divergences.
+
 **CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
 changed paths touching Spark-relevant code (the Spark backend crate, Spark/parity integration
 tests, the function-signature registry, type inference, the parser's dialect surface, or the
@@ -488,6 +503,15 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
+- **The `dags` non-vacuity self-check runs on the Spark leg only.** `dags`'s seeded-divergence
+  self-check — the one that proves a case's per-node comparison is capable of failing — has a
+  wrapper in `maintenance_conformance_spark` but not in `maintenance_conformance_bigquery`. The
+  BigQuery leg's twin already resolves to its own per-case dataset, so its comparison is distinct
+  by construction rather than by luck; what is missing is the assertion that says so, which means
+  a future change to BigQuery's twin derivation would not be caught the way the same defect on
+  Spark now is. The gate-oracle self-check (`harness_self_check`) does run on all three legs. Adding
+  the BigQuery wrapper costs a live sweep to confirm, so it is tracked rather than landed here.
+  Tracked in `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The exact median was silently rounded on BigQuery, by the output-schema cast wrap rather than
   by the lowering.** `apply_type_casts` re-parses SQL that the dialect printer has *already*
   lowered, so a BigQuery median arrives as `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`.

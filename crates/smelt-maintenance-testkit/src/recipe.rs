@@ -45,11 +45,32 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
 /// every prior call site that relied on implicit-copy semantics either
 /// constructs a fresh unit variant (unaffected) or now goes through
 /// `.clone()` where the same target is consulted more than once.
+/// `SparkDelta` likewise carries the schema its project stages into. Spark's
+/// warehouse is ONE persistent Delta store shared by every project in a test
+/// binary — same connect URL, same `spark_catalog`, and the same warehouse
+/// directory whenever `SMELT_SPARK_WAREHOUSE` is exported — so unlike DuckDB
+/// (a private `.duckdb` file per project) the schema is the *only* thing that
+/// separates two projects' physical tables. Carrying it in the target makes
+/// "these two projects write different tables" expressible, which is what
+/// `families::dags`'s full-refresh oracle twin needs to be a real comparison
+/// rather than one table read twice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConformanceTarget {
     DuckDb,
-    SparkDelta,
+    SparkDelta { schema: String },
     BigQuery { dataset: String },
+}
+
+impl ConformanceTarget {
+    /// The Spark/Delta target every non-paired family stages into — the one
+    /// persistent [`SPARK_CONFORMANCE_SCHEMA`]. Paired families (today only
+    /// `families::dags`) reach the twin's distinct schema through
+    /// `ConformanceBackend::twin_target` instead.
+    pub fn spark_delta() -> Self {
+        ConformanceTarget::SparkDelta {
+            schema: SPARK_CONFORMANCE_SCHEMA.to_string(),
+        }
+    }
 }
 
 /// The BigQuery dataset a generative-conformance `(family, case)` pair

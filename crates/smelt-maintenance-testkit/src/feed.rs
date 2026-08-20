@@ -237,9 +237,13 @@ pub fn stage_feed_keyed_for_target(
 ) -> anyhow::Result<LinkCProject> {
     match &target {
         crate::recipe::ConformanceTarget::DuckDb => stage_feed_keyed(recipe, project_dir, db_path),
-        crate::recipe::ConformanceTarget::SparkDelta => {
+        crate::recipe::ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
             #[cfg(feature = "spark")]
             {
+                let schema = schema.clone();
                 std::fs::create_dir_all(project_dir.join("models/sources"))?;
                 std::fs::write(
                     project_dir.join(format!("models/{}.sql", recipe.model_name)),
@@ -254,7 +258,7 @@ pub fn stage_feed_keyed_for_target(
                     render::render_smelt_yml_for(target, db_path),
                 )?;
 
-                create_feed_tables_via_backend(db_path, &recipe.source)?;
+                create_feed_tables_via_backend(db_path, &recipe.source, &schema)?;
 
                 LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
             }
@@ -372,9 +376,10 @@ fn create_bigquery_feed_tables(dataset: &str, source: &SourceRecipe) -> anyhow::
 fn create_feed_tables_via_backend(
     db_path: &std::path::Path,
     source: &SourceRecipe,
+    schema: &str,
 ) -> anyhow::Result<()> {
     let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let schema = schema.to_string();
     let base_table = format!("{schema}.sources_{}", source.name);
     let feed_table = format!("{schema}.feed_{}", source.name);
     let (base_defs, feed_defs) = if is_clocked(source) {
@@ -407,7 +412,8 @@ fn create_feed_tables_via_backend(
         )
     };
     crate::link_c_harness::block_on_isolated(async move {
-        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        let backend =
+            crate::link_c_harness::open_spark_conformance_backend_in(&db_path, &schema).await?;
         for table in [&base_table, &feed_table] {
             smelt_backend::Backend::execute_sql(
                 backend.as_ref(),

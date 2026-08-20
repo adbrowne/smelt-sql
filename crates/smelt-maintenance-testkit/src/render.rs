@@ -269,7 +269,7 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
                 db = db_path.display()
             ),
         ),
-        ConformanceTarget::SparkDelta => {
+        ConformanceTarget::SparkDelta { schema } => {
             let warehouse = crate::recipe::spark_warehouse_dir(db_path);
             let connect_url = crate::recipe::spark_connect_url();
             (
@@ -278,7 +278,6 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
                     "type: spark\n    connect_url: {connect_url}\n    \
                      catalog: spark_catalog\n    schema: {schema}\n    \
                      warehouse: {warehouse}\n    format: delta",
-                    schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA,
                     warehouse = warehouse.display(),
                 ),
             )
@@ -418,9 +417,13 @@ pub fn stage_for_target(
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
     match &target {
         ConformanceTarget::DuckDb => stage(recipe, project_dir, db_path),
-        ConformanceTarget::SparkDelta => {
+        ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
             #[cfg(feature = "spark")]
             {
+                let schema = schema.clone();
                 std::fs::create_dir_all(project_dir.join("models/sources"))?;
                 std::fs::write(
                     project_dir.join(format!("models/{}.sql", recipe.model_name)),
@@ -435,7 +438,7 @@ pub fn stage_for_target(
                     render_smelt_yml_for(target, db_path),
                 )?;
 
-                reset_and_create_spark_source_table(db_path, recipe)?;
+                reset_and_create_spark_source_table(db_path, recipe, &schema)?;
 
                 crate::link_c_harness::LinkCProject::load(
                     project_dir.to_path_buf(),
@@ -495,13 +498,19 @@ pub fn stage_for_target(
     }
 }
 
-/// Drop then (re)create `<SPARK_CONFORMANCE_SCHEMA>.sources_<name>` AND drop
-/// any stale `<SPARK_CONFORMANCE_SCHEMA>.<model_name>` from a prior run
-/// (`stage_for_target`'s Spark arm) — the drop-before-seed idempotency
-/// [`create_source_table_via_backend`] doesn't need on DuckDB (a fresh temp
-/// file per case has nothing to collide with).
+/// Drop then (re)create `<schema>.sources_<name>` AND drop any stale
+/// `<schema>.<model_name>` from a prior run (`stage_for_target`'s Spark arm)
+/// — the drop-before-seed idempotency [`create_source_table_via_backend`]
+/// doesn't need on DuckDB (a fresh temp file per case has nothing to collide
+/// with). `schema` comes from the staged target, never a constant, so a
+/// project staged into a twin schema resets the twin's tables rather than
+/// the incremental project's.
 #[cfg(feature = "spark")]
-fn reset_and_create_spark_source_table(db_path: &Path, recipe: &ModelRecipe) -> anyhow::Result<()> {
+fn reset_and_create_spark_source_table(
+    db_path: &Path,
+    recipe: &ModelRecipe,
+    schema: &str,
+) -> anyhow::Result<()> {
     let column_defs = format!(
         "{d} DATE, {id} INT, {val} INT",
         d = recipe.source.clock_column,
@@ -513,6 +522,7 @@ fn reset_and_create_spark_source_table(db_path: &Path, recipe: &ModelRecipe) -> 
         &recipe.source.name,
         &recipe.model_name,
         &column_defs,
+        schema,
     )
 }
 
@@ -528,14 +538,16 @@ fn reset_and_create_spark_table_for(
     source_name: &str,
     model_name: &str,
     column_defs: &str,
+    schema: &str,
 ) -> anyhow::Result<()> {
     let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let schema = schema.to_string();
     let source_table = format!("{schema}.sources_{source_name}");
     let model_table = format!("{schema}.{model_name}");
     let column_defs = column_defs.to_string();
     crate::link_c_harness::block_on_isolated(async move {
-        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        let backend =
+            crate::link_c_harness::open_spark_conformance_backend_in(&db_path, &schema).await?;
         smelt_backend::Backend::execute_sql(
             backend.as_ref(),
             &format!("DROP TABLE IF EXISTS {model_table}"),
@@ -830,9 +842,13 @@ pub fn stage_keyed_for_target(
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
     match &target {
         ConformanceTarget::DuckDb => stage_keyed(recipe, project_dir, db_path),
-        ConformanceTarget::SparkDelta => {
+        ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
             #[cfg(feature = "spark")]
             {
+                let schema = schema.clone();
                 std::fs::create_dir_all(project_dir.join("models/sources"))?;
                 std::fs::write(
                     project_dir.join(format!("models/{}.sql", recipe.model_name)),
@@ -847,7 +863,7 @@ pub fn stage_keyed_for_target(
                     render_smelt_yml_for(target, db_path),
                 )?;
 
-                reset_and_create_spark_keyed_source_table(db_path, recipe)?;
+                reset_and_create_spark_keyed_source_table(db_path, recipe, &schema)?;
 
                 crate::link_c_harness::LinkCProject::load(
                     project_dir.to_path_buf(),
@@ -922,9 +938,10 @@ pub fn stage_keyed_for_target(
 fn reset_and_create_spark_keyed_source_table(
     db_path: &Path,
     recipe: &KeyedRecipe,
+    schema: &str,
 ) -> anyhow::Result<()> {
     let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let schema = schema.to_string();
     let source_table = format!("{schema}.sources_{}", recipe.source.name);
     let model_table = format!("{schema}.{}", recipe.model_name);
     let column_defs = match recipe.source.posture {
@@ -941,7 +958,8 @@ fn reset_and_create_spark_keyed_source_table(
         ),
     };
     crate::link_c_harness::block_on_isolated(async move {
-        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        let backend =
+            crate::link_c_harness::open_spark_conformance_backend_in(&db_path, &schema).await?;
         smelt_backend::Backend::execute_sql(
             backend.as_ref(),
             &format!("DROP TABLE IF EXISTS {model_table}"),
@@ -1107,9 +1125,13 @@ pub fn stage_composed_for_target(
 ) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
     match &target {
         ConformanceTarget::DuckDb => stage_composed(recipe, project_dir, db_path),
-        ConformanceTarget::SparkDelta => {
+        ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
             #[cfg(feature = "spark")]
             {
+                let schema = schema.clone();
                 std::fs::create_dir_all(project_dir.join("models/sources"))?;
                 std::fs::write(
                     project_dir.join(format!("models/{}.sql", recipe.model_name)),
@@ -1134,6 +1156,7 @@ pub fn stage_composed_for_target(
                         id = recipe.source.key_column,
                         val = recipe.source.payload_column,
                     ),
+                    &schema,
                 )?;
 
                 crate::link_c_harness::LinkCProject::load(
@@ -1344,7 +1367,7 @@ mod tests {
              BigQuery arm"
         );
 
-        let spark_yaml = render_smelt_yml_for(ConformanceTarget::SparkDelta, &db_path);
+        let spark_yaml = render_smelt_yml_for(ConformanceTarget::spark_delta(), &db_path);
         let warehouse = crate::recipe::spark_warehouse_dir(&db_path);
         let connect_url = crate::recipe::spark_connect_url();
         let expected_spark = format!(
