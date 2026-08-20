@@ -141,6 +141,40 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~BigQuery generative maintenance-conformance leg~~ ✅ (August 21, 2026)
+
+10-phase plan ([plan](plans/20260817-bigquery-generative-conformance.md)) giving BigQuery its own
+leg of the generative dual-execution harness, so its incremental coverage is generative rather
+than fixed-recipe-only — and making `multi_backend.md`'s claim that "the backend under test is a
+parameter, not a duplicated implementation" true, by extracting the shared test families into one
+target-parametrized owner instead of adding a third copy.
+
+- **Measured green in one sweep** — `bash scripts/bigquery-conformance.sh`, `--test-threads=1`:
+  21 passed / 0 failed / 0 ignored, 2190.85s against the live warehouse. Earlier sessions could
+  only ever verify cases in targeted runs, because a one-hour credential could not cover a sweep
+  plus an already-spent window.
+- **Four product-side dialect gaps closed, not just harness ones.** A keyed-fold `MERGE` emitted
+  `INSERT *` where GoogleSQL needs `INSERT ROW`; infix `%` and the power operators reached
+  GoogleSQL unlowered — and `^` was the dangerous one, since smelt reads it as power while
+  GoogleSQL defines it as bitwise XOR, so an unlowered `^` returned a *different number* rather
+  than failing. Each affects real user models on BigQuery, not only the harness.
+- **An exact median left the warehouse rounded** — the output-schema cast wrap re-parsed
+  already-lowered SQL, could not read the GoogleSQL `FLOAT64` spelling, and narrowed a
+  `-284.5` median to `-285`. Division with one unresolved operand now yields no type at all.
+  This is the same re-parse-your-own-output bug class the source-derived projection work closed.
+- **The oracle is demonstrably non-vacuous** — `harness_self_check_bigquery` catches a
+  deliberately seeded divergence live, so the leg's green is evidence rather than absence of
+  checking.
+- **A measurement correction worth keeping** — an all-green sweep costs nearly twice a failing one
+  (2190.85s vs 1142.10s), so the credential window's "large headroom" was an artefact of measuring
+  a red suite. A sweep now must start on a freshly minted token.
+
+Deferred, and recorded in the plan: the `hardening-budget.sh` gate mis-classifies the
+test-support testkit crate as production, and the Spark `dags` family may be comparing a project
+against itself (fixed node names in a shared schema) — pre-existing, and a change to the Spark leg
+rather than the BigQuery one.
+
+
 ### ~~Source-derived projection — one owner for a model's output schema~~ ✅ (August 20, 2026)
 
 6-phase plan ([plan](plans/20260819-source-derived-projection.md)) closing a bug class in which

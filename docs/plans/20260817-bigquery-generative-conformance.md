@@ -89,6 +89,16 @@ Live Spark re-run — the standing gate on every change to shared harness code �
 `e028596e`: all 19 `maintenance_conformance_spark` tests pass in 190s, covering both the
 twin-target seam and the dialect-aware row-set owner.
 
+**Whole-sweep close-out (2026-08-21).** The single uninterrupted BigQuery sweep the plan could not
+take on its own — Phase 10 recorded it as the one owed measurement — is now taken and green:
+`bash scripts/bigquery-conformance.sh`, `--test-threads=1`, **21 passed / 0 failed / 0 ignored,
+2190.85s**. Every case that had only ever been verified by a targeted run is confirmed in the same
+sweep as every other. Two things the measurement corrected: an all-green sweep costs almost twice
+a failing one (2190.85s against 1142.10s, because a failing case exits fast), so the "large
+headroom" the credential-window divergence claimed was an artefact of measuring a red suite; and
+the `dags` family alone takes ~14 minutes of the window, so pace extrapolated from it overstates
+the total. Both are recorded in `docs/specs/multi_backend.md` §Known Divergences.
+
 ---
 
 ### Phase 1: Measure the warehouse's modification and dataset limits

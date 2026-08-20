@@ -98,19 +98,10 @@ crate) for the maintenance legs specifically. BigQuery joins the fixed-recipe su
 (materialization, seed, lowering, merge, incremental DELETE+INSERT, schema evolution) and, like
 Spark, has its own leg of the generative dual-execution harness
 (`maintenance_conformance_bigquery`, see §"Generative equivalence coverage"), so its incremental
-coverage is generative rather than fixed-recipe-only. Coverage is partial, measured live
-2026-08-18 (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`): 13 of 21 cases pass. The
-S-restricted oracle relation's `CREATE OR REPLACE TEMPORARY VIEW` gap and the composed family's
-hand-rolled row set — both previously the dominant cause of failure here — are closed; no case
-fails on either any more. The remaining eight failures span one product-side GoogleSQL dialect gap
-(a keyed-fold `MERGE`'s not-matched arm ignores the target dialect), two harness-side gaps (the
-oracle's raw-SQL rendering bypasses smelt's `MEDIAN` lowering; a shared default `execute_model`
-issues a `DROP VIEW` against an existing `TABLE`, which BigQuery refuses unlike DuckDB and Spark),
-a per-case dataset staging collision in the `pinned` family, and two cases whose live failure text
-was not captured and needs a fresh run to diagnose. Six of the eight carry a landed fix whose
-effect no live sweep has confirmed yet; the pass count above is the last measured one, not a
-current one. Full breakdown and evidence in §Known
-Divergences. `refresh:
+coverage is generative rather than fixed-recipe-only. Every one of that leg's 21 cases passes
+against the live warehouse, measured in a single uninterrupted sweep on 2026-08-21
+(`bash scripts/bigquery-conformance.sh`, `--test-threads=1`: 21 passed / 0 failed / 0 ignored,
+2190.85s). `refresh:
 materialized_view` is excluded: no
 backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
 mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
@@ -497,83 +488,6 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
-- **Every one of the BigQuery generative-conformance leg's 21 cases passes live, but no single
-  sweep has yet measured them together.** Measured 2026-08-19 as a set of targeted runs, after the
-  causes below were closed: the last failing cases
-  (`gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`, both
-  `pinned_bigquery` cases, `dags_bigquery::diamond_propagation_suffices_on_bigquery`,
-  `gate_mixed_bigquery::mutable_pool_settles_to_full_refresh_on_bigquery`, all three
-  `harness_self_check_bigquery` cases) each pass. A whole-sweep re-measurement is still owed,
-  because a one-hour credential cannot cover a ~21-minute sweep plus the token preflight's
-  per-family budget once a session has already spent part of the window. The history below records
-  what each failure taught, since the fixes are what the entries now describe.
-- **Eight of the leg's 21 cases failed live on 2026-08-18, for four distinct causes.** Measured 2026-08-18 (`bash scripts/bigquery-conformance.sh`,
-  `--test-threads=1`: 13 passed / 8 failed / 0 ignored, 1142.10s wall-clock). The two gaps
-  previously recorded in this section — the S-restricted oracle relation's `CREATE OR REPLACE
-  TEMPORARY VIEW` (`STracker::materialize_s_as_view`,
-  `crates/smelt-maintenance-testkit/src/s_tracker.rs:296`) and the composed family's hand-rolled
-  `(VALUES …)` row set (`composed_delta_values_sql`,
-  `crates/smelt-maintenance-testkit/src/families/gate_composed.rs:201`) — are both **closed**: no
-  case fails on either gap any more. Critically,
-  `harness_self_check_bigquery::oracle_flags_a_seeded_divergence_on_bigquery` now **passes**,
-  the first live demonstration that BigQuery's leg has a non-vacuous oracle (it catches a
-  deliberately seeded divergence). The remaining eight failures:
-  - `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery` — `400 Function
-    not found: MEDIAN`. The harness executes its S-restricted oracle SQL as raw SQL
-    (`STracker`), bypassing smelt's printer, so the exact-`MEDIAN` GoogleSQL lowering
-    (§"Exact-median lowering") that applies to compiled models does not apply to the oracle's own
-    rendering of a `HolisticAgg` body. **Harness-side.** *Fixed, unconfirmed live:* the oracle body
-    now round-trips through the dialect-aware printer, so the lowering applies to it exactly as it
-    does to a compiled model.
-  - `gate_bigquery::column_add_between_runs_recovers_equivalence_on_bigquery` and
-    `gate_bigquery::full_refresh_interleave_resets_state_correctly_on_bigquery` — `400 Cannot
-    drop <project>:<dataset>.recipe_additive_agg which has type TABLE. A view was expected.` The
-    default `Backend::execute_model` (`crates/smelt-backend/src/lib.rs:216`,`:222`-`223`)
-    unconditionally issues `drop_view_if_exists` before `drop_table_if_exists` (or the reverse)
-    "in case the materialization type changed" — a no-op on DuckDB and Spark when the object is
-    the other kind, but BigQuery's `DROP VIEW IF EXISTS` errors on a type mismatch instead of
-    treating it as absent. **Product-side** (the default `execute_model` implementation shared by
-    every backend). *Fixed, unconfirmed live:* the BigQuery backend now classifies that one error
-    shape as "already absent" and honours the `IF EXISTS` contract every other backend keeps;
-    every other error still propagates.
-  - `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery` — `400 Syntax
-    error: Expected keyword ROW or keyword VALUES but got "*"` on a compiled `MERGE … WHEN NOT
-    MATCHED THEN INSERT *` statement. **Product-side**; recorded as its own divergence below
-    (`build_cumulative_merge_sql` hardcodes the DuckDB dialect). *Fixed, unconfirmed live:* the
-    dialect now threads from the driver through `WindowedKeyedRule::merge_sql`.
-  - `pinned_bigquery::hazard_schedules_are_pinned_on_bigquery` and
-    `pinned_bigquery::pinned_recipes_reproduce_catalogue_coverage_on_bigquery` — `409 Already
-    Exists: Table …sources_events`. A case stages its source table twice into one per-case
-    dataset — structurally the same twin-target collision shape the `dags` family already fixed,
-    in a family (`pinned`) that did not get that fix. **Harness-side.** *Fixed, unconfirmed live:*
-    each independent staging in the family now carries its own case through the existing
-    target/schema seam.
-  - `dags_bigquery::diamond_propagation_suffices_on_bigquery` and
-    `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery` — both
-    characterised by the 2026-08-19 sweep. `composed_keyed_pool` **passes**; it was collateral
-    from the gaps already closed. `diamond_propagation` failed with `400 Syntax error: Expected
-    ")" but got "%"` — a model body's `id % 2` reaching GoogleSQL unlowered, now fixed
-    (§"Operator lowering") but not yet confirmed live.
-  A targeted re-run of just the `gate_bigquery` module independently measured 3 passed / 3 failed
-  in 200.75s, consistent with the full-sweep numbers above. Tracked in
-  `docs/plans/20260817-bigquery-generative-conformance.md`.
-- **Re-measured live 2026-08-19: 14 passed / 7 failed / 0 ignored, 1265.89s** — but five of the
-  seven failures are the credential window expiring mid-sweep (474s remaining against a 600s
-  estimated need), not defects: `gate_mixed`, both `pinned` cases, and two `harness_self_check`
-  cases were refused by the token preflight and never ran, so the `pinned` staging-collision fix
-  remains unconfirmed. The `INSERT ROW` dialect gap and both `DROP`-type-mismatch cases now pass
-  live, as does `gate_composed_bigquery::composed_keyed_pool_upholds_equivalence_on_bigquery`.
-  Two genuine failures remain: `dags_bigquery::diamond_propagation_suffices_on_bigquery` (the
-  unlowered `%`, since fixed) and
-  `gate_bigquery::append_only_partition_pool_upholds_equivalence_on_bigquery`, which now clears
-  the `MEDIAN` error and fails instead on a real S-restricted equivalence violation at the first
-  run whose `ColumnScopedMerge` takes the `MATCHED` arm rather than inserting a new partition.
-  BigQuery is the only backend whose matched arm is an explicit `SET c = source.c, …` column list
-  rather than `SET *` (GoogleSQL has no star form — §"Whole-row MERGE"), and the identical
-  recipe and schedule pass on DuckDB. Cause unconfirmed: distinguishing a stale row from a
-  partial column update from a duplicated row needs a live re-run, which now reports the
-  differing rows rather than only the two queries. Tracked in
-  `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The exact median was silently rounded on BigQuery, by the output-schema cast wrap rather than
   by the lowering.** `apply_type_casts` re-parses SQL that the dialect printer has *already*
   lowered, so a BigQuery median arrives as `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`.
@@ -608,13 +522,16 @@ resolves nested widening to a table rewrite.
   mid-case rather than degrading gracefully. `scripts/bigquery-conformance.sh` refuses to start a
   sweep it cannot see through: it fails loud, naming the missing thing and the fix, when
   `SMELT_BQ_PROJECT` is unset (an unset project would otherwise skip green, proving nothing) or
-  when no valid token is on disk (`bash scripts/bigquery-auth.sh` mints one). Measured 2026-08-18:
-  the full 21-case shared-family sweep (`bash scripts/bigquery-conformance.sh`,
-  `--test-threads=1`) takes 1142.10s (~19 minutes) wall-clock — about a third of the one-hour
-  token window, with large headroom. The credential-window constraint itself remains real (the
-  window still bounds a session to one token's worth of wall-clock, and a larger case pool or a
-  slower network day could still exhaust it), but no concurrency or case-count reduction is needed
-  to fit today's sweep inside one window. Tracked in
+  when no valid token is on disk (`bash scripts/bigquery-auth.sh` mints one). Measured 2026-08-21:
+  an all-green 21-case sweep (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`) takes
+  2190.85s (~37 minutes) wall-clock — roughly three fifths of the one-hour token window. The
+  margin is thinner than a failing sweep suggests, because a failing case costs a fraction of a
+  passing one: the same suite measured 1142.10s when eight cases failed fast. A sweep must
+  therefore be started against a freshly minted token, not against the remainder of a window a
+  session has already spent, and the pool is not free to grow much before concurrency or a case-count
+  reduction becomes necessary. The per-family token preflight bounds the damage when the budget
+  does not fit — it refuses a family it cannot see through rather than dying mid-case, so a short
+  window yields un-run families rather than false failures. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated
