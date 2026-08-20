@@ -141,6 +141,36 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Source-derived projection — one owner for a model's output schema~~ ✅ (August 20, 2026)
+
+6-phase plan ([plan](plans/20260819-source-derived-projection.md)) closing a bug class in which
+several consumers fed `smelt_dialect::print`'s *output* back into `smelt_parser::parse`, asking
+smelt's parser to read dialect-lowered SQL it was never designed to read. Every site failed soft,
+so the damage was silent. A model's projection — its output column names and their inferred
+types — is now derived once, from the model's own source CST, before printing.
+
+- **The median bug fixed** — a BigQuery `MEDIAN` reached the cast wrap as a `FLOAT64`-spelled
+  expression smelt's type parser could not read, and an exact median left the warehouse rounded
+  by a narrowing `CAST(... AS SMALLINT)`. `multi_backend.md` §Known Divergences retires the
+  unfixed-hazard paragraph.
+- **Projection aliases are bound, not invented** — an unaliased expression column previously had
+  a `_colN` name invented at *reference* time that the inner query never exposed. Alias synthesis
+  now splices a real ` AS _smelt_col{n}` into the source before printing, and `_smelt_` is a
+  reserved prefix enforced by a new `ReservedProjectionAliasPrefix` diagnostic emitted from the
+  analyzer, so the editor and the build agree. This unblocked in-model list spread.
+- **A dead safety probe revived** — the count-preservation probe was fed the cast-wrapped body,
+  so the enrichment join it looks for was buried in a derived table and had never fired in
+  production on any dialect. It now receives the pre-wrap body via `CompiledModel::body_sql`, and
+  its derived-table widening is gated on the shared `TYPE_CAST_WRAP_ALIAS` marker and bounded to
+  one level, so a user's own subquery is never mistaken for a cast wrap.
+- **Standing gate** — `cargo test -p smelt-runtime --test projection_dialect_invariance` compiles
+  one model exercising every construct the printer lowers (`MEDIAN`, `%`, `**`, `QUALIFY`, date
+  literals, `::` casts, array literals) for DuckDB, Spark and BigQuery and asserts `output_columns`
+  and the cast-wrap column names are byte-identical across all three. Verified load-bearing:
+  restoring the printed-SQL derivation makes it fail, because Spark's `QUALIFY` lowering emits
+  `SELECT * FROM (...)` which reads back as an empty projection. Needs no live warehouse.
+
+
 ### ~~Keyed Frontier — column-family union + snapshot-reconcile executor~~ ✅ (August 9, 2026)
 
 5-phase plan ([plan](plans/20260809-keyed-frontier.md)) widening the keyed classifier past the direct-monoid families and building the second keyed run shape. Every family arrived with its admission-matrix conformance recipes including the refusal directions.
