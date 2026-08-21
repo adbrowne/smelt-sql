@@ -169,10 +169,19 @@ target-parametrized owner instead of adding a third copy.
   (2190.85s vs 1142.10s), so the credential window's "large headroom" was an artefact of measuring
   a red suite. A sweep now must start on a freshly minted token.
 
-Deferred, and recorded in the plan: the `hardening-budget.sh` gate mis-classifies the
-test-support testkit crate as production, and the Spark `dags` family may be comparing a project
-against itself (fixed node names in a shared schema) — pre-existing, and a change to the Spark leg
-rather than the BigQuery one.
+Both items deferred during the plan have since closed. The Spark `dags` family really was
+comparing a project against itself — the full-refresh twin shared the incremental project's
+schema, so the equality assertion could read one already-overwritten table for both sides, and
+every earlier green `dags` run on the Spark leg carried no evidence about the incremental engine
+at all. The twin now stages into its own schema, threaded from the target through every Spark
+staging path, and a seeded-divergence self-check proves the comparison refuses a divergence it
+previously reported as equal (August 21, 2026).
+
+And `hardening-budget.sh` no longer mis-classifies the test-support testkit crate as production:
+test-support is now *derived* — a crate that some crate dev-depends on, that no crate depends on
+normally, and that produces no binary — rather than listed somewhere that could go stale. The
+gate also refuses an orphaned baseline entry, so a crate silently dropping out of the budget is
+an error rather than an unnoticed hole (August 21, 2026).
 
 
 ### ~~Source-derived projection — one owner for a model's output schema~~ ✅ (August 20, 2026)

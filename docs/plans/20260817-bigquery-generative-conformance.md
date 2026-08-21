@@ -692,6 +692,17 @@ column types through the conformance backend`
   exclusion for the crate (or for `src/families/`) in `.claude/scripts/hardening-budget.sh`, which
   is a change to the gate itself and outside this plan's scope.
 
+  **Resolved 2026-08-21, and not by an exclusion.** Test-support is now derived from the tree:
+  a crate qualifies when some crate dev-depends on it, no crate depends on it normally, and it
+  produces no binary. Deriving it means promoting a testkit to a real dependency silently
+  re-enters its debt into the gate, where a listed exclusion would have gone stale. The
+  binary-target condition was learned by measurement, not foresight — the first two conditions
+  alone dropped `smelt-cli` and its 161 `println!`s out of the budget, because `smelt-runtime`
+  carries a test-only back edge onto the CLI and nothing depends on it normally. The gate also
+  gained the missing ratchet direction: an orphaned baseline entry (a crate registered but no
+  longer counted) is now an error, without which an over-broad exclusion is invisible — the
+  regression test for it could not fail until that check existed.
+
 - **The Spark `dags` family may be comparing a project against itself.** `SparkConformanceBackend`'s
   `target`/`schema` ignore the case index and return the one fixed `SPARK_CONFORMANCE_SCHEMA`, and
   the DAG node names in `dag.rs` are fixed literals rather than case-parametrized. So every case's

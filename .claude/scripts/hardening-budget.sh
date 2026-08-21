@@ -58,12 +58,98 @@ _count_crate() {
     echo "$total"
 }
 
+# Print the dependency names listed under one manifest section, one per line.
+# `kind` is "dependencies" or "dev-dependencies". Handles both the inline table
+# form (`foo = { path = ... }`, `foo.workspace = true`) and the sub-table form
+# (`[dependencies.foo]`). Section tracking is what keeps `[features]` entries
+# like `smelt-maintenance-testkit/spark` from being mistaken for dependencies.
+_deps_of_kind() {
+    local manifest="$1"
+    local kind="$2"
+    awk -v want="$kind" '
+        /^[ \t]*\[/ {
+            s = $0; sub(/#.*/, "", s); gsub(/[ \t]/, "", s)
+            section = s
+            # [dependencies.foo] — the dependency name is the table suffix.
+            if (index(section, "[" want ".") == 1) {
+                name = substr(section, length(want) + 3)
+                sub(/\]$/, "", name)
+                print name
+            }
+            next
+        }
+        section == "[" want "]" {
+            line = $0; sub(/#.*/, "", line)
+            if (line ~ /^[ \t]*[A-Za-z0-9_-]+[ \t]*(\.[A-Za-z0-9_-]+)?[ \t]*=/) {
+                name = line
+                sub(/[ \t]*=.*/, "", name)   # drop everything from the "="
+                sub(/\..*/, "", name)        # drop a `.workspace` suffix
+                gsub(/[ \t]/, "", name)
+                print name
+            }
+        }
+    ' "$manifest" 2>/dev/null
+}
+
+# Test-support crates are DERIVED, never declared. A crate is test-support iff
+# all three hold:
+#
+#   1. some crate names it under [dev-dependencies],
+#   2. no crate names it under [dependencies], and
+#   3. it has no binary target (no src/main.rs, no [[bin]] table).
+#
+# Its unwrap/expect debt is then excluded from the budget, because that debt is
+# test scaffolding rather than production risk.
+#
+# Each condition is load-bearing, and (3) was learned the hard way. "Nothing
+# depends on it" alone would excuse every top-level crate, which nothing depends
+# on either. Requiring (1) is not enough on its own: `smelt-runtime` carries a
+# test-only back edge onto `smelt-cli`, so the shipped CLI is dev-depended-upon
+# and normally-depended-upon by nobody, and conditions (1)+(2) alone dropped it
+# — and its 161 printlns — straight out of the budget. A crate that produces a
+# binary ships to users and is production whatever the dependency edges say.
+#
+# The default is production: a crate escapes the budget only by demonstrating it
+# is test-only, so an unparseable or absent manifest keeps its debt counted.
+#
+# Deriving this rather than keeping an exclusion list means promoting a testkit
+# to a real dependency silently re-enters its debt into the gate.
+declare -A IS_PROD_DEP=()
+declare -A IS_DEV_DEP=()
+for manifest in "$REPO_ROOT"/crates/*/Cargo.toml; do
+    [[ -f "$manifest" ]] || continue
+    while IFS= read -r dep; do
+        [[ -n "$dep" ]] && IS_PROD_DEP["$dep"]=1
+    done < <(_deps_of_kind "$manifest" "dependencies")
+    while IFS= read -r dep; do
+        [[ -n "$dep" ]] && IS_DEV_DEP["$dep"]=1
+    done < <(_deps_of_kind "$manifest" "dev-dependencies")
+done
+
+_has_binary_target() {
+    local crate_dir="$1"
+    [[ -f "$crate_dir/src/main.rs" ]] && return 0
+    grep -q '^[ \t]*\[\[bin\]\]' "$crate_dir/Cargo.toml" 2>/dev/null
+}
+
+_is_test_support_crate() {
+    local crate="$1"
+    local crate_dir="$2"
+    [[ -n "${IS_DEV_DEP[$crate]+set}" ]] || return 1
+    [[ -z "${IS_PROD_DEP[$crate]+set}" ]] || return 1
+    ! _has_binary_target "$crate_dir"
+}
+
 # Collect current counts for all crates
 declare -A CURRENT
 expect_pat='.expect("'
 for crate_src_dir in "$REPO_ROOT"/crates/*/src; do
     [[ -d "$crate_src_dir" ]] || continue
-    crate="$(basename "$(dirname "$crate_src_dir")")"
+    crate_dir="$(dirname "$crate_src_dir")"
+    crate="$(basename "$crate_dir")"
+    if _is_test_support_crate "$crate" "$crate_dir"; then
+        continue
+    fi
     CURRENT["$crate:unwrap"]="$(_count_crate "$crate_src_dir" ".unwrap()")"
     CURRENT["$crate:expect"]="$(_count_crate "$crate_src_dir" "$expect_pat")"
     CURRENT["$crate:println"]="$(_count_crate "$crate_src_dir" "println!")"
@@ -131,6 +217,24 @@ for key in $(printf '%s\n' "${!CURRENT[@]}" | sort); do
         echo "  Run '.claude/scripts/hardening-budget.sh --update' to tighten the baseline."
         exit_code=1
     fi
+done
+
+# ...and every baseline entry must still correspond to a counted crate. Without
+# this direction the ratchet is one-sided: a crate that silently drops out of
+# the budget — deleted, renamed, or newly derived as test-support — leaves its
+# entry sitting in the baseline, unchecked and indistinguishable from a crate
+# still being measured. That is the same class of invisible drift the
+# test-support derivation exists to prevent, so it is checked here rather than
+# left to whoever next runs --update.
+for key in $(printf '%s\n' "${!BASELINE[@]}" | sort); do
+    [[ -n "${CURRENT[$key]+set}" ]] && continue
+    crate="${key%%:*}"
+    pattern="${key##*:}"
+    echo "ORPHANED BASELINE ENTRY: '$crate $pattern' is registered but no longer counted."
+    echo "  The crate was removed, renamed, or is now derived as test-support"
+    echo "  (dev-dependency of some crate, regular dependency of none, no binary target)."
+    echo "  Run '.claude/scripts/hardening-budget.sh --update' to drop the stale entry."
+    exit_code=1
 done
 
 if [[ "$exit_code" -eq 0 ]]; then
