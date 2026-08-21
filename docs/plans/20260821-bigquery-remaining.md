@@ -155,11 +155,16 @@ well-aimed — it names the model, explains that GoogleSQL has no
 alternative is a syntactically valid `MERGE` whose matched arm assigns nothing
 and silently stops updating rows.
 
-**The refusal has no test.** `require_merge_columns` is called from
-`maintenance_driver.rs:2580` and `lib.rs:430` and asserted nowhere. A
-documented limitation whose guard is unproven is one refactor away from
-becoming the silent-no-op it exists to prevent. Pinning it costs a unit test
-and no warehouse — worth doing whichever way the item below is decided.
+**The refusal now has a test** (`crates/smelt-backend/tests/merge_columns_guard.rs`,
+2026-08-21). It was previously called from `maintenance_driver.rs:2580` and
+`lib.rs:430` and asserted nowhere — a documented limitation whose guard is
+unproven is one refactor away from becoming the silent-no-op it exists to
+prevent. Three cases: BigQuery refuses an empty list and names the model,
+BigQuery admits a resolved one, and the star dialects (DuckDB, Spark,
+PostgreSQL) accept an empty list — the last keeping the guard narrow, since
+widening it would refuse `SELECT *` models the other backends handle
+correctly. Verified load-bearing: neutering the condition makes the refusal
+case fail.
 
 **So the item is a decision, not a bug.** Either:
 
