@@ -536,8 +536,10 @@ resolves nested widening to a table rewrite.
   using `refresh: keyed` with a cumulative aggregate on BigQuery. The dialect now threads from the
   maintenance driver through `WindowedKeyedRule::merge_sql` and into
   `build_cumulative_merge_sql`, resolved once via `smelt_backend::maintenance_dialect`, so the
-  not-matched arm spells `INSERT ROW` on BigQuery and stays byte-identical on DuckDB — asserted
-  offline; no live sweep has confirmed the case passes yet. Tracked in
+  not-matched arm spells `INSERT ROW` on BigQuery and stays byte-identical on DuckDB. Confirmed
+  live: `gate_keyed_bigquery::keyed_pool_upholds_end_state_equivalence_on_bigquery` is in the
+  all-green 21-case sweep measured 2026-08-21, so the case that produced the syntax error now
+  passes against the warehouse. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The BigQuery generative-conformance leg is bounded by a one-hour credential window.** The
   service account's OAuth access token (`scripts/bigquery-auth.sh`) is short-lived and cannot be

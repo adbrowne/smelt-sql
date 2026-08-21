@@ -32,11 +32,11 @@ of `prop_type_inference` alongside DuckDB and Spark.
 | D2 | Whether BigQuery gets a CI tier | decision | no | pending |
 | 1 | Schema-evolution DDL for BigQuery | feature | yes | pending |
 | 2 | `supports_native_ivm` — emit the maintained object, or keep the `false` | feature | yes | pending |
-| 3 | `ColumnScopedMerge` on an unresolvable projection | correctness | yes | pending |
+| 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | checked — still reachable |
 | 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | pending |
 | 5 | `supports_pipe_syntax` has no live coverage | coverage | yes (one case) | pending |
 | 6 | Conformance sweep vs the one-hour credential window | scaling | yes | pending |
-| 7 | Stale spec sentence: the keyed-`MERGE` fix *was* confirmed live | docs | no | pending |
+| 7 | Stale spec sentence: the keyed-`MERGE` fix *was* confirmed live | docs | no | done |
 
 ## Decisions first
 
@@ -137,16 +137,45 @@ unaffected — their `UPDATE SET *` needs no list.
 
 **Why it matters.** It is a live refusal on a real technique, BigQuery-only.
 
-**First step, before any implementation.** Check whether this is still
-reachable. The source-derived projection work (`docs/plans/20260819-source-derived-projection.md`)
-made a model's projection derive from its own source CST, with alias synthesis
-splicing real `AS _smelt_col{n}` names — which may have shrunk the
-"unresolvable projection" set to empty. If it has, this item is a spec
-correction, not a feature.
+**Checked 2026-08-21 — still reachable; the spec entry is accurate.** The
+source-derived projection work did not empty the unresolvable set. Alias
+synthesis names unnamed *expressions*; a wildcard is not enumerable at all, so
+`Projection::columns` stays `None` and `output_columns` stays empty. Two
+committed tests pin exactly that —
+`projection_source_derived::bare_wildcard_projection_still_yields_empty_output_columns`
+and `::struct_spread_select_item_yields_empty_output_columns`.
 
-**Done when.** Either a case proves the refusal is still reachable and it is
-fixed or accepted, or the spec entry is retired as no longer reachable, with
-the reason.
+Nothing between there and the write narrows it: no admission-time or
+choice-time guard reads `output_columns`, so a `SELECT *` model carrying a
+`unique_key` resolves to `ColumnScopedMerge` normally and is refused only at
+execution, by `smelt_backend::require_merge_columns`
+(`crates/smelt-backend/src/lib.rs:76`). The refusal itself is sound and
+well-aimed — it names the model, explains that GoogleSQL has no
+`UPDATE SET *`, and gives the remedy — and it is the right shape, since the
+alternative is a syntactically valid `MERGE` whose matched arm assigns nothing
+and silently stops updating rows.
+
+**The refusal has no test.** `require_merge_columns` is called from
+`maintenance_driver.rs:2580` and `lib.rs:430` and asserted nowhere. A
+documented limitation whose guard is unproven is one refactor away from
+becoming the silent-no-op it exists to prevent. Pinning it costs a unit test
+and no warehouse — worth doing whichever way the item below is decided.
+
+**So the item is a decision, not a bug.** Either:
+
+- **Accept it.** Rewrite the spec entry as a Constraint: a BigQuery model using
+  `ColumnScopedMerge` must have a statically enumerable projection. Cheap,
+  honest, and the refusal already implements it.
+- **Close it.** Expand the wildcard at compile time. smelt already knows the
+  upstream schemas — the `TypeContext` the projection is derived against is
+  assembled from them — so `SELECT *` over resolvable upstreams could yield a
+  real column list rather than `None`. That is a change to the projection
+  owner, benefiting every consumer of `output_columns`, not a BigQuery patch.
+  Note it cannot cover every case: a wildcard over an unresolvable upstream
+  stays unknown, so the refusal survives either way.
+
+**Done when.** The spec entry is either restated as a Constraint or retired by
+the compile-time expansion, and `require_merge_columns` has a test.
 
 ## Coverage gaps
 
