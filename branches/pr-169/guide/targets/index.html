@@ -3300,6 +3300,16 @@ for them. The resolved URL, token included, is handed to the Spark Connect Pytho
 unmodified and is never logged.</p>
 <p>A <code>connect_url</code> holding a literal (non-<code>${VAR}</code>) token is a lint-worthy smell: the secret sits in
 the committed YAML in plaintext, which is exactly what interpolation exists to avoid.</p>
+<p>Schema changes migrate in place for the additive cases — adding a nullable column, adding a
+struct field, relaxing <code>NOT NULL</code> — in Spark's own spelling (<code>ADD COLUMNS (c STRING)</code>, a
+three-part table name). Changes the deployed table cannot express — adding a <code>NOT NULL</code> column,
+tightening to <code>NOT NULL</code>, dropping a column, or widening one — rewrite the table (Delta) or are
+refused with a message naming the column and the limitation (Parquet), and need
+<code>--allow-full-refresh</code>. Dropping and widening are refused because they require a Delta table
+feature (<code>delta.columnMapping.mode</code>, <code>delta.enableTypeWidening</code>) that smelt does not enable, since
+turning one on irreversibly raises the table's protocol version. See
+<a href="../schema-evolution/#backend-capability-matrix">Schema evolution</a> for the full per-operation
+matrix.</p>
 <h4 id="delta-vs-parquet">Delta vs Parquet<a class="headerlink" href="#delta-vs-parquet" title="Permanent link">&para;</a></h4>
 <p>The <code>format:</code> field selects the Spark table format, which determines which capabilities are available:</p>
 <table>
@@ -3396,6 +3406,13 @@ DuckDB's <code>database</code> or Spark's <code>connect_url</code>.</p>
 <code>x::T</code> casts become <code>CAST(x AS T)</code>, partition replacement becomes a scoped <code>DELETE</code> + <code>INSERT</code>
 (BigQuery has no <code>INSERT OVERWRITE</code>), and type names GoogleSQL does not recognise (<code>VARCHAR</code>,
 <code>TEXT</code>, <code>DOUBLE</code>) are emitted as <code>STRING</code> and <code>FLOAT64</code>.</p>
+<p>Schema changes migrate in place for the flat cases — adding a column, dropping one, widening a
+scalar type, relaxing <code>NOT NULL</code> — in GoogleSQL's own spelling (<code>ALTER COLUMN … SET DATA TYPE</code>,
+<code>NUMERIC(p,s)</code>, <code>INT64</code>). Changes GoogleSQL cannot express — anything inside a struct or array,
+adding a <code>NOT NULL</code> column, or widening a column that is already <code>NOT NULL</code> — are refused with a
+message naming the column and the limitation, and need <code>--allow-full-refresh</code> to rebuild the
+model instead. See <a href="../schema-evolution/#backend-capability-matrix">Schema evolution</a> for the full
+per-operation matrix.</p>
 <p>BigQuery is verified against a live warehouse: the fixed-recipe parity suites (materialization,
 seeding, dialect lowering, <code>MERGE</code>, incremental refresh, schema evolution) run against a real
 BigQuery project, and incremental-model correctness is additionally checked generatively — the
