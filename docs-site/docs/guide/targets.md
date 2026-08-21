@@ -122,6 +122,17 @@ unmodified and is never logged.
 A `connect_url` holding a literal (non-`${VAR}`) token is a lint-worthy smell: the secret sits in
 the committed YAML in plaintext, which is exactly what interpolation exists to avoid.
 
+Schema changes migrate in place for the additive cases — adding a nullable column, adding a
+struct field, relaxing `NOT NULL` — in Spark's own spelling (`ADD COLUMNS (c STRING)`, a
+three-part table name). Changes the deployed table cannot express — adding a `NOT NULL` column,
+tightening to `NOT NULL`, dropping a column, or widening one — rewrite the table (Delta) or are
+refused with a message naming the column and the limitation (Parquet), and need
+`--allow-full-refresh`. Dropping and widening are refused because they require a Delta table
+feature (`delta.columnMapping.mode`, `delta.enableTypeWidening`) that smelt does not enable, since
+turning one on irreversibly raises the table's protocol version. See
+[Schema evolution](schema-evolution.md#backend-capability-matrix) for the full per-operation
+matrix.
+
 #### Delta vs Parquet
 
 The `format:` field selects the Spark table format, which determines which capabilities are available:

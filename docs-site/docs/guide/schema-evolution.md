@@ -113,14 +113,14 @@ smelt detects the `StructFieldAdded` change and runs:
 === "Spark (Delta)"
 
     ```sql
-    ALTER TABLE catalog.schema.my_table ADD COLUMNS (profile.email VARCHAR);
+    ALTER TABLE catalog.schema.my_table ADD COLUMNS (profile.email STRING);
     ```
 
 === "Spark (Parquet)"
 
-    ```sql
-    ALTER TABLE catalog.schema.my_table ADD COLUMNS (profile.email VARCHAR);
-    ```
+    Not expressible: a v1 Parquet table rejects a qualified path in `ADD COLUMNS`. The run is
+    refused with a message naming the struct column and the field, and needs
+    `--allow-full-refresh` to rebuild the model instead.
 
 === "BigQuery"
 
@@ -177,7 +177,13 @@ Your column is `STRUCT(id INTEGER, name VARCHAR)[]` and you add a `score` field:
 
 === "Spark (Delta/Parquet)"
 
-    Spark uses `mergeSchema` on write for nullable array-of-struct field additions.
+    Delta adds the field in place:
+
+    ```sql
+    ALTER TABLE catalog.schema.my_table ADD COLUMNS (items.element.score DOUBLE);
+    ```
+
+    Parquet rejects a qualified path in `ADD COLUMNS`; the change needs `--allow-full-refresh`.
 
 ### Map value evolution
 
@@ -236,15 +242,16 @@ Not all backends support the same schema evolution operations. The table below s
 | Operation | DuckDB | Spark + Delta | Spark + Parquet | BigQuery |
 |-----------|--------|---------------|-----------------|----------|
 | Add nullable column | ALTER TABLE | ALTER TABLE | ALTER TABLE | ALTER TABLE |
-| Add NOT NULL column (with default) | ALTER TABLE | ALTER TABLE | Full refresh | Full refresh |
-| Remove column | ALTER TABLE | ALTER TABLE (column mapping) | Full refresh | ALTER TABLE |
-| Widen scalar type | ALTER COLUMN TYPE | ALTER COLUMN TYPE (safe widenings) | Full refresh (most types) | ALTER COLUMN SET DATA TYPE (nullable columns) |
-| Relax NOT NULL to nullable | ALTER COLUMN | Full refresh | Full refresh | ALTER COLUMN DROP NOT NULL |
-| Add struct field (nullable) | `ADD COLUMN col.field` | `ADD COLUMNS (col.field)` | `ADD COLUMNS (col.field)` (metastore) | Full refresh |
-| Remove struct field | `DROP COLUMN col.field` | `DROP COLUMN` (column mapping) | Full refresh | Full refresh |
+| Add nullable column with a `default:` | ALTER TABLE | ALTER TABLE, then UPDATE | Full refresh | ALTER TABLE, SET DEFAULT, then UPDATE |
+| Add NOT NULL column (with default) | ALTER TABLE | Full refresh | Full refresh | Full refresh |
+| Remove column | ALTER TABLE | Table rewrite | Full refresh | ALTER TABLE |
+| Widen scalar type | ALTER COLUMN TYPE | Table rewrite | Full refresh | ALTER COLUMN SET DATA TYPE (nullable columns) |
+| Relax NOT NULL to nullable | ALTER COLUMN | ALTER COLUMN DROP NOT NULL | Full refresh | ALTER COLUMN DROP NOT NULL |
+| Add struct field (nullable) | `ADD COLUMN col.field` | `ADD COLUMNS (col.field)` | Full refresh | Full refresh |
+| Remove struct field | `DROP COLUMN col.field` | Full refresh | Full refresh | Full refresh |
 | Widen type in struct | ALTER COLUMN TYPE (full struct) | Table rewrite | Full refresh | Full refresh |
 | Widen array element type | ALTER COLUMN TYPE | Table rewrite | Full refresh | Full refresh |
-| Add field to array-of-structs | ALTER COLUMN TYPE (full type) | mergeSchema write | mergeSchema write | Full refresh |
+| Add field to array-of-structs | ALTER COLUMN TYPE (full type) | `ADD COLUMNS (col.element.field)` | Full refresh | Full refresh |
 | Widen map value type | ALTER COLUMN TYPE | Table rewrite | Full refresh | Full refresh (no map type) |
 | Change map key type | Full refresh | Full refresh | Full refresh | Full refresh |
 | Backfill expression (UPDATE) | UPDATE statement | UPDATE statement | Full refresh | UPDATE statement |
@@ -252,8 +259,8 @@ Not all backends support the same schema evolution operations. The table below s
 ### Recommendations
 
 - **DuckDB** has the most complete schema evolution support. All safe changes can be handled with ALTER TABLE.
-- **Spark + Delta** supports most operations. Use Delta when you need struct field removal (requires column mapping) or type widening inside nested types (via table rewrite).
-- **Spark + Parquet** is the most limited. Consider switching to Delta format if you need frequent schema changes. Many operations that are safe on Delta require `--allow-full-refresh` on Parquet.
+- **Spark + Delta** migrates additive changes in place -- new columns, new struct fields, relaxing `NOT NULL` -- and expresses the rest as a table rewrite. Three limits are worth knowing before you plan a migration, and all three are properties of the table smelt creates rather than of Delta itself: a column cannot be added `NOT NULL` or tightened to it; a `DEFAULT` clause cannot ride on the add, so a `default:` becomes an `UPDATE` that fills the rows already there; and dropping or widening a column needs a Delta table feature (`columnMapping`, `enableTypeWidening`) that smelt does not turn on, since enabling one irreversibly raises the table's protocol version. Those changes rewrite the table instead, which needs `--allow-full-refresh`.
+- **Spark + Parquet** is the most limited: it takes a new nullable column and nothing else. Consider switching to Delta format if you need frequent schema changes. When a run is refused, the reason names the column and the limitation rather than failing mid-migration.
 - **BigQuery** migrates every flat change -- adding and dropping columns, widening a scalar type, relaxing `NOT NULL` -- but nothing that reaches inside a struct or array: GoogleSQL has no dotted `ADD COLUMN`, and its `SET DATA TYPE` refuses a struct that gained or lost a field. Those changes need `--allow-full-refresh`. Two GoogleSQL rules are worth knowing before you plan a migration: a column cannot be *added* `NOT NULL` (nor tightened to it) at all, and an existing `NOT NULL` column cannot be widened -- both resolve to a full refresh, with a message naming the column. When a run is refused, the reason names the exact limitation rather than a generic failure.
 
 ### Table format configuration

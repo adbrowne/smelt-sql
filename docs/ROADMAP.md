@@ -141,6 +141,34 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Schema-evolution DDL for Spark~~ ✅ (August 21, 2026)
+
+The same dispatch bug the BigQuery work uncovered was live on Spark too: only the *complex* change
+kinds ever reached `ddl_spark`, so `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE` and
+`SET NOT NULL` went to a Spark server in DuckDB's dialect. Spark now routes the whole diff through
+its own generator, and the generator's rules were re-derived from measurement.
+
+- **Measured, not read.** `scripts/spark-probe-ddl.sh` runs each form against a fresh Delta and a
+  fresh Parquet table on a live server. Five answers contradicted what the generator claimed:
+  `NOT NULL` on `ADD COLUMNS` is refused by *both* formats (the generator emitted it for Delta), a
+  `DEFAULT` clause needs Delta's `allowColumnDefaults` feature, `DROP COLUMN` needs
+  `delta.columnMapping.mode`, every `ALTER COLUMN … TYPE` widening needs `delta.enableTypeWidening`
+  — the documented-safe integer chain included — and `SET NOT NULL` is refused even on a column
+  holding no NULLs.
+- **The rules are about the table smelt creates**, not the format in the abstract. smelt writes
+  `CREATE TABLE … USING DELTA` with no table properties, and enabling any of the three features
+  above irreversibly raises the table's protocol version — not something a migration should do to a
+  user's table unasked. Those changes resolve to a table rewrite on Delta and a named full refresh
+  on Parquet.
+- **A `default:` still fills the rows already there.** Delta will not take the clause, so the
+  generator emits the plain add followed by `UPDATE … WHERE col IS NULL` — the shape the GoogleSQL
+  generator uses, for the same reason.
+- **Verified against the generator, not the server.** Three new legs in
+  `crates/smelt-backend-spark/tests/ddl_observed.rs` execute the statements
+  `plan_migration_for_backend` actually emits; all green against a live Delta-enabled server, and
+  restoring the old fall-through makes them fail with `ParseException` on
+  `ADD COLUMN note VARCHAR`.
+
 ### ~~Schema-evolution DDL for BigQuery~~ ✅ (August 21, 2026)
 
 BigQuery gained its own GoogleSQL DDL generator (`crates/smelt-state/src/ddl_bigquery.rs`), so a

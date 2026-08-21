@@ -474,6 +474,17 @@ resolves nested widening to a table rewrite.
   everywhere else. This is the first case where a flag's value is an implementation statement
   rather than a warehouse one, and it is the reason the matrix cell alone is not a sufficient
   description. Tracked in `docs/research/20260816-bigquery-backend.md`.
+- **Spark's schema-evolution DDL covers the additive changes only.** Spark has its own generator
+  (no generator is shared: bare `VARCHAR` is `DATATYPE_MISSING_SIZE` and `TEXT` is not a type,
+  the add is spelled `ADD COLUMNS (…)`, and the name is three-part), which emits the nullable
+  column add, the struct-field add, the `NOT NULL` relaxation and the backfill `UPDATE`. The
+  rules are stated for the table smelt creates — `USING DELTA` with no table properties — and
+  three of them are properties of *that table* rather than of Delta: a `DEFAULT` clause on the
+  add needs `allowColumnDefaults`, a drop needs `delta.columnMapping.mode`, and a widening needs
+  `delta.enableTypeWidening`. smelt does not enable any of them, because each irreversibly raises
+  the table's protocol version, so those changes resolve to a table rewrite (Delta) or a full
+  refresh (Parquet) whose reason names the column and the limitation, never to DDL the server
+  would reject. The per-operation detail is `schema_evolution.md` §"Backend capability matrix".
 - **BigQuery's schema-evolution DDL covers the flat changes only.** GoogleSQL has its own
   generator (no generator is shared: it rejects `VARCHAR`, `TEXT` and `DOUBLE` as
   `Type not found`, spells widening `SET DATA TYPE`, and has no `ALTER COLUMN … USING`), which
