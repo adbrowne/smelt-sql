@@ -141,6 +141,30 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Schema-evolution DDL for BigQuery~~ ✅ (August 21, 2026)
+
+BigQuery gained its own GoogleSQL DDL generator (`crates/smelt-state/src/ddl_bigquery.rs`), so a
+schema change on a BigQuery model migrates in place instead of resolving to a full refresh. Item 1
+of the [BigQuery worklist](plans/20260821-bigquery-remaining.md).
+
+- **Measured, not read.** `scripts/bigquery-probe-ddl.sh` runs 55 DDL forms against the live
+  warehouse, one fresh table each (repeating on one table trips a per-table update quota, and a
+  quota refusal says nothing about the form). Three answers contradicted the obvious guess: a
+  `DEFAULT` cannot ride on an `ADD COLUMN`, `BIGNUMERIC → FLOAT64` is refused despite being a
+  documented widening, and `SET DATA TYPE` on a `REQUIRED` column is refused outright.
+- **The dispatch was wronger than the divergence entry claimed.** Only the *complex* change kinds
+  ever reached a backend generator; `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE` and
+  `SET NOT NULL` were emitted inline in DuckDB's dialect for every backend, so the BigQuery arm
+  that was supposed to refuse sat in a branch those changes never took. A flat schema change on
+  BigQuery emitted DuckDB SQL the warehouse rejects.
+- **Verified against the generator, not the warehouse.** The pre-existing parity leg evolves the
+  schema with hand-written DDL, which measures BigQuery rather than smelt. Two new legs execute
+  the statements `plan_migration_for_backend` actually emits; both are green live, and reverting
+  `SET DATA TYPE` to DuckDB's spelling makes the BigQuery leg fail.
+- **What GoogleSQL cannot express stays a named refusal** — struct/array changes, adding a
+  `NOT NULL` column, tightening to `NOT NULL`, widening a `REQUIRED` column — each resolving to a
+  full refresh whose reason names the column and the limitation.
+
 ### ~~BigQuery generative maintenance-conformance leg~~ ✅ (August 21, 2026)
 
 10-phase plan ([plan](plans/20260817-bigquery-generative-conformance.md)) giving BigQuery its own

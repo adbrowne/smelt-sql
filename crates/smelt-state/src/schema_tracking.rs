@@ -1224,11 +1224,11 @@ pub enum DdlBackend {
         format: SparkTableFormat,
         capabilities: BackendCapabilities,
     },
-    /// BigQuery — no DDL generator yet. GoogleSQL rejects the type names the
-    /// DuckDB generator emits (`VARCHAR`, `DOUBLE`, `TEXT` are all
-    /// `Type not found`) and has no `ALTER COLUMN … USING`, so borrowing another
-    /// backend's generator would emit invalid SQL. Until a generator exists, a
-    /// schema change on BigQuery resolves to a full refresh rather than DDL.
+    /// BigQuery — GoogleSQL DDL via `ddl_bigquery`. No generator is shared
+    /// with DuckDB: GoogleSQL rejects the type names the DuckDB generator
+    /// emits (`VARCHAR`, `DOUBLE`, `TEXT` are all `Type not found`), spells
+    /// widening `SET DATA TYPE`, and has no `ALTER COLUMN … USING`. What
+    /// GoogleSQL cannot express resolves to a full refresh naming the reason.
     BigQuery,
 }
 
@@ -1278,7 +1278,7 @@ pub fn plan_migration_for_backend(
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,
     backend: &DdlBackend,
-    _deployed_columns: &[DeployedColumn],
+    deployed_columns: &[DeployedColumn],
     inferred_columns: &[DeployedColumn],
 ) -> MigrationAction {
     if diff.is_empty() {
@@ -1369,6 +1369,35 @@ pub fn plan_migration_for_backend(
     if !unresolvable_reasons.is_empty() {
         return MigrationAction::FullRefresh {
             reason: unresolvable_reasons.join("; "),
+        };
+    }
+
+    // BigQuery routes the WHOLE diff through its own generator rather than
+    // the loop below. The loop's simple cases (`ADD COLUMN`, `DROP COLUMN`,
+    // `ALTER COLUMN … TYPE`, `SET NOT NULL`) are written in DuckDB's SQL and
+    // only the complex cases reach a backend generator, so falling through
+    // would hand GoogleSQL statements it rejects outright.
+    if matches!(backend, DdlBackend::BigQuery) {
+        let plan = plan_schema_operations(diff, column_defaults, backfill_exprs);
+        if plan.requires_full_refresh {
+            return MigrationAction::FullRefreshBlocked {
+                reason: plan
+                    .full_refresh_reason
+                    .unwrap_or_else(|| "schema change is not expressible as GoogleSQL DDL".into()),
+            };
+        }
+        return match crate::ddl_bigquery::generate_bigquery_ddl(
+            schema,
+            table,
+            &plan.operations,
+            deployed_columns,
+        ) {
+            crate::ddl_bigquery::BigQueryMigration::Statements(statements) => {
+                MigrationAction::AlterTable { statements }
+            }
+            crate::ddl_bigquery::BigQueryMigration::FullRefreshRequired { reason } => {
+                MigrationAction::FullRefreshBlocked { reason }
+            }
         };
     }
 
@@ -1537,9 +1566,13 @@ pub fn plan_migration_for_backend(
                             crate::ddl_duckdb::generate_duckdb_ddl(schema, table, &plan.operations);
                         statements.extend(ddl_stmts);
                     }
+                    // Unreachable: the whole diff was routed through
+                    // `ddl_bigquery` above. Kept as a refusal rather than a
+                    // panic so a future edit to that routing degrades to a
+                    // named full refresh, never to DuckDB SQL on GoogleSQL.
                     DdlBackend::BigQuery => {
                         return MigrationAction::FullRefreshBlocked {
-                            reason: "schema evolution DDL is not implemented for BigQuery; \
+                            reason: "BigQuery migrations must be planned by ddl_bigquery; \
                                      rebuild the model with a full refresh"
                                 .to_string(),
                         };
@@ -3867,5 +3900,230 @@ mod tests {
             "neither default nor backfill must remain FullRefresh; got: {:?}",
             action
         );
+    }
+
+    // ── BigQuery backend routing tests ────────────────────────────────
+    //
+    // Every expectation here is a *measured* GoogleSQL fact, established
+    // against the live warehouse by `scripts/bigquery-probe-ddl.sh`. The
+    // refusals are as load-bearing as the emissions: a form BigQuery rejects
+    // must resolve to a full refresh rather than reaching the warehouse.
+
+    #[test]
+    fn bigquery_add_nullable_column_emits_googlesql_types() {
+        let deployed = vec![col("id", "BIGINT", false)];
+        let inferred = vec![col("id", "BIGINT", false), col("amount", "BIGINT", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                // BIGINT is an accepted GoogleSQL alias, but the canonical
+                // spelling is what the type printer emits.
+                assert_eq!(
+                    statements,
+                    vec!["ALTER TABLE `ds.t` ADD COLUMN `amount` INT64"]
+                );
+            }
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bigquery_add_column_rewrites_type_names_googlesql_rejects() {
+        // VARCHAR / TEXT / DOUBLE are each `Type not found` in GoogleSQL.
+        let deployed = vec![col("id", "BIGINT", false)];
+        let inferred = vec![
+            col("id", "BIGINT", false),
+            col("name", "VARCHAR", true),
+            col("ratio", "DOUBLE", true),
+        ];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(
+                    statements,
+                    vec![
+                        "ALTER TABLE `ds.t` ADD COLUMN `name` STRING",
+                        "ALTER TABLE `ds.t` ADD COLUMN `ratio` FLOAT64",
+                    ]
+                );
+            }
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bigquery_widen_type_emits_set_data_type() {
+        let deployed = vec![col("amount", "DECIMAL(5,2)", true)];
+        let inferred = vec![col("amount", "DECIMAL(10,4)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                // GoogleSQL spells this `SET DATA TYPE`; the DuckDB
+                // `ALTER COLUMN c TYPE x` spelling is a syntax error there.
+                assert_eq!(
+                    statements,
+                    vec!["ALTER TABLE `ds.t` ALTER COLUMN `amount` SET DATA TYPE NUMERIC(10,4)"]
+                );
+            }
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bigquery_drop_not_null_is_ddl_but_tightening_is_a_full_refresh() {
+        let relax = SchemaDiff {
+            changes: vec![SchemaChange::ChangeNullability {
+                name: "col".to_string(),
+                from_nullable: false,
+                to_nullable: true,
+            }],
+            warnings: vec![],
+        };
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &relax,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &[],
+            &[],
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert_eq!(
+                    statements,
+                    vec!["ALTER TABLE `ds.t` ALTER COLUMN `col` DROP NOT NULL"]
+                );
+            }
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bigquery_required_column_add_is_refused_by_name() {
+        // `Cannot add required fields to an existing schema` — measured.
+        let deployed = vec![col("id", "BIGINT", false)];
+        let inferred = vec![col("id", "BIGINT", false), col("amount", "BIGINT", false)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let mut defaults = HashMap::new();
+        defaults.insert("amount".to_string(), "0".to_string());
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &defaults,
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        match action {
+            MigrationAction::FullRefreshBlocked { reason } => {
+                assert!(
+                    reason.contains("amount") && reason.to_lowercase().contains("not null"),
+                    "the refusal must name the column and the reason; got: {reason}"
+                );
+            }
+            other => panic!("expected FullRefreshBlocked, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn bigquery_struct_field_add_is_refused_by_name() {
+        // GoogleSQL has no dotted `ADD COLUMN s.b`, and `SET DATA TYPE`
+        // refuses a struct that gained a field (not assignable) — measured.
+        let deployed = vec![col("meta", "STRUCT(a INTEGER)", true)];
+        let inferred = vec![col("meta", "STRUCT(a INTEGER, b INTEGER)", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &HashMap::new(),
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        assert!(
+            matches!(action, MigrationAction::FullRefreshBlocked { .. }),
+            "struct field addition must fall back to a full refresh; got: {:?}",
+            action
+        );
+    }
+
+    #[test]
+    fn bigquery_backfill_update_carries_a_where_clause() {
+        // BigQuery rejects an `UPDATE` with no `WHERE`; DuckDB's generator
+        // emits none, so the GoogleSQL one must supply `WHERE TRUE`.
+        let deployed = vec![col("id", "BIGINT", false)];
+        let inferred = vec![col("id", "BIGINT", false), col("amount", "BIGINT", true)];
+        let diff = diff_schemas(&deployed, &inferred);
+        let mut backfills = HashMap::new();
+        backfills.insert("amount".to_string(), "0".to_string());
+        let action = plan_migration_for_backend(
+            "ds",
+            "t",
+            &diff,
+            false,
+            &no_defaults(),
+            &backfills,
+            &DdlBackend::BigQuery,
+            &deployed,
+            &inferred,
+        );
+        match action {
+            MigrationAction::AlterTable { statements } => {
+                assert!(
+                    statements.iter().any(|s| s.starts_with("UPDATE")),
+                    "expected a backfill UPDATE; got {:?}",
+                    statements
+                );
+                for stmt in statements.iter().filter(|s| s.starts_with("UPDATE")) {
+                    assert!(
+                        stmt.contains(" WHERE "),
+                        "BigQuery requires a WHERE on UPDATE; got: {stmt}"
+                    );
+                }
+            }
+            other => panic!("expected AlterTable, got {:?}", other),
+        }
     }
 }

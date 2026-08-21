@@ -9,7 +9,7 @@ When an incremental model runs, smelt:
 1. **Compares schemas** -- parses both the deployed and inferred column types into structured representations and diffs them recursively.
 2. **Classifies changes** -- each change is categorized (column added, type widened, struct field added, etc.) and checked for safety.
 3. **Plans operations** -- safe changes produce ALTER TABLE statements; unsafe changes trigger a full refresh.
-4. **Executes DDL** -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, and Spark+Parquet each have their own code paths.
+4. **Executes DDL** -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, Spark+Parquet, and BigQuery each have their own code paths.
 
 ## Configuration
 
@@ -122,6 +122,12 @@ smelt detects the `StructFieldAdded` change and runs:
     ALTER TABLE catalog.schema.my_table ADD COLUMNS (profile.email VARCHAR);
     ```
 
+=== "BigQuery"
+
+    Not expressible: GoogleSQL has no dotted `ADD COLUMN`, and `ALTER COLUMN … SET DATA TYPE`
+    refuses a struct that gained a field. The run is refused with a message naming the struct
+    column and the field, and needs `--allow-full-refresh` to rebuild the model instead.
+
 Existing rows get `NULL` for the new field.
 
 ### Widening a type inside a struct
@@ -227,26 +233,28 @@ smelt detects both the type widening (`a: INTEGER -> BIGINT`) and the field addi
 
 Not all backends support the same schema evolution operations. The table below shows what each backend can handle natively vs. what requires a fallback.
 
-| Operation | DuckDB | Spark + Delta | Spark + Parquet |
-|-----------|--------|---------------|-----------------|
-| Add nullable column | ALTER TABLE | ALTER TABLE | ALTER TABLE |
-| Add NOT NULL column (with default) | ALTER TABLE | ALTER TABLE | Full refresh |
-| Remove column | ALTER TABLE | ALTER TABLE (column mapping) | Full refresh |
-| Widen scalar type | ALTER COLUMN TYPE | ALTER COLUMN TYPE (safe widenings) | Full refresh (most types) |
-| Add struct field (nullable) | `ADD COLUMN col.field` | `ADD COLUMNS (col.field)` | `ADD COLUMNS (col.field)` (metastore) |
-| Remove struct field | `DROP COLUMN col.field` | `DROP COLUMN` (column mapping) | Full refresh |
-| Widen type in struct | ALTER COLUMN TYPE (full struct) | Table rewrite | Full refresh |
-| Widen array element type | ALTER COLUMN TYPE | Table rewrite | Full refresh |
-| Add field to array-of-structs | ALTER COLUMN TYPE (full type) | mergeSchema write | mergeSchema write |
-| Widen map value type | ALTER COLUMN TYPE | Table rewrite | Full refresh |
-| Change map key type | Full refresh | Full refresh | Full refresh |
-| Backfill expression (UPDATE) | UPDATE statement | UPDATE statement | Full refresh |
+| Operation | DuckDB | Spark + Delta | Spark + Parquet | BigQuery |
+|-----------|--------|---------------|-----------------|----------|
+| Add nullable column | ALTER TABLE | ALTER TABLE | ALTER TABLE | ALTER TABLE |
+| Add NOT NULL column (with default) | ALTER TABLE | ALTER TABLE | Full refresh | Full refresh |
+| Remove column | ALTER TABLE | ALTER TABLE (column mapping) | Full refresh | ALTER TABLE |
+| Widen scalar type | ALTER COLUMN TYPE | ALTER COLUMN TYPE (safe widenings) | Full refresh (most types) | ALTER COLUMN SET DATA TYPE (nullable columns) |
+| Relax NOT NULL to nullable | ALTER COLUMN | Full refresh | Full refresh | ALTER COLUMN DROP NOT NULL |
+| Add struct field (nullable) | `ADD COLUMN col.field` | `ADD COLUMNS (col.field)` | `ADD COLUMNS (col.field)` (metastore) | Full refresh |
+| Remove struct field | `DROP COLUMN col.field` | `DROP COLUMN` (column mapping) | Full refresh | Full refresh |
+| Widen type in struct | ALTER COLUMN TYPE (full struct) | Table rewrite | Full refresh | Full refresh |
+| Widen array element type | ALTER COLUMN TYPE | Table rewrite | Full refresh | Full refresh |
+| Add field to array-of-structs | ALTER COLUMN TYPE (full type) | mergeSchema write | mergeSchema write | Full refresh |
+| Widen map value type | ALTER COLUMN TYPE | Table rewrite | Full refresh | Full refresh (no map type) |
+| Change map key type | Full refresh | Full refresh | Full refresh | Full refresh |
+| Backfill expression (UPDATE) | UPDATE statement | UPDATE statement | Full refresh | UPDATE statement |
 
 ### Recommendations
 
 - **DuckDB** has the most complete schema evolution support. All safe changes can be handled with ALTER TABLE.
 - **Spark + Delta** supports most operations. Use Delta when you need struct field removal (requires column mapping) or type widening inside nested types (via table rewrite).
 - **Spark + Parquet** is the most limited. Consider switching to Delta format if you need frequent schema changes. Many operations that are safe on Delta require `--allow-full-refresh` on Parquet.
+- **BigQuery** migrates every flat change -- adding and dropping columns, widening a scalar type, relaxing `NOT NULL` -- but nothing that reaches inside a struct or array: GoogleSQL has no dotted `ADD COLUMN`, and its `SET DATA TYPE` refuses a struct that gained or lost a field. Those changes need `--allow-full-refresh`. Two GoogleSQL rules are worth knowing before you plan a migration: a column cannot be *added* `NOT NULL` (nor tightened to it) at all, and an existing `NOT NULL` column cannot be widened -- both resolve to a full refresh, with a message naming the column. When a run is refused, the reason names the exact limitation rather than a generic failure.
 
 ### Table format configuration
 

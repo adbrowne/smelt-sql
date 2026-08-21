@@ -171,6 +171,14 @@ smelt compiles the same logical models to GoogleSQL, handling dialect difference
 (BigQuery has no `INSERT OVERWRITE`), and type names GoogleSQL does not recognise (`VARCHAR`,
 `TEXT`, `DOUBLE`) are emitted as `STRING` and `FLOAT64`.
 
+Schema changes migrate in place for the flat cases — adding a column, dropping one, widening a
+scalar type, relaxing `NOT NULL` — in GoogleSQL's own spelling (`ALTER COLUMN … SET DATA TYPE`,
+`NUMERIC(p,s)`, `INT64`). Changes GoogleSQL cannot express — anything inside a struct or array,
+adding a `NOT NULL` column, or widening a column that is already `NOT NULL` — are refused with a
+message naming the column and the limitation, and need `--allow-full-refresh` to rebuild the
+model instead. See [Schema evolution](schema-evolution.md#backend-capability-matrix) for the full
+per-operation matrix.
+
 BigQuery is verified against a live warehouse: the fixed-recipe parity suites (materialization,
 seeding, dialect lowering, `MERGE`, incremental refresh, schema evolution) run against a real
 BigQuery project, and incremental-model correctness is additionally checked generatively — the

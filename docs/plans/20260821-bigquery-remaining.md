@@ -30,7 +30,7 @@ of `prop_type_inference` alongside DuckDB and Spark.
 |---|------|------|----------------------|--------|
 | D1 | Cross-engine exchange with BigQuery — GCS or nothing | decision | no | pending |
 | D2 | Whether BigQuery gets a CI tier | decision | no | pending |
-| 1 | Schema-evolution DDL for BigQuery | feature | yes | pending |
+| 1 | Schema-evolution DDL for BigQuery | feature | yes | done |
 | 2 | `supports_native_ivm` — emit the maintained object, or keep the `false` | feature | yes | pending |
 | 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | checked — still reachable |
 | 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | pending |
@@ -91,8 +91,8 @@ with the reasoning, rather than as an open divergence.
 
 ### 1 — Schema-evolution DDL for BigQuery
 
-**What.** Not implemented. GoogleSQL rejects the type names the DuckDB
-generator emits (`VARCHAR`, `TEXT`, `DOUBLE` are each `Type not found`) and
+**What** (as this item was written). Not implemented. GoogleSQL rejects the
+type names the DuckDB generator emits (`VARCHAR`, `TEXT`, `DOUBLE` are each `Type not found`) and
 has no `ALTER COLUMN … USING`, so no generator is shared. A schema change on a
 BigQuery model resolves to a full refresh instead of a migration.
 
@@ -108,6 +108,35 @@ other backends support, `schema_evolution_parity`'s BigQuery leg asserts them
 against a live warehouse, and the full-refresh fallback remains for the cases
 GoogleSQL genuinely cannot express (named, not silent). User docs updated —
 `docs-site/docs/guide/targets.md` currently says nothing about the limitation.
+
+**Done 2026-08-21.** `crates/smelt-state/src/ddl_bigquery.rs` emits the flat
+cases (add column, drop column, scalar widening, `DROP NOT NULL`, backfill
+`UPDATE`); everything GoogleSQL cannot express resolves to
+`FullRefreshBlocked` naming the column and the limitation.
+
+Two findings shaped it. First, every rule is *measured*, not read from docs:
+`scripts/bigquery-probe-ddl.sh` (committed) runs 55 forms against the live
+warehouse on one fresh table each, and three of its answers contradict the
+obvious guess — a `DEFAULT` cannot ride on an `ADD COLUMN` (it needs a
+following `SET DEFAULT`), `BIGNUMERIC → FLOAT64` is *refused* despite being a
+documented widening, and `SET DATA TYPE` on a `REQUIRED` column is refused
+outright, which is why the generator consults the deployed schema and plans
+that case as a full refresh rather than letting the statement fail mid-run.
+
+Second, the dispatch was wronger than the tracking entry said. Only the
+*complex* change kinds ever reached a backend generator; `ADD COLUMN`,
+`DROP COLUMN`, `ALTER COLUMN … TYPE` and `SET NOT NULL` were emitted inline in
+DuckDB's dialect for every backend. The old BigQuery arm — the refusal this
+item was written against — sat in the branch those changes never took, so a
+flat schema change on BigQuery did not resolve to a full refresh at all; it
+emitted DuckDB SQL the warehouse rejects. BigQuery now routes the whole diff
+through its own generator before that loop.
+
+Verification: `schema_evolution_parity` grew two legs that execute the
+statements `plan_migration_for_backend` *emits* (rather than hand-written DDL,
+which measures the warehouse and not the generator) — green on DuckDB and
+against the live warehouse. Shown load-bearing: swapping `SET DATA TYPE` back
+to DuckDB's `ALTER COLUMN … TYPE` makes the BigQuery leg fail live.
 
 ### 2 — `supports_native_ivm`: emit the maintained object, or keep the `false`
 

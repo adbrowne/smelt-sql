@@ -474,11 +474,14 @@ resolves nested widening to a table rewrite.
   everywhere else. This is the first case where a flag's value is an implementation statement
   rather than a warehouse one, and it is the reason the matrix cell alone is not a sufficient
   description. Tracked in `docs/research/20260816-bigquery-backend.md`.
-- **Schema-evolution DDL is not implemented for BigQuery.** GoogleSQL rejects the type names the
-  DuckDB generator emits (`VARCHAR`, `TEXT`, `DOUBLE` are each `Type not found`) and has no
-  `ALTER COLUMN … USING`, so no generator is shared. A schema change on a BigQuery model
-  therefore resolves to a full refresh rather than a migration — surfaced as a refusal naming
-  the reason, never as emitted DDL the warehouse would reject. Tracked in
+- **BigQuery's schema-evolution DDL covers the flat changes only.** GoogleSQL has its own
+  generator (no generator is shared: it rejects `VARCHAR`, `TEXT` and `DOUBLE` as
+  `Type not found`, spells widening `SET DATA TYPE`, and has no `ALTER COLUMN … USING`), which
+  emits the column add, column drop, scalar widening and NOT NULL *relaxation* cases. What
+  GoogleSQL cannot express — adding a `NOT NULL` column, tightening to `NOT NULL`, any struct
+  field add/remove, any nested or array-element widening — resolves to a full refresh whose
+  reason names the column and the limitation, never to DDL the warehouse would reject. The
+  per-operation detail is `schema_evolution.md` §"Backend capability matrix". Tracked in
   `docs/research/20260816-bigquery-backend.md`.
 - **Per-run dataset isolation depends on a grant the runner may not hold.** Creating a dataset
   per run needs `bigquery.datasets.create`; a principal granted only `WRITER` on one dataset
