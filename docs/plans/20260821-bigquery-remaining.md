@@ -19,8 +19,8 @@ first).
 Everything here is scoped to BigQuery. The backend itself is complete and
 measured: the fixed-recipe parity suites and the generative
 maintenance-conformance leg both run green against a live warehouse
-(`bash scripts/bigquery-conformance.sh`, `--test-threads=1`: 21 passed / 0
-failed, 2190.85s, 2026-08-21), and the type oracle
+(`bash scripts/bigquery-conformance.sh`: 22 passed / 0 failed, 621.61s at the
+default 4-way concurrency, 2026-08-22), and the type oracle
 (`crates/smelt-db/tests/prop_helpers/bigquery_oracle.rs`) runs as a third leg
 of `prop_type_inference` alongside DuckDB and Spark.
 
@@ -35,7 +35,7 @@ of `prop_type_inference` alongside DuckDB and Spark.
 | 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | done — accepted as Constraint (ROADMAP #3) |
 | 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | done |
 | 5 | `supports_pipe_syntax` has no live coverage | coverage | yes (one case) | done |
-| 6 | Conformance sweep vs the one-hour credential window | scaling | yes | done (live sweep timing outstanding) |
+| 6 | Conformance sweep vs the one-hour credential window | scaling | yes | done |
 | 7 | Stale spec sentence: the keyed-`MERGE` fix *was* confirmed live | docs | no | done |
 
 ## Decisions first
@@ -439,10 +439,25 @@ Note the sweep now *requires* a freshly minted token by construction: a 45-minut
 budget against a ~58-minute window means a half-spent token is refused up front,
 which is the intended reading of "start a sweep on a freshly minted token".
 
-**Outstanding:** the live wall-clock under concurrency has not been measured yet —
-the change is green offline, but the sweep needs one full run on a fresh token to
-confirm both the new timing and that 4-way concurrency stays clean against the
-warehouse.
+**Measured live 2026-08-22: 22 passed / 0 failed in 621.61s** at the default
+4-way concurrency, against 2190.85s for the same suite run sequentially — a
+3.5x reduction, and the run finished with 2828s of the token window still
+unspent (it had needed roughly three fifths of a window before). Concurrency
+was clean: no quota refusals, no dataset collisions, no flakes, which is the
+evidence that per-case dataset isolation really does hold under parallel
+execution rather than only in principle. The sweep also covers the
+`materialized_view` work landed alongside it, so that feature is included in
+the green result.
+
+One consequence worth stating rather than leaving implicit: at 621s real cost
+the 2700s budget is now roughly 4x conservative, so a sweep is refused on a
+token that could comfortably have run it. That is the intended trade — the
+estimate is a *sequential* ceiling, and it stays correct if someone drops back
+to `--test-threads=1` to debug a case. Over-refusing costs one extra passphrase
+entry; under-refusing burns quota on a sweep that dies mid-case and proves
+nothing about the cases it never reached. The measured concurrent figure is
+recorded next to the constant so lowering it later is a deliberate, informed
+change rather than a guess.
 
 ## Documentation
 

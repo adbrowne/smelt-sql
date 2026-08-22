@@ -100,8 +100,8 @@ Spark, has its own leg of the generative dual-execution harness
 (`maintenance_conformance_bigquery`, see §"Generative equivalence coverage"), so its incremental
 coverage is generative rather than fixed-recipe-only. Every one of that leg's 21 cases passes
 against the live warehouse, measured in a single uninterrupted sweep on 2026-08-21
-(`bash scripts/bigquery-conformance.sh`, `--test-threads=1`: 21 passed / 0 failed / 0 ignored,
-2190.85s). `refresh: materialized_view` is covered separately and differently, because
+(`bash scripts/bigquery-conformance.sh`: 22 passed / 0 failed / 0 ignored, 621.61s, measured
+2026-08-22 at the default 4-way concurrency). `refresh: materialized_view` is covered separately and differently, because
 its correctness is not smelt's to verify: BigQuery is the only backend advertising
 `supports_native_ivm`, and for that mode smelt runs no combiner and keeps no ledger, so the
 generative equivalence oracle has nothing to drive. What is verified instead is the *emission* —
@@ -573,16 +573,22 @@ resolves nested widening to a table rewrite.
   mid-case rather than degrading gracefully. `scripts/bigquery-conformance.sh` refuses to start a
   sweep it cannot see through: it fails loud, naming the missing thing and the fix, when
   `SMELT_BQ_PROJECT` is unset (an unset project would otherwise skip green, proving nothing) or
-  when no valid token is on disk (`bash scripts/bigquery-auth.sh` mints one). Measured 2026-08-21:
-  an all-green 21-case sweep (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`) takes
-  2190.85s (~37 minutes) wall-clock — roughly three fifths of the one-hour token window. The
-  margin is thinner than a failing sweep suggests, because a failing case costs a fraction of a
-  passing one: the same suite measured 1142.10s when eight cases failed fast. A sweep must
-  therefore be started against a freshly minted token, not against the remainder of a window a
-  session has already spent, and the pool is not free to grow much before concurrency or a case-count
-  reduction becomes necessary. The per-family token preflight bounds the damage when the budget
-  does not fit — it refuses a family it cannot see through rather than dying mid-case, so a short
-  window yields un-run families rather than false failures. Tracked in
+  when no valid token is on disk (`bash scripts/bigquery-auth.sh` mints one). The sweep runs its
+  cases **concurrently**, which is what keeps it inside one window: every case derives its own
+  dataset, and BigQuery's table-update burst quota binds per table, so nothing is shared to
+  contend on. Measured all-green: 621.61s at the default 4-way concurrency (2026-08-22, 22 cases),
+  against 2190.85s for the same suite run sequentially (2026-08-21, 21 cases). Wall-clock is
+  dominated by the measured 3s per-statement pacing floor, so concurrency across cases is what
+  absorbs it; the thread count is bounded rather than unbounded to stay clear of project-level
+  concurrent-query limits, a different constraint from the per-table quota.
+  Headroom must never be read off a *failing* sweep: a failing case costs a fraction of a passing
+  one (the same suite measured 1142.10s when eight cases failed fast), so a red run's timing
+  understates the real budget. The token budget is checked **once per process** against the whole
+  sweep's estimated cost rather than per test — a per-test check cannot express a concurrent
+  sweep's true cost, since each test would pass its own budget while the sweep collectively
+  overran the window. That estimate is deliberately a sequential-cost ceiling, so it stays a safe
+  bound whatever concurrency the runner chooses, which means a sweep is started against a freshly
+  minted token rather than the remainder of a window a session has already spent. Tracked in
   `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
   ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated

@@ -239,6 +239,15 @@ pub const SWEEP_ESTIMATE_ENV_VAR: &str = "SMELT_CONFORMANCE_BQ_SWEEP_ESTIMATE_SE
 /// cost goes up too, and this estimate no longer bounds it — that is
 /// exactly why it is overridable via [`SWEEP_ESTIMATE_ENV_VAR`] rather than
 /// hardcoded.
+///
+/// For scale: the same suite measured **621.61 s** all-green at the script's
+/// default 4-way concurrency (22 tests, 2026-08-22), so this ceiling is
+/// roughly four times a real concurrent sweep. That asymmetry is deliberate.
+/// The two ways to be wrong here are not equally cheap: over-refusing costs
+/// a human one extra passphrase entry, while under-refusing burns real
+/// warehouse quota on a sweep that dies mid-case and proves nothing about
+/// the cases it never reached. A sequential ceiling is the bound that stays
+/// correct if someone drops back to `--test-threads=1` to debug.
 pub const DEFAULT_SWEEP_ESTIMATE_SECS: u64 = 2700;
 
 /// Pure resolution of the sweep estimate from an optional env-var value.

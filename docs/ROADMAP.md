@@ -231,7 +231,9 @@ closed, three as decisions and three as work.
   was already in place; what blocked concurrency was a preflight that budgeted the credential
   window *per test*, so concurrent tests each passed their own budget while the sweep
   overran. Budgeting moved to the sweep, checked once per process against a decided 2700s
-  estimate. Live wall-clock under concurrency is still to be measured.
+  estimate. Measured live: **22 passed / 0 failed in 621.61s** at 4-way concurrency, against
+  2190.85s sequentially — a 3.5x reduction, finishing with 2828s of the credential window
+  unspent, and with no quota refusals or dataset collisions.
 
 ### ~~Schema-evolution DDL for BigQuery~~ ✅ (August 21, 2026)
 
