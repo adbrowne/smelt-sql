@@ -206,6 +206,33 @@ its own generator, and the generator's rules were re-derived from measurement.
   restoring the old fall-through makes them fail with `ParseException` on
   `ADD COLUMN note VARCHAR`.
 
+### ~~BigQuery worklist closed~~ ✅ (August 22, 2026)
+
+The remaining items of the [BigQuery worklist](plans/20260821-bigquery-remaining.md) are
+closed, three as decisions and three as work.
+
+- **Decisions recorded as Constraints, not left as open divergences** — cross-engine exchange
+  is a two-engine, filesystem-local capability by design (a third engine that cannot read a
+  host path needs a new object-store boundary, which is cross-cutting, not a BigQuery
+  feature); BigQuery has no CI tier, by decision, with the credential and billing reasoning
+  recorded in place; and a BigQuery `ColumnScopedMerge` model must have a statically
+  enumerable projection, the broader fix being #3 "Total Output-Schema Resolution".
+- **`refresh: materialized_view` now emits on BigQuery** — `supports_native_ivm` flips to
+  `true` and smelt emits `CREATE OR REPLACE MATERIALIZED VIEW`, running no combiner and no
+  ledger. The design was measured (`scripts/bigquery-probe-mv.sh`), and the finding that
+  shaped it was that materialization flips are hazardous in *both* directions:
+  `DROP TABLE/VIEW IF EXISTS` both fail against a materialized view, so a model flipping away
+  from the mode would have errored — a hazard the feature itself introduced.
+- **The non-vacuity assertion is on the object's type, not its rows** — a substituted plain
+  table serves identical rows, so `materialized_view_parity` reads `INFORMATION_SCHEMA`;
+  swapping the emitter to `CREATE OR REPLACE TABLE` fails it while the row assertion would
+  still have passed.
+- **The conformance sweep is no longer pinned to one thread** — per-case dataset isolation
+  was already in place; what blocked concurrency was a preflight that budgeted the credential
+  window *per test*, so concurrent tests each passed their own budget while the sweep
+  overran. Budgeting moved to the sweep, checked once per process against a decided 2700s
+  estimate. Live wall-clock under concurrency is still to be measured.
+
 ### ~~Schema-evolution DDL for BigQuery~~ ✅ (August 21, 2026)
 
 BigQuery gained its own GoogleSQL DDL generator (`crates/smelt-state/src/ddl_bigquery.rs`), so a
