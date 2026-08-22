@@ -822,7 +822,7 @@ mod tests {
         fn skip_reason(&self) -> Option<String> {
             None
         }
-        fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+        fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
             unimplemented!("not exercised by this test")
         }
         async fn before_step(&self) {}
@@ -866,7 +866,7 @@ mod tests {
         fn skip_reason(&self) -> Option<String> {
             None
         }
-        fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+        fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
             unimplemented!("not exercised by this test")
         }
         async fn before_step(&self) {}

@@ -70,8 +70,8 @@ pub struct BackendCapabilities {
     /// maintain a declared query as a continuously-refreshed materialized
     /// object with no smelt-driven refresh loop (e.g. Databricks Enzyme,
     /// Snowflake Dynamic Tables). Gates `refresh: materialized_view`
-    /// (`materialized_view.md` §"No silent fallback"); `false` on every
-    /// backend today.
+    /// (`materialized_view.md` §"No silent fallback"); `true` on BigQuery
+    /// alone, `false` on every other backend today.
     pub supports_native_ivm: bool,
 
     /// Supports retraction (inverting / reprocessing a prior input) within

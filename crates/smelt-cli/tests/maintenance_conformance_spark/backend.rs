@@ -76,7 +76,10 @@ impl ConformanceBackend for SparkConformanceBackend {
         }
     }
 
-    fn corrupt_sql(&self, recipe: &ModelRecipe) -> String {
+    fn corrupt_sql(&self, _case: usize, recipe: &ModelRecipe) -> String {
+        // `case` is unused here: Spark's conformance schema is one constant
+        // shared by every case, unlike BigQuery's per-case dataset.
+        //
         // Delta's `UPDATE` refuses a subquery in the SET/WHERE clause
         // (`DELTA_UNSUPPORTED_SUBQUERY`), unlike DuckDB's own self-check
         // (`WHERE total = (SELECT MIN(total) ...)`) — an unconditional

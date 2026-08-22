@@ -56,7 +56,7 @@ pub async fn run_oracle_flags_a_seeded_divergence(b: &dyn ConformanceBackend) ->
         .await
         .expect("open backend for corruption");
     backend
-        .execute_sql(&b.corrupt_sql(&recipe))
+        .execute_sql(&b.corrupt_sql(0, &recipe))
         .await
         .expect("seed a divergence");
 

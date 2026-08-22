@@ -141,3 +141,44 @@ fn each_case_gets_a_fresh_dataset() {
         }
     });
 }
+
+/// `corrupt_sql_targets_the_case_under_test`.
+///
+/// Pure (no credentials): the seeded-divergence UPDATE must name the dataset
+/// of the case it is handed, not a constant. BigQuery is the one backend
+/// whose schema is per-case, so a hardcoded case here would aim the mutation
+/// at another case's dataset — and the resulting failure would read as "the
+/// oracle failed to catch a divergence" rather than "the divergence was
+/// seeded in the wrong place". Guards the `case` parameter on
+/// `ConformanceBackend::corrupt_sql` against being dropped again.
+#[test]
+fn corrupt_sql_targets_the_case_under_test() {
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+    use smelt_maintenance_testkit::recipe::{arb_recipe, ConstructKind, RecipePool};
+
+    let b = BigQueryConformanceBackend::new("corrupt-sql-check");
+    let mut runner = TestRunner::deterministic();
+    let recipe = arb_recipe(RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    })
+    .new_tree(&mut runner)
+    .unwrap()
+    .current();
+
+    for case in [0usize, 1, 7] {
+        let sql = b.corrupt_sql(case, &recipe);
+        assert!(
+            sql.contains(&format!("{}.{}", b.schema(case), recipe.model_name)),
+            "corrupt_sql({case}) must target case {case}'s own dataset \
+             ({}), got: {sql}",
+            b.schema(case)
+        );
+    }
+
+    assert_ne!(
+        b.corrupt_sql(0, &recipe),
+        b.corrupt_sql(1, &recipe),
+        "two cases must not share one corruption target"
+    );
+}

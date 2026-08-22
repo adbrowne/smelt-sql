@@ -170,7 +170,7 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         skip_reason_for_project(bq_project().as_deref())
     }
 
-    fn corrupt_sql(&self, recipe: &ModelRecipe) -> String {
+    fn corrupt_sql(&self, case: usize, recipe: &ModelRecipe) -> String {
         // GoogleSQL's `UPDATE` also refuses a bare unconditional statement
         // with no WHERE unless the target uses `WHERE true` explicitly —
         // this is unconditional-but-syntactically-legal, mirroring Spark's
@@ -178,7 +178,7 @@ impl ConformanceBackend for BigQueryConformanceBackend {
         // rather than DuckDB's subquery-based one.
         format!(
             "UPDATE {schema}.{table} SET total = total + 999999 WHERE true",
-            schema = self.schema(0),
+            schema = self.schema(case),
             table = recipe.model_name,
         )
     }

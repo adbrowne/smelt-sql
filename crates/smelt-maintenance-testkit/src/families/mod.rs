@@ -102,8 +102,13 @@ pub trait ConformanceBackend: Sync {
     /// Backend-specific corruption SQL for the harness self-check family —
     /// an UNCONDITIONAL, GoogleSQL/Delta-valid whole-table mutation (Delta's
     /// `UPDATE` refuses a subquery in the SET/WHERE clause, unlike DuckDB's
-    /// own self-check).
-    fn corrupt_sql(&self, recipe: &ModelRecipe) -> String;
+    /// own self-check). Takes `case` for the same reason
+    /// `schema`/`target`/`open_backend` do: a per-case-dataset backend
+    /// (BigQuery) must aim the mutation at the case actually under test, not
+    /// guess a constant — corrupting another case's dataset would surface as
+    /// "the oracle failed to catch a divergence" when the truth is that the
+    /// divergence was seeded somewhere the oracle never looks.
+    fn corrupt_sql(&self, case: usize, recipe: &ModelRecipe) -> String;
 
     /// Pacing hook invoked before every write-ish step (insert/run). A
     /// no-op on Spark; BigQuery's implementation applies the
@@ -448,7 +453,7 @@ mod tests {
             fn skip_reason(&self) -> Option<String> {
                 unimplemented!("not exercised by this test")
             }
-            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
                 unimplemented!("not exercised by this test")
             }
             async fn before_step(&self) {
@@ -478,7 +483,7 @@ mod tests {
             fn skip_reason(&self) -> Option<String> {
                 unimplemented!("not exercised by this test")
             }
-            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
                 unimplemented!("not exercised by this test")
             }
             async fn before_step(&self) {
@@ -583,7 +588,7 @@ mod tests {
             fn skip_reason(&self) -> Option<String> {
                 unimplemented!("not exercised by this test")
             }
-            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
                 unimplemented!("not exercised by this test")
             }
             async fn before_step(&self) {
@@ -805,7 +810,7 @@ mod tests {
             fn skip_reason(&self) -> Option<String> {
                 unimplemented!("not exercised by this test")
             }
-            fn corrupt_sql(&self, _recipe: &ModelRecipe) -> String {
+            fn corrupt_sql(&self, _case: usize, _recipe: &ModelRecipe) -> String {
                 unimplemented!("not exercised by this test")
             }
             async fn before_step(&self) {
