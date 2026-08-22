@@ -41,6 +41,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Per-step pacing floor between consecutive modifications of one BigQuery
@@ -150,20 +151,21 @@ pub fn default_token_path() -> PathBuf {
     PathBuf::from(dir).join("token")
 }
 
-/// Refuse to start a sweep the current token cannot outlive.
+/// Compute the remaining lifetime of the token at `token_path`.
 ///
 /// Reads the two-line token file `bigquery-auth.sh` writes (line 1: token,
-/// line 2: unix-epoch expiry) at `token_path`, and fails if:
+/// line 2: unix-epoch expiry) and fails if:
 /// - the file is absent or unreadable (never assume a good window with no
 ///   evidence of one);
 /// - the expiry line is missing or does not parse as a unix timestamp;
-/// - the token has already expired;
-/// - the remaining window is shorter than `estimated_duration`.
+/// - the token has already expired.
 ///
-/// Success means only that there is *time*; it says nothing about whether
-/// the token is otherwise valid — that is what a live call and
-/// [`classify_bq_error`] are for.
-pub fn preflight(token_path: impl AsRef<Path>, estimated_duration: Duration) -> Result<(), String> {
+/// Pulled out of [`preflight`] so both the per-test check and the
+/// once-per-process sweep check ([`preflight_sweep_once`]) share the exact
+/// same window arithmetic and the exact same failure messages for an
+/// absent/malformed/expired token — only the "is the window long enough"
+/// comparison differs between the two callers.
+fn remaining_window(token_path: impl AsRef<Path>) -> Result<Duration, String> {
     let path = token_path.as_ref();
     let contents = fs::read_to_string(path).map_err(|e| {
         format!(
@@ -207,18 +209,111 @@ pub fn preflight(token_path: impl AsRef<Path>, estimated_duration: Duration) -> 
             now.saturating_sub(expires_at)
         )
     })?;
-    let remaining = Duration::from_secs(remaining_secs);
 
-    if remaining < estimated_duration {
-        let shortfall = estimated_duration - remaining;
+    Ok(Duration::from_secs(remaining_secs))
+}
+
+/// Env var overriding [`DEFAULT_SWEEP_ESTIMATE_SECS`]. See
+/// [`resolve_sweep_estimate`].
+pub const SWEEP_ESTIMATE_ENV_VAR: &str = "SMELT_CONFORMANCE_BQ_SWEEP_ESTIMATE_SECS";
+
+/// Default sweep-cost estimate, in seconds, used by [`preflight_sweep_once`]
+/// when [`SWEEP_ESTIMATE_ENV_VAR`] is unset.
+///
+/// Derivation: the last measured all-green **sequential** run of the full
+/// BigQuery maintenance-conformance sweep (21 tests, `--test-threads=1`)
+/// took 2190.85 s (2026-08-21). 2700 s (45 min) carries roughly 500 s of
+/// headroom over that measurement while still comfortably fitting inside the
+/// ~1 h (~3500 s usable) token window `scripts/bigquery-auth.sh` mints.
+///
+/// This is deliberately a **sequential**-cost ceiling, not a
+/// concurrency-adjusted one: `preflight_sweep_once` is checked once per
+/// process regardless of how many threads `--test-threads` gives the
+/// runner, so treating it as the sum of the sweep's own (sequential) work
+/// keeps it a safe upper bound no matter what concurrency the runner
+/// chooses — running the same sweep concurrently only makes the real
+/// wall-clock cost *lower* than this estimate, never higher.
+///
+/// If any `SMELT_CONFORMANCE_BQ_*_CASES` env var is raised above its
+/// default (more generated cases per family), the sweep's real sequential
+/// cost goes up too, and this estimate no longer bounds it — that is
+/// exactly why it is overridable via [`SWEEP_ESTIMATE_ENV_VAR`] rather than
+/// hardcoded.
+pub const DEFAULT_SWEEP_ESTIMATE_SECS: u64 = 2700;
+
+/// Pure resolution of the sweep estimate from an optional env-var value.
+///
+/// `None` (the env var unset) resolves to [`DEFAULT_SWEEP_ESTIMATE_SECS`].
+/// `Some(s)` must parse as a `u64` or this is a loud error — per the
+/// fail-loud discipline (root `CLAUDE.md` §"Fail-loud discipline"), an
+/// unparseable override must never be silently absorbed into the default,
+/// which would hide a typo behind a value that looks like it did something.
+///
+/// Takes the env var's value as a parameter rather than reading
+/// `std::env::var` internally so it can be tested without mutating
+/// process-global environment state, which would race against every other
+/// test in this binary reading the same variable — the same convention
+/// `backend.rs`'s `skip_reason_for_project` documents and uses.
+pub fn resolve_sweep_estimate(env_value: Option<&str>) -> Result<Duration, String> {
+    match env_value {
+        None => Ok(Duration::from_secs(DEFAULT_SWEEP_ESTIMATE_SECS)),
+        Some(raw) => raw.parse::<u64>().map(Duration::from_secs).map_err(|e| {
+            format!("{SWEEP_ESTIMATE_ENV_VAR}={raw:?} is not a valid number of seconds: {e}")
+        }),
+    }
+}
+
+/// Non-memoized sweep-level preflight check: does the token at `token_path`
+/// have at least `sweep_estimate` of remaining life?
+///
+/// Pulled out from [`preflight_sweep_once`] so the check logic itself can be
+/// unit-tested directly, without going through the `OnceLock` memoization
+/// (which is inherently a once-per-process effect and not something a test
+/// can exercise more than once per test binary).
+fn check_sweep_preflight(
+    token_path: impl AsRef<Path>,
+    sweep_estimate: Duration,
+) -> Result<(), String> {
+    let path = token_path.as_ref();
+    let remaining = remaining_window(path)?;
+
+    if remaining < sweep_estimate {
+        let shortfall = sweep_estimate - remaining;
         return Err(format!(
-            "BigQuery token window ({remaining:?} remaining) is shorter than this sweep's \
-             estimated duration ({estimated_duration:?}) — shortfall {shortfall:?}; run \
+            "BigQuery token window ({remaining:?} remaining) is shorter than the whole sweep's \
+             estimated duration ({sweep_estimate:?}) — shortfall {shortfall:?}; run \
              scripts/bigquery-auth.sh again before starting"
         ));
     }
 
     Ok(())
+}
+
+/// Sweep-level token preflight, evaluated **once per process** and memoized.
+///
+/// [`preflight`] answers "can THIS test's estimated cost fit in the
+/// remaining window?" — the right question when tests run one at a time
+/// (`--test-threads=1`), but the wrong one once tests run concurrently:
+/// every `#[test]` would independently pass its own small per-test budget
+/// while the sweep as a whole still needed far more than the window, and the
+/// token could expire mid-sweep with no test ever having been warned. The
+/// unit of budgeting has to be the SWEEP, not the individual test — one
+/// process-wide check against the sweep's total estimated cost
+/// ([`resolve_sweep_estimate`]), performed exactly once regardless of how
+/// many `#[test]` wrappers call this function or how many threads run them
+/// concurrently.
+///
+/// `OnceLock::get_or_init` guarantees exactly one evaluation even when many
+/// test threads call this concurrently and race to be first — every caller,
+/// first or not, gets a clone of the same `Result`.
+pub fn preflight_sweep_once(
+    token_path: impl AsRef<Path>,
+    sweep_estimate: Duration,
+) -> Result<(), String> {
+    static RESULT: OnceLock<Result<(), String>> = OnceLock::new();
+    RESULT
+        .get_or_init(|| check_sweep_preflight(token_path, sweep_estimate))
+        .clone()
 }
 
 /// Block the calling thread for `delay`. A named hook (rather than an
@@ -289,44 +384,43 @@ mod tests {
     }
 
     #[test]
-    fn preflight_refuses_a_window_too_short_for_the_sweep() {
+    fn remaining_window_reports_the_time_left_on_a_live_stamp() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // Token valid for another 10 s; the sweep claims it needs 60 s.
-        let expires = now_secs() + 10;
+        let expires = now_secs() + 3600;
         let path = write_token_file(dir.path(), &format!("faketoken123\n{expires}\n"));
 
-        let err = preflight(&path, Duration::from_secs(60))
-            .expect_err("a 10s window must refuse a 60s sweep");
+        let remaining = remaining_window(&path).expect("a future stamp must yield a window");
+        // Wall-clock may advance a second between the stamp and the read.
         assert!(
-            err.contains("shortfall"),
-            "expected the refusal to name the shortfall, got: {err}"
+            remaining <= Duration::from_secs(3600) && remaining >= Duration::from_secs(3600 - 5),
+            "expected ~3600s remaining, got {remaining:?}"
         );
-
-        // A window comfortably longer than the estimate succeeds.
-        let expires_ok = now_secs() + 3600;
-        let path_ok = write_token_file(dir.path(), &format!("faketoken123\n{expires_ok}\n"));
-        preflight(&path_ok, Duration::from_secs(60)).expect("a 1h window must accept a 60s sweep");
     }
 
+    /// The token-FILE failure modes — absent, truncated, unparseable,
+    /// already expired — asserted against [`remaining_window`], the single
+    /// owner of that arithmetic and of these messages. Both the sweep
+    /// preflight and any future caller inherit them from here, so they are
+    /// pinned once rather than per caller.
     #[test]
-    fn preflight_refuses_an_absent_or_unparseable_expiry_stamp() {
+    fn remaining_window_refuses_an_absent_or_unparseable_expiry_stamp() {
         let dir = tempfile::tempdir().expect("tempdir");
 
         // Absent file entirely.
         let missing = dir.path().join("no-such-token");
-        let err = preflight(&missing, Duration::from_secs(1))
+        let err = remaining_window(&missing)
             .expect_err("a missing token file must never be treated as a good window");
         assert!(err.contains("no usable BigQuery token"), "got: {err}");
 
         // Present file, but no second (expiry) line at all.
         let no_expiry_path = write_token_file(dir.path(), "faketoken123\n");
-        let err = preflight(&no_expiry_path, Duration::from_secs(1))
+        let err = remaining_window(&no_expiry_path)
             .expect_err("a token file with no expiry line must refuse, not assume a good window");
         assert!(err.contains("expiry stamp"), "got: {err}");
 
         // Present file, unparseable expiry line.
         let garbage_path = write_token_file(dir.path(), "faketoken123\nnot-a-timestamp\n");
-        let err = preflight(&garbage_path, Duration::from_secs(1))
+        let err = remaining_window(&garbage_path)
             .expect_err("an unparseable expiry stamp must refuse, not assume a good window");
         assert!(err.contains("unparseable expiry stamp"), "got: {err}");
 
@@ -335,8 +429,8 @@ mod tests {
             dir.path(),
             &format!("faketoken123\n{}\n", now_secs().saturating_sub(100)),
         );
-        let err = preflight(&expired_path, Duration::from_secs(1))
-            .expect_err("an already-expired stamp must refuse");
+        let err =
+            remaining_window(&expired_path).expect_err("an already-expired stamp must refuse");
         assert!(err.contains("already expired"), "got: {err}");
     }
 
@@ -424,6 +518,60 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(calls, 1, "a non-quota failure must not be retried");
+    }
+
+    #[test]
+    fn sweep_estimate_defaults_when_env_var_unset() {
+        assert_eq!(
+            resolve_sweep_estimate(None).expect("default must resolve"),
+            Duration::from_secs(DEFAULT_SWEEP_ESTIMATE_SECS)
+        );
+    }
+
+    #[test]
+    fn sweep_estimate_honours_a_valid_override() {
+        assert_eq!(
+            resolve_sweep_estimate(Some("1200")).expect("valid override must resolve"),
+            Duration::from_secs(1200)
+        );
+    }
+
+    #[test]
+    fn sweep_estimate_refuses_an_unparseable_override_loudly() {
+        let err = resolve_sweep_estimate(Some("not-a-number"))
+            .expect_err("an unparseable override must be a loud error, not a silent default");
+        assert!(
+            err.contains(SWEEP_ESTIMATE_ENV_VAR),
+            "error should name the env var, got: {err}"
+        );
+        assert!(
+            err.contains("not-a-number"),
+            "error should name the bad value, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sweep_preflight_refuses_a_window_shorter_than_the_sweep_estimate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expires = now_secs() + 100;
+        let path = write_token_file(dir.path(), &format!("faketoken123\n{expires}\n"));
+
+        let err = check_sweep_preflight(&path, Duration::from_secs(2700))
+            .expect_err("a 100s window must refuse a 2700s sweep estimate");
+        assert!(
+            err.contains("shortfall"),
+            "expected the refusal to name the shortfall, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sweep_preflight_accepts_an_ample_window() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expires = now_secs() + 3600;
+        let path = write_token_file(dir.path(), &format!("faketoken123\n{expires}\n"));
+
+        check_sweep_preflight(&path, Duration::from_secs(2700))
+            .expect("a 1h window must accept a 2700s sweep estimate");
     }
 
     #[test]

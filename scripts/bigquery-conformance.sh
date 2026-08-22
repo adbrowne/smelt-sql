@@ -36,11 +36,20 @@ if [ -z "${SMELT_BQ_PROJECT:-}" ]; then
   exit 1
 fi
 
-# --test-threads=1: every case's dataset is fresh and isolated, but the token
-# preflight (crates/smelt-maintenance-testkit/src/bigquery_session.rs) budgets
-# against ONE sweep's estimated duration per test. Running tests concurrently
-# would race down the same token's remaining window faster than any single
-# test's own estimate accounts for.
+# Concurrency: every case's dataset is fresh and isolated
+# (`BigQueryConformanceBackend::target`/`schema`/`twin_target`/`twin_schema`
+# derive a fresh dataset per (family, case)), and BigQuery's per-table
+# modification-quota burst limit binds PER TABLE — since no table is ever
+# shared across tests, running tests concurrently does not re-trigger it.
+# The token-window preflight (crates/smelt-maintenance-testkit/src/
+# bigquery_session.rs) is now checked ONCE PER PROCESS against the whole
+# sweep's estimated cost, not once per test, so it stays a correct bound
+# regardless of how many threads run concurrently. The thread count is still
+# bounded (default 4, not "however many cores this machine has") to stay
+# well clear of project-level concurrent-query limits, which bind across
+# every table/dataset in the project and are a different constraint than the
+# per-table quota above.
+SMELT_CONFORMANCE_BQ_TEST_THREADS="${SMELT_CONFORMANCE_BQ_TEST_THREADS:-4}"
 exec cargo test --no-fail-fast -p smelt-cli --features bigquery \
   --test maintenance_conformance_bigquery \
-  "$@" -- --test-threads=1 --nocapture
+  "$@" -- --test-threads="$SMELT_CONFORMANCE_BQ_TEST_THREADS" --nocapture

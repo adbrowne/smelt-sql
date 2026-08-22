@@ -33,23 +33,21 @@
 //! collision), none of which is this file's own code.
 
 use std::path::Path;
-use std::time::Duration;
 
 use smelt_backend::Backend;
-use smelt_maintenance_testkit::bigquery_session::{pace, preflight, TABLE_MODIFICATION_PACING};
+use smelt_maintenance_testkit::bigquery_session::{
+    pace, preflight_sweep_once, resolve_sweep_estimate, TABLE_MODIFICATION_PACING,
+};
 use smelt_maintenance_testkit::families::ConformanceBackend;
 use smelt_maintenance_testkit::recipe::{
     bq_conformance_dataset, bq_project, ConformanceTarget, ModelRecipe,
 };
 use smelt_maintenance_testkit::s_tracker::STracker;
 
-/// Coarse per-test ceiling passed to [`preflight`] before any wrapper starts
-/// its sweep. Not a tight measured bound (Phase 1 measured per-STATEMENT
-/// pacing, not whole-sweep wall-clock for every family) — a generous, uniform
-/// estimate is enough to catch the case that actually matters: a token with
-/// only a few minutes left starting a sweep that needs the better part of an
-/// hour.
-const PREFLIGHT_ESTIMATE: Duration = Duration::from_secs(600);
+// (No per-test preflight-estimate constant here anymore — see
+// `preflight_or_panic`'s doc comment for why the unit of budgeting moved to
+// the whole sweep, resolved by
+// `smelt_maintenance_testkit::bigquery_session::resolve_sweep_estimate`.)
 
 /// Pure predicate behind [`ConformanceBackend::skip_reason`] — credentials
 /// ABSENT (no project configured at all) is the only condition that skips
@@ -85,15 +83,48 @@ impl BigQueryConformanceBackend {
         Self { family }
     }
 
-    /// Refuse to start a sweep the current token cannot outlive — see
-    /// [`PREFLIGHT_ESTIMATE`]'s doc comment. Called once at the top of every
-    /// `#[test]` wrapper, after the `skip_reason` check (credentials absent
-    /// ⇒ skip green; credentials present but the token's window is too short
-    /// ⇒ this panics, a loud failure, never a skip).
+    /// Refuse to start a sweep the current token cannot outlive.
+    ///
+    /// Called once at the top of every `#[test]` wrapper, after the
+    /// `skip_reason` check (credentials absent ⇒ skip green; credentials
+    /// present but the token's window is too short ⇒ this panics, a loud
+    /// failure, never a skip).
+    ///
+    /// This used to check each `#[test]`'s OWN small estimated cost
+    /// (`PREFLIGHT_ESTIMATE`, a uniform per-test ceiling) against the token's
+    /// remaining window, which is why the sweep had to run
+    /// `--test-threads=1`: the per-test check answers "can this one test's
+    /// estimated cost fit?", not "can the whole sweep finish?" — every test
+    /// could independently pass its own small budget while the sweep as a
+    /// whole still needed far more than the window, silently risking the
+    /// token expiring mid-sweep with no test ever having been warned. That
+    /// made it unsafe to unpin `--test-threads`, since concurrency only
+    /// makes MORE of the sweep's total cost land inside the SAME window, not
+    /// less.
+    ///
+    /// The unit of budgeting is now the sweep as a whole, not the
+    /// individual test: [`preflight_sweep_once`] evaluates the check exactly
+    /// once per process (memoized), against
+    /// [`resolve_sweep_estimate`]'s sequential-cost ceiling for the ENTIRE
+    /// sweep — see that function's doc comment for the 2700 s default and
+    /// its derivation. Every `#[test]` wrapper still calls this method (the
+    /// method name and `&self` signature are unchanged so no call site
+    /// needed to move), but only the first call across the whole process
+    /// actually evaluates anything; every later call, from any thread, reuses
+    /// that one result. This is what makes running the sweep with more than
+    /// one thread safe: `scripts/bigquery-conformance.sh` no longer pins
+    /// `--test-threads=1`.
     pub fn preflight_or_panic(&self) {
-        preflight(
+        let sweep_estimate = resolve_sweep_estimate(
+            std::env::var(smelt_maintenance_testkit::bigquery_session::SWEEP_ESTIMATE_ENV_VAR)
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("BigQuery sweep-estimate resolution failed: {e}"));
+
+        preflight_sweep_once(
             smelt_maintenance_testkit::bigquery_session::default_token_path(),
-            PREFLIGHT_ESTIMATE,
+            sweep_estimate,
         )
         .unwrap_or_else(|e| {
             panic!(

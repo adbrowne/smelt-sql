@@ -96,11 +96,20 @@
 //! only classification, and the boundary-row reach check, none of which
 //! reach the broken code paths above).
 //!
-//! **Run with `-- --test-threads=1`** (mirrors the Spark twin's own
-//! constraint) — every case's dataset is fresh and isolated, but the token
-//! preflight budgets against ONE sweep's estimated duration per test; running
-//! tests concurrently would race down the same token's remaining window
-//! faster than any single test's own estimate accounts for.
+//! **Run via `scripts/bigquery-conformance.sh`**, which passes a bounded
+//! `--test-threads` (default 4, overridable via
+//! `SMELT_CONFORMANCE_BQ_TEST_THREADS`) rather than the Spark twin's
+//! `--test-threads=1`. Concurrency is safe here because every case's dataset
+//! is fresh and isolated (`BigQueryConformanceBackend::target`/`schema`
+//! derive a per-(family, case) dataset) and BigQuery's per-table
+//! modification-quota burst limit binds per table, never shared across
+//! tests. The token-window preflight
+//! (`smelt_maintenance_testkit::bigquery_session::preflight_sweep_once`) is
+//! checked once per PROCESS against the whole sweep's estimated cost, not
+//! once per test — a per-test check could not express a concurrent sweep's
+//! true cost, since every test could independently pass its own small
+//! budget while the sweep as a whole still needed far more than the token's
+//! window.
 
 mod backend;
 mod dags_bigquery;
