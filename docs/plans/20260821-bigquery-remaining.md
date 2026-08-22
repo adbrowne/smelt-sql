@@ -28,13 +28,13 @@ of `prop_type_inference` alongside DuckDB and Spark.
 
 | # | Item | Kind | Needs live warehouse | Status |
 |---|------|------|----------------------|--------|
-| D1 | Cross-engine exchange with BigQuery — GCS or nothing | decision | no | pending |
-| D2 | Whether BigQuery gets a CI tier | decision | no | pending |
+| D1 | Cross-engine exchange with BigQuery — GCS or nothing | decision | no | done — accepted as Constraint (filesystem-local by design) |
+| D2 | Whether BigQuery gets a CI tier | decision | no | done — accepted as standing decision (no CI tier) |
 | 1 | Schema-evolution DDL for BigQuery | feature | yes | done |
 | 2 | `supports_native_ivm` — emit the maintained object, or keep the `false` | feature | yes | pending |
-| 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | checked — still reachable |
-| 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | pending |
-| 5 | `supports_pipe_syntax` has no live coverage | coverage | yes (one case) | pending |
+| 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | done — accepted as Constraint (ROADMAP #3) |
+| 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | done |
+| 5 | `supports_pipe_syntax` has no live coverage | coverage | yes (one case) | done |
 | 6 | Conformance sweep vs the one-hour credential window | scaling | yes | pending |
 | 7 | Stale spec sentence: the keyed-`MERGE` fix *was* confirmed live | docs | no | done |
 
@@ -65,6 +65,16 @@ the former is merely un-built, which reads as a gap when it is a boundary.
 **Done when:** the spec says which, and the §Known Divergences entry either
 names a tracking plan or is rewritten as a Constraint.
 
+**Done 2026-08-22 — accepted as a Constraint (filesystem-local by design).**
+`multi_backend.md` §Constraints & Invariants now states cross-engine exchange
+is a two-engine, filesystem-local capability by design: a third engine that
+cannot read a host path needs a new object-store exchange boundary
+(S3/GCS/ADLS), which is a cross-cutting change to the exchange design, not a
+BigQuery feature, and stays out of scope until a concrete consumer demands
+it. The §Known Divergences entry is retired — the type-level half of the gap
+is already closed independently by the BigQuery type oracle
+(`bigquery_oracle.rs`).
+
 ### D2 — Whether BigQuery gets a CI tier
 
 Spark parity runs per-PR on changed paths and nightly in full. BigQuery runs
@@ -86,6 +96,16 @@ call. Not something to drift into.
 `.github/workflows/compat.yml` on the same gated shape as `spark-parity`, or
 the spec's "BigQuery has no CI tier" entry is restated as a standing decision
 with the reasoning, rather than as an open divergence.
+
+**Done 2026-08-22 — accepted as a standing decision (no CI tier).**
+`multi_backend.md` §Constraints & Invariants now carries "BigQuery has no CI
+tier, by decision, not by omission" — the reasoning (credentials off CI,
+~37min/run billing cost, requires a service account and GitHub secret this
+spec cannot provision) and the cost (a claim of Spark-equivalent coverage is
+a claim about which gates exist, never when they run) recorded in place. The
+§Known Divergences entry is retired; no `bigquery-parity` CI job was added.
+Item 6 (case-count vs. credential window) remains open independently, since
+hand-run sweeps still need it regardless of CI status.
 
 ## Functional gaps
 
@@ -211,6 +231,16 @@ case fail.
 **Done when.** The spec entry is either restated as a Constraint or retired by
 the compile-time expansion, and `require_merge_columns` has a test.
 
+**Done 2026-08-22 — accepted as a Constraint.** `multi_backend.md` §Constraints & Invariants now
+carries "A BigQuery `ColumnScopedMerge` model must have a statically enumerable projection"; the
+§Known-Divergences entry is retired. `require_merge_columns` already has its test
+(`crates/smelt-backend/tests/merge_columns_guard.rs`, above). The compile-time expansion was *not*
+taken here — but the broader position it points at, that smelt should always know a model's output
+schema, is recorded as ROADMAP #3 "Total Output-Schema Resolution". The information exists for the
+common case (`derive_projection` returns `None` on any wildcard without consulting the upstream
+schema it already holds), and the residual unresolvable cases — external tables, CSV seeds,
+unresolved function-star, `ON`-joins — are each independently closable there.
+
 ## Coverage gaps
 
 ### 4 — `dags` non-vacuity self-check on the BigQuery leg
@@ -236,6 +266,25 @@ landed.
 demonstrated load-bearing the way the Spark one was: reverting the twin
 derivation makes it fail.
 
+**Done 2026-08-22.** `dags_bigquery.rs` grew
+`dags_oracle_flags_a_seeded_divergence_on_bigquery`, a thin wrapper over
+`smelt_maintenance_testkit::families::dags::run_oracle_flags_a_seeded_divergence`
+— the same function the Spark leg's self-check already calls. All 6 tests
+in `dags_bigquery` passed live (`smelt-bq-test-20260816`, 2026-08-22,
+`--test-threads=1`, 816.92s), including the new wrapper.
+
+Shown load-bearing, but via a different failure mode than Spark's shared-
+schema vacuity: `BigQueryConformanceBackend::twin_target`/`twin_schema`
+were temporarily collapsed onto `target`/`schema` — reproducing the exact
+pre-fix state `main.rs`'s point-3 finding describes — and the self-check
+failed immediately, not by accepting a corrupted multiset but by
+reproducing the `409 Already Exists` collision that motivated
+`twin_target` in the first place (both projects then race to create the
+same table on the same dataset). Still the right evidence: the wrapper's
+pass depends on the distinct-dataset property it exists to assert, and
+removing that property breaks it. Reverted immediately after; re-run
+confirmed green (63.87s).
+
 ### 5 — `supports_pipe_syntax` has no live coverage
 
 **What.** BigQuery is the only backend reporting `true`, and no parity fixture
@@ -258,6 +307,44 @@ to run. Do not bundle it with this.
 
 **Done when.** A pipe query runs through a BigQuery parity leg against a live
 warehouse.
+
+**Done 2026-08-22.** `crates/smelt-cli/tests/pipe_parity.rs` runs one pipe
+query — pre-aggregation `\|> WHERE`, `\|> EXTEND`, `\|> AGGREGATE … GROUP BY`,
+post-aggregation `\|> WHERE`, `\|> ORDER BY`, `\|> LIMIT`, reading its upstream
+through a `smelt.<path>` reference — on both DuckDB (lowered) and a live
+BigQuery warehouse (native), asserting identical rows. Green live, 16.3s.
+Registered in `scripts/bigquery-parity.sh`.
+
+**The cheapest item on the list found the biggest bug.** The first run failed
+on **DuckDB**, before BigQuery was reached: `run failed at model
+'pipe_showcase': SQL could not be parsed for presentation projection`. Every
+compiled model passes through `hide_state_columns` →
+`presentation_projection`, which parsed the SQL and demanded a `SELECT_STMT`
+before checking whether it had any work to do. A pipe query has no top-level
+`SELECT_STMT`, so **every pipe-query model failed to run, on every backend** —
+a whole documented language feature was unreachable end-to-end, and the error
+blamed the user's SQL for being unparseable. Nothing caught it because the
+`examples/test_workspace` pipe models are only ever *diagnosed*, never run, and
+`pipe_equivalence` drives the printer directly rather than `smelt run`.
+
+The fix is two guards in `presentation_projection`: an empty `state_bearing`
+map returns the SQL untouched without parsing it (nothing to hide ⇒ no
+standing to judge the form), and a pipe query that *does* read a state-bearing
+model refuses with a new `PipeQueryOverStateBearingModel` variant naming the
+form, rather than reporting unparseable SQL. That second case stays fail-closed
+on purpose: this emitter hides state columns behind a select list, and a pipe
+query has none to edit, so passing it through would leak `__part` columns into
+a consumer's schema.
+
+**Non-vacuity — the item-4 lesson applied up front.** A live BigQuery leg alone
+would *not* have proven anything about native emission: GoogleSQL accepts the
+lowered SQL too, so flipping `supports_pipe_syntax` to `false` would leave the
+parity leg green. Two assertions close that. `crates/smelt-dialect/tests/pipe_native.rs`
+pins that BigQuery emits `\|>` verbatim (and that the lowering backends emit
+none) for the same query — shown load-bearing: flipping the flag to `false`
+fails it with the lowered SQL in the message. And `pipe_parity` asserts its
+BigQuery leg *ran* whenever `bigquery_enabled()`, so a silent DuckDB-only pass
+is a failure rather than a skip.
 
 ### 6 — Conformance sweep vs the one-hour credential window
 

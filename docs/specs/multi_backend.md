@@ -139,8 +139,8 @@ project owns a private database file; BigQuery and Spark explicitly, because bot
 shared store where only the dataset or schema separates two projects' tables. Because a
 comparison that has gone vacuous is indistinguishable from a passing one, the property is asserted
 rather than assumed: the paired family carries a self-check that seeds a divergence into the
-incremental side after both builds and requires the comparison to refuse it. Its coverage is
-recorded in §Known Divergences.
+incremental side after both builds and requires the comparison to refuse it. Runs on all three
+legs (DuckDB, Spark, BigQuery).
 
 **CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
 changed paths touching Spark-relevant code (the Spark backend crate, Spark/parity integration
@@ -438,34 +438,53 @@ resolves nested widening to a table rewrite.
 - **Default `cargo test` is backend-agnostic.** With `SPARK_CONNECT_URL` unset, every
   Spark-targeted test skips; the suite stays green without Spark installed. Spark coverage runs
   only in the gated job that provides the server.
-- **Cross-engine exchange is filesystem-local today.** Remote object stores (S3/GCS/ADLS) are
-  explicitly out of scope until a mirrored test demands one.
+- **BigQuery has no CI tier, by decision, not by omission.** Spark parity runs per-PR on changed
+  paths and nightly in full; BigQuery's fixed-recipe suites and its generative-conformance leg
+  run only when a developer executes them by hand (`scripts/bigquery-parity.sh`,
+  `scripts/bigquery-conformance.sh`), gated on `SMELT_BQ_PROJECT`. This is deliberate: it keeps
+  cloud credentials, and the short-lived credential window a BigQuery session runs under, out of
+  CI entirely. The cost is real — a BigQuery regression surfaces only when someone runs a sweep,
+  never on a schedule — and is accepted rather than resolved: adding a tier needs a service
+  account, a GitHub secret, and a recurring billing commitment (a green conformance sweep alone
+  runs ~37 minutes of warehouse time), none of which this spec can decide unilaterally. A claim
+  of Spark-equivalent BigQuery coverage is therefore a claim about which gates exist, never about
+  when they run.
+- **Cross-engine exchange is a two-engine, filesystem-local capability by design.**
+  `cross_engine_parity`/`cross_engine_types_parity` hand off through a shared local Parquet
+  file. A third engine that cannot read a host path (BigQuery, or any object-store-only engine)
+  needs a new exchange boundary — remote object stores (S3/GCS/ADLS) — not a mirrored leg of the
+  existing loop, and that boundary is a cross-cutting change to the exchange design, never a
+  per-backend patch. It stays out of scope until a concrete consumer demands cross-engine
+  exchange with such an engine; it is not part of BigQuery backend completion.
 - **Data loading carries no host-filesystem assumption.** A backend's load path (seeds, test
   fixtures, Arrow batches) must transfer rows through the backend client API, never via a host
   path the server is asked to read. A load path that only works when the server shares the host
   filesystem is a bug, not a deployment constraint (see §"Loading data into a backend").
 - **No new logical surface per backend.** Backends may differ in physical SQL and capability
   flags only; the set of writable smelt models is backend-independent.
+- **A capability flag advertising a *path* carries live coverage of that path.** Asserting a
+  flag's value proves only that the matrix is accurate; it says nothing about the emission the
+  flag selects. `supports_pipe_syntax` is the case in point: BigQuery is the only backend
+  reporting `true`, so it is the only backend whose printer emits `|>` rather than lowering, and
+  a pipe query runs through `pipe_parity` on a live warehouse and must produce the same rows the
+  lowered form produces on DuckDB. The offline half of that pair (`smelt-dialect`'s
+  `pipe_native`) pins that BigQuery is sent pipes at all — without it the live leg would keep
+  passing on lowered SQL, which GoogleSQL also accepts, and prove nothing about the native path.
+- **A BigQuery `ColumnScopedMerge` model must have a statically enumerable projection.**
+  GoogleSQL has no `UPDATE SET *`, so the whole-row `MERGE` renders its matched arm column by
+  column over the model's output projection (§"Whole-row MERGE"). Where that projection is not
+  statically enumerable — a surviving wildcard, an unnamed select item — the column list is
+  empty and the run is refused with an error naming the model, rather than emitting a matched
+  arm that assigns nothing and silently stops updating rows. DuckDB and Spark are unaffected:
+  their `UPDATE SET *` needs no list. Making every model's output schema knowable (ROADMAP
+  "Total Output-Schema Resolution") would narrow this to genuinely unresolvable upstreams, not
+  retire it.
 
 ## Known Divergences / Open Questions
 
-- **`supports_pipe_syntax` is unexercised by any parity test.** BigQuery is the only backend
-  reporting `true`, and no parity fixture writes a pipe query, so the printer's
-  emit-pipes-natively path has no live coverage on the one backend that would take it. Every
-  other BigQuery-relevant printer path does: `materialization_parity`, `seed_parity`,
-  `lowering_parity`, `merge_parity`, `incremental_parity` and `schema_evolution_parity` each
-  carry a BigQuery leg. `NOT MATCHED BY SOURCE` is likewise uncovered, but for a different
-  reason — no emitter produces the clause on any backend yet, so there is nothing to run.
-  Tracked in `docs/research/20260816-bigquery-backend.md`.
-- **A model whose output columns are not statically resolvable cannot use
-  `Technique::ColumnScopedMerge` on BigQuery.** The whole-row `MERGE` needs an explicit column
-  list there (see §"Whole-row MERGE"), and a surviving wildcard projection leaves that list
-  empty, so the run fails with an error naming the model rather than emitting a matched arm
-  that assigns nothing. DuckDB and Spark are unaffected — their `UPDATE SET *` needs no list.
-- **`cross_engine_parity` and `cross_engine_types_parity` are DuckDB↔Spark only.** They assert
-  handoff between two live engines rather than looping over `targets_to_run`, so extending them
-  to BigQuery means a new engine *pair*, not a third leg of an existing loop. The type-level
-  half of that gap is what a BigQuery type oracle would close.
+- **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
+  there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
+  not a path smelt takes. Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **BigQuery advertises `supports_native_ivm: false` despite supporting materialized views.**
   The warehouse accepts `CREATE MATERIALIZED VIEW` with incremental refresh, so unlike DuckDB
   and Spark this backend's `false` describes smelt, not the engine: `true` obliges smelt to emit
@@ -501,13 +520,6 @@ resolves nested widening to a table rewrite.
   drop), so the fallback is a supported mode rather than a degraded one — but the two modes leave
   different residue behind a crash, which is why created datasets carry a default table
   expiration. Tracked in `docs/research/20260816-bigquery-backend.md`.
-- **BigQuery has no CI tier.** Spark parity runs per-PR on changed paths and nightly in full;
-  BigQuery runs **only when a developer runs it by hand** against their own GCP project, gated on
-  `SMELT_BQ_PROJECT`. A BigQuery regression therefore does not surface on `main` on any schedule.
-  This is a deliberate consequence of keeping cloud credentials off CI, not an oversight, and it
-  means a claim of Spark-equivalent BigQuery coverage is a claim about which gates exist, never
-  about when they run. Revisiting it requires a service account, a GitHub secret, and a billing
-  decision. Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **The generative conformance case count on BigQuery is undecided.** Every statement costs a
   network round trip — measured at roughly 0.7 s for a trivial query and 2 s for a
   `CREATE TABLE` — against sub-millisecond in-process DuckDB. Concurrency across cases is
@@ -517,15 +529,6 @@ resolves nested widening to a table rewrite.
   while the same rate spread across distinct tables is not. A generative suite must therefore
   allocate a fresh target table per case rather than reusing one. Tracked in
   `docs/research/20260816-bigquery-backend.md`.
-- **The `dags` non-vacuity self-check runs on the Spark leg only.** `dags`'s seeded-divergence
-  self-check — the one that proves a case's per-node comparison is capable of failing — has a
-  wrapper in `maintenance_conformance_spark` but not in `maintenance_conformance_bigquery`. The
-  BigQuery leg's twin already resolves to its own per-case dataset, so its comparison is distinct
-  by construction rather than by luck; what is missing is the assertion that says so, which means
-  a future change to BigQuery's twin derivation would not be caught the way the same defect on
-  Spark now is. The gate-oracle self-check (`harness_self_check`) does run on all three legs. Adding
-  the BigQuery wrapper costs a live sweep to confirm, so it is tracked rather than landed here.
-  Tracked in `docs/plans/20260817-bigquery-generative-conformance.md`.
 - **The exact median was silently rounded on BigQuery, by the output-schema cast wrap rather than
   by the lowering.** `apply_type_casts` re-parses SQL that the dialect printer has *already*
   lowered, so a BigQuery median arrives as `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`.

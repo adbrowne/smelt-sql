@@ -2,13 +2,14 @@
 //! `smelt_maintenance_testkit::families::dags`
 //! (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 5).
 //!
-//! Live run (2026-08-17): 1/5 passed
-//! (`keyed_grain_node_excluded_from_generated_graph_on_bigquery`, which
-//! stages only one project). The other 4 fail `409 Already Exists` —
-//! `families::dags`'s two-project-per-case staging calls `b.target(case)`
-//! twice with the SAME `case` for what should be two distinct projects,
-//! colliding on BigQuery's per-case-dataset design. See `main.rs`'s doc
-//! comment point 3.
+//! First live run (2026-08-17): 1/5 passed — `families::dags`'s
+//! two-project-per-case staging called `b.target(case)` twice with the SAME
+//! `case` for what should be two distinct projects, colliding on BigQuery's
+//! per-case-dataset design. Fixed in `stage_pair_for`
+//! (`smelt-maintenance-testkit/src/families/dags.rs`): the full-refresh
+//! oracle twin now stages against `b.twin_target(case)`, a dataset distinct
+//! from the incremental project's `b.target(case)`. All 5 wrappers below,
+//! including this family's own seeded-divergence self-check, now run.
 
 use smelt_maintenance_testkit::families::{dags, ConformanceBackend};
 
@@ -25,6 +26,28 @@ fn case_count() -> usize {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(DEFAULT_CASES)
+}
+
+/// `dags_oracle_flags_a_seeded_divergence_on_bigquery` — this family's
+/// non-vacuity self-check. Proves the per-node equality assertion is capable
+/// of FAILING on BigQuery, the way the Spark twin's own self-check proved it
+/// there — Spark's had been passing vacuously because its incremental
+/// project and full-refresh twin shared one schema. BigQuery's twin
+/// resolves to its own per-case dataset (`twin_target`, above), so this
+/// case's two builds are backed by distinct physical storage BY
+/// CONSTRUCTION; this test is what actually asserts that, rather than
+/// leaving it as an inference from the backend's dataset-per-case design.
+#[test]
+fn dags_oracle_flags_a_seeded_divergence_on_bigquery() {
+    let b = BigQueryConformanceBackend::new("dags_selfcheck");
+    if let Some(reason) = b.skip_reason() {
+        eprintln!("{reason} — skipping dags_oracle_flags_a_seeded_divergence_on_bigquery");
+        return;
+    }
+    b.preflight_or_panic();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(dags::run_oracle_flags_a_seeded_divergence(&b))
+        .expect("the dags oracle failed to flag a seeded divergence on BigQuery");
 }
 
 /// `chain_since_upstream_dirty_set_suffices_on_bigquery`.

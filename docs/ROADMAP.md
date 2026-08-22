@@ -53,7 +53,44 @@ Each axis is delivered end-to-end before the next begins: spec contract → soun
 
 As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
-### 3. Safety-Overrides Review — Partition-Grain Admission Checks
+### 3. Total Output-Schema Resolution
+
+smelt does not always know a model's output schema. `CompiledModel::output_columns` (and the
+`derive_projection` owner behind it) returns *empty = unknown* the moment a select list contains a
+surviving wildcard, even when the upstream columns are fully declared and already resolved for LSP
+completion (`available_columns`). An ETL tool that cannot name its own output is the wrong default:
+too much downstream precision depends on the projection being total — output-fingerprint reuse and
+virtual-environment sharing (#5), cross-model column lineage and backbuild eclipse, schema
+migration planning (#6), and the BigQuery whole-row `MERGE`, which refuses a `ColumnScopedMerge`
+model whose projection is not statically enumerable (`multi_backend.md` §Constraints).
+
+The goal is a *total* output schema: every model resolves to a concrete column list, or names the
+exact reason it cannot. The unresolvable cases today are each independently closable:
+
+- **`SELECT *` derivation gives up unconditionally.** `derive_projection`
+  (`crates/smelt-runtime/src/compile.rs`) returns `None` on any wildcard without consulting the
+  upstream schema it already holds. Teach it to expand a wildcard against resolvable upstream refs
+  (reusing the `RowExtension` / `RefSchemaProvider` machinery `available_columns` already uses), so
+  `SELECT *` over declared upstreams yields a real column list.
+- **External physical tables carry no declared schema.** Support declaring an external table's
+  columns so a projection over one resolves instead of falling to `ColumnSource::ExternalTable` /
+  `Unknown`.
+- **CSV seeds do not participate in `SELECT *` resolution.** Require/declare seed schemas so a
+  `SELECT *` over a seed is enumerable.
+- **`smelt.functions.<f>(args).*` over an unresolved return.** Closed-struct returns already
+  expand; row-tail (`Struct<{…, ..r}>`) and unresolved signatures fall back to a synthetic
+  `Unknown` column — close the gap so the spread is always enumerable or a named refusal.
+- **`SELECT *` over an `ON`-join is not expanded** (duplicate-name hazard, tracked in
+  `docs/TODO.md`). Expand it with explicit duplicate-name handling.
+
+**Done when** `output_columns` is total for every model over declared upstreams, each residual
+unresolvable case is a named diagnostic rather than a silent empty list, and the BigQuery
+`ColumnScopedMerge` constraint narrows to genuinely unresolvable upstreams. Sequenced as a
+precision precondition for the fingerprint fold (#5) and backbuild lineage. Extends
+[`docs/plans/20260819-source-derived-projection.md`](plans/20260819-source-derived-projection.md),
+the projection owner this builds on.
+
+### 4. Safety-Overrides Review — Partition-Grain Admission Checks
 
 The partition-grain recompute-a-region quadrant admits SQL only past a set of per-cell safety
 checks (window functions, `HAVING`, `DISTINCT`, `LIMIT`, FROM/JOIN subqueries, non-deterministic
@@ -88,7 +125,7 @@ rewrite instead of a bypass (window functions, possibly `HAVING`/`DISTINCT`), or
 opt-in risk acceptance that should stay a recorded override (non-deterministic functions) — then
 a spec diff to `incremental_shapes.md` §"Safety checks" for whichever checks change shape.
 
-### 4. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
+### 5. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
 
 SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script. The same machinery powers **backbuild change-detection** — deciding precisely which models a change forces to rebuild versus spares.
 
@@ -107,11 +144,11 @@ SQLMesh-style opt-in virtual data environments: cheap isolated environments that
 
 Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #2 and unlock fingerprint precision as they land.
 
-### 5. General Schema Migration on the VE Substrate
+### 6. General Schema Migration on the VE Substrate
 
-Generalise schema change management on top of the fingerprint + column-lineage machinery from #3. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
+Generalise schema change management on top of the fingerprint + column-lineage machinery from #5. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
 
-### 6. Spark — Production Hardening
+### 7. Spark — Production Hardening
 
 The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow, Spark Connect / Databricks Connect). Remaining gaps to production-grade:
 
@@ -119,21 +156,21 @@ The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow
 - **JSON incompatibility rewrites** — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY`; emit compile-time warnings where no faithful rewrite exists.
 - **Authentication docs** — tokens, OAuth, and instance profiles for Databricks Connect / EMR / Dataproc.
 
-### 7. `smelt check` — LLM-Optimised Diagnostic CLI
+### 8. `smelt check` — LLM-Optimised Diagnostic CLI
 
 Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-### 8. Orchestrator Integration
+### 9. Orchestrator Integration
 
 Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
-### 9. PostgreSQL Backend
+### 10. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
-### 10. Databricks Support + Metrics-View Compatibility (low priority)
+### 11. Databricks Support + Metrics-View Compatibility (low priority)
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
