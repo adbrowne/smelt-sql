@@ -16,8 +16,8 @@ use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
 use smelt_backend::{
-    emit_delete_insert, Backend, BackendCapabilities, BackendError, MaintenanceDialect,
-    PartitionRange, Region, SqlDialect,
+    emit_delete_insert, execute_model_default, Backend, BackendCapabilities, BackendError,
+    ExecutionResult, MaintenanceDialect, Materialization, PartitionRange, Region, SqlDialect,
 };
 
 mod sql;
@@ -191,10 +191,35 @@ impl BigQueryBackend {
         .await
         .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))?
     }
+
+    /// `DROP MATERIALIZED VIEW IF EXISTS` — used by `execute_model`'s
+    /// reverse-flip cleanup (see that method's doc comment). Not part of
+    /// the `Backend` trait: no other backend has a materialized-view
+    /// concept to clean up.
+    ///
+    /// Tolerates the wrong-type drop failure the same way
+    /// `drop_table_if_exists` / `drop_view_if_exists` do
+    /// (`sql::is_wrong_type_drop_failure`) — on the common path, the name
+    /// holds an ordinary table or view rather than a materialized view,
+    /// and this must be a no-op there, not a hard error.
+    async fn drop_materialized_view_if_exists(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<(), BackendError> {
+        let view_name = self.qualified_name(schema, name);
+        match self
+            .py_execute_no_result(&sql::drop_materialized_view(&view_name))
+            .await
+        {
+            Err(e) if is_wrong_type_error(&e) => Ok(()),
+            other => other,
+        }
+    }
 }
 
-/// Whether a drop failure is BigQuery's "wrong object type" shape
-/// (`sql::is_wrong_object_type_for_drop`) rather than a genuine failure.
+/// Whether a DDL failure is BigQuery's "wrong object type" shape
+/// (`sql::is_wrong_type_drop_failure`) rather than a genuine failure.
 ///
 /// Only [`BackendError::ExecutionFailed`] carries a message worth
 /// inspecting; every other variant (connection failure, configuration
@@ -202,11 +227,9 @@ impl BigQueryBackend {
 /// unchanged — this is deliberately not a blanket string sniff over
 /// `Display`, to avoid ever swallowing an error this classifier was not
 /// built to recognise (CLAUDE.md §"Fail-loud discipline").
-fn is_wrong_object_type_error(err: &BackendError) -> bool {
+fn is_wrong_type_error(err: &BackendError) -> bool {
     match err {
-        BackendError::ExecutionFailed { message, .. } => {
-            sql::is_wrong_object_type_for_drop(message)
-        }
+        BackendError::ExecutionFailed { message, .. } => sql::is_wrong_type_drop_failure(message),
         _ => false,
     }
 }
@@ -243,13 +266,90 @@ impl Backend for BigQueryBackend {
             .await
     }
 
+    /// Create (or replace) an engine-maintained materialized view — the
+    /// `refresh: materialized_view` delegation target
+    /// (`docs/specs/materialized_view.md`). BigQuery is the first backend
+    /// to override the `Backend` trait's erroring default: its native IVM
+    /// runtime accepts or rejects the query, and this passes that verdict
+    /// straight through `py_execute_no_result` — a rejection surfaces
+    /// verbatim as `BackendError::ExecutionFailed`, never summarized or
+    /// masked (`docs/specs/materialized_view.md` §"No silent fallback"
+    /// item 2).
+    ///
+    /// Forward flip: measured via `scripts/bigquery-probe-mv.sh`
+    /// (`docs/research/20260816-bigquery-backend.md` §"Materialized
+    /// views"), `CREATE OR REPLACE MATERIALIZED VIEW` is refused outright
+    /// when the name currently holds a TABLE (or, by symmetry, a VIEW), so
+    /// any leftover table/view is dropped defensively first — mirroring
+    /// what the default `Backend::execute_model` already does for the
+    /// table/view pair. Reusing `drop_table_if_exists` /
+    /// `drop_view_if_exists` here (rather than a bespoke drop) is what
+    /// makes this safe when the *existing* object is itself already a
+    /// materialized view: both of those already tolerate the wrong-type
+    /// drop failure that produces (`sql::is_wrong_type_drop_failure`), and
+    /// `CREATE OR REPLACE MATERIALIZED VIEW` handles the actual
+    /// replacement in that case (see `sql::create_materialized_view_as`).
+    async fn create_materialized_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.drop_table_if_exists(schema, name).await?;
+        self.drop_view_if_exists(schema, name).await?;
+
+        let view_name = self.qualified_name(schema, name);
+        tracing::debug!(
+            "BigQuery CREATE OR REPLACE MATERIALIZED VIEW {} AS ...",
+            view_name
+        );
+        self.py_execute_no_result(&sql::create_materialized_view_as(&view_name, sql))
+            .await
+    }
+
+    /// Execute a model (drop + create as table or view), with one extra
+    /// step ahead of the shared [`execute_model_default`] body: dropping a
+    /// leftover materialized view.
+    ///
+    /// This is the reverse flip *out of* `refresh: materialized_view`
+    /// (`docs/specs/materialized_view.md`). Measured via
+    /// `scripts/bigquery-probe-mv.sh`
+    /// (`docs/research/20260816-bigquery-backend.md` §"Materialized
+    /// views"): `DROP TABLE IF EXISTS` and `DROP VIEW IF EXISTS` both fail
+    /// against an existing materialized view (`Cannot drop ... which has
+    /// type MATERIALIZED_VIEW. A table was expected.`) — `IF EXISTS` does
+    /// not rescue a wrong-type object, because the object does exist. That
+    /// failure is new with this feature (no materialized view could exist
+    /// before it), so cleaning one up belongs here. On the common path
+    /// where no materialized view exists for this name,
+    /// `DROP MATERIALIZED VIEW IF EXISTS` is a no-op, so this adds no
+    /// observable cost to an ordinary run.
+    ///
+    /// A Rust trait override has no way to call back into the default
+    /// implementation it replaces, so the shared drop/create body lives in
+    /// the free function [`execute_model_default`]
+    /// (`crates/smelt-backend/src/lib.rs`) and both the trait's own default
+    /// and this override call it, rather than this override duplicating
+    /// that body.
+    async fn execute_model(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+        materialization: Materialization,
+        show_preview: bool,
+    ) -> Result<ExecutionResult, BackendError> {
+        self.drop_materialized_view_if_exists(schema, name).await?;
+        execute_model_default(self, schema, name, sql, materialization, show_preview).await
+    }
+
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
         match self
             .py_execute_no_result(&sql::drop_table(&table_name))
             .await
         {
-            Err(e) if is_wrong_object_type_error(&e) => Ok(()),
+            Err(e) if is_wrong_type_error(&e) => Ok(()),
             other => other,
         }
     }
@@ -257,7 +357,7 @@ impl Backend for BigQueryBackend {
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
         match self.py_execute_no_result(&sql::drop_view(&view_name)).await {
-            Err(e) if is_wrong_object_type_error(&e) => Ok(()),
+            Err(e) if is_wrong_type_error(&e) => Ok(()),
             other => other,
         }
     }

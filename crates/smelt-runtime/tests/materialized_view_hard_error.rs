@@ -188,11 +188,15 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
 }
 
 /// `crates/smelt-backend/src/` must not contain a silent materialized-view
-/// fallback surface — the compile-time hard error above is the only path.
-/// A dead `create_materialized_view_as` trait default that silently falls
-/// back to `create_table_as` (with only a `warn!`) would be unreachable in
-/// practice but still a "falling back" surface that violates
-/// `docs/specs/materialized_view.md` §"No silent fallback".
+/// fallback surface — the compile-time hard error above is one line of
+/// defense, and `Backend::create_materialized_view_as`'s own provided
+/// default (an erroring `BackendError::UnsupportedFeature`, never a quiet
+/// substitution) is the other. What must never appear is a fallback that
+/// *succeeds* by silently routing to `create_table_as`/`create_view_as`
+/// instead of refusing — that would violate `docs/specs/materialized_view.md`
+/// §"No silent fallback" even though the method name itself
+/// (`create_materialized_view_as`) is exactly the correct, loud-erroring
+/// surface this spec calls for.
 #[test]
 fn no_silent_fallback_surface_in_backend_crate() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -207,12 +211,6 @@ fn no_silent_fallback_surface_in_backend_crate() {
         let content = std::fs::read_to_string(&entry).expect("read backend src file");
         if content.contains("falling back") {
             offenders.push(format!("{}: contains \"falling back\"", entry.display()));
-        }
-        if content.contains("create_materialized_view_as") {
-            offenders.push(format!(
-                "{}: contains \"create_materialized_view_as\"",
-                entry.display()
-            ));
         }
     }
 

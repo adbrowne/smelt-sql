@@ -425,6 +425,60 @@ type-cast wrapper re-parses printed SQL to name its columns: an unparseable lowe
 column its alias and the wrapper then emits a positional `_col2` the warehouse rejects. Ordered
 aggregates (`ARRAY_AGG(x ORDER BY x)`) were a genuine parser gap and now parse.
 
+### Materialized views (`scripts/bigquery-probe-mv.sh`, 2026-08-22)
+
+Measured before writing the `refresh: materialized_view` emitter, on the same
+one-fresh-table-per-case discipline the DDL probe uses. Six answers, three of which
+contradict the obvious guess.
+
+**Forms.** `CREATE MATERIALIZED VIEW`, `CREATE OR REPLACE MATERIALIZED VIEW` and
+`CREATE MATERIALIZED VIEW IF NOT EXISTS` are all accepted. `OR REPLACE` genuinely
+*replaces*: re-running the same definition is accepted, and replacing a `SUM` definition
+with a `COUNT(*)` one changes the served value (3 → 2). So the emitter can be a single
+idempotent statement that also absorbs a definition delta — no drop-first, no
+create-if-absent branch. A plain `CREATE` over an existing view is `Already Exists`,
+which is why `OR REPLACE` is the form emitted.
+
+**Options are unnecessary.** `enable_refresh`, `refresh_interval_minutes` and
+`max_staleness` are all accepted, but refresh is on by default, so smelt emits **no**
+`OPTIONS` clause at all: the engine owning freshness is the whole point of the mode, and
+inventing a knob here would pre-empt the per-engine physical-strategy modifier that
+`materialized_view.md` §Known Divergences deliberately defers.
+
+**Freshness is synchronous at read time.** After an `INSERT` into the base table, a
+`SELECT` through the materialized view returned the *new* total immediately (3 → 13)
+rather than the last materialized one. BigQuery combines the materialized data with a
+delta over the base table when the view is queried. This is what makes a parity assertion
+possible at all: the leg can compare rows straight after the write, with no refresh-cycle
+wait and no forced refresh.
+
+**Refusals are specific, and are the text smelt relays.** Ineligible shapes come back
+with a reason worth surfacing verbatim (`materialized_view.md` §"No smelt-side
+eligibility"): *"Incremental materialized views do not support the Sort operation."*
+(top-level `ORDER BY`), *"… do not support the Limit operation."*, *"… do not support
+analytic functions or WITH OFFSET."*, *"Incremental materialized view queries may not
+reference the same table more than once."* (self-join, and `UNION ALL` of one table), and
+for an aggregate carrying any further transformation: *"Incremental materialized views
+with aggregation … must output the result of the aggregation directly, without further
+transformation."* Two shapes commonly assumed ineligible are in fact **accepted**:
+`SELECT DISTINCT`, and a plain non-aggregate projection.
+
+**Materialization flips are hazardous in both directions — the finding that changed the
+implementation.** `CREATE OR REPLACE MATERIALIZED VIEW` is refused where a *table* already
+holds the name (*"is not allowed for this operation because it is currently a TABLE"*), so
+the emitter must drop a pre-existing table/view first, exactly as `Backend::execute_model`
+already does defensively for the table/view pair. The reverse is worse: `DROP TABLE IF
+EXISTS` and `DROP VIEW IF EXISTS` both **fail** against a materialized view (*"Cannot drop
+… which has type MATERIALIZED_VIEW. A table was expected."*) — `IF EXISTS` does not rescue
+a wrong-type object, because the object does exist. A model flipping *away* from
+`refresh: materialized_view` therefore hits an error on the ordinary drop path. Nothing
+could hit this before, since no materialized view could exist; introducing the mode
+introduces the hazard, so cleaning up a leftover materialized view belongs to the same
+change.
+
+Dropping the base *table* out from under a live materialized view is accepted, so test
+teardown needs no dependency ordering.
+
 ## Open questions
 
 - **The budget alert is unprovisioned** (see §Provisioned environment). Either accept the

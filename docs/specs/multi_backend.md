@@ -51,7 +51,7 @@ owners: [andrew]
   | `supports_double_colon_cast` (`x::T`) | ✓ | ✗ | ✗ | ✗ |
   | `supports_trailing_commas` | ✓ | ✗ | ✗ | ✓ |
   | `supports_insert_overwrite` | ✗ (emulated) | ✓ | ✓ | ✗ (emulated) |
-  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✗ |
+  | `supports_native_ivm` | ✗ | ✗ | ✗ | ✓ |
   | `supports_retraction` | ✗ | ✗ | ✗ | ✗ |
   | `supports_struct_field_ddl` | ✓ | ✓ | ✗ | ✓ |
   | `supports_alter_column_using` | ✓ | ✗ | ✗ | ✗ |
@@ -101,10 +101,14 @@ Spark, has its own leg of the generative dual-execution harness
 coverage is generative rather than fixed-recipe-only. Every one of that leg's 21 cases passes
 against the live warehouse, measured in a single uninterrupted sweep on 2026-08-21
 (`bash scripts/bigquery-conformance.sh`, `--test-threads=1`: 21 passed / 0 failed / 0 ignored,
-2190.85s). `refresh:
-materialized_view` is excluded: no
-backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
-mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
+2190.85s). `refresh: materialized_view` is covered separately and differently, because
+its correctness is not smelt's to verify: BigQuery is the only backend advertising
+`supports_native_ivm`, and for that mode smelt runs no combiner and keeps no ledger, so the
+generative equivalence oracle has nothing to drive. What is verified instead is the *emission* —
+`materialized_view_parity` asserts against a live warehouse that the object smelt creates is an
+engine-owned `MATERIALIZED VIEW` and not a substituted table, and that an ineligible query is
+refused with the engine's own reason. On the three backends without native IVM the mode
+hard-errors, which is asserted offline. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
 
 **Generative equivalence coverage.** The equivalence invariant
@@ -273,10 +277,10 @@ suite is the executable list):
   capability (Enzyme).
 
 ### Incremental-view-maintenance capabilities
-Two flags describe a backend's participation in maintaining a keyed refresh mode's state; both are `false` on every backend today.
+Two flags describe a backend's participation in maintaining a keyed refresh mode's state.
 
-- **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`keyed`, `versioned`), which maintain their own state with `merge_into` + views on any backend.
-- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `incremental_shapes.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
+- **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (BigQuery materialized views, Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. `true` on BigQuery, `false` on DuckDB and both Spark profiles, where it is a warehouse fact: no native IVM runtime exists to delegate to. Because the flag states what *smelt emits* for a backend, not merely what the engine could support, a backend whose engine has IVM still reads `false` until the emission exists — the flag is never a claim about the warehouse alone. It is *not* consulted for the smelt-driven keyed modes (`keyed`, `versioned`), which maintain their own state with `merge_into` + views on any backend.
+- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`, and `false` even on BigQuery: its materialized views do not invert a prior contribution, and a retraction-shaped query is refused at creation rather than maintained. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `incremental_shapes.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
 
 ### Column-scoped merge and conditional-write capabilities
 
@@ -470,6 +474,18 @@ resolves nested widening to a table rewrite.
   lowered form produces on DuckDB. The offline half of that pair (`smelt-dialect`'s
   `pipe_native`) pins that BigQuery is sent pipes at all — without it the live leg would keep
   passing on lowered SQL, which GoogleSQL also accepts, and prove nothing about the native path.
+- **Delegated maintenance is emitted, never simulated.** Where `supports_native_ivm` is `true`,
+  `refresh: materialized_view` resolves to the engine's own maintained object —
+  `CREATE OR REPLACE MATERIALIZED VIEW` on BigQuery, carrying no `OPTIONS` clause, so the engine's
+  default refresh behaviour is what owns freshness. smelt runs no combiner and writes no
+  reconciliation ledger for these models, and the equivalence invariant is discharged by the
+  engine rather than by smelt's generative oracle (`materialized_view.md` §Constraints item 4).
+  Two consequences are load-bearing. First, substituting an ordinary table would serve *identical
+  rows*, so the live leg asserts the created object's **type**, not its contents — row equality
+  alone would go green against exactly the silent fallback §"No silent fallback" forbids. Second,
+  eligibility is the engine's verdict alone: an unsupported query shape is refused with
+  BigQuery's own message relayed verbatim, never pre-empted by a smelt-side check and never
+  quietly downgraded to a table.
 - **A BigQuery `ColumnScopedMerge` model must have a statically enumerable projection.**
   GoogleSQL has no `UPDATE SET *`, so the whole-row `MERGE` renders its matched arm column by
   column over the model's output projection (§"Whole-row MERGE"). Where that projection is not
@@ -485,14 +501,6 @@ resolves nested widening to a table rewrite.
 - **`NOT MATCHED BY SOURCE` is unexercised.** No emitter produces the clause on any backend, so
   there is nothing to run against a warehouse; the capability row records what GoogleSQL accepts,
   not a path smelt takes. Tracked in `docs/research/20260816-bigquery-backend.md`.
-- **BigQuery advertises `supports_native_ivm: false` despite supporting materialized views.**
-  The warehouse accepts `CREATE MATERIALIZED VIEW` with incremental refresh, so unlike DuckDB
-  and Spark this backend's `false` describes smelt, not the engine: `true` obliges smelt to emit
-  the native maintained object and cede freshness to the engine, and that emission path does not
-  exist. Until it does, `refresh: materialized_view` hard-errors on BigQuery exactly as it does
-  everywhere else. This is the first case where a flag's value is an implementation statement
-  rather than a warehouse one, and it is the reason the matrix cell alone is not a sufficient
-  description. Tracked in `docs/research/20260816-bigquery-backend.md`.
 - **Spark's schema-evolution DDL covers the additive changes only.** Spark has its own generator
   (no generator is shared: bare `VARCHAR` is `DATATYPE_MISSING_SIZE` and `TEXT` is not a type,
   the add is spelled `ADD COLUMNS (…)`, and the name is three-part), which emits the nullable

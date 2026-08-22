@@ -31,11 +31,11 @@ of `prop_type_inference` alongside DuckDB and Spark.
 | D1 | Cross-engine exchange with BigQuery — GCS or nothing | decision | no | done — accepted as Constraint (filesystem-local by design) |
 | D2 | Whether BigQuery gets a CI tier | decision | no | done — accepted as standing decision (no CI tier) |
 | 1 | Schema-evolution DDL for BigQuery | feature | yes | done |
-| 2 | `supports_native_ivm` — emit the maintained object, or keep the `false` | feature | yes | pending |
+| 2 | `supports_native_ivm` — emit the maintained object, or keep the `false` | feature | yes | done |
 | 3 | `ColumnScopedMerge` on an unresolvable projection | decision (+ a missing test) | no | done — accepted as Constraint (ROADMAP #3) |
 | 4 | `dags` non-vacuity self-check on the BigQuery leg | coverage | yes (a sweep) | done |
 | 5 | `supports_pipe_syntax` has no live coverage | coverage | yes (one case) | done |
-| 6 | Conformance sweep vs the one-hour credential window | scaling | yes | pending |
+| 6 | Conformance sweep vs the one-hour credential window | scaling | yes | done (live sweep timing outstanding) |
 | 7 | Stale spec sentence: the keyed-`MERGE` fix *was* confirmed live | docs | no | done |
 
 ## Decisions first
@@ -241,6 +241,49 @@ common case (`derive_projection` returns `None` on any wildcard without consulti
 schema it already holds), and the residual unresolvable cases — external tables, CSV seeds,
 unresolved function-star, `ON`-joins — are each independently closable there.
 
+**Done 2026-08-22 — the emission path was built and the flag flipped.** BigQuery now
+advertises `supports_native_ivm: true` and `refresh: materialized_view` resolves to
+`CREATE OR REPLACE MATERIALIZED VIEW`, with smelt running no combiner and writing no
+reconciliation ledger for those models. The reconciliation skip needed no new code: the
+mode lands in the executor's full-refresh arm, which never touched the ledger.
+
+Every rule is *measured*, not read from docs — `scripts/bigquery-probe-mv.sh` (committed)
+runs the forms against a live warehouse, and three answers changed the design:
+
+- `CREATE OR REPLACE MATERIALIZED VIEW` genuinely **replaces** (a `SUM` definition swapped
+  for `COUNT(*)` changes the served value), so one idempotent statement covers both a
+  re-run and a definition change — no drop-then-create, no create-if-absent branch.
+- **No `OPTIONS` clause is emitted.** `enable_refresh`/`refresh_interval_minutes`/
+  `max_staleness` are all accepted, but refresh is on by default, and inventing a knob here
+  would pre-empt the per-engine physical-strategy modifier `materialized_view.md`
+  deliberately defers.
+- **Materialization flips are hazardous in both directions** — the finding that changed the
+  implementation. `OR REPLACE MATERIALIZED VIEW` is refused where a *table* holds the name,
+  so the emitter drops first; and `DROP TABLE IF EXISTS`/`DROP VIEW IF EXISTS` both *fail*
+  against a materialized view (`IF EXISTS` does not rescue a wrong-type object), so a model
+  flipping *away* from the mode would have errored. Nothing could hit that before, since no
+  materialized view could exist — introducing the mode introduced the hazard, so
+  `BigQueryBackend::execute_model` now clears a leftover materialized view first. The
+  wrong-type tolerance is narrow and reuses the backend's pre-existing `is_wrong_type_error`
+  classifier rather than swallowing arbitrary failures.
+
+Verification: `crates/smelt-cli/tests/materialized_view_parity.rs`, green against the live
+warehouse (2026-08-22, 22.2s), registered in `scripts/bigquery-parity.sh`.
+
+**Non-vacuity — the item-4/5 lesson applied up front.** Row equality proves nothing here:
+a plain `CREATE TABLE` would serve *identical rows*, and that substitution is exactly what
+§"No silent fallback" forbids. So the load-bearing assertion is on the object's **type**,
+read back from `INFORMATION_SCHEMA.TABLES`. Shown load-bearing: swapping the emitter to
+`CREATE OR REPLACE TABLE` fails the leg with `left: Some("BASE TABLE")` — while the row
+assertion downstream would still have passed. A second test pins that an ineligible query
+(top-level `ORDER BY`) is refused with BigQuery's own reason relayed verbatim, asserting on
+the engine's exact phrase rather than on "the run failed", which would have gone green on
+the unrelated dataset race the suite hit on its first live run.
+
+**The two tests must not share a dataset.** They run concurrently and each drops its own
+dataset on the way out; sharing one let the first finisher delete the warehouse under the
+other. Each now carries its own label.
+
 ## Coverage gaps
 
 ### 4 — `dags` non-vacuity self-check on the BigQuery leg
@@ -367,6 +410,39 @@ illusion. Start a sweep on a freshly minted token.
 **Done when.** Either the pool runs concurrently within one window with a fresh
 target table per case, or the case count is a decided number with the reasoning
 recorded — the current state is "undecided", which is the actual defect.
+
+**Done 2026-08-22 — concurrency, not a case cut.** The premise needed correcting
+first: per-case isolation was *already* in place (`bq_conformance_dataset` keys
+every dataset by family + pid + case, and the twin gets its own), and BigQuery's
+table-update burst quota binds per table, so there was nothing shared to contend
+on. Concurrency was blocked by a budgeting bug instead — `PREFLIGHT_ESTIMATE`
+(600s) was checked *independently per test* against the token's remaining window,
+so N concurrent tests would each pass their own budget while the sweep
+collectively needed far more, and the token could expire mid-sweep unwarned.
+Summing that estimate instead would have refused every sweep outright
+(600s x 22 = 13200s against a ~3500s window), because 600s is a coarse ceiling
+roughly six times the real per-test average.
+
+So the unit of budgeting moved from the test to the sweep: `preflight_sweep_once`
+performs one process-wide check against the whole sweep's estimated cost,
+memoized in a `OnceLock` so concurrent first-callers cannot race into two
+evaluations. The estimate is a **decided number with its reasoning recorded** —
+2700s, headroom over the measured 2190.85s all-green sequential run, and
+deliberately a *sequential*-cost ceiling so it stays a safe bound at any
+concurrency; `SMELT_CONFORMANCE_BQ_SWEEP_ESTIMATE_SECS` overrides it because
+raising any `*_CASES` var raises real cost, and an unparseable override is a loud
+error rather than a silent default. `bigquery-conformance.sh` now runs
+`--test-threads=4`, bounded rather than unbounded to stay clear of project-level
+concurrent-query limits — a different constraint from the per-table quota.
+
+Note the sweep now *requires* a freshly minted token by construction: a 45-minute
+budget against a ~58-minute window means a half-spent token is refused up front,
+which is the intended reading of "start a sweep on a freshly minted token".
+
+**Outstanding:** the live wall-clock under concurrency has not been measured yet —
+the change is green offline, but the sweep needs one full run on a fresh token to
+confirm both the new timing and that 4-way concurrency stays clean against the
+warehouse.
 
 ## Documentation
 

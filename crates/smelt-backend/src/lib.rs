@@ -114,6 +114,62 @@ fn build_column_scoped_merge_group(
     )
 }
 
+/// The shared body of [`Backend::execute_model`]'s provided default: drop
+/// whichever materialization kind the model isn't (in case it changed since
+/// the last run), create the requested kind, then report row count and an
+/// optional preview.
+///
+/// This is a free function, not just code inlined into the trait's default
+/// method, because Rust gives an overriding trait impl no way to call back
+/// into the default implementation it replaced — there is no `super`.
+/// `BigQueryBackend::execute_model` needs to run one extra step first
+/// (dropping a leftover materialized view before the ordinary drop/create
+/// pair — `docs/specs/materialized_view.md`, reverse-flip cleanup) and then
+/// run exactly this behaviour; factoring it out here is what lets both the
+/// trait's own default and that override share one implementation instead
+/// of the override duplicating this body.
+pub async fn execute_model_default(
+    backend: &(impl Backend + ?Sized),
+    schema: &str,
+    name: &str,
+    sql: &str,
+    materialization: Materialization,
+    show_preview: bool,
+) -> Result<ExecutionResult, BackendError> {
+    let start = std::time::Instant::now();
+
+    match materialization {
+        Materialization::Table => {
+            // Drop both view and table in case the materialization type changed
+            backend.drop_view_if_exists(schema, name).await?;
+            backend.drop_table_if_exists(schema, name).await?;
+            backend.create_table_as(schema, name, sql).await?;
+        }
+        Materialization::View => {
+            // Drop both table and view in case the materialization type changed
+            backend.drop_table_if_exists(schema, name).await?;
+            backend.drop_view_if_exists(schema, name).await?;
+            backend.create_view_as(schema, name, sql).await?;
+        }
+    }
+
+    let duration = start.elapsed();
+    let row_count = backend.get_row_count(schema, name).await?;
+
+    let preview = if show_preview {
+        Some(backend.get_preview(schema, name, 10).await?)
+    } else {
+        None
+    };
+
+    Ok(ExecutionResult {
+        model_name: name.to_string(),
+        duration,
+        row_count,
+        preview,
+    })
+}
+
 /// Abstract interface for smelt execution backends.
 ///
 /// Backends are responsible for:
@@ -137,6 +193,40 @@ pub trait Backend: Send + Sync {
     /// Create a view from a SQL query.
     async fn create_view_as(&self, schema: &str, name: &str, sql: &str)
         -> Result<(), BackendError>;
+
+    /// Create (or replace) an engine-maintained materialized view from a SQL
+    /// query — the `refresh: materialized_view` delegation target
+    /// (`docs/specs/materialized_view.md`). Freshness is owned by the
+    /// backend's native incremental-view-maintenance runtime, not by smelt.
+    ///
+    /// This is a **provided** method with an erroring default, not a
+    /// required one: `supports_native_ivm` is `false` for every backend
+    /// today (`docs/specs/multi_backend.md`), and a required method would
+    /// force a stub implementation into every test-only mock `Backend`
+    /// (~14 of them) for a capability none of them exercise. A backend that
+    /// actually has native IVM (e.g. BigQuery) overrides this; every other
+    /// backend inherits the default, which reports — via
+    /// [`BackendError::UnsupportedFeature`] — that it has no native IVM,
+    /// matching `docs/specs/materialized_view.md` §"No silent fallback"
+    /// item 1. Callers should not normally reach this default: the
+    /// `supports_native_ivm` capability gate in `smelt-runtime`'s compiler
+    /// refuses the model before any backend call is made; this default is a
+    /// second line of defense, not the primary enforcement point.
+    async fn create_materialized_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        let _ = sql;
+        Err(BackendError::unsupported(
+            self.dialect().name(),
+            format!(
+                "refresh: materialized_view for '{schema}.{name}' — this backend has no \
+                 native incremental-view maintenance"
+            ),
+        ))
+    }
 
     /// Drop a table if it exists.
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError>;
@@ -200,6 +290,13 @@ pub trait Backend: Send + Sync {
     /// Execute a model (drop + create as table or view).
     ///
     /// This is a convenience method that combines drop + create operations.
+    /// The body lives in the free function [`execute_model_default`] rather
+    /// than inline here so a backend that overrides this method can still
+    /// run it after doing its own extra step first — see that function's
+    /// doc comment for why (a trait override has no way to call back into
+    /// the default it replaced). `BigQueryBackend::execute_model` is the
+    /// first such override, cleaning up a leftover materialized view before
+    /// falling through to this behaviour (`docs/specs/materialized_view.md`).
     async fn execute_model(
         &self,
         schema: &str,
@@ -208,38 +305,7 @@ pub trait Backend: Send + Sync {
         materialization: Materialization,
         show_preview: bool,
     ) -> Result<ExecutionResult, BackendError> {
-        let start = std::time::Instant::now();
-
-        match materialization {
-            Materialization::Table => {
-                // Drop both view and table in case the materialization type changed
-                self.drop_view_if_exists(schema, name).await?;
-                self.drop_table_if_exists(schema, name).await?;
-                self.create_table_as(schema, name, sql).await?;
-            }
-            Materialization::View => {
-                // Drop both table and view in case the materialization type changed
-                self.drop_table_if_exists(schema, name).await?;
-                self.drop_view_if_exists(schema, name).await?;
-                self.create_view_as(schema, name, sql).await?;
-            }
-        }
-
-        let duration = start.elapsed();
-        let row_count = self.get_row_count(schema, name).await?;
-
-        let preview = if show_preview {
-            Some(self.get_preview(schema, name, 10).await?)
-        } else {
-            None
-        };
-
-        Ok(ExecutionResult {
-            model_name: name.to_string(),
-            duration,
-            row_count,
-            preview,
-        })
+        execute_model_default(self, schema, name, sql, materialization, show_preview).await
     }
 
     /// Execute a model with incremental materialization support.

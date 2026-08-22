@@ -26,6 +26,7 @@ exec cargo test --no-fail-fast -p smelt-cli --features bigquery \
   --test source_seed \
   --test seed_parity \
   --test materialization_parity \
+  --test materialized_view_parity \
   --test lowering_parity \
   --test pipe_parity \
   --test merge_parity \

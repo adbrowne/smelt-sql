@@ -250,14 +250,18 @@ impl BackendCapabilities {
             // No `INSERT OVERWRITE` in GoogleSQL; partition replacement lowers to a
             // scoped DELETE + INSERT.
             supports_insert_overwrite: false,
-            // BigQuery genuinely supports CREATE MATERIALIZED VIEW with incremental
-            // refresh, so this `false` is an implementation statement, not a warehouse
-            // one: `true` obliges smelt to emit the native maintained object and own
-            // nothing of the refresh loop, and that emission path does not exist yet.
-            // Advertising it before then would turn `refresh: materialized_view` from a
-            // clean hard error into a broken path. Tracked in `multi_backend.md`
-            // §Known Divergences.
-            supports_native_ivm: false,
+            // The one backend that advertises native IVM. smelt emits
+            // `CREATE OR REPLACE MATERIALIZED VIEW` and then owns nothing of the
+            // refresh loop: BigQuery keeps the object current and serves it by
+            // combining the materialized data with a live delta over the base table,
+            // so a read straight after a write already reflects it. smelt runs no
+            // combiner and keeps no ledger for these models
+            // (`materialized_view.md` §Constraints item 4). Eligibility is the
+            // engine's verdict alone — an unsupported query shape is relayed
+            // verbatim, never pre-empted by a smelt-side check.
+            supports_native_ivm: true,
+            // BigQuery's IVM does not invert a prior contribution; retraction-shaped
+            // queries are refused at creation rather than maintained.
             supports_retraction: false,
             supports_struct_field_ddl: true,
             // GoogleSQL has no `USING` clause on ALTER COLUMN at all (syntax error);

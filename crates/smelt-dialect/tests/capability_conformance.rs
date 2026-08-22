@@ -110,7 +110,9 @@ fn every_flag_matches_matrix() {
     cell!(delta, supports_insert_overwrite, true, "Spark(Delta)");
     cell!(parquet, supports_insert_overwrite, true, "Spark(Parquet)");
 
-    // supports_native_ivm — matrix: all ✗ (no backend has native IVM today)
+    // supports_native_ivm — matrix: BigQuery ✓, the rest ✗. On these three the
+    // `false` is a warehouse fact (no native IVM runtime exists to delegate to);
+    // BigQuery's `true` is asserted below.
     cell!(duckdb, supports_native_ivm, false, "DuckDB");
     cell!(delta, supports_native_ivm, false, "Spark(Delta)");
     cell!(parquet, supports_native_ivm, false, "Spark(Parquet)");
@@ -189,10 +191,13 @@ fn every_flag_matches_matrix() {
     cell!(bigquery, supports_trailing_commas, true, "BigQuery");
     cell!(bigquery, supports_insert_overwrite, false, "BigQuery");
     // BigQuery *does* accept CREATE MATERIALIZED VIEW with incremental refresh, so
-    // this cell is false for an implementation reason rather than a warehouse one:
-    // `true` obliges smelt to emit the native maintained object, and that emission
-    // path does not exist. Recorded in `multi_backend.md` §Known Divergences.
-    cell!(bigquery, supports_native_ivm, false, "BigQuery");
+    // The only backend advertising native IVM. `true` obliges smelt to emit the
+    // native maintained object and cede freshness to the engine, which it does:
+    // `CREATE OR REPLACE MATERIALIZED VIEW`, no combiner, no ledger. Live coverage
+    // of the path this flag selects is `crates/smelt-cli/tests/materialized_view_parity.rs`
+    // — which asserts the created object's TYPE, since a substituted table would
+    // serve identical rows.
+    cell!(bigquery, supports_native_ivm, true, "BigQuery");
     cell!(bigquery, supports_retraction, false, "BigQuery");
     cell!(bigquery, supports_struct_field_ddl, true, "BigQuery");
     // No USING clause exists in GoogleSQL — `ALTER COLUMN ... SET DATA TYPE ... USING`
