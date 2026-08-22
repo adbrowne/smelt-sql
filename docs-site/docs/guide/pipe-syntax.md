@@ -222,11 +222,13 @@ FROM (
 
 ## Lowering to standard SQL
 
-Pipe queries lower to standard SQL before reaching the backend. The lowered SQL computes the same relation as the pipe query; backends receive standard SQL regardless of whether the original model used pipe syntax or not.
+Pipe queries lower to standard SQL before reaching the backend, so a backend with no pipe dialect of its own — DuckDB, Spark, PostgreSQL — receives standard SQL regardless of whether the model was authored with pipes. The lowered SQL computes the same relation as the pipe query.
 
 Contiguous stages that fit one query level collapse into a single `SELECT`. Stages that require a new query level (a second `AGGREGATE`, a `WHERE` that follows a `SELECT` whose aliases would be invisible in a same-level `WHERE`) wrap the prior query as a subquery automatically.
 
-This lowering is transparent — you author in pipe style, smelt handles the translation.
+BigQuery has native pipe syntax, so it receives the pipe query as you wrote it, unlowered. Either way the result is the same relation — the same pipe query is run on both a live BigQuery warehouse and DuckDB and checked to produce identical rows.
+
+This is transparent either way — you author in pipe style, and smelt decides per backend whether to translate.
 
 ## Unsupported operators
 

@@ -191,7 +191,7 @@ model instead. See [Schema evolution](schema-evolution.md#backend-capability-mat
 per-operation matrix.
 
 BigQuery is verified against a live warehouse: the fixed-recipe parity suites (materialization,
-seeding, dialect lowering, `MERGE`, incremental refresh, schema evolution) run against a real
+seeding, dialect lowering, pipe syntax, `MERGE`, incremental refresh, schema evolution) run against a real
 BigQuery project, and incremental-model correctness is additionally checked generatively — the
 same recipe pool, run schedules, and equivalence oracle the other backends use, parametrized to
 target BigQuery. Every case in that generative suite passes against a live warehouse. Both suites

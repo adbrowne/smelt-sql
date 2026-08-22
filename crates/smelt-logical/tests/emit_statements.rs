@@ -1079,6 +1079,35 @@ fn presentation_projection_refuses_unresolvable_star() {
     );
 }
 
+/// A pipe query is not a `SELECT_STMT`, but with nothing state-bearing in
+/// scope there is nothing to hide behind a projection — so it round-trips
+/// rather than refusing. Refusing here failed every pipe-query model on
+/// every backend, since this rewrite runs on every compiled model.
+#[test]
+fn presentation_projection_passes_pipe_query_through_without_state_refs() {
+    let state_bearing = BTreeMap::new();
+    let sql = "FROM smelt.models.events |> WHERE amount > 0 |> SELECT user_id";
+    assert_eq!(
+        presentation_projection(sql, &state_bearing).expect("identity path must not refuse"),
+        sql
+    );
+}
+
+/// A pipe query *over* a state-bearing model still refuses — this emitter
+/// only knows how to hide state columns behind a SELECT list, and passing
+/// the pipe query through would leak them. The refusal names the form, so
+/// the message does not blame the user's SQL for being unparseable.
+#[test]
+fn presentation_projection_refuses_pipe_query_over_state_bearing_model() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert("agg".to_string(), vec!["customer_id".to_string()]);
+    let sql = "FROM smelt.models.agg |> WHERE customer_id > 0";
+    assert_eq!(
+        presentation_projection(sql, &state_bearing),
+        Err(PresentationRefusal::PipeQueryOverStateBearingModel)
+    );
+}
+
 /// A string literal containing `*` and a state column name is untouched —
 /// the rewrite locates wildcards via CST location, never a whole-text scan.
 #[test]

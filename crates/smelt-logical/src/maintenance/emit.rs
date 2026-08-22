@@ -2035,6 +2035,12 @@ pub enum PresentationRefusal {
         /// `<qualifier>.*`).
         wildcard: String,
     },
+    /// The SQL is a pipe query (`pipe_sql.md`) reading a state-bearing
+    /// model. This emitter hides state columns behind a SELECT list, and a
+    /// pipe query has none to edit, so passing it through would leak them.
+    /// Distinguished from [`PresentationRefusal::Unparseable`] because the
+    /// SQL parses fine — it is this rewrite that cannot express the hiding.
+    PipeQueryOverStateBearingModel,
 }
 
 impl std::fmt::Display for PresentationRefusal {
@@ -2043,6 +2049,12 @@ impl std::fmt::Display for PresentationRefusal {
             PresentationRefusal::Unparseable => {
                 write!(f, "SQL could not be parsed for presentation projection")
             }
+            PresentationRefusal::PipeQueryOverStateBearingModel => write!(
+                f,
+                "a pipe query cannot hide the decomposed state columns of the model it reads \
+                 behind a presentation projection — rewrite it as a SELECT that names the \
+                 columns it presents"
+            ),
             PresentationRefusal::UnresolvableWildcard { wildcard } => write!(
                 f,
                 "wildcard `{wildcard}` could not be resolved to a FROM/JOIN relation while a \
@@ -2103,6 +2115,25 @@ fn from_relations(from: &smelt_parser::ast::FromClause) -> Vec<Relation> {
         .collect()
 }
 
+/// Whether any table this pipe query reads — its entry `FROM`, a `\|> JOIN`
+/// stage's right side, or a table inside a CTE/subquery — is a model
+/// `state_bearing` names.
+///
+/// Traverses every `TABLE_REF` under the pipe query rather than the entry
+/// `FROM` alone: a pipe query reaching a state-bearing model from any of
+/// those positions would present its state columns just the same, and this
+/// decides a refusal, so it errs wide.
+fn pipe_reads_state_bearing(
+    pipe: &smelt_parser::ast::PipeQuery,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    pipe.syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::TableRef::cast)
+        .filter_map(|table_ref| table_ref_model_name(&table_ref).or_else(|| table_ref.identifier()))
+        .any(|name| state_bearing.contains_key(&name))
+}
+
 /// Rewrite `sql`'s wildcard select items so a state-bearing model's
 /// `__part` state columns never reach a consumer's schema: a wildcard over
 /// a relation `state_bearing` names is expanded to that model's presented
@@ -2134,9 +2165,27 @@ pub fn presentation_projection(
     sql: &str,
     state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Result<String, PresentationRefusal> {
+    // Nothing state-bearing anywhere in the project: there are no columns to
+    // hide, so this rewrite has no work to do and must not judge the SQL's
+    // form. It runs on *every* compiled model, so parsing first and refusing
+    // on a non-SELECT body (a pipe query) failed those models outright.
+    if state_bearing.is_empty() {
+        return Ok(sql.to_string());
+    }
+
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax()).ok_or(PresentationRefusal::Unparseable)?;
-    let select = file.select_stmt().ok_or(PresentationRefusal::Unparseable)?;
+    let Some(select) = file.select_stmt() else {
+        // A pipe query parses cleanly but carries no SELECT list to edit.
+        // Only refuse when it actually reads a state-bearing model.
+        if file
+            .pipe_query()
+            .is_some_and(|pipe| pipe_reads_state_bearing(&pipe, state_bearing))
+        {
+            return Err(PresentationRefusal::PipeQueryOverStateBearingModel);
+        }
+        return Ok(sql.to_string());
+    };
     let list = select
         .select_list()
         .ok_or(PresentationRefusal::Unparseable)?;
