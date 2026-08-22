@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787408450452,
+  "lastUpdate": 1787408453439,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 10.933404,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "be605c41ae55dae411eb47617da7860eff042a08",
+          "message": "Merge pull request #169 from adbrowne/bigquery-backend-research\n\nMerges the BigQuery backend work: research, walking skeleton, and live parity legs.\n\nAlso carries three fixes made while verifying the merge:\n- the python-feature planner test, which the default CI matrix does not build\n- two argument-less format! calls that failed CI's clippy invocation\n- the Spark type oracle, which could not see the errors it classifies (stderr\n  was discarded, and Spark 4 changed its refusal wording)\n\nFollow-up filed as #171 (BigQuery dialect coverage audit).",
+          "timestamp": "2026-08-23T00:16:18+10:00",
+          "tree_id": "17e5ce94294c58c0907cd8f7605dfeec68abf3e5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/be605c41ae55dae411eb47617da7860eff042a08"
+        },
+        "date": 1787408452617,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 31.529613284206818,
+            "unit": "MB/s"
           }
         ]
       }
