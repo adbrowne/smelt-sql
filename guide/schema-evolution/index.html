@@ -3177,7 +3177,7 @@
 <li><strong>Compares schemas</strong> -- parses both the deployed and inferred column types into structured representations and diffs them recursively.</li>
 <li><strong>Classifies changes</strong> -- each change is categorized (column added, type widened, struct field added, etc.) and checked for safety.</li>
 <li><strong>Plans operations</strong> -- safe changes produce ALTER TABLE statements; unsafe changes trigger a full refresh.</li>
-<li><strong>Executes DDL</strong> -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, and Spark+Parquet each have their own code paths.</li>
+<li><strong>Executes DDL</strong> -- the backend-specific DDL is generated and run. DuckDB, Spark+Delta, Spark+Parquet, and BigQuery each have their own code paths.</li>
 </ol>
 <h2 id="configuration">Configuration<a class="headerlink" href="#configuration" title="Permanent link">&para;</a></h2>
 <p>Schema evolution is configured in the model's <strong>SQL frontmatter</strong>. The <code>schema_evolution</code> and <code>columns</code> keys are frontmatter-only — they have no effect if placed under <code>models.&lt;name&gt;:</code> in <code>smelt.yml</code>.</p>
@@ -3337,40 +3337,46 @@
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">struct_pack</span><span class="p">(</span><span class="n">name</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">age</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">age</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="w"> </span><span class="p">:</span><span class="o">=</span><span class="w"> </span><span class="n">email</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">profile</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">...</span>
 </code></pre></div>
 <p>smelt detects the <code>StructFieldAdded</code> change and runs:</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="1:3"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">DuckDB</label><label for="__tabbed_1_2">Spark (Delta)</label><label for="__tabbed_1_3">Spark (Parquet)</label></div>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:4"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><input id="__tabbed_1_4" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">DuckDB</label><label for="__tabbed_1_2">Spark (Delta)</label><label for="__tabbed_1_3">Spark (Parquet)</label><label for="__tabbed_1_4">BigQuery</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">;</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">);</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="n">STRING</span><span class="p">);</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">profile</span><span class="p">.</span><span class="n">email</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">);</span>
-</code></pre></div>
+<p>Not expressible: a v1 Parquet table rejects a qualified path in <code>ADD COLUMNS</code>. The run is
+refused with a message naming the struct column and the field, and needs
+<code>--allow-full-refresh</code> to rebuild the model instead.</p>
+</div>
+<div class="tabbed-block">
+<p>Not expressible: GoogleSQL has no dotted <code>ADD COLUMN</code>, and <code>ALTER COLUMN … SET DATA TYPE</code>
+refuses a struct that gained a field. The run is refused with a message naming the struct
+column and the field, and needs <code>--allow-full-refresh</code> to rebuild the model instead.</p>
 </div>
 </div>
 </div>
 <p>Existing rows get <code>NULL</code> for the new field.</p>
 <h3 id="widening-a-type-inside-a-struct">Widening a type inside a struct<a class="headerlink" href="#widening-a-type-inside-a-struct" title="Permanent link">&para;</a></h3>
 <p>Change a field from INTEGER to BIGINT:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">-- v1: STRUCT(score INTEGER, label VARCHAR)</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1">-- v2: STRUCT(score BIGINT, label VARCHAR)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">-- v1: STRUCT(score INTEGER, label VARCHAR)</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1">-- v2: STRUCT(score BIGINT, label VARCHAR)</span>
 </code></pre></div>
 <div class="tabbed-set tabbed-alternate" data-tabs="2:3"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><input id="__tabbed_2_3" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">DuckDB</label><label for="__tabbed_2_2">Spark (Delta)</label><label for="__tabbed_2_3">Spark (Parquet)</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">score</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">);</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">score</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">);</span>
 </code></pre></div>
 <p>DuckDB handles the INTEGER to BIGINT cast automatically inside the struct.</p>
 </div>
 <div class="tabbed-block">
 <p>Spark cannot ALTER COLUMN TYPE with USING expressions, so smelt performs a <strong>table rewrite</strong>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">stats</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">STRUCT</span><span class="o">&lt;</span><span class="n">score</span><span class="p">:</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="n">STRING</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">DROP</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">stats</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">STRUCT</span><span class="o">&lt;</span><span class="n">score</span><span class="p">:</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">,</span><span class="w"> </span><span class="n">label</span><span class="p">:</span><span class="w"> </span><span class="n">STRING</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">stats</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">DROP</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">tmp_my_table</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">my_table</span><span class="p">;</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
@@ -3380,16 +3386,19 @@
 </div>
 <h3 id="adding-a-field-to-an-array-of-structs">Adding a field to an array-of-structs<a class="headerlink" href="#adding-a-field-to-an-array-of-structs" title="Permanent link">&para;</a></h3>
 <p>Your column is <code>STRUCT(id INTEGER, name VARCHAR)[]</code> and you add a <code>score</code> field:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1">-- v2: STRUCT(id INTEGER, name VARCHAR, score DOUBLE)[]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">-- v2: STRUCT(id INTEGER, name VARCHAR, score DOUBLE)[]</span>
 </code></pre></div>
 <div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">DuckDB</label><label for="__tabbed_3_2">Spark (Delta/Parquet)</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">items</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">,</span><span class="w"> </span><span class="n">score</span><span class="w"> </span><span class="n">DOUBLE</span><span class="p">)[];</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ALTER</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">items</span><span class="w"> </span><span class="k">TYPE</span><span class="w"> </span><span class="n">STRUCT</span><span class="p">(</span><span class="n">id</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">,</span><span class="w"> </span><span class="n">name</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">,</span><span class="w"> </span><span class="n">score</span><span class="w"> </span><span class="n">DOUBLE</span><span class="p">)[];</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
-<p>Spark uses <code>mergeSchema</code> on write for nullable array-of-struct field additions.</p>
+<p>Delta adds the field in place:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="k">catalog</span><span class="p">.</span><span class="k">schema</span><span class="p">.</span><span class="n">my_table</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="n">COLUMNS</span><span class="w"> </span><span class="p">(</span><span class="n">items</span><span class="p">.</span><span class="n">element</span><span class="p">.</span><span class="n">score</span><span class="w"> </span><span class="n">DOUBLE</span><span class="p">);</span>
+</code></pre></div>
+<p>Parquet rejects a qualified path in <code>ADD COLUMNS</code>; the change needs <code>--allow-full-refresh</code>.</p>
 </div>
 </div>
 </div>
@@ -3439,6 +3448,7 @@
 <th>DuckDB</th>
 <th>Spark + Delta</th>
 <th>Spark + Parquet</th>
+<th>BigQuery</th>
 </tr>
 </thead>
 <tbody>
@@ -3447,35 +3457,55 @@
 <td>ALTER TABLE</td>
 <td>ALTER TABLE</td>
 <td>ALTER TABLE</td>
+<td>ALTER TABLE</td>
+</tr>
+<tr>
+<td>Add nullable column with a <code>default:</code></td>
+<td>ALTER TABLE</td>
+<td>ALTER TABLE, then UPDATE</td>
+<td>Full refresh</td>
+<td>ALTER TABLE, SET DEFAULT, then UPDATE</td>
 </tr>
 <tr>
 <td>Add NOT NULL column (with default)</td>
 <td>ALTER TABLE</td>
-<td>ALTER TABLE</td>
+<td>Full refresh</td>
+<td>Full refresh</td>
 <td>Full refresh</td>
 </tr>
 <tr>
 <td>Remove column</td>
 <td>ALTER TABLE</td>
-<td>ALTER TABLE (column mapping)</td>
+<td>Table rewrite</td>
 <td>Full refresh</td>
+<td>ALTER TABLE</td>
 </tr>
 <tr>
 <td>Widen scalar type</td>
 <td>ALTER COLUMN TYPE</td>
-<td>ALTER COLUMN TYPE (safe widenings)</td>
-<td>Full refresh (most types)</td>
+<td>Table rewrite</td>
+<td>Full refresh</td>
+<td>ALTER COLUMN SET DATA TYPE (nullable columns)</td>
+</tr>
+<tr>
+<td>Relax NOT NULL to nullable</td>
+<td>ALTER COLUMN</td>
+<td>ALTER COLUMN DROP NOT NULL</td>
+<td>Full refresh</td>
+<td>ALTER COLUMN DROP NOT NULL</td>
 </tr>
 <tr>
 <td>Add struct field (nullable)</td>
 <td><code>ADD COLUMN col.field</code></td>
 <td><code>ADD COLUMNS (col.field)</code></td>
-<td><code>ADD COLUMNS (col.field)</code> (metastore)</td>
+<td>Full refresh</td>
+<td>Full refresh</td>
 </tr>
 <tr>
 <td>Remove struct field</td>
 <td><code>DROP COLUMN col.field</code></td>
-<td><code>DROP COLUMN</code> (column mapping)</td>
+<td>Full refresh</td>
+<td>Full refresh</td>
 <td>Full refresh</td>
 </tr>
 <tr>
@@ -3483,27 +3513,32 @@
 <td>ALTER COLUMN TYPE (full struct)</td>
 <td>Table rewrite</td>
 <td>Full refresh</td>
+<td>Full refresh</td>
 </tr>
 <tr>
 <td>Widen array element type</td>
 <td>ALTER COLUMN TYPE</td>
 <td>Table rewrite</td>
 <td>Full refresh</td>
+<td>Full refresh</td>
 </tr>
 <tr>
 <td>Add field to array-of-structs</td>
 <td>ALTER COLUMN TYPE (full type)</td>
-<td>mergeSchema write</td>
-<td>mergeSchema write</td>
+<td><code>ADD COLUMNS (col.element.field)</code></td>
+<td>Full refresh</td>
+<td>Full refresh</td>
 </tr>
 <tr>
 <td>Widen map value type</td>
 <td>ALTER COLUMN TYPE</td>
 <td>Table rewrite</td>
 <td>Full refresh</td>
+<td>Full refresh (no map type)</td>
 </tr>
 <tr>
 <td>Change map key type</td>
+<td>Full refresh</td>
 <td>Full refresh</td>
 <td>Full refresh</td>
 <td>Full refresh</td>
@@ -3513,14 +3548,16 @@
 <td>UPDATE statement</td>
 <td>UPDATE statement</td>
 <td>Full refresh</td>
+<td>UPDATE statement</td>
 </tr>
 </tbody>
 </table>
 <h3 id="recommendations">Recommendations<a class="headerlink" href="#recommendations" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong>DuckDB</strong> has the most complete schema evolution support. All safe changes can be handled with ALTER TABLE.</li>
-<li><strong>Spark + Delta</strong> supports most operations. Use Delta when you need struct field removal (requires column mapping) or type widening inside nested types (via table rewrite).</li>
-<li><strong>Spark + Parquet</strong> is the most limited. Consider switching to Delta format if you need frequent schema changes. Many operations that are safe on Delta require <code>--allow-full-refresh</code> on Parquet.</li>
+<li><strong>Spark + Delta</strong> migrates additive changes in place -- new columns, new struct fields, relaxing <code>NOT NULL</code> -- and expresses the rest as a table rewrite. Three limits are worth knowing before you plan a migration, and all three are properties of the table smelt creates rather than of Delta itself: a column cannot be added <code>NOT NULL</code> or tightened to it; a <code>DEFAULT</code> clause cannot ride on the add, so a <code>default:</code> becomes an <code>UPDATE</code> that fills the rows already there; and dropping or widening a column needs a Delta table feature (<code>columnMapping</code>, <code>enableTypeWidening</code>) that smelt does not turn on, since enabling one irreversibly raises the table's protocol version. Those changes rewrite the table instead, which needs <code>--allow-full-refresh</code>.</li>
+<li><strong>Spark + Parquet</strong> is the most limited: it takes a new nullable column and nothing else. Consider switching to Delta format if you need frequent schema changes. When a run is refused, the reason names the column and the limitation rather than failing mid-migration.</li>
+<li><strong>BigQuery</strong> migrates every flat change -- adding and dropping columns, widening a scalar type, relaxing <code>NOT NULL</code> -- but nothing that reaches inside a struct or array: GoogleSQL has no dotted <code>ADD COLUMN</code>, and its <code>SET DATA TYPE</code> refuses a struct that gained or lost a field. Those changes need <code>--allow-full-refresh</code>. Two GoogleSQL rules are worth knowing before you plan a migration: a column cannot be <em>added</em> <code>NOT NULL</code> (nor tightened to it) at all, and an existing <code>NOT NULL</code> column cannot be widened -- both resolve to a full refresh, with a message naming the column. When a run is refused, the reason names the exact limitation rather than a generic failure.</li>
 </ul>
 <h3 id="table-format-configuration">Table format configuration<a class="headerlink" href="#table-format-configuration" title="Permanent link">&para;</a></h3>
 <p>Spark targets default to Delta format. The target-level <code>format</code> field is set in <code>smelt.yml</code> under the target's config:</p>
