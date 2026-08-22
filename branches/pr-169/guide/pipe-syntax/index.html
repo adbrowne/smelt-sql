@@ -3318,9 +3318,10 @@
 <a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="p">)</span><span class="w"> </span><span class="n">filtered</span>
 </code></pre></div>
 <h2 id="lowering-to-standard-sql">Lowering to standard SQL<a class="headerlink" href="#lowering-to-standard-sql" title="Permanent link">&para;</a></h2>
-<p>Pipe queries lower to standard SQL before reaching the backend. The lowered SQL computes the same relation as the pipe query; backends receive standard SQL regardless of whether the original model used pipe syntax or not.</p>
+<p>Pipe queries lower to standard SQL before reaching the backend, so a backend with no pipe dialect of its own — DuckDB, Spark, PostgreSQL — receives standard SQL regardless of whether the model was authored with pipes. The lowered SQL computes the same relation as the pipe query.</p>
 <p>Contiguous stages that fit one query level collapse into a single <code>SELECT</code>. Stages that require a new query level (a second <code>AGGREGATE</code>, a <code>WHERE</code> that follows a <code>SELECT</code> whose aliases would be invisible in a same-level <code>WHERE</code>) wrap the prior query as a subquery automatically.</p>
-<p>This lowering is transparent — you author in pipe style, smelt handles the translation.</p>
+<p>BigQuery has native pipe syntax, so it receives the pipe query as you wrote it, unlowered. Either way the result is the same relation — the same pipe query is run on both a live BigQuery warehouse and DuckDB and checked to produce identical rows.</p>
+<p>This is transparent either way — you author in pipe style, and smelt decides per backend whether to translate.</p>
 <h2 id="unsupported-operators">Unsupported operators<a class="headerlink" href="#unsupported-operators" title="Permanent link">&para;</a></h2>
 <p>The following pipe operators are not supported. Using one is a hard error, not a silent no-op:</p>
 <table>
