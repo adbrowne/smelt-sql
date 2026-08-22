@@ -990,6 +990,30 @@ mod tests {
         assert!(result.preview.is_none());
     }
 
+    /// `create_materialized_view_as` has no DuckDB override, so it falls
+    /// through to the `Backend` trait's provided default
+    /// (`crates/smelt-backend/src/lib.rs`), which reports that this backend
+    /// has no native incremental-view maintenance — DuckDB's
+    /// `supports_native_ivm` is `false`
+    /// (`docs/specs/materialized_view.md` §"No silent fallback" item 1).
+    #[tokio::test]
+    async fn create_materialized_view_as_default_errors_no_native_ivm() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        let err = backend
+            .create_materialized_view_as("main", "mv", "SELECT 1 as id")
+            .await
+            .unwrap_err();
+
+        let message = err.to_string();
+        assert!(
+            message.contains("no native incremental-view maintenance"),
+            "unexpected error message: {message}"
+        );
+    }
+
     #[tokio::test]
     async fn test_execute_model_view() {
         let temp_dir = TempDir::new().unwrap();
@@ -1066,6 +1090,7 @@ mod tests {
                 "users",
                 "SELECT * FROM (VALUES (1, 'Alice', 200), (2, 'Bob', 150)) AS t(id, name, score)",
                 &["id".to_string()],
+                &[],
             )
             .await
             .unwrap();
@@ -1107,6 +1132,7 @@ mod tests {
                 "items",
                 "SELECT * FROM (VALUES (2, 'B'), (3, 'C')) AS t(id, name)",
                 &["id".to_string()],
+                &[],
             )
             .await
             .unwrap();

@@ -20,13 +20,19 @@
 //! is absent the test passes covering DuckDB only.
 
 mod common;
-use common::{assert_table_parity, fetch_rows, spark_connect_url, targets_to_run, TargetKind};
+use common::{
+    assert_table_parity, bq_target_block, drop_bq_dataset, fetch_rows, spark_connect_url,
+    targets_to_run, TargetKind,
+};
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
 /// Unique Spark schema for this test to avoid conflicts with other Spark tests.
 const SPARK_SCHEMA: &str = "smelt_lower_p2";
+
+/// Scopes this suite's BigQuery dataset, as `SPARK_SCHEMA` does for Spark.
+const BQ_LABEL: &str = "lower_p2";
 
 /// Model SQL exercising five directly-testable Spark lowerings:
 /// - Trailing comma after `rn` in SELECT list (lowering 4 — stripped for Spark)
@@ -66,8 +72,9 @@ fn stage_lowering_workspace(tmp: &TempDir) -> (PathBuf, PathBuf) {
          version: 1\n\
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  \
-         spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n\
-         default_materialization: table\n"
+         spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}\
+         default_materialization: table\n",
+        bq_block = bq_target_block(BQ_LABEL)
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
     std::fs::write(
@@ -133,10 +140,11 @@ fn all_lowerings_execute_on_both_backends() {
     let (root, warehouse) = stage_lowering_workspace(&tmp);
     let db_path = root.join("target/dev.duckdb");
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let (target_name, schema) = match &kind {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
+            TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
         };
 
         let out = run_smelt_run(&root, target_name);
@@ -148,6 +156,7 @@ fn all_lowerings_execute_on_both_backends() {
         );
 
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "lowering_showcase");
+        drop_bq_dataset(&kind);
         assert_table_parity(&actual, &expected_rows(), target_name);
     }
 }

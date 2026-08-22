@@ -49,6 +49,9 @@ fn make_config(db_path: &Path) -> Arc<Config> {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         },
     );
     Arc::new(Config {

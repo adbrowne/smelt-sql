@@ -24,6 +24,9 @@ fn make_target(name: &str) -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 

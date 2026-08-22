@@ -40,6 +40,9 @@ fn duckdb_config_and_target() -> (Config, Target) {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     };
     let mut targets = HashMap::new();
     targets.insert("default".to_string(), target.clone());

@@ -455,6 +455,7 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
                 &source_select,
+                &[],
                 MaintenanceDialect::DuckDb,
             ),
         );
@@ -564,6 +565,7 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
                 &source_select,
+                &[],
                 MaintenanceDialect::DuckDb,
             ),
         );

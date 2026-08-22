@@ -22,6 +22,9 @@ fn duckdb_target() -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 
@@ -35,6 +38,9 @@ fn spark_target_with_url(url: &str) -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 

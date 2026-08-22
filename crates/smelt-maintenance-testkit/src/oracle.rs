@@ -109,6 +109,152 @@ pub async fn multiset_equal_via_backend(
     )
 }
 
+/// The default multiset-difference SQL text: native `EXCEPT ALL`. What every
+/// backend except BigQuery uses
+/// (`smelt_maintenance_testkit::families::ConformanceBackend::multiset_diff_sql`'s
+/// default implementation).
+pub fn except_all_diff_sql(left_sql: &str, right_sql: &str) -> String {
+    format!("({left_sql}) EXCEPT ALL ({right_sql})")
+}
+
+/// GoogleSQL has no `EXCEPT ALL` — only `EXCEPT DISTINCT` (set semantics,
+/// blind to multiplicity, exactly the degradation this module's own doc
+/// comment warns against). This emulates `EXCEPT ALL`'s multiset semantics
+/// without it: rank each row's duplicate copies within its own
+/// identical-row group via `ROW_NUMBER() OVER (PARTITION BY TO_JSON_STRING(t))`
+/// (`t` is the whole-row table alias), then `EXCEPT DISTINCT` the ranked
+/// tuples. A row present N times on `left` and M times on `right` (N > M)
+/// contributes ranks `M+1..=N` as unmatched — exactly `EXCEPT ALL`'s
+/// per-value `max(0, N-M)` count.
+///
+/// The partition key is `TO_JSON_STRING(t)`, not the bare row alias `t`:
+/// measured directly against a live BigQuery warehouse (a dry-run probe,
+/// not read from documentation), `PARTITION BY t` is REJECTED —
+/// "Partitioning by expressions of type STRUCT containing FLOAT64 is not
+/// allowed" — and this harness's recipe pool generates `DOUBLE`/`FLOAT64`
+/// payload columns essentially everywhere, so this is not an edge case.
+/// `EXCEPT ALL` itself was also confirmed rejected ("Only EXCEPT DISTINCT is
+/// supported") and `TO_JSON_STRING(t)` confirmed accepted, on the same
+/// warehouse. This SQL-generation function's shape (not its execution — see
+/// its callers' own tests for why) is asserted by
+/// `tests::bigquery_diff_sql_partitions_by_to_json_string_and_differences_ranked_rows`
+/// below; the live duplicate-only detection proof against BigQuery itself
+/// belongs to the BigQuery conformance leg, which holds the credentials this
+/// module does not. `smelt_maintenance_testkit::families::ConformanceBackend`'s
+/// BigQuery implementation
+/// (`crates/smelt-cli/tests/maintenance_conformance_bigquery/backend.rs`)
+/// calls this rather than reimplementing it inline.
+pub fn bigquery_multiset_diff_sql(left_sql: &str, right_sql: &str) -> String {
+    format!(
+        "SELECT * FROM (SELECT t.*, ROW_NUMBER() OVER (PARTITION BY TO_JSON_STRING(t)) AS \
+         __smelt_dup_rank FROM ({left_sql}) AS t) EXCEPT DISTINCT SELECT * FROM (SELECT t.*, \
+         ROW_NUMBER() OVER (PARTITION BY TO_JSON_STRING(t)) AS __smelt_dup_rank FROM \
+         ({right_sql}) AS t)"
+    )
+}
+
+/// [`except_all_row_count_via_backend`] generalised over the multiset-diff
+/// SQL text itself, rather than hardcoding `EXCEPT ALL` — the seam a
+/// backend without `EXCEPT ALL` (BigQuery) needs. `diff_sql` receives
+/// `(left_sql, right_sql)` and returns a query whose rows are exactly
+/// `left`'s multiset-excess over `right`.
+pub async fn except_all_row_count_via_backend_with_diff(
+    backend: &dyn Backend,
+    left_sql: &str,
+    right_sql: &str,
+    diff_sql: impl Fn(&str, &str) -> String,
+) -> anyhow::Result<i64> {
+    let sql = format!(
+        "SELECT count(*) FROM ({}) AS d",
+        diff_sql(left_sql, right_sql)
+    );
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("multiset diff count query: {e}"))?;
+    let batch = batches
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("multiset diff count query returned no batches"))?;
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .ok_or_else(|| {
+            anyhow::anyhow!("multiset diff count query's count(*) column was not Int64")
+        })?;
+    Ok(counts.value(0))
+}
+
+/// [`multiset_equal_via_backend`] generalised over the multiset-diff SQL
+/// text — the family-facing entry point every shared family routes through
+/// so the diff operator is backend-supplied
+/// (`ConformanceBackend::multiset_diff_sql`), never hardcoded in a family
+/// body.
+pub async fn multiset_equal_via_backend_with_diff(
+    backend: &dyn Backend,
+    left_sql: &str,
+    right_sql: &str,
+    diff_sql: impl Fn(&str, &str) -> String + Copy,
+) -> anyhow::Result<bool> {
+    Ok(
+        except_all_row_count_via_backend_with_diff(backend, left_sql, right_sql, diff_sql).await?
+            == 0
+            && except_all_row_count_via_backend_with_diff(backend, right_sql, left_sql, diff_sql)
+                .await?
+                == 0,
+    )
+}
+
+/// Diagnostic-only counterpart to [`multiset_equal_via_backend_with_diff`]:
+/// fetches a bounded sample of the actual rows that make `left`/`right`
+/// diverge, formatted for a human, rather than only the count the equality
+/// check itself uses. Never used to decide equality — a caller that already
+/// knows `multiset_equal_via_backend_with_diff` returned `false` calls this
+/// afterward to explain *which* rows, since a bare SQL-text mismatch in a
+/// panic message gives no way to tell a genuine value divergence from a
+/// dialect-rendering quirk (the gap that made a live BigQuery equivalence
+/// failure hard to triage from the log alone — `assert_equivalence_for_with_edit`
+/// in `crates/smelt-maintenance-testkit/src/families/gate.rs`). `limit`
+/// bounds each direction's row fetch so a large divergence does not flood
+/// the panic message.
+pub async fn describe_multiset_diff_via_backend(
+    backend: &dyn Backend,
+    left_sql: &str,
+    right_sql: &str,
+    diff_sql: impl Fn(&str, &str) -> String,
+    limit: usize,
+) -> anyhow::Result<String> {
+    let left_extra = fetch_diff_sample(backend, &diff_sql(left_sql, right_sql), limit).await?;
+    let right_extra = fetch_diff_sample(backend, &diff_sql(right_sql, left_sql), limit).await?;
+    Ok(format!(
+        "rows present in left but not right (up to {limit}):\n{left_extra}\n\
+         rows present in right but not left (up to {limit}):\n{right_extra}"
+    ))
+}
+
+/// [`describe_multiset_diff_via_backend`]'s one-direction row fetch: runs
+/// `diff_query` (already the excess-of-left-over-right shape a `diff_sql`
+/// closure produces), caps it with `LIMIT limit`, and pretty-prints the
+/// resulting batches. `"  (none)"` when the direction has no divergent rows
+/// (an empty result set, or a query that returned zero record batches).
+async fn fetch_diff_sample(
+    backend: &dyn Backend,
+    diff_query: &str,
+    limit: usize,
+) -> anyhow::Result<String> {
+    let sql = format!("SELECT * FROM ({diff_query}) AS d LIMIT {limit}");
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("multiset diff sample query: {e}"))?;
+    if batches.is_empty() || batches.iter().all(|b| b.num_rows() == 0) {
+        return Ok("  (none)".to_string());
+    }
+    let formatted = arrow::util::pretty::pretty_format_batches(&batches)
+        .map_err(|e| anyhow::anyhow!("format diff sample batches: {e}"))?;
+    Ok(formatted.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,6 +385,222 @@ mod tests {
             .await
             .expect("divergent-multiset comparison must not error"),
             "the Backend-routed oracle must flag the seeded divergence, exactly like the raw-Connection oracle"
+        );
+    }
+
+    /// `except_all_diff_via_with_diff_plumbing_detects_a_duplicate_only_divergence`:
+    /// the executed proof for the DEFAULT diff operator
+    /// ([`except_all_diff_sql`], native `EXCEPT ALL` — what DuckDB and
+    /// Spark's `ConformanceBackend` impls use) reached through the same
+    /// `*_with_diff` plumbing every shared family routes through (not the
+    /// plain `multiset_equal_via_backend`/`except_all_row_count_via_backend`
+    /// pair `duplicated_identical_row_is_visible_to_except_all_but_not_except`
+    /// above already covers) — so the seam itself, not just the diff
+    /// function in isolation, is proven to still catch a duplicate-only
+    /// divergence (two copies of a row on one side, one on the other).
+    #[tokio::test]
+    async fn except_all_diff_via_with_diff_plumbing_detects_a_duplicate_only_divergence() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+
+        for stmt in [
+            "CREATE TABLE main.left_t(id BIGINT, val DOUBLE)",
+            // left has (1, 10.0) TWICE — the duplicate-only divergence class
+            // a degraded EXCEPT DISTINCT comparison would go blind to.
+            "INSERT INTO main.left_t VALUES (1, 10.0), (1, 10.0)",
+            "CREATE TABLE main.right_t(id BIGINT, val DOUBLE)",
+            "INSERT INTO main.right_t VALUES (1, 10.0)",
+        ] {
+            backend
+                .execute_sql(stmt)
+                .await
+                .unwrap_or_else(|e| panic!("seed duplicate-only divergence ({stmt}): {e}"));
+        }
+
+        let left_sql = "SELECT * FROM main.left_t";
+        let right_sql = "SELECT * FROM main.right_t";
+
+        let forward = except_all_row_count_via_backend_with_diff(
+            &backend,
+            left_sql,
+            right_sql,
+            except_all_diff_sql,
+        )
+        .await
+        .expect("except-all-diff forward count must not error");
+        assert_eq!(
+            forward, 1,
+            "the default diff operator, reached through the with_diff plumbing, must surface \
+             exactly the one extra duplicate"
+        );
+
+        let backward = except_all_row_count_via_backend_with_diff(
+            &backend,
+            right_sql,
+            left_sql,
+            except_all_diff_sql,
+        )
+        .await
+        .expect("except-all-diff backward count must not error");
+        assert_eq!(
+            backward, 0,
+            "right has no rows left has not — the backward diff must be empty"
+        );
+
+        assert!(
+            !multiset_equal_via_backend_with_diff(
+                &backend,
+                left_sql,
+                right_sql,
+                except_all_diff_sql
+            )
+            .await
+            .expect("except-all-diff multiset_equal must not error"),
+            "the with_diff-routed oracle must flag the seeded duplicate-only divergence"
+        );
+
+        // Equal multisets in different physical order must still compare
+        // equal — routing through with_diff must not introduce a false
+        // positive either.
+        backend
+            .execute_sql("DELETE FROM main.left_t")
+            .await
+            .expect("clear left_t");
+        for stmt in [
+            "INSERT INTO main.left_t VALUES (1, 10.0), (2, 20.0)",
+            "DELETE FROM main.right_t",
+            "INSERT INTO main.right_t VALUES (2, 20.0), (1, 10.0)",
+        ] {
+            backend
+                .execute_sql(stmt)
+                .await
+                .unwrap_or_else(|e| panic!("reseed equal multisets ({stmt}): {e}"));
+        }
+        assert!(
+            multiset_equal_via_backend_with_diff(
+                &backend,
+                left_sql,
+                right_sql,
+                except_all_diff_sql
+            )
+            .await
+            .expect("except-all-diff equal-multiset comparison must not error"),
+            "equal multisets in different physical order must still compare equal under the \
+             with_diff plumbing"
+        );
+    }
+
+    /// `bigquery_diff_sql_partitions_by_to_json_string_and_differences_ranked_rows`:
+    /// an OFFLINE shape assertion over [`bigquery_multiset_diff_sql`]'s
+    /// generated text — this function is NOT executed here. DuckDB has no
+    /// `TO_JSON_STRING`, so there is no honest local executor for it; its
+    /// live duplicate-only detection proof belongs to the BigQuery
+    /// conformance leg (which holds the credentials this module does not).
+    /// This test only pins the shape [`bigquery_multiset_diff_sql`]'s own
+    /// doc comment promises: partition by `TO_JSON_STRING(t)` (not the bare
+    /// row alias — BigQuery rejects partitioning by a STRUCT containing
+    /// FLOAT64, which this harness's DOUBLE/FLOAT64 payload columns hit
+    /// essentially everywhere), rank via `ROW_NUMBER()`, and difference with
+    /// `EXCEPT DISTINCT` — never GoogleSQL's unsupported `EXCEPT ALL`.
+    #[test]
+    fn bigquery_diff_sql_partitions_by_to_json_string_and_differences_ranked_rows() {
+        let sql = bigquery_multiset_diff_sql("SELECT * FROM l", "SELECT * FROM r");
+        assert!(
+            sql.contains("PARTITION BY TO_JSON_STRING(t)"),
+            "must partition by TO_JSON_STRING(t), not the bare row alias — BigQuery rejects \
+             partitioning by a STRUCT containing FLOAT64: {sql:?}"
+        );
+        assert!(
+            sql.contains("ROW_NUMBER()"),
+            "must rank duplicate copies within their identical-row group: {sql:?}"
+        );
+        assert!(
+            sql.contains("EXCEPT DISTINCT"),
+            "must difference the ranked rows with EXCEPT DISTINCT: {sql:?}"
+        );
+        assert!(
+            !sql.contains("EXCEPT ALL"),
+            "must never emit EXCEPT ALL — GoogleSQL does not support it: {sql:?}"
+        );
+    }
+
+    /// `describe_multiset_diff_via_backend_names_the_offending_rows`: the
+    /// diagnostic helper must surface the ACTUAL divergent row values (not
+    /// just a count) in both directions, and report "(none)" for a
+    /// direction with no divergence — the gap that made a live BigQuery
+    /// equivalence failure ("maintained SQL != oracle SQL") hard to triage
+    /// from the panic message alone, since only the two SQL texts were
+    /// printed, never the rows they actually returned.
+    #[tokio::test]
+    async fn describe_multiset_diff_via_backend_names_the_offending_rows() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open DuckDbBackend");
+
+        for stmt in [
+            "CREATE TABLE main.left_t(id BIGINT, val DOUBLE)",
+            // left is missing the recomputed (1, -284.5) row a partition
+            // re-run should have produced and instead still carries the
+            // stale (1, -576.0) — the exact "matched-arm didn't write"
+            // shape this helper needs to make legible.
+            "INSERT INTO main.left_t VALUES (1, -576.0), (2, 503.0)",
+            "CREATE TABLE main.right_t(id BIGINT, val DOUBLE)",
+            "INSERT INTO main.right_t VALUES (1, -284.5), (2, 503.0)",
+        ] {
+            backend
+                .execute_sql(stmt)
+                .await
+                .unwrap_or_else(|e| panic!("seed offending-row fixture ({stmt}): {e}"));
+        }
+
+        let left_sql = "SELECT * FROM main.left_t";
+        let right_sql = "SELECT * FROM main.right_t";
+
+        let desc = describe_multiset_diff_via_backend(
+            &backend,
+            left_sql,
+            right_sql,
+            except_all_diff_sql,
+            20,
+        )
+        .await
+        .expect("describe_multiset_diff_via_backend must not error");
+
+        assert!(
+            desc.contains("-576"),
+            "must name the stale left-only row's actual value, not just report a count: {desc}"
+        );
+        assert!(
+            desc.contains("-284.5"),
+            "must name the missing right-only row's actual value: {desc}"
+        );
+        assert!(
+            !desc.contains("503"),
+            "the (2, 503.0) row is present on both sides and must not appear in either \
+             direction's sample: {desc}"
+        );
+
+        // Equal multisets must report "(none)" in both directions rather
+        // than an empty/blank sample that reads as "the helper found
+        // nothing to show" ambiguously.
+        let equal_desc = describe_multiset_diff_via_backend(
+            &backend,
+            right_sql,
+            right_sql,
+            except_all_diff_sql,
+            20,
+        )
+        .await
+        .expect("describe_multiset_diff_via_backend on equal relations must not error");
+        assert!(
+            equal_desc.contains("(none)"),
+            "an empty divergence direction must read as \"(none)\", not a blank sample: \
+             {equal_desc}"
         );
     }
 }

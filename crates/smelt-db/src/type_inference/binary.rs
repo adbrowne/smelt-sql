@@ -137,6 +137,26 @@ fn promote_numeric_operands_for_op(
         }
     }
 
+    // Division with exactly one operand of genuinely unresolved type (`None`,
+    // e.g. a `CAST(... AS <type the portable parser doesn't recognise>)`, NOT
+    // `Some(Unknown)`) must not silently adopt the other, known operand's
+    // type. The catch-all match at the bottom of this function matches on
+    // whichever side IS `Some`, regardless of the other side — sound for
+    // `+`/`-`/`*` only insofar as those already get their own explicit
+    // handling above/below, but for `/` it previously produced a concrete,
+    // confidently wrong result (e.g. `<unresolved> / 2` inferring `SmallInt`
+    // from the literal `2` alone). Surfaced live: BigQuery's `MEDIAN`
+    // lowering (`crates/smelt-dialect/src/printer.rs::print_bigquery_median`)
+    // emits `(CAST(x AS FLOAT64) + CAST(y AS FLOAT64)) / 2`; `FLOAT64` is a
+    // GoogleSQL spelling `smelt_types::parse_type` doesn't recognise, so both
+    // operands resolve to `None`, and this fallback used to type the whole
+    // expression `SmallInt` — `smelt-runtime`'s `apply_type_casts` then
+    // wrapped an exact-median value in `CAST(med_val AS SMALLINT)`, rounding
+    // interpolated medians (`-284.5` → `-285`) before they left BigQuery.
+    if op == "/" && left.is_none() != right.is_none() {
+        return None;
+    }
+
     // Spec §15 division rejection: division with a Decimal operand is not in the
     // portable surface (engines disagree on the result family). Return Unknown
     // early so the type is consistent with the TypeMismatch diagnostic emitted by

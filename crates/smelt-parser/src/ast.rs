@@ -1508,6 +1508,24 @@ impl SelectItem {
         }) && self.expression().is_none()
     }
 
+    /// Whether this select item is a `smelt.<path>(args).*` struct-spread
+    /// call (a [`SyntaxKind::SMELT_PATH_CALL_STAR`] node anywhere under this
+    /// item). Like a bare `*`, this item expands to however many columns the
+    /// called function's struct return type has — a count only knowable
+    /// once the call is resolved and printed, never from this item alone.
+    /// Neither [`Self::is_wildcard`] (its STAR token is nested inside the
+    /// `SMELT_PATH_CALL_STAR` node, not a direct child of this item) nor
+    /// [`Self::expression`] (`SMELT_PATH_CALL_STAR` is not an `Expr`
+    /// variant) sees this shape, so a caller deriving a select list's
+    /// column count/names (e.g. a projection consumer that must agree with
+    /// what the printer will actually emit) needs this dedicated check
+    /// alongside `is_wildcard`.
+    pub fn is_struct_spread_call(&self) -> bool {
+        self.0
+            .descendants()
+            .any(|n| n.kind() == SyntaxKind::SMELT_PATH_CALL_STAR)
+    }
+
     /// If this select item is a qualified wildcard `<qualifier>.*`,
     /// return the qualifier identifier text. Returns `None` for a bare
     /// `*` (see [`Self::is_wildcard`]) or any non-wildcard item.
@@ -5083,6 +5101,63 @@ mod tests {
             tz.syntax().text().to_string().trim(),
             "'est'",
             "as_at_time_zone on the outer chained node must wrap that node, not the inner one"
+        );
+    }
+
+    /// `is_struct_spread_call` must recognize a `smelt.<path>(args).*`
+    /// select item, must NOT mistake a bare `*` or an ordinary select item
+    /// for one, and must NOT mistake a plain (non-`.*`) `smelt.<path>(args)`
+    /// call for one either.
+    #[test]
+    fn is_struct_spread_call_detects_only_the_smelt_path_call_star_shape() {
+        let src = "SELECT id, smelt.functions.parse_event(payload).*, smelt.functions.other(x), y \
+             FROM t";
+        let parsed = parse(src);
+        assert!(parsed.errors.is_empty(), "errors: {:?}", parsed.errors);
+        let select_list = parsed
+            .syntax()
+            .descendants()
+            .find_map(SelectList::cast)
+            .expect("must find SELECT_LIST");
+        let items: Vec<SelectItem> = select_list.items().collect();
+        assert_eq!(items.len(), 4, "items: {items:?}");
+
+        assert!(
+            !items[0].is_struct_spread_call(),
+            "a plain column reference must not be treated as a struct spread"
+        );
+        assert!(
+            items[1].is_struct_spread_call(),
+            "smelt.<path>(args).* must be detected as a struct spread"
+        );
+        assert!(
+            !items[2].is_struct_spread_call(),
+            "a plain smelt.<path>(args) call (no trailing .*) must not be \
+             treated as a struct spread"
+        );
+        assert!(
+            !items[3].is_struct_spread_call(),
+            "a plain column reference must not be treated as a struct spread"
+        );
+
+        let bare_star = parse("SELECT * FROM t");
+        assert!(
+            bare_star.errors.is_empty(),
+            "errors: {:?}",
+            bare_star.errors
+        );
+        let star_item = bare_star
+            .syntax()
+            .descendants()
+            .find_map(SelectItem::cast)
+            .expect("must find a SELECT_ITEM");
+        assert!(
+            star_item.is_wildcard(),
+            "sanity check: bare `*` must still be a wildcard"
+        );
+        assert!(
+            !star_item.is_struct_spread_call(),
+            "a bare `*` is a wildcard, not a struct spread"
         );
     }
 }

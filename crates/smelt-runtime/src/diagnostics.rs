@@ -604,6 +604,7 @@ fn build_technique_statements(
                 &table_name,
                 unique_key,
                 &compiled.sql,
+                &compiled.output_columns,
                 dialect,
             ))
         }
@@ -1030,6 +1031,9 @@ mod tests {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         }
     }
 

@@ -1,0 +1,249 @@
+//! `BigQueryConformanceBackend` — the BigQuery-arm implementation of
+//! `smelt_maintenance_testkit::families::ConformanceBackend`
+//! (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 5). Every
+//! `#[test]` wrapper in this binary constructs one (naming the family it
+//! belongs to, so datasets from different families never collide) and calls
+//! the matching `families::<family>::run_<family>` entry point — the family
+//! bodies themselves never know they are talking to BigQuery.
+//!
+//! Unlike Spark's one persistent schema shared by every case
+//! (`SparkConformanceBackend::target`), a `BigQueryConformanceBackend`
+//! derives a FRESH dataset per case
+//! (`smelt_maintenance_testkit::recipe::bq_conformance_dataset`) — the design
+//! Phase 2 built the `ConformanceTarget::BigQuery { dataset }` seam for.
+//! `open_backend` now takes `case`, so this implementation opens the same
+//! per-case dataset `target`/`schema` already resolve, rather than guessing
+//! or refusing. The mixed-dimension staging path
+//! (`smelt_maintenance_testkit::families::gate_mixed::stage_mixed_recipe_for`
+//! and `families::pinned`'s mixed/g-10 hazard cases) also no longer
+//! hardcodes Delta-only `USING DELTA` DDL — it splices
+//! `ConformanceBackend::storage_clause()` (empty for BigQuery) after its
+//! column lists instead. The multiset-equality oracle's diff operator also
+//! moved onto this trait (`multiset_diff_sql`, overridden below with
+//! `smelt_maintenance_testkit::oracle::bigquery_multiset_diff_sql`'s
+//! row-ranking emulation of `EXCEPT ALL`, which GoogleSQL lacks), so every
+//! wrapper in this binary that reaches a live comparison now emits
+//! GoogleSQL-valid SQL rather than a syntax error for THIS operator
+//! specifically. Confirmed live (2026-08-17): none of the above three fixes
+//! is implicated in any of the first live run's 14 failures — see `main.rs`'s
+//! doc comment for the three further defects the run surfaced instead
+//! (`s_tracker.rs`'s `VALUES`-table-constructor oracle materialization,
+//! `smelt-runtime`'s `ephemeral_seed_ctes` compiler path hitting the same
+//! GoogleSQL gap, and `families::dags`'s two-project-per-case dataset
+//! collision), none of which is this file's own code.
+
+use std::path::Path;
+
+use smelt_backend::Backend;
+use smelt_maintenance_testkit::bigquery_session::{
+    pace, preflight_sweep_once, resolve_sweep_estimate, TABLE_MODIFICATION_PACING,
+};
+use smelt_maintenance_testkit::families::ConformanceBackend;
+use smelt_maintenance_testkit::recipe::{
+    bq_conformance_dataset, bq_project, ConformanceTarget, ModelRecipe,
+};
+use smelt_maintenance_testkit::s_tracker::STracker;
+
+// (No per-test preflight-estimate constant here anymore — see
+// `preflight_or_panic`'s doc comment for why the unit of budgeting moved to
+// the whole sweep, resolved by
+// `smelt_maintenance_testkit::bigquery_session::resolve_sweep_estimate`.)
+
+/// Pure predicate behind [`ConformanceBackend::skip_reason`] — credentials
+/// ABSENT (no project configured at all) is the only condition that skips
+/// green, mirrors `bq_env`'s convention (`crates/smelt-cli/tests/common/mod.rs`)
+/// and `docs/specs/multi_backend.md` §Surface's `SMELT_BQ_PROJECT` entry. A
+/// project set but a missing/expired/invalid token is deliberately NOT a
+/// skip: that surfaces as a loud failure from `preflight_or_panic` or from
+/// the live connection attempt itself (`classify_bq_error`'s `Auth` class),
+/// never silently absorbed. Factored out as a pure function (rather than
+/// asserted only through `skip_reason` on a live-constructed backend) so
+/// `skips_green_when_SMELT_BQ_PROJECT_is_unset` can assert this WITHOUT
+/// mutating process-global environment state (which would race against every
+/// other test in this binary reading the same variable).
+pub fn skip_reason_for_project(project: Option<&str>) -> Option<String> {
+    if project.is_none() {
+        Some("SMELT_BQ_PROJECT unset".to_string())
+    } else {
+        None
+    }
+}
+
+pub struct BigQueryConformanceBackend {
+    /// Names the family this backend instance belongs to
+    /// (`bq_conformance_dataset`'s `family` argument) — keeps two families'
+    /// datasets apart the same way `SPARK_CONFORMANCE_SCHEMA` keeps every
+    /// Spark case in one fixed schema, except BigQuery additionally varies
+    /// per `case` within a family.
+    family: &'static str,
+}
+
+impl BigQueryConformanceBackend {
+    pub fn new(family: &'static str) -> Self {
+        Self { family }
+    }
+
+    /// Refuse to start a sweep the current token cannot outlive.
+    ///
+    /// Called once at the top of every `#[test]` wrapper, after the
+    /// `skip_reason` check (credentials absent ⇒ skip green; credentials
+    /// present but the token's window is too short ⇒ this panics, a loud
+    /// failure, never a skip).
+    ///
+    /// This used to check each `#[test]`'s OWN small estimated cost
+    /// (`PREFLIGHT_ESTIMATE`, a uniform per-test ceiling) against the token's
+    /// remaining window, which is why the sweep had to run
+    /// `--test-threads=1`: the per-test check answers "can this one test's
+    /// estimated cost fit?", not "can the whole sweep finish?" — every test
+    /// could independently pass its own small budget while the sweep as a
+    /// whole still needed far more than the window, silently risking the
+    /// token expiring mid-sweep with no test ever having been warned. That
+    /// made it unsafe to unpin `--test-threads`, since concurrency only
+    /// makes MORE of the sweep's total cost land inside the SAME window, not
+    /// less.
+    ///
+    /// The unit of budgeting is now the sweep as a whole, not the
+    /// individual test: [`preflight_sweep_once`] evaluates the check exactly
+    /// once per process (memoized), against
+    /// [`resolve_sweep_estimate`]'s sequential-cost ceiling for the ENTIRE
+    /// sweep — see that function's doc comment for the 2700 s default and
+    /// its derivation. Every `#[test]` wrapper still calls this method (the
+    /// method name and `&self` signature are unchanged so no call site
+    /// needed to move), but only the first call across the whole process
+    /// actually evaluates anything; every later call, from any thread, reuses
+    /// that one result. This is what makes running the sweep with more than
+    /// one thread safe: `scripts/bigquery-conformance.sh` no longer pins
+    /// `--test-threads=1`.
+    pub fn preflight_or_panic(&self) {
+        let sweep_estimate = resolve_sweep_estimate(
+            std::env::var(smelt_maintenance_testkit::bigquery_session::SWEEP_ESTIMATE_ENV_VAR)
+                .ok()
+                .as_deref(),
+        )
+        .unwrap_or_else(|e| panic!("BigQuery sweep-estimate resolution failed: {e}"));
+
+        preflight_sweep_once(
+            smelt_maintenance_testkit::bigquery_session::default_token_path(),
+            sweep_estimate,
+        )
+        .unwrap_or_else(|e| {
+            panic!(
+                "BigQuery token preflight failed for family {:?}: {e}",
+                self.family
+            )
+        });
+    }
+}
+
+#[async_trait::async_trait]
+impl ConformanceBackend for BigQueryConformanceBackend {
+    fn target(&self, case: usize) -> ConformanceTarget {
+        ConformanceTarget::BigQuery {
+            dataset: bq_conformance_dataset(self.family, &case.to_string()),
+        }
+    }
+
+    fn schema(&self, case: usize) -> String {
+        bq_conformance_dataset(self.family, &case.to_string())
+    }
+
+    fn twin_target(&self, case: usize) -> ConformanceTarget {
+        // A fresh dataset, distinct from `target(case)`'s
+        // (`docs/plans/20260817-bigquery-generative-conformance.md` Phase
+        // 5b) — `families::dags`'s full-refresh oracle twin must never race
+        // the incremental project to create the same table on the SAME
+        // dataset (`409 Already Exists`).
+        ConformanceTarget::BigQuery {
+            dataset: bq_conformance_dataset(self.family, &format!("{case}-full")),
+        }
+    }
+
+    fn twin_schema(&self, case: usize) -> String {
+        bq_conformance_dataset(self.family, &format!("{case}-full"))
+    }
+
+    fn engine_name(&self) -> &str {
+        "bq"
+    }
+
+    fn skip_reason(&self) -> Option<String> {
+        skip_reason_for_project(bq_project().as_deref())
+    }
+
+    fn corrupt_sql(&self, case: usize, recipe: &ModelRecipe) -> String {
+        // GoogleSQL's `UPDATE` also refuses a bare unconditional statement
+        // with no WHERE unless the target uses `WHERE true` explicitly —
+        // this is unconditional-but-syntactically-legal, mirroring Spark's
+        // own whole-table bump (`SparkConformanceBackend::corrupt_sql`)
+        // rather than DuckDB's subquery-based one.
+        format!(
+            "UPDATE {schema}.{table} SET total = total + 999999 WHERE true",
+            schema = self.schema(case),
+            table = recipe.model_name,
+        )
+    }
+
+    async fn before_step(&self) {
+        // Phase 1's measured per-table modification floor
+        // (`docs/research/20260816-bigquery-backend.md` §"Measured against
+        // the live warehouse"): 3s spacing is the floor at which BigQuery's
+        // table-update burst limit stops binding.
+        pace(TABLE_MODIFICATION_PACING);
+    }
+
+    async fn open_backend(&self, case: usize, _db_path: &Path) -> anyhow::Result<Box<dyn Backend>> {
+        // `ConformanceBackend::open_backend` now takes `case`, so a
+        // per-case-dataset backend no longer has to guess or refuse — it
+        // opens the SAME dataset `target(case)`/`schema(case)` name.
+        smelt_maintenance_testkit::link_c_harness::open_bigquery_backend(&self.schema(case)).await
+    }
+
+    fn multiset_diff_sql(&self, left_sql: &str, right_sql: &str) -> String {
+        // GoogleSQL has no `EXCEPT ALL` — see
+        // `smelt_maintenance_testkit::oracle::bigquery_multiset_diff_sql`'s
+        // own doc comment for the row-ranking emulation this delegates to
+        // (never a degraded `EXCEPT DISTINCT`, which would go blind to a
+        // duplicate-only divergence).
+        smelt_maintenance_testkit::oracle::bigquery_multiset_diff_sql(left_sql, right_sql)
+    }
+
+    fn dialect(&self) -> smelt_core::config::BackendType {
+        // GoogleSQL has no `VALUES` table-value constructor in `FROM`
+        // position — `gate_composed.rs`'s route-3 delta query routes
+        // through `smelt_core::sql::row_set::build_row_set_table`'s portable
+        // `UNION ALL` rewrite for this dialect
+        // (`docs/plans/20260817-bigquery-generative-conformance.md` Phase 7).
+        smelt_core::config::BackendType::BigQuery
+    }
+
+    fn double_type(&self) -> &str {
+        // GoogleSQL has no `DOUBLE` type (`400 Type not found: DOUBLE`,
+        // measured live 2026-08-19 staging `families::pinned`'s g-10 hazard
+        // facts table) — it spells IEEE double precision `FLOAT64`.
+        "FLOAT64"
+    }
+
+    async fn oracle_relation(
+        &self,
+        _backend: &dyn Backend,
+        tracker: &STracker,
+        k: usize,
+    ) -> anyhow::Result<String> {
+        // `CREATE OR REPLACE TEMPORARY VIEW` is refused outright by
+        // GoogleSQL (`400 CREATE TEMP VIEW is unsupported`, measured live
+        // 2026-08-17) — issue NO DDL at all and return an inline derived
+        // table over the SAME portable `S_k` row-set query
+        // `STracker::materialize_s_as_view` would have materialized
+        // (`STracker::s_select_sql`), aliased to the SAME bare name every
+        // family body already substitutes for `smelt.sources.<name>`
+        // (`STracker::oracle_table_name`) — strictly better than the
+        // DuckDB/Spark default even on principle: no round trip, nothing to
+        // clean up (`docs/plans/20260817-bigquery-generative-conformance.md`
+        // Phase 7).
+        Ok(format!(
+            "({}) AS {}",
+            tracker.s_select_sql(k),
+            tracker.oracle_table_name()
+        ))
+    }
+}

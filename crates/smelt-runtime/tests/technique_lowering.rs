@@ -296,6 +296,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         "d",
         "2024-01-01 12:00:00",
         dimension_batch_sql,
+        &[],
         &unconditional(),
         &test_window(),
         &no_retry_policy(),
@@ -466,6 +467,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "d",
         "2024-01-01 00:00:00",
         dimension_batch_sql,
+        &[],
         &unconditional(),
         &test_window(),
         &no_retry_policy(),
@@ -576,6 +578,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &suppression,
         &test_window(),
         &no_retry_policy(),
@@ -608,6 +611,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &suppression,
         &test_window(),
         &no_retry_policy(),
@@ -687,6 +691,7 @@ async fn merge_affected_row_count(
         &key_owned,
         &format!("SELECT * FROM {source}"),
         &compared_owned,
+        &[],
         MaintenanceDialect::DuckDb,
     );
     let batches = backend
@@ -905,6 +910,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &steady_variant,
         &test_window(),
         &no_retry_policy(),
@@ -918,6 +924,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &backfill_variant,
         &test_window(),
         &no_retry_policy(),
@@ -1053,6 +1060,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &natural_variant,
         &test_window(),
         &no_retry_policy(),
@@ -1066,6 +1074,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &pinned_variant,
         &test_window(),
         &no_retry_policy(),
@@ -1465,6 +1474,7 @@ fn max_by_merge_renders_incumbent_comparison() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(
@@ -1522,6 +1532,7 @@ fn once_write_renders_coalesce_target_first() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(
@@ -1572,6 +1583,7 @@ fn snapshot_reconcile_merges_whole_source_no_window() {
         &classification,
         None,
         &unconditional(),
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
     );
 
     assert!(
@@ -3762,6 +3774,7 @@ mod external_source_point_lookup_recompute {
             "event_date",
             &region,
             &body,
+            &body,
             Some("user_id"),
             Some(&closure),
             "raw.events",
@@ -3845,6 +3858,7 @@ mod external_source_point_lookup_recompute {
             "event_date",
             &region,
             &body,
+            &body,
             Some("user_id"),
             Some(&closure),
             "raw.events",
@@ -3923,6 +3937,7 @@ mod external_source_point_lookup_recompute {
             "event_date",
             &region,
             &body,
+            &body,
             Some("user_id"),
             Some(&closure),
             "raw.events",
@@ -3979,6 +3994,9 @@ mod in_place_update_lowering {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
         smelt_core::config::Config {

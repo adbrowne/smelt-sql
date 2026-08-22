@@ -253,6 +253,11 @@ pub enum ModelStrategy {
     },
     /// Keyed merge loop.
     Keyed,
+    /// Engine-maintained materialized view (`refresh: materialized_view`,
+    /// `docs/specs/materialized_view.md`): freshness is owned by the
+    /// backend's native incremental-view maintenance, not by a smelt-driven
+    /// refresh loop.
+    MaterializedView,
     /// Inlined as a CTE into downstream models — not materialized directly.
     Ephemeral,
     /// Excluded from execution.

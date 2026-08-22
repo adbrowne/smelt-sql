@@ -181,18 +181,64 @@ After classifying changes, smelt resolves one `MigrationAction`:
 
 Not all ALTER TABLE operations are supported on all backends:
 
-| Operation | DuckDB | Spark + Delta | Spark + Parquet |
-|-----------|--------|--------------|-----------------|
-| ADD COLUMN (nullable) | ✓ | ✓ | ✓ |
-| ADD COLUMN (NOT NULL) | ✓ | ✗ | ✗ |
-| DROP COLUMN | ✓ | ✓ (column mapping) | ✗ |
-| ALTER COLUMN TYPE (safe widening) | ✓ | Limited | ✗ |
-| ALTER COLUMN NULLABILITY | ✓ | ✗ | ✗ |
-| Struct field addition | ✓ | ✓ (mergeSchema) | ✗ |
-| Struct field removal | ✓ | ✗ | ✗ |
-| Nested type widening | ✓ | ✗ | ✗ |
+| Operation | DuckDB | Spark + Delta | Spark + Parquet | BigQuery |
+|-----------|--------|--------------|-----------------|----------|
+| ADD COLUMN (nullable) | ✓ | ✓ | ✓ | ✓ |
+| ADD COLUMN (nullable, with `default:`) | ✓ | ✓ (add, then `UPDATE`) | ✗ | ✓ (add, `SET DEFAULT`, then `UPDATE`) |
+| ADD COLUMN (NOT NULL) | ✓ | ✗ | ✗ | ✗ |
+| DROP COLUMN | ✓ | Rewrite | ✗ | ✓ |
+| ALTER COLUMN TYPE (safe widening) | ✓ | Rewrite | ✗ | ✓ (scalar, nullable column) |
+| ALTER COLUMN NULLABILITY | ✓ | Relax only | ✗ | Relax only |
+| Struct field addition | ✓ | ✓ | ✗ | ✗ |
+| Struct field removal | ✓ | ✗ | ✗ | ✗ |
+| Nested type widening | ✓ | Rewrite | ✗ | ✗ |
 
-For Spark + Parquet, most changes that require DDL result in `FullRefresh`. For Spark + Delta, complex changes use a `TableRewrite` strategy (CREATE TABLE AS SELECT + DROP + RENAME).
+For Spark + Parquet, every change that requires DDL beyond adding a nullable column results in `FullRefresh`. For Spark + Delta, a change that is not expressible as DDL uses a `TableRewrite` strategy (CREATE TABLE AS SELECT + DROP + RENAME).
+
+Every ✗ in a Spark column resolves to `FullRefreshBlocked` carrying a reason that names the column and the Spark limitation behind it, so a refusal is never silent and never reaches the server as rejected DDL.
+
+Every ✗ in the BigQuery column resolves to `FullRefreshBlocked` carrying a reason that names the column and the GoogleSQL limitation behind it, so a refusal is never silent and never reaches the warehouse as rejected DDL.
+
+### Spark SQL DDL
+
+The Spark rules are stated for the tables smelt creates: `CREATE TABLE … USING DELTA` with no table properties, and plain v1 Parquet. Several forms Delta supports in principle are refused on such a table because they need a table feature smelt does not enable, and enabling one (`delta.columnMapping.mode`, `delta.enableTypeWidening`) is an irreversible protocol upgrade of a user's table that a migration must not make silently. A change smelt cannot express against the deployed table is therefore planned as a rewrite or a full refresh, never as a statement the server will reject mid-run.
+
+| Difference | DuckDB | Spark |
+|---|---|---|
+| Type names | `VARCHAR`, `TEXT` | `STRING` (bare `VARCHAR` is `DATATYPE_MISSING_SIZE`; `TEXT` is not a type) |
+| Adding a column | `ADD COLUMN c t` | `ADD COLUMNS (c t)` |
+| Adding a constrained column | `ADD COLUMN c t NOT NULL DEFAULT e` | neither may ride on the add: `NOT NULL` is refused by both formats, and `DEFAULT` needs Delta's `allowColumnDefaults` feature |
+| Widening | `ALTER COLUMN c TYPE t` | refused without `delta.enableTypeWidening`, the documented-safe integer chain included |
+| Dropping a column | `ALTER TABLE … DROP COLUMN c` | refused without `delta.columnMapping.mode` (Delta) or outright (Parquet v1) |
+| Tightening nullability | `SET NOT NULL` | no legal form — Delta refuses it even on a column holding no NULLs |
+| Relaxing nullability | `DROP NOT NULL` | same form on Delta; unsupported on Parquet |
+| `UPDATE` | any table | Delta only |
+| Naming | `schema.table` | `catalog.schema.table` |
+
+One consequence is semantic rather than syntactic: **a default fills existing rows.** DuckDB's `ADD COLUMN … DEFAULT e` populates the rows already in the table. Delta will not accept the clause at all, so the generator follows the plain add with an `UPDATE … WHERE col IS NULL` — the same shape the GoogleSQL generator uses, for the same reason. Parquet can run neither the fill nor an `UPDATE`, so a `default:` on an added column resolves to a full refresh there.
+
+### GoogleSQL DDL for BigQuery
+
+GoogleSQL differs from the DuckDB generator's SQL in ways that each make the DuckDB statement a hard error rather than a dialect wobble, so BigQuery has its own generator rather than sharing one:
+
+| Difference | DuckDB | GoogleSQL |
+|---|---|---|
+| Type names | `VARCHAR`, `TEXT`, `DOUBLE`, `BLOB`, `CHAR(n)` | `STRING`, `FLOAT64`, `BYTES` (the others are `Type not found`) |
+| Integers | `SMALLINT`/`INTEGER`/`BIGINT` | one `INT64` |
+| Exact decimals | `DECIMAL(p,s)` | `NUMERIC(p,s)` up to 29 integer and 9 fractional digits, `BIGNUMERIC(p,s)` up to 38 and 38 |
+| Composite types | `STRUCT(a INTEGER)`, `T[]`, `MAP(K,V)` | `STRUCT<a INT64>`, `ARRAY<T>`, no map type at all |
+| Widening | `ALTER COLUMN c TYPE t` | `ALTER COLUMN c SET DATA TYPE t` |
+| Value rewrite | `ALTER COLUMN c TYPE t USING expr` | no `USING` clause |
+| Adding a constrained column | `ADD COLUMN c t NOT NULL DEFAULT e` | neither `NOT NULL` nor `DEFAULT` may ride on the add; the default is a following `ALTER COLUMN c SET DEFAULT e` |
+| Tightening nullability | `SET NOT NULL` | no such form — only `DROP NOT NULL` |
+| Nested columns | dotted `ADD COLUMN s.b` | no dotted form; `SET DATA TYPE` requires the old type be *assignable* to the new, which a struct that gained or lost a field is not |
+| `UPDATE` | `WHERE` optional | `WHERE` required |
+| Identifier quoting | `"c"` | `` `c` `` (double quotes are a string literal) |
+
+Two consequences are semantic rather than syntactic:
+
+- **A default fills existing rows.** DuckDB's `ADD COLUMN … DEFAULT e` populates the rows already in the table; a BigQuery default governs only subsequent inserts. The GoogleSQL generator therefore follows the `SET DEFAULT` with an `UPDATE … WHERE col IS NULL`, so the migrated table holds the same values on either backend.
+- **A `REQUIRED` column cannot be widened.** BigQuery refuses `SET DATA TYPE` on a `NOT NULL` column. The generator consults the deployed schema and plans a full refresh for that case up front, rather than letting the run fail on the statement.
 
 DuckDB uses `struct_pack()` expressions to rewrite struct columns during ALTER TABLE for nested type changes and struct field additions or removals.
 
@@ -227,13 +273,16 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
 3. **Unsafe type changes require `--allow-full-refresh`.** Without this flag, narrowing or incompatible changes halt the run.
 4. **Stored schema version increments on each migration.** Version starts at 1 on first deployment and increments by 1 per successful run that changes the schema.
 5. **Map key type changes are always blocked from safe ALTER.** Map key changes are never a safe widening regardless of key types.
-6. **Spark + Parquet receives no ALTER TABLE DDL.** Any schema change on a Parquet-backed Spark table results in either a FullRefresh or TableRewrite.
+6. **Spark + Parquet receives no ALTER TABLE DDL beyond adding a nullable column.** Every other schema change on a Parquet-backed Spark table results in a FullRefresh.
+7. **Spark never receives another backend's DDL.** The whole diff is planned by the Spark generator; a change it cannot express becomes a rewrite or a full refresh naming the column and the limitation, so no statement written in DuckDB's dialect can reach the server.
+8. **BigQuery never receives another backend's DDL.** The whole diff is planned by the GoogleSQL generator; a change it cannot express becomes a full refresh naming the column and the limitation, so no statement written in DuckDB's dialect can reach the warehouse.
 
 ## Known Divergences / Open Questions
 
 - **`.smelt/schemas/` not documented in user guide.** The stored schema directory, its format, its update timing, and its lifecycle are not documented for users. Users who delete it accidentally will see all models reported as `NEW` by `smelt diff`.
 - **`model_hash` not used for change detection.** The stored model SQL hash is recorded but not used by `smelt diff` to decide whether a model needs re-running — only schema column differences trigger migration actions. The principled successor is the *semantic* output-fingerprint (`output_fingerprint.md`): a raw SQL hash over-reports change (any formatting edit re-runs), whereas the fingerprint re-runs only on a genuine output change. Wiring fingerprint-based change detection into reuse is owned by `virtual_environments.md`.
 - **Schema migration and fingerprint reuse are complementary, not alternatives.** A fingerprint match proves *row* equivalence for the same inputs; it does not by itself guarantee the deployed *physical* schema matches. Under `state.mode: environments`, reuse of a table additionally requires that no physical migration is needed, or that one is applied via the `MigrationAction` path here (`virtual_environments.md` §"Reuse decision" condition 4). The two systems compose: this spec classifies the physical change, the fingerprint classifies the logical-output change.
+- **`TableRewrite` is executed as a full refresh, not as a rewrite.** `ddl_spark` produces the rewrite's SELECT expression and `generate_table_rewrite_sql` can render the CREATE/DROP/RENAME sequence, but no run path calls it: the runtime maps a `TableRewrite` action onto the same full-refresh-from-source path as `FullRefresh`, gated on `--allow-full-refresh`. The outcome is correct — the table ends up with the new schema and the model's rows — but it re-reads the sources rather than rewriting the deployed table, which is the more expensive of the two. The rendered sequence would also need the table's format restating (`CREATE TABLE … USING DELTA`) before it could be used, since a bare CTAS lands in the session's default format.
 - **`backfill:` and `default:` undocumented in user guide.** The column evolution annotations are implemented but absent from the schema evolution user guide page.
 - **Struct field reordering detection.** Whether changing struct field order is detected as `IncompatibleTypeChange` or silently ignored depends on the comparison implementation. Current behavior undocumented in user guide.
 - **Exit code for blocked migrations.** When a run is blocked by `RequiresColumnRemovalFlag` or `FullRefreshBlocked`, the exit code is non-zero but the specific code (1 vs. other) is not specified.
@@ -248,8 +297,11 @@ The `USING` clause re-packs the struct field-by-field, applying casts as needed 
   - `crates/smelt-state/src/file_store.rs` — `DeployedSchema`, `.smelt/schemas/` read/write
   - `crates/smelt-cli/src/migration.rs` — `SchemaEvolutionResult`, `check_and_migrate()`, `extract_evolution_maps()`
   - `crates/smelt-cli/src/commands/diff.rs` — `smelt diff` command, JSON output
-  - `crates/smelt-backend-duckdb/src/ddl_duckdb.rs` — DuckDB ALTER TABLE generation, `build_struct_pack_expr()`
-  - `crates/smelt-backend-spark/src/ddl_spark.rs` — Spark DDL generation, `classify_operation()`
+  - `crates/smelt-state/src/ddl_duckdb.rs` — DuckDB ALTER TABLE generation, `build_struct_pack_expr()`
+  - `crates/smelt-state/src/ddl_spark.rs` — Spark DDL generation, `classify_operation()`
+  - `scripts/spark-probe-ddl.sh` — the live probe the Spark rules above were measured with
+  - `crates/smelt-state/src/ddl_bigquery.rs` — GoogleSQL DDL generation, `bigquery_type_sql()`
+  - `scripts/bigquery-probe-ddl.sh` — the live probe the GoogleSQL rules above were measured with
 - **User docs**:
   - `docs-site/docs/guide/schema-evolution.md`
 - **Related specs**:

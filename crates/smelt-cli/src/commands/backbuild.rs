@@ -72,7 +72,8 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let (models, function_files) =
         discover_models_for_run(&discovery, &args.target, &project_dir, &config)?;
-    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+    let ephemeral_seed_ctes =
+        build_ephemeral_seed_ctes(&seeds, resolve_target_backend_type(&config, &args.target)?);
 
     if models.is_empty() {
         return Err(anyhow::anyhow!(

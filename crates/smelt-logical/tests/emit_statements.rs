@@ -295,6 +295,7 @@ fn column_scoped_merge_duckdb_uses_set_star_full_row_projection() {
         &["event_id".to_string()],
         "SELECT event_id, event_date, user_id, event_type, user_name \
          FROM sources_raw_events e JOIN sources_raw_users u ON e.user_id = u.user_id",
+        &[],
         MaintenanceDialect::DuckDb,
     );
 
@@ -322,6 +323,7 @@ fn column_scoped_merge_composite_key_ands_every_column() {
         "cat.db.events",
         &["user_id".to_string(), "event_date".to_string()],
         "SELECT * FROM staging",
+        &[],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -330,6 +332,91 @@ fn column_scoped_merge_composite_key_ands_every_column() {
          target.user_id = source.user_id AND target.event_date = source.event_date \
          WHEN MATCHED THEN UPDATE SET * \
          WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// GoogleSQL has neither `UPDATE SET *` nor `INSERT *`, so the BigQuery
+/// variant spells the matched arm out column by column and uses `INSERT ROW`
+/// for the whole-row insert. Both refusals were established against the live
+/// warehouse (`scripts/bigquery-probe-merge.sh`), not read from documentation:
+/// `UPDATE SET *` fails with `Expected "(" but got "*"`, and `INSERT *` with
+/// `Expected keyword ROW or keyword VALUES but got "*"`.
+///
+/// The explicit `SET` list is the model's full output projection — the same
+/// full-row contract `UPDATE SET *` already imposes on `source_select` — so
+/// this writes exactly the columns the star form would have written.
+#[test]
+fn column_scoped_merge_bigquery_spells_out_the_matched_arm() {
+    let group = emit_column_scoped_merge(
+        "ds.daily_events",
+        &["event_id".to_string()],
+        "SELECT event_id, user_id, event_type FROM staging",
+        &[
+            "event_id".to_string(),
+            "user_id".to_string(),
+            "event_type".to_string(),
+        ],
+        MaintenanceDialect::BigQuery,
+    );
+
+    assert_eq!(group.statements.len(), 1);
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO ds.daily_events AS target USING (SELECT event_id, user_id, event_type FROM \
+         staging) AS source ON target.event_id = source.event_id \
+         WHEN MATCHED THEN UPDATE SET event_id = source.event_id, user_id = source.user_id, \
+         event_type = source.event_type \
+         WHEN NOT MATCHED THEN INSERT ROW"
+    );
+}
+
+/// `columns` is inert on the star-form dialects: passing a column list must
+/// not perturb DuckDB's or Spark's emitted text, which stays byte-identical to
+/// what every backend has always executed.
+#[test]
+fn column_scoped_merge_columns_do_not_affect_star_dialects() {
+    let with_columns = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id, 2 AS v",
+        &["id".to_string(), "v".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    let without_columns = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id, 2 AS v",
+        &[],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(with_columns, without_columns);
+    assert!(with_columns.statements[0]
+        .sql
+        .ends_with("WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *"));
+}
+
+/// The keyed fold already emits an explicit `UPDATE SET` (its fold
+/// expressions), so BigQuery only diverges on the not-matched arm — no column
+/// list is needed to lower it.
+#[test]
+fn keyed_fold_bigquery_uses_insert_row() {
+    let group = emit_keyed_fold(
+        "ds.totals",
+        &["user_id".to_string()],
+        &[(
+            "total".to_string(),
+            "target.total + delta.total".to_string(),
+        )],
+        "SELECT user_id, total FROM staging",
+        None,
+        MaintenanceDialect::BigQuery,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO ds.totals AS target USING (SELECT user_id, total FROM staging) AS delta ON \
+         target.user_id = delta.user_id \
+         WHEN MATCHED THEN UPDATE SET total = target.total + delta.total \
+         WHEN NOT MATCHED THEN INSERT ROW"
     );
 }
 
@@ -345,12 +432,14 @@ fn column_scoped_merge_dialect_invariant_shape() {
         "t",
         &["id".to_string()],
         "SELECT 1 AS id",
+        &[],
         MaintenanceDialect::DuckDb,
     );
     let spark = emit_column_scoped_merge(
         "t",
         &["id".to_string()],
         "SELECT 1 AS id",
+        &[],
         MaintenanceDialect::Spark,
     );
     assert_eq!(duckdb, spark);
@@ -990,6 +1079,35 @@ fn presentation_projection_refuses_unresolvable_star() {
     );
 }
 
+/// A pipe query is not a `SELECT_STMT`, but with nothing state-bearing in
+/// scope there is nothing to hide behind a projection — so it round-trips
+/// rather than refusing. Refusing here failed every pipe-query model on
+/// every backend, since this rewrite runs on every compiled model.
+#[test]
+fn presentation_projection_passes_pipe_query_through_without_state_refs() {
+    let state_bearing = BTreeMap::new();
+    let sql = "FROM smelt.models.events |> WHERE amount > 0 |> SELECT user_id";
+    assert_eq!(
+        presentation_projection(sql, &state_bearing).expect("identity path must not refuse"),
+        sql
+    );
+}
+
+/// A pipe query *over* a state-bearing model still refuses — this emitter
+/// only knows how to hide state columns behind a SELECT list, and passing
+/// the pipe query through would leak them. The refusal names the form, so
+/// the message does not blame the user's SQL for being unparseable.
+#[test]
+fn presentation_projection_refuses_pipe_query_over_state_bearing_model() {
+    let mut state_bearing = BTreeMap::new();
+    state_bearing.insert("agg".to_string(), vec!["customer_id".to_string()]);
+    let sql = "FROM smelt.models.agg |> WHERE customer_id > 0";
+    assert_eq!(
+        presentation_projection(sql, &state_bearing),
+        Err(PresentationRefusal::PipeQueryOverStateBearingModel)
+    );
+}
+
 /// A string literal containing `*` and a state column name is untouched —
 /// the rewrite locates wildcards via CST location, never a whole-text scan.
 #[test]
@@ -1274,6 +1392,76 @@ fn append_only_posture_probe_panics_on_empty_digest_columns() {
     emit_append_only_posture_probe("main.t", "d", &[], &baseline, MaintenanceDialect::DuckDb);
 }
 
+/// The rejection test at the `emit` call site: for
+/// `MaintenanceDialect::BigQuery` the baseline join is never a `FROM
+/// (VALUES …)`/`JOIN (VALUES …)` table-value constructor — GoogleSQL has
+/// none. Asserts the baseline row set in the emitted SQL is byte-for-byte
+/// what `smelt_core::build_row_set_table` itself renders, so a future
+/// hand-rolled (but still VALUES-free) rewrite at this call site would fail
+/// the test rather than pass it vacuously. Uses a two-row baseline — with a
+/// single row the `UNION ALL` join between rows never appears, and an
+/// equality check against the owner's output would hold trivially for
+/// almost any rewrite.
+#[test]
+fn append_only_posture_probe_bigquery_is_not_a_values_constructor() {
+    let baseline = vec![
+        AppendOnlyBaselinePartition {
+            partition_value: "2026-01-01".to_string(),
+            recorded_count: 100,
+            recorded_fingerprint: "abc123".to_string(),
+            check_fingerprint: true,
+        },
+        AppendOnlyBaselinePartition {
+            partition_value: "2026-01-02".to_string(),
+            recorded_count: 42,
+            recorded_fingerprint: "def456".to_string(),
+            check_fingerprint: false,
+        },
+    ];
+    let stmt = emit_append_only_posture_probe(
+        "main.raw_events",
+        "event_date",
+        &["event_id".to_string()],
+        &baseline,
+        MaintenanceDialect::BigQuery,
+    );
+    assert!(
+        !stmt.sql.contains("VALUES"),
+        "BigQuery has no table-value constructor, got: {}",
+        stmt.sql
+    );
+    let expected_baseline_row_set = smelt_core::build_row_set_table(
+        smelt_core::BackendType::BigQuery,
+        "__baseline",
+        &[
+            "partition_value",
+            "recorded_count",
+            "recorded_fingerprint",
+            "check_fingerprint",
+        ],
+        &[
+            vec![
+                "'2026-01-01'".to_string(),
+                "100".to_string(),
+                "'abc123'".to_string(),
+                "TRUE".to_string(),
+            ],
+            vec![
+                "'2026-01-02'".to_string(),
+                "42".to_string(),
+                "'def456'".to_string(),
+                "FALSE".to_string(),
+            ],
+        ],
+    );
+    assert!(
+        stmt.sql.contains(&expected_baseline_row_set),
+        "expected the baseline row set to route through smelt_core::build_row_set_table \
+         verbatim, expected substring: {expected_baseline_row_set}, got: {}",
+        stmt.sql
+    );
+}
+
 #[test]
 #[should_panic(expected = "non-empty recorded baseline")]
 fn append_only_posture_probe_panics_on_empty_baseline() {
@@ -1306,6 +1494,34 @@ fn count_preservation_probe_from_body_splices_out_the_enrichment_join() {
     );
 }
 
+/// A body wrapped exactly the way a type-cast wrap produces it —
+/// `SELECT CAST(..) AS c FROM ( <body> ) _smelt_typed` — must still locate
+/// the enrichment join, one level inside the derived table
+/// (`docs/plans/20260819-source-derived-projection.md` Phase 5). Before
+/// this widening `from_clause.joins()` only ever looked at the outer
+/// `SELECT`'s own joins, which a cast-wrapped body never has — the probe
+/// silently found nothing on every dialect, every run.
+#[test]
+fn count_preservation_probe_from_body_locates_the_join_inside_a_cast_wrap() {
+    let inner = "SELECT f.id, f.amount, d.category FROM main.fact f JOIN main.dim d ON \
+                 f.dim_id = d.id WHERE f.amount > 0";
+    let wrapped = format!(
+        "SELECT CAST(id AS BIGINT) AS id, CAST(amount AS DOUBLE) AS amount, \
+         CAST(category AS VARCHAR) AS category FROM (\n  {inner}\n) _smelt_typed"
+    );
+    let stmt = emit_count_preservation_probe_from_body(&wrapped, "main.dim").expect(
+        "a cast-wrapped body must still locate the enrichment join one level inside the \
+         derived table",
+    );
+    assert_eq!(
+        stmt.sql,
+        "SELECT (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f  WHERE f.amount > 0\n) AS \
+         __smelt_driving) AS driving_count, (SELECT COUNT(*) FROM (SELECT 1 FROM main.fact f \
+         JOIN main.dim d ON f.dim_id = d.id  WHERE f.amount > 0\n) AS __smelt_enriched) AS \
+         enriched_count"
+    );
+}
+
 /// Fail-closed: no top-level `SELECT`, no `FROM` clause, or no join against
 /// the named source all yield `None` rather than a best-effort guess
 /// (`docs/outcomes/20260809-probe-backed-facts/phases/03-plan.md` test 3).
@@ -1321,4 +1537,80 @@ fn count_preservation_probe_from_body_refuses_when_unreconstructable() {
         "main.dim"
     )
     .is_none());
+}
+
+/// The cast-wrap widening ([`select_with_enrichment_join`]) is itself
+/// fail-closed: a cast-wrapped body whose inner select joins a different
+/// source, or whose outer `FROM` isn't a single derived table at all,
+/// still yields `None` rather than a best-effort guess. This is what makes
+/// the widening a genuinely wider *contract*, not a loosened one — it
+/// finds a join that's really there one level down, it does not paper over
+/// a genuine miss.
+#[test]
+fn count_preservation_probe_from_body_cast_wrap_widening_still_fails_closed() {
+    // Wrapped, but the inner join is against a different table.
+    let wrapped_wrong_join = "SELECT CAST(id AS BIGINT) AS id FROM (\n  SELECT f.id FROM \
+                               main.fact f JOIN main.other o ON f.id = o.id\n) _smelt_typed";
+    assert!(
+        emit_count_preservation_probe_from_body(wrapped_wrong_join, "main.dim").is_none(),
+        "a cast-wrapped body whose inner join targets a different source must still refuse"
+    );
+
+    // Wrapped, but the outer FROM has two sources rather than one derived
+    // table — not the cast-wrap shape at all.
+    let wrapped_two_sources = "SELECT a.id FROM (SELECT 1 AS id) a, (SELECT 2 AS id) b";
+    assert!(
+        emit_count_preservation_probe_from_body(wrapped_two_sources, "main.dim").is_none(),
+        "an outer FROM with more than one source must not be treated as a cast wrap"
+    );
+
+    // Wrapped, but the single derived-table source isn't a subquery at all
+    // (a plain table alias) — nothing to recurse into.
+    let plain_alias = "SELECT a.id FROM main.fact a";
+    assert!(
+        emit_count_preservation_probe_from_body(plain_alias, "main.dim").is_none(),
+        "a single plain table source with no join must still refuse, not be mistaken for a \
+         wrapped body"
+    );
+}
+
+/// The single-derived-table widening is gated on the wrap marker alias
+/// (`_smelt_typed`, [`smelt_dialect::TYPE_CAST_WRAP_ALIAS`]) — the exact
+/// shape `wrap_with_type_casts` produces — not on "any single non-joined
+/// derived-table FROM source". A user's own legitimate subquery with the
+/// same outer shape (`SELECT ... FROM (SELECT ... JOIN ...) sub WHERE
+/// <outer filter>`) must fail closed rather than being mistaken for a cast
+/// wrap: matching it would silently drop the outer `WHERE` (the caller
+/// would build driving/enriched selects from the INNER select's `WHERE`,
+/// discarding the outer filter that actually scopes the write), verifying
+/// count-preservation over a different row set than the model actually
+/// writes (`docs/plans/20260819-source-derived-projection.md` Phase 5
+/// review finding).
+#[test]
+fn count_preservation_probe_from_body_refuses_a_user_subquery_that_is_not_a_cast_wrap() {
+    let body = "SELECT sub.id, sub.amount, sub.category FROM (SELECT f.id, f.amount, \
+                d.category FROM main.fact f JOIN main.dim d ON f.dim_id = d.id) sub WHERE \
+                sub.amount > 0";
+    assert!(
+        emit_count_preservation_probe_from_body(body, "main.dim").is_none(),
+        "a derived-table source aliased something other than the cast-wrap marker must not be \
+         treated as a wrapped body, even though its inner select does join main.dim"
+    );
+}
+
+/// The cast-wrap widening recurses exactly one level, matching the doc
+/// comment's "a type-cast wrap nests once, never repeatedly": a doubly
+/// nested cast-wrap-shaped body (the marker alias two levels deep, with the
+/// real join only reachable by recursing twice) must still fail closed
+/// rather than the function recursing further to find it.
+#[test]
+fn count_preservation_probe_from_body_does_not_recurse_past_one_cast_wrap_level() {
+    let inner_join = "SELECT f.id, f.amount, d.category FROM main.fact f JOIN main.dim d ON \
+                       f.dim_id = d.id WHERE f.amount > 0";
+    let once_wrapped = format!("SELECT * FROM (\n  {inner_join}\n) _smelt_typed");
+    let twice_wrapped = format!("SELECT * FROM (\n  {once_wrapped}\n) _smelt_typed");
+    assert!(
+        emit_count_preservation_probe_from_body(&twice_wrapped, "main.dim").is_none(),
+        "a doubly-nested cast wrap must fail closed rather than recursing past one level"
+    );
 }

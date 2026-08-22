@@ -1599,6 +1599,7 @@ pub fn build_physical_explain(
                 partition_column, granularity
             ),
             smelt_runtime::ModelStrategy::Keyed => "cumulative_aggregate".to_string(),
+            smelt_runtime::ModelStrategy::MaterializedView => "materialized_view".to_string(),
             smelt_runtime::ModelStrategy::Ephemeral => "ephemeral".to_string(),
             smelt_runtime::ModelStrategy::Skipped { reason } => {
                 format!("skipped ({})", reason)
@@ -1769,6 +1770,9 @@ mod tests {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
 

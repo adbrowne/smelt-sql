@@ -3,9 +3,34 @@
 //! Translates backend-agnostic schema operations into Spark SQL statements
 //! for both Delta and Parquet table formats.
 //!
+//! Every rule below was measured against a live server rather than read from
+//! documentation — `scripts/spark-probe-ddl.sh` runs each form against a fresh
+//! Delta and Parquet table and prints what the server answered. The rules are
+//! stated for the tables *smelt creates*: `CREATE TABLE … USING DELTA` with no
+//! table properties, and plain v1 Parquet. Several Delta forms that the format
+//! supports in principle are refused on such a table because they need a table
+//! feature smelt does not enable (`delta.columnMapping.mode`,
+//! `delta.enableTypeWidening`, `allowColumnDefaults`), and a statement the
+//! deployed table refuses is worse than a migration smelt declines to express.
+//!
+//! | Operation | Delta | Parquet |
+//! |---|---|---|
+//! | Add nullable column | `ADD COLUMNS (c T)` | `ADD COLUMNS (c T)` |
+//! | Add nullable column with a `default:` | add, then `UPDATE … WHERE c IS NULL` | full refresh (no `UPDATE`) |
+//! | Add `NOT NULL` column | full refresh | full refresh |
+//! | Drop column | table rewrite | full refresh |
+//! | Widen a column type | table rewrite | full refresh |
+//! | `DROP NOT NULL` | `ALTER COLUMN c DROP NOT NULL` | full refresh |
+//! | `SET NOT NULL` | full refresh | full refresh |
+//! | Add a struct field | `ADD COLUMNS (c.f T)` | full refresh |
+//! | Drop a struct field | full refresh | full refresh |
+//! | Backfill (`UPDATE`) | `UPDATE …` | full refresh |
+//!
 //! Key differences from DuckDB:
 //! - No `ALTER COLUMN TYPE ... USING expr` — nested type widening requires table rewrite
-//! - Delta supports `DROP COLUMN` (requires column mapping); Parquet does not
+//! - Type names differ: bare `VARCHAR` is `DATATYPE_MISSING_SIZE` and `TEXT` is not a
+//!   type at all; both spell as `STRING`
+//! - `NOT NULL` and `DEFAULT` may not ride on `ADD COLUMNS`
 //! - `mergeSchema` on write for adding nullable fields (Spark-specific)
 //! - Three-part naming: `catalog.schema.table`
 
@@ -62,7 +87,9 @@ pub fn generate_spark_ddl(
 
     for op in ops {
         match classify_operation(op, format, caps) {
-            OpStrategy::Ddl(sql) => stmts.push(sql.replace("{TABLE}", &qualified)),
+            OpStrategy::Ddl(sqls) => {
+                stmts.extend(sqls.iter().map(|sql| sql.replace("{TABLE}", &qualified)))
+            }
             OpStrategy::MergeSchema(columns) => {
                 return MigrationExecution::MergeSchemaWrite {
                     columns_to_add: columns,
@@ -109,8 +136,8 @@ pub fn generate_table_rewrite_sql(
 
 /// Internal classification of how a single operation should be executed.
 enum OpStrategy {
-    /// Execute as a DDL statement. `{TABLE}` placeholder for qualified name.
-    Ddl(String),
+    /// Execute these statements in order. `{TABLE}` is the qualified name.
+    Ddl(Vec<String>),
     /// Use mergeSchema write with these columns.
     MergeSchema(Vec<(String, DataType)>),
     /// Rewrite the table using this SELECT expression.
@@ -131,97 +158,107 @@ fn classify_operation(
             nullable,
             default_expr,
         } => {
-            if !nullable && format == SparkTableFormat::Parquet {
+            // Measured: `ADD COLUMNS (c T NOT NULL)` is refused by both formats —
+            // Delta with `NOT NULL in ALTER TABLE ADD COLUMNS is not supported`,
+            // Parquet with `ADD COLUMN with v1 tables cannot specify NOT NULL`.
+            if !nullable {
                 return OpStrategy::FullRefresh(format!(
-                    "Cannot add NOT NULL column '{}' to Parquet table without full refresh. \
-                     Consider using Delta format or --allow-full-refresh",
+                    "Cannot add NOT NULL column '{}' — Spark refuses NOT NULL on \
+                     ALTER TABLE ADD COLUMNS for both Delta and Parquet tables. \
+                     Add it as nullable or use --allow-full-refresh",
                     name
                 ));
             }
-            let type_sql = to_spark_type_sql(data_type);
-            let mut col_spec = format!("{} {}", name, type_sql);
-            if !*nullable {
-                col_spec.push_str(" NOT NULL");
-            }
+            let mut stmts = vec![format!(
+                "ALTER TABLE {{TABLE}} ADD COLUMNS ({} {})",
+                name,
+                to_spark_type_sql(data_type)
+            )];
+            // A `default:` fills the rows already in the table (the DuckDB
+            // generator gets that from `ADD COLUMN … DEFAULT`). Delta refuses a
+            // DEFAULT clause on the add without the `allowColumnDefaults` table
+            // feature, so the same outcome is spelled as a following UPDATE —
+            // which only Delta can run.
             if let Some(default) = default_expr {
-                // Spark supports DEFAULT in ALTER TABLE ADD COLUMNS (Delta)
-                col_spec.push_str(&std::format!(" DEFAULT {}", default));
-            }
-            OpStrategy::Ddl(format!("ALTER TABLE {{TABLE}} ADD COLUMNS ({})", col_spec))
-        }
-        SchemaOperation::RemoveColumn { name } => {
-            if !caps.supports_column_mapping {
-                return OpStrategy::FullRefresh(format!(
-                    "Cannot drop column '{}' on Parquet table — column mapping not supported. \
-                     Consider using Delta format or --allow-full-refresh",
-                    name
-                ));
-            }
-            OpStrategy::Ddl(format!("ALTER TABLE {{TABLE}} DROP COLUMN {}", name))
-        }
-        SchemaOperation::WidenColumnType { name, from, to } => {
-            // Spark/Delta supports limited safe type widenings:
-            // TINYINT→SMALLINT→INT→BIGINT, FLOAT→DOUBLE, DECIMAL precision increase
-            if is_spark_safe_widening(from, to) {
-                OpStrategy::Ddl(format!(
-                    "ALTER TABLE {{TABLE}} ALTER COLUMN {} TYPE {}",
-                    name,
-                    to_spark_type_sql(to)
-                ))
-            } else if format == SparkTableFormat::Parquet {
-                OpStrategy::FullRefresh(format!(
-                    "Cannot widen column '{}' from {} to {} on Parquet table. \
-                     Consider using Delta format or --allow-full-refresh",
-                    name,
-                    from.to_sql(),
-                    to.to_sql()
-                ))
-            } else {
-                // Delta: table rewrite for non-trivial widenings
-                OpStrategy::TableRewrite(format!(
-                    "CAST({} AS {}) AS {}, *",
-                    name,
-                    to_spark_type_sql(to),
-                    name
-                ))
-            }
-        }
-        SchemaOperation::ChangeNullability {
-            name,
-            to_nullable,
-            default_expr,
-        } => {
-            if *to_nullable {
-                OpStrategy::Ddl(format!(
-                    "ALTER TABLE {{TABLE}} ALTER COLUMN {} DROP NOT NULL",
-                    name
-                ))
-            } else {
-                // Fill NULLs first if needed, then set NOT NULL
-                // Spark doesn't support SET NOT NULL easily on existing data without UPDATE
-                if let Some(default) = default_expr {
-                    // For Delta: UPDATE then ALTER
-                    if caps.supports_column_mapping {
-                        // This is a two-statement operation but we return a single DDL
-                        // The caller should handle multi-statement.
-                        // For now, return the UPDATE + ALTER as a single strategy
-                        return OpStrategy::Ddl(format!(
-                            "UPDATE {{TABLE}} SET {} = {} WHERE {} IS NULL",
-                            name, default, name
-                        ));
-                    }
+                if format == SparkTableFormat::Parquet {
                     return OpStrategy::FullRefresh(format!(
-                        "Cannot set column '{}' to NOT NULL on Parquet table. \
+                        "Cannot apply the default for added column '{}' on a Parquet table — \
+                         Parquet cannot UPDATE existing rows. \
                          Consider using Delta format or --allow-full-refresh",
                         name
                     ));
                 }
-                OpStrategy::FullRefresh(format!(
-                    "Cannot set column '{}' to NOT NULL without a default expression. \
-                     Provide a default or use --allow-full-refresh",
-                    name
-                ))
+                stmts.push(format!(
+                    "UPDATE {{TABLE}} SET {} = {} WHERE {} IS NULL",
+                    name, default, name
+                ));
             }
+            OpStrategy::Ddl(stmts)
+        }
+        SchemaOperation::RemoveColumn { name } => {
+            // Measured: `DROP COLUMN` is refused on both — Delta with
+            // `DELTA_UNSUPPORTED_DROP_COLUMN` (it needs `delta.columnMapping.mode`,
+            // an irreversible protocol upgrade smelt does not make on a user's
+            // table), Parquet with `UNSUPPORTED_FEATURE.TABLE_OPERATION`.
+            if format == SparkTableFormat::Parquet {
+                return OpStrategy::FullRefresh(format!(
+                    "Cannot drop column '{}' on a Parquet table — column mapping not supported. \
+                     Consider using Delta format or --allow-full-refresh",
+                    name
+                ));
+            }
+            OpStrategy::TableRewrite(format!("* EXCEPT({})", name))
+        }
+        SchemaOperation::WidenColumnType { name, from, to } => {
+            // Measured: every `ALTER COLUMN … TYPE` widening is refused, the
+            // whole documented safe chain included — Delta needs the
+            // `delta.enableTypeWidening` table feature, Parquet refuses with
+            // `NOT_SUPPORTED_CHANGE_COLUMN`. Delta re-casts by rewriting.
+            if format == SparkTableFormat::Parquet {
+                return OpStrategy::FullRefresh(format!(
+                    "Cannot widen column '{}' from {} to {} on a Parquet table. \
+                     Consider using Delta format or --allow-full-refresh",
+                    name,
+                    from.to_sql(),
+                    to.to_sql()
+                ));
+            }
+            OpStrategy::TableRewrite(format!(
+                "CAST({} AS {}) AS {}, * EXCEPT({})",
+                name,
+                to_spark_type_sql(to),
+                name,
+                name
+            ))
+        }
+        SchemaOperation::ChangeNullability {
+            name,
+            to_nullable,
+            default_expr: _,
+        } => {
+            if !to_nullable {
+                // Measured: Delta refuses `SET NOT NULL` outright — "Cannot change
+                // nullable column to non-nullable" — even when the column holds no
+                // NULLs, so no amount of pre-filling makes the statement legal.
+                return OpStrategy::FullRefresh(format!(
+                    "Cannot set column '{}' to NOT NULL — Spark refuses SET NOT NULL on an \
+                     existing nullable column for both Delta and Parquet tables. \
+                     Use --allow-full-refresh",
+                    name
+                ));
+            }
+            if format == SparkTableFormat::Parquet {
+                return OpStrategy::FullRefresh(format!(
+                    "Cannot relax column '{}' to nullable on a Parquet table — \
+                     ALTER COLUMN is unsupported there. \
+                     Consider using Delta format or --allow-full-refresh",
+                    name
+                ));
+            }
+            OpStrategy::Ddl(vec![format!(
+                "ALTER TABLE {{TABLE}} ALTER COLUMN {} DROP NOT NULL",
+                name
+            )])
         }
         SchemaOperation::AddStructField {
             column,
@@ -230,6 +267,18 @@ fn classify_operation(
             field_type,
             default_expr: _,
         } => {
+            // Measured: a qualified struct path in ADD COLUMNS is accepted on
+            // Delta and refused on Parquet (`UNSUPPORTED_FEATURE.TABLE_OPERATION`),
+            // which is what `supports_struct_field_ddl` records.
+            if !caps.supports_struct_field_ddl {
+                return OpStrategy::FullRefresh(format!(
+                    "Cannot add struct field '{}' to column '{}' on a Parquet table — \
+                     ALTER TABLE ADD COLUMNS with a qualified path is unsupported there. \
+                     Consider using Delta format or --allow-full-refresh",
+                    field_name, column
+                ));
+            }
+
             // Check if the path goes through an array element (e.g., items.element.score).
             // Spark doesn't support ALTER TABLE ADD COLUMNS for nested array-of-struct fields;
             // use mergeSchema write instead.
@@ -242,26 +291,32 @@ fn classify_operation(
             // Both Delta and Parquet support adding nullable struct fields via DDL
             let dot_path = format_spark_dot_path(column, path, Some(field_name));
             let type_sql = to_spark_type_sql(field_type);
-            OpStrategy::Ddl(format!(
+            OpStrategy::Ddl(vec![format!(
                 "ALTER TABLE {{TABLE}} ADD COLUMNS ({} {})",
                 dot_path, type_sql
-            ))
+            )])
         }
         SchemaOperation::RemoveStructField {
             column,
             path,
             field_name,
         } => {
-            if !caps.supports_column_mapping {
-                return OpStrategy::FullRefresh(format!(
-                    "Cannot drop struct field '{}.{}' on Parquet table — column mapping not supported. \
-                     Consider using Delta format or --allow-full-refresh",
-                    column,
-                    field_name
-                ));
-            }
-            let dot_path = format_spark_dot_path(column, path, Some(field_name));
-            OpStrategy::Ddl(format!("ALTER TABLE {{TABLE}} DROP COLUMN {}", dot_path))
+            // Measured: dropping a nested field is refused on both formats —
+            // Delta with `DELTA_UNSUPPORTED_DROP_COLUMN` (it needs column
+            // mapping, which smelt's tables do not enable), Parquet with
+            // `UNSUPPORTED_FEATURE.TABLE_OPERATION`.
+            let _ = path;
+            OpStrategy::FullRefresh(format!(
+                "Cannot drop struct field '{}.{}' on a {} table — DROP COLUMN on a nested \
+                 field requires column mapping, which smelt's tables do not enable. \
+                 Use --allow-full-refresh",
+                column,
+                field_name,
+                match format {
+                    SparkTableFormat::Delta => "Delta",
+                    SparkTableFormat::Parquet => "Parquet",
+                }
+            ))
         }
         SchemaOperation::WidenNestedType {
             column,
@@ -303,7 +358,10 @@ fn classify_operation(
                     name
                 ))
             } else {
-                OpStrategy::Ddl(format!("UPDATE {{TABLE}} SET {} = {}", name, expression))
+                OpStrategy::Ddl(vec![format!(
+                    "UPDATE {{TABLE}} SET {} = {}",
+                    name, expression
+                )])
             }
         }
         SchemaOperation::RewriteColumn {
@@ -329,24 +387,6 @@ fn classify_operation(
             }
         }
     }
-}
-
-/// Check if a type widening is natively supported by Spark ALTER COLUMN TYPE.
-///
-/// Spark supports limited safe widenings:
-/// - TINYINT → SMALLINT → INTEGER → BIGINT
-/// - FLOAT → DOUBLE
-/// - DECIMAL precision increase (same or higher scale)
-fn is_spark_safe_widening(from: &DataType, to: &DataType) -> bool {
-    matches!(
-        (from, to),
-        // Integer widening chain
-        (DataType::SmallInt, DataType::Integer)
-            | (DataType::SmallInt, DataType::BigInt)
-            | (DataType::Integer, DataType::BigInt)
-            // Float widening
-            | (DataType::Float, DataType::Double)
-    )
 }
 
 /// Convert a `DataType` to Spark SQL type syntax.
@@ -456,12 +496,16 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
-        assert_eq!(
-            result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t DROP COLUMN meta.old_field".to_string()
-            ])
-        );
+        // Measured: `DELTA_UNSUPPORTED_DROP_COLUMN` — dropping a nested field
+        // needs `delta.columnMapping.mode`, which smelt's tables do not set.
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains("meta.old_field"),
+                "the refusal must name the field, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
     }
 
     // ── Spark+Delta: nested type widen → table rewrite ────────────────
@@ -533,11 +577,13 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
+        // Measured: `DELTA_UNSUPPORTED_DROP_COLUMN` on a table without column
+        // mapping — the drop is expressed by rewriting the table instead.
         assert_eq!(
             result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t DROP COLUMN old_col".to_string()
-            ])
+            MigrationExecution::TableRewrite {
+                select_expr: "* EXCEPT(old_col)".to_string()
+            }
         );
     }
 
@@ -560,9 +606,9 @@ mod tests {
         );
         assert_eq!(
             result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ALTER COLUMN amount TYPE BIGINT".to_string()
-            ])
+            MigrationExecution::TableRewrite {
+                select_expr: "CAST(amount AS BIGINT) AS amount, * EXCEPT(amount)".to_string()
+            }
         );
     }
 
@@ -583,9 +629,9 @@ mod tests {
         );
         assert_eq!(
             result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ALTER COLUMN score TYPE DOUBLE".to_string()
-            ])
+            MigrationExecution::TableRewrite {
+                select_expr: "CAST(score AS DOUBLE) AS score, * EXCEPT(score)".to_string()
+            }
         );
     }
 
@@ -633,12 +679,16 @@ mod tests {
             SparkTableFormat::Parquet,
             &parquet_caps(),
         );
-        assert_eq!(
-            result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ADD COLUMNS (meta.b STRING)".to_string()
-            ])
-        );
+        // Measured: `UNSUPPORTED_FEATURE.TABLE_OPERATION` — a qualified struct
+        // path in ADD COLUMNS is rejected on a v1 Parquet table.
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains('b') && reason.contains("meta"),
+                "the refusal must name the field, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
     }
 
     // ── Spark+Parquet: nested type widen → full refresh ───────────────
@@ -759,12 +809,15 @@ mod tests {
             SparkTableFormat::Parquet,
             &parquet_caps(),
         );
-        assert_eq!(
-            result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ALTER COLUMN amount TYPE BIGINT".to_string()
-            ])
-        );
+        // Measured: `NOT_SUPPORTED_CHANGE_COLUMN` — Parquet cannot widen in place.
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains("amount"),
+                "the refusal must name the column, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
     }
 
     // ── Spark+Parquet: NOT NULL column add → full refresh ─────────────
@@ -896,15 +949,14 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
-        match result {
-            MigrationExecution::Statements(stmts) => {
-                assert_eq!(stmts.len(), 3);
-                assert!(stmts[0].contains("ADD COLUMNS (new_col INTEGER)"));
-                assert!(stmts[1].contains("DROP COLUMN old_col"));
-                assert!(stmts[2].contains("ADD COLUMNS (meta.status STRING)"));
+        // The column drop is not expressible as DDL, and a rewrite answers for
+        // the whole diff — a plan is one strategy, never a mix.
+        assert_eq!(
+            result,
+            MigrationExecution::TableRewrite {
+                select_expr: "* EXCEPT(old_col)".to_string()
             }
-            other => panic!("Expected Statements, got {:?}", other),
-        }
+        );
     }
 
     // ── Spark type naming ─────────────────────────────────────────────
@@ -925,42 +977,57 @@ mod tests {
         assert_eq!(to_spark_type_sql(&DataType::Boolean), "BOOLEAN");
     }
 
-    // ── is_spark_safe_widening ────────────────────────────────────────
+    // ── widening is never DDL ─────────────────────────────────────────
 
+    /// No widening is expressible as `ALTER COLUMN … TYPE` on a smelt-created
+    /// table — not even the documented-safe integer chain. Measured: Delta
+    /// answers `DELTA_UNSUPPORTED_ALTER_TABLE_CHANGE_COL_OP` without the
+    /// `delta.enableTypeWidening` table feature; Parquet answers
+    /// `NOT_SUPPORTED_CHANGE_COLUMN`.
     #[test]
-    fn test_spark_safe_widenings() {
-        assert!(is_spark_safe_widening(
-            &DataType::SmallInt,
-            &DataType::Integer
-        ));
-        assert!(is_spark_safe_widening(
-            &DataType::SmallInt,
-            &DataType::BigInt
-        ));
-        assert!(is_spark_safe_widening(
-            &DataType::Integer,
-            &DataType::BigInt
-        ));
-        assert!(is_spark_safe_widening(&DataType::Float, &DataType::Double));
-    }
+    fn test_spark_widening_is_never_alter_column_type() {
+        for (from, to) in [
+            (DataType::SmallInt, DataType::Integer),
+            (DataType::Integer, DataType::BigInt),
+            (DataType::Float, DataType::Double),
+        ] {
+            let ops = vec![SchemaOperation::WidenColumnType {
+                name: "n".into(),
+                from: from.clone(),
+                to: to.clone(),
+            }];
 
-    #[test]
-    fn test_spark_unsafe_widenings() {
-        // Narrowing
-        assert!(!is_spark_safe_widening(
-            &DataType::BigInt,
-            &DataType::Integer
-        ));
-        // VARCHAR to INT is not a safe widening
-        assert!(!is_spark_safe_widening(
-            &DataType::Varchar { max_length: None },
-            &DataType::Integer
-        ));
-        // Array widening is not handled at this level
-        assert!(!is_spark_safe_widening(
-            &DataType::Array(Box::new(DataType::Integer)),
-            &DataType::Array(Box::new(DataType::BigInt))
-        ));
+            let delta = generate_spark_ddl(
+                "cat",
+                "db",
+                "t",
+                &ops,
+                SparkTableFormat::Delta,
+                &delta_caps(),
+            );
+            match delta {
+                MigrationExecution::TableRewrite { select_expr } => assert_eq!(
+                    select_expr,
+                    format!("CAST(n AS {}) AS n, * EXCEPT(n)", to_spark_type_sql(&to))
+                ),
+                other => panic!("Delta {from:?} -> {to:?}: expected TableRewrite, got {other:?}"),
+            }
+
+            let parquet = generate_spark_ddl(
+                "cat",
+                "db",
+                "t",
+                &ops,
+                SparkTableFormat::Parquet,
+                &parquet_caps(),
+            );
+            match parquet {
+                MigrationExecution::FullRefreshRequired { reason } => {
+                    assert!(reason.contains('n'), "the refusal must name the column")
+                }
+                other => panic!("Parquet {from:?} -> {to:?}: expected refusal, got {other:?}"),
+            }
+        }
     }
 
     // ── Spark+Parquet: backfill column → full refresh ─────────────────
@@ -1057,13 +1124,15 @@ mod tests {
             SparkTableFormat::Parquet,
             &parquet_caps(),
         );
+        // Measured: Parquet rejects every qualified-path ADD COLUMNS, so the
+        // refusal fires before the array-nested mergeSchema branch is reached.
         match result {
-            MigrationExecution::MergeSchemaWrite { columns_to_add } => {
-                assert_eq!(columns_to_add.len(), 1);
-                assert_eq!(columns_to_add[0].0, "items.element.score");
-                assert_eq!(columns_to_add[0].1, DataType::Double);
-            }
-            other => panic!("Expected MergeSchemaWrite, got {:?}", other),
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains("score"),
+                "the refusal must name the field, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
         }
     }
 
@@ -1117,10 +1186,14 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
+        // Measured: Delta refuses a DEFAULT clause on ADD COLUMNS without the
+        // `allowColumnDefaults` table feature, so the default reaches the rows
+        // already in the table as a following UPDATE instead.
         assert_eq!(
             result,
             MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ADD COLUMNS (status STRING DEFAULT 'pending')".to_string()
+                "ALTER TABLE cat.db.t ADD COLUMNS (status STRING)".to_string(),
+                "UPDATE cat.db.t SET status = 'pending' WHERE status IS NULL".to_string(),
             ])
         );
     }
@@ -1141,12 +1214,17 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
-        assert_eq!(
-            result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ADD COLUMNS (required_col INTEGER NOT NULL)".to_string()
-            ])
-        );
+        // Measured: `NOT NULL in ALTER TABLE ADD COLUMNS is not supported` on
+        // Delta, and `ADD COLUMN with v1 tables cannot specify NOT NULL` on
+        // Parquet — neither format accepts the constraint on the add.
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains("required_col"),
+                "the refusal must name the column, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1164,13 +1242,17 @@ mod tests {
             SparkTableFormat::Delta,
             &delta_caps(),
         );
-        // Delta with column mapping: UPDATE to fill NULLs
-        assert_eq!(
-            result,
-            MigrationExecution::Statements(vec![
-                "UPDATE cat.db.t SET status = 'unknown' WHERE status IS NULL".to_string()
-            ])
-        );
+        // Measured: Delta refuses SET NOT NULL on an existing nullable column
+        // ("Cannot change nullable column to non-nullable") even when it holds
+        // no NULLs, so filling the gaps first cannot make the change legal.
+        match result {
+            MigrationExecution::FullRefreshRequired { reason } => assert!(
+                reason.contains("status"),
+                "the refusal must name the column, got: {}",
+                reason
+            ),
+            other => panic!("Expected FullRefreshRequired, got {:?}", other),
+        }
     }
 
     #[test]
@@ -1241,9 +1323,9 @@ mod tests {
         );
         assert_eq!(
             result,
-            MigrationExecution::Statements(vec![
-                "ALTER TABLE cat.db.t ALTER COLUMN val TYPE INTEGER".to_string()
-            ])
+            MigrationExecution::TableRewrite {
+                select_expr: "CAST(val AS INTEGER) AS val, * EXCEPT(val)".to_string()
+            }
         );
     }
 
@@ -1509,8 +1591,8 @@ mod tests {
         match result {
             MigrationExecution::FullRefreshRequired { reason } => {
                 assert!(
-                    reason.contains("Delta"),
-                    "Should suggest Delta format, got: {}",
+                    reason.contains("column mapping"),
+                    "Should name the missing table feature, got: {}",
                     reason
                 );
                 assert!(

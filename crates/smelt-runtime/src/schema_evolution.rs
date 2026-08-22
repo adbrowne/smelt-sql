@@ -128,6 +128,7 @@ pub fn ddl_backend_for_dialect(
 ) -> DdlBackend {
     match dialect {
         SqlDialect::DuckDB | SqlDialect::PostgreSQL => DdlBackend::DuckDb,
+        SqlDialect::BigQuery => DdlBackend::BigQuery,
         SqlDialect::SparkSQL => {
             let format = match table_format {
                 Some(TableFormat::Parquet) => SparkTableFormat::Parquet,

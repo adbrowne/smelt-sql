@@ -1,3 +1,4 @@
+pub mod ddl_bigquery;
 pub mod ddl_duckdb;
 pub mod ddl_spark;
 pub mod file_store;

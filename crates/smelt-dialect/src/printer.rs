@@ -11,7 +11,7 @@
 //! are emitted exactly as they appear in the source. This guarantees an identity
 //! property for DuckDB with no refs/sources.
 
-use smelt_parser::ast::{SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
+use smelt_parser::ast::{BinaryExpr, SmeltAsStructCall, SmeltPathCall, SmeltPathRef};
 use smelt_parser::syntax_kind::{SyntaxElement, SyntaxKind, SyntaxNode};
 use smelt_parser::{CastExpr, FunctionCall};
 
@@ -250,11 +250,36 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
                 // Function name remapping per dialect
                 if let Some(name) = fc.name() {
+                    // `MEDIAN` needs more than a rename on GoogleSQL, which has
+                    // no such built-in — see `print_bigquery_median`.
+                    if matches!(ctx.dialect, SqlDialect::BigQuery)
+                        && name.eq_ignore_ascii_case("MEDIAN")
+                        && print_bigquery_median(node, &fc, ctx, out)
+                    {
+                        return;
+                    }
                     if let Some(new_name) = remap_function_name(ctx.dialect, &name) {
                         print_function_with_renamed(node, ctx, out, new_name);
                         return;
                     }
                 }
+            }
+            print_children(node, ctx, out);
+        }
+        SyntaxKind::BINARY_EXPR => {
+            // `%` needs more than a rename on GoogleSQL, which has no infix
+            // modulo operator — see `print_bigquery_modulo`.
+            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_modulo(node, ctx, out)
+            {
+                return;
+            }
+            // `^` is a strictly more dangerous gap than `%`: GoogleSQL *does*
+            // define infix `^`, but as bitwise XOR, not power — so an
+            // unlowered `^` doesn't fail, it silently computes the wrong
+            // number. `**` shares the same DuckDB "power" semantics and has
+            // no infix form on GoogleSQL at all. See `print_bigquery_power`.
+            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_power(node, ctx, out) {
+                return;
             }
             print_children(node, ctx, out);
         }
@@ -1689,6 +1714,167 @@ fn split_comma_top_level(s: &str) -> Vec<String> {
     parts
 }
 
+/// Lower `MEDIAN(x)` to GoogleSQL, which has no `MEDIAN` built-in.
+///
+/// Returns `true` when the call was printed here, `false` to fall through to
+/// the normal path (leaving the call verbatim so the engine rejects it loudly
+/// rather than smelt guessing).
+///
+/// Both forms below are **exact**, which is the whole constraint: substituting
+/// an approximate median under the equivalence oracle would make it report
+/// divergences that are artefacts of the substitution, or hide real ones.
+/// `APPROX_QUANTILES` is an aggregate but approximate, so it is not a candidate.
+/// Measured against the live warehouse by `scripts/bigquery-probe-lowering.sh`
+/// on the fixture `val ∈ {1,2,3,4}` — an even count, where an interpolating
+/// median (2.5) and a nearest-rank one (2) differ:
+///
+/// - **Window position** (`MEDIAN(x) OVER w`) → `PERCENTILE_CONT(x, 0.5) OVER w`.
+///   Exact and interpolating; measured 2.5, agreeing with DuckDB's `MEDIAN`.
+///   `PERCENTILE_DISC` returns 2 and is therefore *not* the equivalent.
+/// - **Aggregate position** (`SELECT MEDIAN(x) … GROUP BY …`) →
+///   an `ARRAY_AGG`-indexing expression. `PERCENTILE_CONT` is analytic-only in
+///   GoogleSQL and is rejected outright in a `GROUP BY` query, so it cannot
+///   stand here. Binding the array to a name via `UNNEST([ARRAY_AGG(…)])` is
+///   also rejected (`Aggregate function ARRAY_AGG not allowed in UNNEST`), which
+///   is why the sub-expression is repeated rather than named. Measured on
+///   grouped fixtures against DuckDB's answers: even count → 2.5, odd → 2,
+///   NULLs ignored → 1.5, all-NULL group → NULL.
+///
+/// The aggregate form casts to `FLOAT64`, matching DuckDB's `MEDIAN` return
+/// type for numeric input. A temporal argument — which DuckDB's `MEDIAN` also
+/// accepts — makes BigQuery reject the cast, i.e. it fails loud rather than
+/// returning a wrong value.
+fn print_bigquery_median(
+    node: &SyntaxNode,
+    fc: &FunctionCall,
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    let args = fc.arguments();
+    let [arg] = args.as_slice() else {
+        return false;
+    };
+    let mut arg_sql = String::new();
+    print_node(arg.syntax(), ctx, &mut arg_sql);
+    let arg_sql = arg_sql.trim();
+    if arg_sql.is_empty() {
+        return false;
+    }
+
+    // `OVER` is parsed as a WINDOW_SPEC sibling of the call, not a child.
+    let windowed = node
+        .next_sibling()
+        .map(|sib| sib.kind() == SyntaxKind::WINDOW_SPEC)
+        .unwrap_or(false);
+    if windowed {
+        out.push_str(&format!("PERCENTILE_CONT({arg_sql}, 0.5)"));
+        push_trailing_trivia(node, out);
+        return true;
+    }
+
+    let sorted = format!("ARRAY_AGG({arg_sql} IGNORE NULLS ORDER BY {arg_sql})");
+    let mid = format!("DIV(ARRAY_LENGTH({sorted}), 2)");
+    let at = |index: &str| format!("CAST({sorted}[SAFE_OFFSET({index})] AS FLOAT64)");
+    out.push_str(&format!(
+        "CASE WHEN MOD(ARRAY_LENGTH({sorted}), 2) = 1 THEN {upper} \
+         ELSE ({lower} + {upper}) / 2 END",
+        upper = at(&mid),
+        lower = at(&format!("{mid} - 1")),
+    ));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Lower infix `%` (modulo) to GoogleSQL, which has no infix modulo operator
+/// — only the `MOD(x, y)` function (verified live: BigQuery rejects `id % 2`
+/// with `Syntax error: Expected ")" but got "%"`, the failure this closes).
+///
+/// Returns `true` when the expression was printed here (a `%` `BINARY_EXPR`
+/// with both operands present), `false` to fall through to the normal path
+/// so every other `BINARY_EXPR` (`+`, `-`, `AND`, …) still prints verbatim.
+fn print_bigquery_modulo(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+    let Some(bin) = BinaryExpr::cast(node.clone()) else {
+        return false;
+    };
+    if bin.operator().as_deref() != Some("%") {
+        return false;
+    }
+    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+        return false;
+    };
+    let mut left_sql = String::new();
+    print_node(left.syntax(), ctx, &mut left_sql);
+    let mut right_sql = String::new();
+    print_node(right.syntax(), ctx, &mut right_sql);
+    let left_sql = left_sql.trim();
+    let right_sql = right_sql.trim();
+    if left_sql.is_empty() || right_sql.is_empty() {
+        return false;
+    }
+
+    out.push_str(&format!("MOD({left_sql}, {right_sql})"));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Lower infix `^` and `**` (power) to GoogleSQL, which has no infix `**`
+/// and defines infix `^` as bitwise XOR — a silent-wrong-answer hazard, not a
+/// syntax error, if left unlowered. Both operators are DuckDB-exact synonyms
+/// for `POWER(x, y)` (measured against DuckDB 1.5.4: `2 ^ 10`, `2 ** 10`, and
+/// `power(2, 10)` all print `1024.0`; the equivalence holds across negative
+/// bases, negative exponents, fractional exponents, and integer-typed
+/// operands — every case always returns `DOUBLE`, matching GoogleSQL's
+/// `POWER`, which always returns `FLOAT64`). The one measured divergence is
+/// `0 ^ (-1)`: DuckDB returns `inf`, GoogleSQL's `POWER` raises a runtime
+/// "invalid argument" error per SQL:2003 — a loud BigQuery-side failure, not
+/// a silent one, so it does not block this lowering.
+///
+/// Returns `true` when the expression was printed here (a `^`/`**`
+/// `BINARY_EXPR` with both operands present), `false` to fall through so
+/// every other `BINARY_EXPR` still prints verbatim.
+fn print_bigquery_power(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+    let Some(bin) = BinaryExpr::cast(node.clone()) else {
+        return false;
+    };
+    if !matches!(bin.operator().as_deref(), Some("^") | Some("**")) {
+        return false;
+    }
+    let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
+        return false;
+    };
+    let mut left_sql = String::new();
+    print_node(left.syntax(), ctx, &mut left_sql);
+    let mut right_sql = String::new();
+    print_node(right.syntax(), ctx, &mut right_sql);
+    let left_sql = left_sql.trim();
+    let right_sql = right_sql.trim();
+    if left_sql.is_empty() || right_sql.is_empty() {
+        return false;
+    }
+
+    out.push_str(&format!("POWER({left_sql}, {right_sql})"));
+    push_trailing_trivia(node, out);
+    true
+}
+
+/// Re-emit the trivia tokens trailing a node whose text a rewrite replaced,
+/// so a following sibling (an `OVER` clause, the next select item) does not
+/// end up glued to the rewritten text.
+fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
+    let tokens: Vec<_> = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .collect();
+    let trailing: Vec<_> = tokens
+        .into_iter()
+        .rev()
+        .take_while(|t| t.kind().is_trivia())
+        .collect();
+    for token in trailing.into_iter().rev() {
+        out.push_str(token.text());
+    }
+}
+
 /// Print a FUNCTION_CALL node with the function name replaced by `new_name`.
 /// Remap a function name for a specific dialect.
 /// Returns `Some(new_name)` if the function should be renamed, `None` to keep as-is.
@@ -1717,6 +1903,20 @@ fn remap_function_name<'a>(dialect: &SqlDialect, name: &str) -> Option<&'a str> 
                 Some("EVERY")
             } else if name.eq_ignore_ascii_case("BOOL_OR") {
                 Some("SOME")
+            } else {
+                None
+            }
+        }
+        SqlDialect::BigQuery => {
+            // GoogleSQL spells the boolean aggregates LOGICAL_AND / LOGICAL_OR and
+            // has no BOOL_AND / BOOL_OR / EVERY. It does have UNNEST natively, so
+            // only EXPLODE needs remapping onto it.
+            if name.eq_ignore_ascii_case("EXPLODE") {
+                Some("UNNEST")
+            } else if name.eq_ignore_ascii_case("BOOL_AND") || name.eq_ignore_ascii_case("EVERY") {
+                Some("LOGICAL_AND")
+            } else if name.eq_ignore_ascii_case("BOOL_OR") {
+                Some("LOGICAL_OR")
             } else {
                 None
             }

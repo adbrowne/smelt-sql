@@ -77,8 +77,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         { "name": "Salsa / Root Edit Diagnostics", "unit": "ms", "value": s.root_edit_diagnostics_ms },
         { "name": "Salsa / Add File", "unit": "ms", "value": s.add_file_all_models_ms },
         { "name": "Salsa / Full Diagnostics", "unit": "ms", "value": s.full_diagnostics_ms },
-        { "name": format!("Parser / Simple SQL"), "unit": "μs", "value": p.single_simple_us },
-        { "name": format!("Parser / Complex SQL"), "unit": "μs", "value": p.single_complex_us },
+        { "name": "Parser / Simple SQL", "unit": "μs", "value": p.single_simple_us },
+        { "name": "Parser / Complex SQL", "unit": "μs", "value": p.single_complex_us },
         { "name": format!("Parser / Batch ({})", p.batch_count), "unit": "ms", "value": p.batch_all_ms },
     ]);
 

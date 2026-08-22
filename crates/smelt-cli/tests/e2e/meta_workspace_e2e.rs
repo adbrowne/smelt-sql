@@ -12,16 +12,13 @@
 //! `smelt` binary, and opens the produced DuckDB file to assert on the
 //! materialised values — same pattern as `meta_columns_e2e.rs`.
 //!
-//! The consumer models fold the reflected names with `reduce(map(...),
-//! concat_with(', '))` into a single aliased scalar. The bare-spread form
-//! (`SELECT ...map(smelt.models.with_tag(t), fn m => m.name)`) lowers correctly
-//! — its compile-time lowering is covered by the `meta_eval` unit tests — but
-//! produces unaliased string-literal columns that trip a pre-existing,
-//! orthogonal `apply_type_casts` defect (a non-identifier select item wrapped as
-//! `_colN` the inner query does not expose), exactly the disposition recorded
-//! for the literal list-spread case in the diagnostic-parity plan (P5). The
-//! fold form exercises the same wide-reflection evaluation end-to-end on DuckDB
-//! without depending on that orthogonal defect.
+//! The consumer models use the bare-spread form (`SELECT ...map(smelt.models
+//! .with_tag(t), fn m => m.name)`) directly: its compile-time lowering (to one
+//! string-literal select item per reflected entry) is covered by the
+//! `meta_eval` unit tests, and each unaliased literal item receives a real,
+//! bound `_smelt_col{n}` alias (`docs/specs/multi_backend.md` §"Output-schema
+//! type conformance") — so the spread executes end-to-end on DuckDB without
+//! needing to fold the results into a single scalar first.
 //!
 //! The `examples/meta_workspace/` workspace itself stays on the
 //! `example_builds` `KNOWN_UNBUILDABLE` allow-list because its cohort models
@@ -86,10 +83,11 @@ default_materialization: table
 }
 
 /// A model that reflects over the workspace's models tagged `cohort`
-/// (`smelt.models.with_tag`), projects each `ModelRef` to its `name`, and folds
-/// the names into a single `Text` column; and a model that does the same over
-/// sources tagged `audit` (`smelt.sources.with_tag`). The reflection must be
-/// materialised at build so each fold collapses to a concrete string.
+/// (`smelt.models.with_tag`), projects each `ModelRef` to its `name`, and
+/// bare-spreads the names directly into the select list; and a model that
+/// does the same over sources tagged `audit` (`smelt.sources.with_tag`). The
+/// reflection must be materialised at build so each spread lowers to one
+/// concrete string-literal column per matching entry.
 #[test]
 fn e2e_wide_reflection_models_and_sources_execute_against_duckdb() {
     let tmp = TempDir::new().expect("tempdir");
@@ -120,16 +118,18 @@ fn e2e_wide_reflection_models_and_sources_execute_against_duckdb() {
                 "models/sources/raw/events.yml",
                 "description: Raw events\ntags: [audit]\ncolumns:\n- name: id\n  type: INTEGER\n",
             ),
-            // Consumer 1: fold the cohort-tagged model names → 'cohort_a, cohort_b'
-            // (path-sorted; zzz_other tagged `misc` is excluded by with_tag).
+            // Consumer 1: bare-spread the cohort-tagged model names
+            // (path-sorted: cohort_a, cohort_b; zzz_other tagged `misc` is
+            // excluded by with_tag) into two select items.
             (
                 "models/cohort_names.sql",
-                "SELECT reduce(\n  map(smelt.models.with_tag('cohort'), fn m => m.name),\n  concat_with(', ')\n) AS names\n",
+                "SELECT ...map(smelt.models.with_tag('cohort'), fn m => m.name)\n",
             ),
-            // Consumer 2: fold the audit-tagged source names → 'events'.
+            // Consumer 2: bare-spread the audit-tagged source names (one
+            // match: 'events') into a single select item.
             (
                 "models/audit_source_names.sql",
-                "SELECT reduce(\n  map(smelt.sources.with_tag('audit'), fn s => s.name),\n  concat_with(', ')\n) AS names\n",
+                "SELECT ...map(smelt.sources.with_tag('audit'), fn s => s.name)\n",
             ),
         ],
     );
@@ -137,18 +137,24 @@ fn e2e_wide_reflection_models_and_sources_execute_against_duckdb() {
     run_smelt_build(proj, "dev");
     let conn = duckdb::Connection::open(&db_path).expect("open dev.duckdb");
 
-    // cohort_names folds the two cohort model names, path-sorted; zzz_other
-    // (tag misc) is excluded by with_tag.
-    let cohort_names: String = conn
-        .query_row("SELECT names FROM main.cohort_names", [], |r| r.get(0))
+    // cohort_names spreads to two unaliased literal items; each receives a
+    // real, bound `_smelt_col{n}` alias (position-derived, per
+    // `docs/specs/multi_backend.md` §"Output-schema type conformance").
+    let (cohort_a, cohort_b): (String, String) = conn
+        .query_row(
+            "SELECT _smelt_col1, _smelt_col2 FROM main.cohort_names",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .expect("query cohort_names");
-    assert_eq!(cohort_names, "cohort_a, cohort_b");
+    assert_eq!(cohort_a, "cohort_a");
+    assert_eq!(cohort_b, "cohort_b");
 
-    // audit_source_names folds the single audit source's name.
-    let audit_names: String = conn
-        .query_row("SELECT names FROM main.audit_source_names", [], |r| {
+    // audit_source_names spreads to a single unaliased literal item.
+    let audit_name: String = conn
+        .query_row("SELECT _smelt_col1 FROM main.audit_source_names", [], |r| {
             r.get(0)
         })
         .expect("query audit_source_names");
-    assert_eq!(audit_names, "events");
+    assert_eq!(audit_name, "events");
 }

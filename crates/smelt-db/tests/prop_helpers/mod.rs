@@ -11,6 +11,7 @@
 //! or compatible type differences (Text vs Varchar, Decimal precision differences).
 
 pub mod arrow_mapping;
+pub mod bigquery_oracle;
 pub mod divergences;
 pub mod duckdb_oracle;
 pub mod generators;

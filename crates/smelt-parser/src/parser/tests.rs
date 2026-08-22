@@ -7971,6 +7971,42 @@ fn order_by_all_parses() {
     );
 }
 
+/// Ordered aggregates — `ARRAY_AGG(x ORDER BY y)`, `STRING_AGG(x, ',' ORDER BY
+/// y DESC)` — are valid in DuckDB, PostgreSQL, Spark SQL, and GoogleSQL alike,
+/// and the BigQuery `MEDIAN` lowering emits one, so the printed SQL has to parse
+/// back cleanly with its alias intact (the compiler's type-cast wrapper names
+/// its columns from that re-parse).
+#[test]
+fn order_by_inside_an_aggregate_arg_list_parses() {
+    for input in [
+        "SELECT ARRAY_AGG(x ORDER BY x) AS a FROM t",
+        "SELECT ARRAY_AGG(x IGNORE NULLS ORDER BY x) AS a FROM t",
+        "SELECT STRING_AGG(x, ',' ORDER BY y DESC, z) AS a FROM t",
+    ] {
+        let parsed = parse(input);
+        assert!(
+            parsed.errors.is_empty(),
+            "{input}: parse errors: {:?}",
+            parsed.errors
+        );
+
+        let file = File::cast(parsed.syntax()).expect("file");
+        let select = file.select_stmt().expect("select");
+        let item = select
+            .select_list()
+            .expect("select list")
+            .items()
+            .next()
+            .expect("one item");
+        assert_eq!(item.alias().as_deref(), Some("a"), "{input}");
+        assert_eq!(
+            parsed.syntax().text().to_string(),
+            input,
+            "{input}: the CST must be lossless"
+        );
+    }
+}
+
 #[test]
 fn ignore_nulls_in_window_parses() {
     let input = "SELECT last_value(a IGNORE NULLS) OVER (ORDER BY a) AS x FROM t";

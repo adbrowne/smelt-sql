@@ -53,6 +53,7 @@ smelt_sql.data/
 # Local Spark Connect runtime (scripts/spark-up.sh) — not committed
 .smelt-spark-warehouse/
 .smelt-spark-venv/
+.smelt-bq-venv/
 # Delta Lake Ivy cache (bind-mounted into the container; files owned by the
 # container's uid 185, so the host loop's auto-stash/clean cannot remove them —
 # gitignore it to avoid "Permission denied" warnings on every iteration).

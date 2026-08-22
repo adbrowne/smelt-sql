@@ -122,6 +122,17 @@ unmodified and is never logged.
 A `connect_url` holding a literal (non-`${VAR}`) token is a lint-worthy smell: the secret sits in
 the committed YAML in plaintext, which is exactly what interpolation exists to avoid.
 
+Schema changes migrate in place for the additive cases — adding a nullable column, adding a
+struct field, relaxing `NOT NULL` — in Spark's own spelling (`ADD COLUMNS (c STRING)`, a
+three-part table name). Changes the deployed table cannot express — adding a `NOT NULL` column,
+tightening to `NOT NULL`, dropping a column, or widening one — rewrite the table (Delta) or are
+refused with a message naming the column and the limitation (Parquet), and need
+`--allow-full-refresh`. Dropping and widening are refused because they require a Delta table
+feature (`delta.columnMapping.mode`, `delta.enableTypeWidening`) that smelt does not enable, since
+turning one on irreversibly raises the table's protocol version. See
+[Schema evolution](schema-evolution.md#backend-capability-matrix) for the full per-operation
+matrix.
+
 #### Delta vs Parquet
 
 The `format:` field selects the Spark table format, which determines which capabilities are available:
@@ -141,6 +152,68 @@ available; doing so restricts the available incremental strategies and disables 
 To use Delta, ensure your Spark cluster has Delta Lake installed (e.g. the
 `io.delta:delta-spark_2.13:4.0.0` package). See `scripts/spark-up.sh` for the reference setup
 used in CI.
+
+### BigQuery
+
+BigQuery is supported through Google's BigQuery client. A BigQuery dataset is the analogue of a
+schema, so a target names a `project`, a `dataset`, and the dataset's `location` in place of
+DuckDB's `database` or Spark's `connect_url`.
+
+```yaml
+targets:
+  bigquery_prod:
+    type: bigquery
+    project: my-gcp-project
+    dataset: analytics
+    location: US
+    schema: analytics
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `type` | Yes | Must be `bigquery`. |
+| `project` | Yes | GCP project the jobs are billed to. |
+| `dataset` | No | Dataset holding the created tables and views. Defaults to `schema`. |
+| `location` | No | Dataset location (e.g. `US`, `europe-west2`). Must match at query time. |
+| `schema` | Yes | Default schema for created tables and views. |
+
+smelt compiles the same logical models to GoogleSQL, handling dialect differences automatically —
+`x::T` casts become `CAST(x AS T)`, partition replacement becomes a scoped `DELETE` + `INSERT`
+(BigQuery has no `INSERT OVERWRITE`), and type names GoogleSQL does not recognise (`VARCHAR`,
+`TEXT`, `DOUBLE`) are emitted as `STRING` and `FLOAT64`.
+
+Schema changes migrate in place for the flat cases — adding a column, dropping one, widening a
+scalar type, relaxing `NOT NULL` — in GoogleSQL's own spelling (`ALTER COLUMN … SET DATA TYPE`,
+`NUMERIC(p,s)`, `INT64`). Changes GoogleSQL cannot express — anything inside a struct or array,
+adding a `NOT NULL` column, or widening a column that is already `NOT NULL` — are refused with a
+message naming the column and the limitation, and need `--allow-full-refresh` to rebuild the
+model instead. See [Schema evolution](schema-evolution.md#backend-capability-matrix) for the full
+per-operation matrix.
+
+BigQuery is verified against a live warehouse: the fixed-recipe parity suites (materialization,
+seeding, dialect lowering, pipe syntax, `MERGE`, incremental refresh, schema evolution) run against a real
+BigQuery project, and incremental-model correctness is additionally checked generatively — the
+same recipe pool, run schedules, and equivalence oracle the other backends use, parametrized to
+target BigQuery. Every case in that generative suite passes against a live warehouse. Both suites
+run locally against your own GCP project rather than in CI, since that keeps cloud credentials out
+of the build pipeline — which also means a BigQuery regression surfaces when someone runs the
+suites by hand, not on a schedule.
+
+#### Credentials
+
+The BigQuery backend authenticates from a short-lived OAuth access token read from
+`SMELT_BQ_ACCESS_TOKEN`, and **never** falls back to Google application-default credentials. This
+is deliberate: ambient credentials on a developer machine carry that developer's entire cloud
+identity, so refusing the fallback keeps the explicitly-supplied token the only route to the
+warehouse. A run with no token set fails with a message naming the token, rather than silently
+picking up whichever identity happens to be logged in.
+
+```bash
+export SMELT_BQ_ACCESS_TOKEN="$(gcloud auth print-access-token)"
+smelt run --target bigquery_prod
+```
+
+Prefer a service account scoped to the datasets it needs over a user credential.
 
 ## Switching targets
 
@@ -316,6 +389,8 @@ GROUP BY 1
 ## Cross-engine SQL compilation
 
 smelt compiles SQL to the target's dialect automatically. You write standard SQL with `smelt.<name>` and `smelt.sources.<name>`, and smelt translates function calls, types, and syntax to match the target backend.
+
+Where a backend's native return type for an expression differs from smelt's inferred type, output columns are reconciled to the inferred type with a `CAST`, so a model writes the same schema — same column names, same types — to every warehouse regardless of engine. Column names follow the rule in [Output column names](../reference/language.md#output-column-names): an explicit alias or a bare column reference keeps its own name; anything else (a function call, an expression, a literal) gets a synthesized, dialect-invariant `_smelt_col{n}` name.
 
 !!! note
     Not all SQL features are available on all backends. If you use a backend-specific function, smelt will report an error when targeting a backend that does not support it.

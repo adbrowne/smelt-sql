@@ -10,6 +10,7 @@ repository = "https://github.com/adbrowne/smelt-sql"
 
 [dependencies]
 smelt-core = { path = "../smelt-core" }
+smelt-dialect = { path = "../smelt-dialect" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
 serde = { workspace = true }

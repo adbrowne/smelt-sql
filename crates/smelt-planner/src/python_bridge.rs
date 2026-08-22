@@ -354,10 +354,11 @@ mod tests {
                     assert_monotonic: false,
                 }),
                 incremental_config: Some(PartitionGrainConfig {
-                    enabled: true,
                     unique_key: vec![],
+                    nondeterministic_columns_retired: (),
                     safety_overrides: crate::types::PartitionGrainSafetyOverrides::default(),
                 }),
+                plausible_columns: std::collections::BTreeSet::new(),
             };
 
             let py_model = model_info_to_py(py, &model).unwrap();

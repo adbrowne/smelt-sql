@@ -58,13 +58,16 @@ The full per-key reference (target sub-shape, model-config sub-shape, incrementa
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `type` | string | yes | Backend type — `duckdb` or `spark`. |
+| `type` | string | yes | Backend type — `duckdb`, `spark`, or `bigquery`. |
 | `schema` | string | no | Schema name used for materialised tables/views and target-schema seeds. Defaults to `main` when omitted (matches `architecture.md` §"Default materialization name mapping"). |
 | `database` | string | DuckDB only | Path to the `.duckdb` file (relative to project root). |
 | `connect_url` | string | Spark only | Spark Connect URL (e.g. `sc://localhost:15002`). |
 | `catalog` | string | Spark only | Optional Spark catalog name. |
 | `warehouse` | string | Spark only | Base directory for file-based output (Parquet warehouse). |
 | `format` | string | Spark only | `delta` (default) or `parquet`. Affects schema-evolution capabilities. |
+| `project` | string | BigQuery only | GCP project the jobs are billed to and resolved against. |
+| `dataset` | string | BigQuery only | Dataset holding the target's tables — BigQuery's analogue of a schema. Defaults to `schema` when omitted. |
+| `location` | string | BigQuery only | Dataset location (e.g. `US`, `europe-west2`). Must match at query time; a dataset created in one location cannot be queried alongside tables in another. |
 | `settings` | map of string → string | DuckDB only | Connection-time settings applied as `SET key = value` on open. Unknown keys are rejected with an error. Common keys: `memory_limit`, `threads`, `temp_directory`. When `memory_limit` and/or `temp_directory` are absent, smelt supplies conservative defaults (see Semantics §8); any key the user sets is applied verbatim and never overridden. |
 
 ### Model-config shape (per `models.<name>`)

@@ -76,7 +76,8 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let (models, function_files) =
         discover_models_for_run(&discovery, &args.target, &project_dir, &config)?;
-    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+    let ephemeral_seed_ctes =
+        build_ephemeral_seed_ctes(&seeds, resolve_target_backend_type(&config, &args.target)?);
 
     // Discover check files separately (excluded from the model graph).
     let all_discovered = discovery
@@ -363,7 +364,8 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
     }
 
     let seeds = smelt_core::discover_seed_infos_with_sidecars(&project_dir, &config.paths);
-    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+    let ephemeral_seed_ctes =
+        build_ephemeral_seed_ctes(&seeds, resolve_target_backend_type(&config, &args.target)?);
     let salsa_db = build_execute_salsa_db(
         &discovery,
         &function_files,

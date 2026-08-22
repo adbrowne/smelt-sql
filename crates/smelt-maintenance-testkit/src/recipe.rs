@@ -36,17 +36,72 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
     -PAYLOAD_BOUND..=PAYLOAD_BOUND
 }
 
-/// Which backend a staged Link-C project targets
-/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2). Selects
-/// both `render::render_smelt_yml_for`'s emitted target block and
-/// `LinkCProject::run_with_target`'s backend factory arm. `DuckDb` is the
-/// only variant ever constructed today — `SparkDelta` exists so the seam is
-/// in place ahead of the Spark arm a later phase of that plan wires up;
-/// selecting it from `run_with_target` is `unimplemented!()` until then.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which backend a staged Link-C project targets. Selects both
+/// `render::render_smelt_yml_for`'s emitted target block and
+/// `LinkCProject::run_with_target`'s backend factory arm. `BigQuery` carries
+/// the dataset name the case isolates in — a fresh dataset per case, derived
+/// by [`bq_conformance_dataset`] rather than threaded through the harness —
+/// which is why the enum is no longer `Copy` (a `String` field can't be):
+/// every prior call site that relied on implicit-copy semantics either
+/// constructs a fresh unit variant (unaffected) or now goes through
+/// `.clone()` where the same target is consulted more than once.
+/// `SparkDelta` likewise carries the schema its project stages into. Spark's
+/// warehouse is ONE persistent Delta store shared by every project in a test
+/// binary — same connect URL, same `spark_catalog`, and the same warehouse
+/// directory whenever `SMELT_SPARK_WAREHOUSE` is exported — so unlike DuckDB
+/// (a private `.duckdb` file per project) the schema is the *only* thing that
+/// separates two projects' physical tables. Carrying it in the target makes
+/// "these two projects write different tables" expressible, which is what
+/// `families::dags`'s full-refresh oracle twin needs to be a real comparison
+/// rather than one table read twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConformanceTarget {
     DuckDb,
-    SparkDelta,
+    SparkDelta { schema: String },
+    BigQuery { dataset: String },
+}
+
+impl ConformanceTarget {
+    /// The Spark/Delta target every non-paired family stages into — the one
+    /// persistent [`SPARK_CONFORMANCE_SCHEMA`]. Paired families (today only
+    /// `families::dags`) reach the twin's distinct schema through
+    /// `ConformanceBackend::twin_target` instead.
+    pub fn spark_delta() -> Self {
+        ConformanceTarget::SparkDelta {
+            schema: SPARK_CONFORMANCE_SCHEMA.to_string(),
+        }
+    }
+}
+
+/// The BigQuery dataset a generative-conformance `(family, case)` pair
+/// isolates in.
+///
+/// Derived rather than minted, so staging (which writes the `bq:` target
+/// block) and the assertion loop (which reads the same dataset back to
+/// compare against the oracle) agree without threading state between them —
+/// exactly the property `crates/smelt-cli/tests/common/mod.rs::bq_dataset`
+/// gives the parity suites. The pid keeps two concurrent runs (two
+/// worktrees, or a developer beside an autonomy loop) apart; `family` and
+/// `case` keep every generated case in one run apart from every other.
+pub fn bq_conformance_dataset(family: &str, case: &str) -> String {
+    let base = std::env::var("SMELT_BQ_DATASET").unwrap_or_else(|_| "smelt_test".to_string());
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    format!(
+        "{base}_conf_{family}_{pid}_{case}",
+        family = sanitize(family),
+        pid = std::process::id(),
+        case = sanitize(case),
+    )
 }
 
 /// Dedicated Spark/Delta schema the generative conformance harness's Spark
@@ -83,6 +138,34 @@ pub fn spark_warehouse_dir(db_path: &std::path::Path) -> std::path::PathBuf {
                 .unwrap_or_else(|| std::path::Path::new("."))
                 .join("spark_warehouse")
         })
+}
+
+/// The GCP project the conformance harness's BigQuery arm bills its jobs to
+/// and resolves datasets against: `SMELT_BQ_PROJECT` from the environment
+/// (`scripts/bigquery-env.sh`'s convention, mirroring
+/// `crates/smelt-cli/tests/common/mod.rs::bq_env`'s `project` field). `None`
+/// when unset — callers that reach the BigQuery arm at all have already
+/// checked this is set (the harness's skip-when-unset gate); a caller that
+/// bypasses that check fails loud on connect rather than silently targeting
+/// an empty project string.
+pub fn bq_project() -> Option<String> {
+    std::env::var("SMELT_BQ_PROJECT").ok()
+}
+
+/// The BigQuery dataset location (e.g. `US`, `europe-west2`) the conformance
+/// harness's BigQuery arm creates its datasets in: `SMELT_BQ_LOCATION` from
+/// the environment, or `None` to let BigQuery apply its own default.
+pub fn bq_location() -> Option<String> {
+    std::env::var("SMELT_BQ_LOCATION").ok()
+}
+
+/// The live BigQuery access token the conformance harness's BigQuery arm
+/// authenticates with: `SMELT_BQ_ACCESS_TOKEN` from the environment
+/// (`scripts/bigquery-auth.sh`'s convention). `None` when unset — smelt never
+/// falls back to Google application-default credentials
+/// (`docs/specs/multi_backend.md` §Surface).
+pub fn bq_access_token() -> Option<String> {
+    std::env::var("SMELT_BQ_ACCESS_TOKEN").ok()
 }
 
 /// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
@@ -1851,6 +1934,33 @@ mod tests {
             }
         }
         assert!(saw_filter, "sample never generated a Filter recipe");
+    }
+
+    /// `conformance_dataset_is_derived_not_threaded`: two independent
+    /// `bq_conformance_dataset(family, case)` calls in the same process
+    /// agree (no threaded state needed to reproduce the name), and the name
+    /// differs across both `family` and `case` — the property that lets
+    /// staging and the assertion loop compute the same BigQuery dataset
+    /// independently, exactly as `common::bq_dataset` does for the parity
+    /// suites.
+    #[test]
+    fn conformance_dataset_is_derived_not_threaded() {
+        let a1 = bq_conformance_dataset("additive", "case0");
+        let a2 = bq_conformance_dataset("additive", "case0");
+        assert_eq!(
+            a1, a2,
+            "two independent calls with the same (family, case) must agree \
+             without threading state between them"
+        );
+
+        let different_family = bq_conformance_dataset("idempotent", "case0");
+        assert_ne!(
+            a1, different_family,
+            "dataset name must differ across family"
+        );
+
+        let different_case = bq_conformance_dataset("additive", "case1");
+        assert_ne!(a1, different_case, "dataset name must differ across case");
     }
 
     /// `reachability_sample_inhabits_every_pool_construct` (plan Phase 1 TDD

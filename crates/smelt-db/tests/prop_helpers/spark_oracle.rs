@@ -26,8 +26,19 @@ struct SparkSession {
 
 impl SparkOracle {
     pub fn new(container_id: &str) -> Self {
+        // `spark-sql` writes query errors to stderr, not stdout, so the stream
+        // is merged inside the container. Without this the oracle sees an empty
+        // `DESCRIBE QUERY` result and cannot tell a query the engine refused
+        // from an oracle that has stopped working — see `query_types`.
         let mut child = Command::new("docker")
-            .args(["exec", "-i", container_id, "/opt/spark/bin/spark-sql"])
+            .args([
+                "exec",
+                "-i",
+                container_id,
+                "sh",
+                "-c",
+                "/opt/spark/bin/spark-sql 2>&1",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -122,16 +133,72 @@ impl TypeOracle for SparkOracle {
 
         let output = lines.join("");
 
-        // Check for errors in the output
-        if output.contains("AnalysisException")
-            || output.contains("ParseException")
-            || output.contains("Error in query")
-        {
-            return Err("spark-sql error in output".to_string());
-        }
-
-        parse_describe_output(&output)
+        interpret_describe_output(&output)
     }
+}
+
+/// Turn one `DESCRIBE QUERY` response into column types, or into an error
+/// string whose wording tells `classify_oracle_error` whether the engine
+/// refused this query (skippable) or the oracle itself is blind (fatal).
+///
+/// Split out of `query_types` so both branches can be pinned by unit tests
+/// without a live Spark session.
+fn interpret_describe_output(output: &str) -> Result<Vec<(String, DataType)>, String> {
+    // Spark 4 reports a refused query as a named error condition with a
+    // trailing SQLSTATE rather than the exception names 3.x used — e.g.
+    // `CAST('x' AS VARCHAR)` yields `[DATATYPE_MISSING_SIZE] DataType
+    // "VARCHAR" requires a length parameter ... SQLSTATE: 42K01`, which
+    // carries none of the three legacy strings. Both spellings are matched so
+    // the oracle keeps classifying an engine refusal as a refusal on either
+    // version.
+    if output.contains("AnalysisException")
+        || output.contains("ParseException")
+        || output.contains("Error in query")
+        || output.contains("SQLSTATE:")
+    {
+        return Err("spark-sql error in output".to_string());
+    }
+
+    match parse_describe_output(output) {
+        Ok(columns) => Ok(columns),
+        // No column rows came back. Reading the sentinel already proved the
+        // session is alive, so this is one of two very different things and the
+        // oracle must not conflate them (see `classify_oracle_error`): the
+        // engine refused this query and explained itself in prose, or
+        // `DESCRIBE QUERY`'s output shape changed and the parser is now blind —
+        // which would silently "skip" every case and report green while
+        // verifying nothing.
+        //
+        // The discriminator is the tab. A successful `DESCRIBE QUERY` row is
+        // tab-separated (`col_name\tdata_type\tcomment`); Spark's refusal
+        // messages are prose with no tabs. So tab-bearing output that failed to
+        // parse is a format change (fatal, left unrecognised), while tab-free
+        // prose is the engine rejecting this specific SQL. Verified live on
+        // Spark 4.0.0: `CUME_DIST() OVER (... ROWS ...)` yields "Window Frame
+        // specifiedwindowframe(RowFrame, -1, 1) must match the required frame
+        // ..." — a refusal carrying neither an exception name nor a SQLSTATE.
+        Err(e) => {
+            if diagnostic_lines(output).any(|line| line.contains('\t')) {
+                Err(format!("unparseable DESCRIBE QUERY output: {e}"))
+            } else if diagnostic_lines(output).next().is_some() {
+                Err("spark-sql error in output".to_string())
+            } else {
+                Err(format!("{e} (no output at all)"))
+            }
+        }
+    }
+}
+
+/// The lines of `spark-sql` output that carry information about the statement,
+/// with the CLI's own scaffolding removed: the echoed prompt (which repeats the
+/// submitted SQL verbatim), blank lines, and the trailing timing line.
+///
+/// Used to tell an engine refusal from an output-format change; see the call
+/// site in `query_types`.
+fn diagnostic_lines(output: &str) -> impl Iterator<Item = &str> {
+    output.lines().map(str::trim).filter(|line| {
+        !line.is_empty() && !line.starts_with("spark-sql") && !line.starts_with("Time taken:")
+    })
 }
 
 /// Parse Spark's tab-separated `DESCRIBE QUERY` output.
@@ -325,5 +392,57 @@ mod tests {
         let result = parse_describe_output(output).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1, DataType::BigInt);
+    }
+
+    /// Regression: Spark 4 spells a refused query as a named error condition
+    /// with a trailing SQLSTATE, carrying none of the 3.x exception names.
+    /// Live on Spark 4.0.0, `CAST('hello' AS VARCHAR)` (no length) produces
+    /// exactly this. It must read as a refusal, not a broken oracle.
+    #[test]
+    fn sqlstate_error_is_a_query_refusal() {
+        let output = "[DATATYPE_MISSING_SIZE] DataType \"VARCHAR\" requires a length \
+                      parameter, for example \"VARCHAR\"(10). Please specify the length. \
+                      SQLSTATE: 42K01\n";
+        let err = interpret_describe_output(output).unwrap_err();
+        assert_eq!(err, "spark-sql error in output");
+    }
+
+    /// Regression for the `prop_type_inference` seed pinned in
+    /// `type_property_tests.proptest-regressions`: `CUME_DIST() OVER (... ROWS
+    /// ...)` is refused by Spark with prose carrying neither an exception name
+    /// nor a SQLSTATE. The tab-free-prose branch is what classifies it.
+    #[test]
+    fn bare_prose_error_is_a_query_refusal() {
+        let output = "spark-sql (default)> DESCRIBE QUERY SELECT CUME_DIST() OVER (ORDER \
+                      BY d ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING);\n\
+                      Window Frame specifiedwindowframe(RowFrame, -1, 1) must match the \
+                      required frame specifiedwindowframe(RangeFrame, unboundedpreceding$(), \
+                      currentrow$()).\nTime taken: 0.3 seconds\n";
+        let err = interpret_describe_output(output).unwrap_err();
+        assert_eq!(err, "spark-sql error in output");
+    }
+
+    /// The fail-loud half: output that is still tab-shaped but no longer
+    /// parseable means `DESCRIBE QUERY`'s format moved, which would make every
+    /// case "skip" and the leg report green while verifying nothing. That must
+    /// stay unrecognised so `classify_oracle_error` calls it fatal.
+    #[test]
+    fn unparseable_tab_shaped_output_is_not_a_refusal() {
+        let output = "# col_name\tdata_type\tcomment\n";
+        let err = interpret_describe_output(output).unwrap_err();
+        assert!(
+            err.starts_with("unparseable DESCRIBE QUERY output"),
+            "expected a fatal-shaped error, got {err:?}"
+        );
+        assert_ne!(err, "spark-sql error in output");
+    }
+
+    /// Silence is also not a refusal: a session that answers nothing at all is
+    /// a dead oracle, not an engine rejecting one query.
+    #[test]
+    fn empty_output_is_not_a_refusal() {
+        let err = interpret_describe_output("spark-sql (default)> \n\n").unwrap_err();
+        assert!(err.contains("no output at all"), "got {err:?}");
+        assert_ne!(err, "spark-sql error in output");
     }
 }

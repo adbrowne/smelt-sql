@@ -8,16 +8,26 @@
 //! (no Delta runtime), `merge_into` fails; the test surfaces that as a block
 //! for the human, not a code fix.
 //!
+//! BigQuery needs no such runtime — `MERGE` is native GoogleSQL — so its leg
+//! covers the emitted `WHEN MATCHED` / `WHEN NOT MATCHED` shape without a table
+//! format prerequisite. It does *not* reach `NOT MATCHED BY SOURCE`: no emitter
+//! produces that clause yet, on any backend.
+//!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
+//! With `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` set AND `--features
+//! bigquery`: also covers BigQuery.
 
 mod common;
 #[cfg(feature = "spark")]
 use common::spark_connect_url;
-use common::{assert_table_parity, fetch_rows, targets_to_run, TargetKind};
+use common::{assert_table_parity, drop_bq_dataset, fetch_rows, targets_to_run, TargetKind};
 use tempfile::TempDir;
 
 const SPARK_SCHEMA: &str = "smelt_merge_p4";
+
+/// Scopes this suite's BigQuery dataset, as `SPARK_SCHEMA` does for Spark.
+const BQ_LABEL: &str = "merge_p4";
 
 /// The SELECT that produces the initial batch: two users with scores.
 ///
@@ -34,6 +44,15 @@ fn initial_batch_select() -> &'static str {
 fn second_batch_source_sql() -> &'static str {
     "SELECT 'A' AS user_id, CAST(300 AS BIGINT) AS total_score \
      UNION ALL SELECT 'C', CAST(50 AS BIGINT)"
+}
+
+/// The target's full output projection, in order.
+///
+/// Inert on DuckDB and Spark, which spell the matched arm `UPDATE SET *`, and
+/// required on BigQuery, whose GoogleSQL has no star form — so passing it is
+/// what makes the same call work on all three.
+fn target_columns() -> Vec<String> {
+    vec!["user_id".to_string(), "total_score".to_string()]
 }
 
 /// Expected final state after the MERGE:
@@ -72,10 +91,11 @@ fn cumulative_merge_matches_across_backends() {
     std::fs::create_dir_all(&warehouse).unwrap();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let schema = match &kind {
             TargetKind::DuckDb => "main",
             TargetKind::Spark => SPARK_SCHEMA,
+            TargetKind::BigQuery { dataset } => dataset.as_str(),
         };
 
         match &kind {
@@ -102,6 +122,7 @@ fn cumulative_merge_matches_across_backends() {
                             "merge_target",
                             second_batch_source_sql(),
                             &["user_id".to_string()],
+                            &target_columns(),
                         )
                         .await
                         .unwrap_or_else(|e| panic!("DuckDB merge_into failed: {e}"));
@@ -143,15 +164,45 @@ fn cumulative_merge_matches_across_backends() {
                                 "merge_target",
                                 second_batch_source_sql(),
                                 &["user_id".to_string()],
+                                &target_columns(),
                             )
                             .await
                             .unwrap_or_else(|e| panic!("Spark merge_into failed: {e}"));
                     });
                 }
             }
+            TargetKind::BigQuery { dataset } => {
+                let _ = dataset;
+                #[cfg(not(feature = "bigquery"))]
+                panic!("BigQuery path should only be reached when --features bigquery is enabled");
+                #[cfg(feature = "bigquery")]
+                rt.block_on(async {
+                    use smelt_backend::Backend;
+
+                    let backend = common::bq_backend(dataset).await;
+
+                    backend
+                        .create_table_as(schema, "merge_target", initial_batch_select())
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery create merge_target failed: {e}"));
+
+                    // MERGE is native GoogleSQL — no table format prerequisite.
+                    backend
+                        .merge_into(
+                            schema,
+                            "merge_target",
+                            second_batch_source_sql(),
+                            &["user_id".to_string()],
+                            &target_columns(),
+                        )
+                        .await
+                        .unwrap_or_else(|e| panic!("BigQuery merge_into failed: {e}"));
+                });
+            }
         }
 
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "merge_target");
+        drop_bq_dataset(&kind);
         assert_table_parity(&actual, &expected_rows(), &format!("{kind:?}"));
     }
 }

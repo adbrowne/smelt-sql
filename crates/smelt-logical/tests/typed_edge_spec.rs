@@ -20,9 +20,12 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
 }
 
+/// Extracts the body of a `### <heading>` section, anchored on the LAST
+/// occurrence of the heading: `### The graph layer` appears twice in the spec,
+/// once in the overview of the layers and once as the normative section.
 fn section_body<'a>(doc: &'a str, heading: &str) -> &'a str {
     let start = doc
-        .find(heading)
+        .rfind(heading)
         .unwrap_or_else(|| panic!("document must have a {heading:?} heading"));
     let after_heading = &doc[start..];
     let body_start = after_heading

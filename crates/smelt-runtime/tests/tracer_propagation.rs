@@ -201,6 +201,7 @@ fn repair_conversion_score(conn: &Connection, clamp: &ScanClamp, region: &Region
             "silver_events",
             &strings(&["event_id", "event_date"]),
             &source_select,
+            &[],
             MaintenanceDialect::DuckDb,
         ),
     );

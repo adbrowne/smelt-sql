@@ -1,18 +1,27 @@
-//! W5·P1 — seed / `load_table` end-to-end parity on live Spark.
+//! W5·P1 — seed / `load_table` end-to-end parity on live remote backends.
 //!
-//! Proves a CSV seed loads through the real CLI path (`smelt seed`) into both
-//! DuckDB and Spark backends, not just via the backend's `load_table` directly.
+//! Proves a CSV seed loads through the real CLI path (`smelt seed`) into the
+//! DuckDB, Spark, and BigQuery backends, not just via the backend's
+//! `load_table` directly.
 //!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
+//! With `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` set AND `--features
+//! bigquery`: also covers BigQuery.
 
 mod common;
-use common::{assert_table_parity, fetch_rows, spark_connect_url, targets_to_run, TargetKind};
+use common::{
+    assert_table_parity, bq_target_block, drop_bq_dataset, fetch_rows, spark_connect_url,
+    targets_to_run, TargetKind,
+};
 use std::process::Command;
 use tempfile::TempDir;
 
 /// Unique Spark schema for this test to avoid conflicts with other Spark tests.
 const SPARK_SCHEMA: &str = "smelt_seed_p1";
+
+/// Scopes this suite's BigQuery dataset, for the same reason.
+const BQ_LABEL: &str = "seed_p1";
 
 /// Stage a minimal workspace with a single flat seed CSV (`p1_users.csv`).
 fn stage_seed_workspace(tmp: &TempDir) -> std::path::PathBuf {
@@ -27,8 +36,9 @@ fn stage_seed_workspace(tmp: &TempDir) -> std::path::PathBuf {
         .to_str()
         .expect("warehouse path must be valid UTF-8");
 
+    let bq_block = bq_target_block(BQ_LABEL);
     let yml = format!(
-        "name: seed_parity_proj\nversion: 1\npaths:\n  - seeds\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\ndefault_materialization: table\n"
+        "name: seed_parity_proj\nversion: 1\npaths:\n  - seeds\ntargets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}default_materialization: table\n"
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
 
@@ -87,10 +97,11 @@ fn seed_loads_into_both_backends() {
     // DuckDB file created by `smelt seed --target dev` at target/dev.duckdb.
     let db_path = root.join("target/dev.duckdb");
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let (target_name, schema) = match &kind {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
+            TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
         };
 
         let out = run_smelt_seed(&root, target_name);
@@ -102,6 +113,7 @@ fn seed_loads_into_both_backends() {
         );
 
         let actual = fetch_rows(&kind, &db_path, &warehouse, schema, "p1_users");
+        drop_bq_dataset(&kind);
         assert_table_parity(&actual, &expected_rows(), target_name);
     }
 }

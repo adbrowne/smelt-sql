@@ -12,14 +12,54 @@
 //! can compare smelt's inference against DuckDB's actual type.
 
 use proptest::prelude::*;
+use smelt_dialect::SqlDialect;
 use smelt_types::{DataType, SqlFunction};
 
 /// A typed column in the CTE source.
+///
+/// `cast_sql` is the **canonical** rendering — the SQL text smelt's own parser
+/// and type inference always read. Oracles whose engine does not accept the
+/// canonical spelling (BigQuery) get their rendering via
+/// [`TypedSource::cast_sql_for`]; DuckDB, Spark and PostgreSQL share the
+/// canonical text byte for byte.
 #[derive(Debug, Clone)]
 pub struct TypedSource {
     pub name: String,
     pub data_type: DataType,
     pub cast_sql: String,
+}
+
+impl TypedSource {
+    /// The source-column cast literal as `dialect` accepts it.
+    ///
+    /// `None` means "this column has no rendering in that dialect" — the caller
+    /// skips the case rather than inventing a spelling. Derived columns (those
+    /// carrying an empty `cast_sql`, e.g. an upstream model's output columns)
+    /// have no literal at all and pass through unchanged.
+    pub fn cast_sql_for(&self, dialect: SqlDialect) -> Option<&str> {
+        if dialect != SqlDialect::BigQuery || self.cast_sql.is_empty() {
+            return Some(&self.cast_sql);
+        }
+        BaseType::from_canonical_cast_sql(&self.cast_sql)?.cast_sql_for(dialect)
+    }
+}
+
+/// Render the CTE source columns (`<cast> AS <name>`) for `dialect`.
+///
+/// `None` when any column lacks a rendering in that dialect.
+pub fn render_cte_columns(columns: &[TypedSource], dialect: SqlDialect) -> Option<Vec<String>> {
+    columns
+        .iter()
+        .map(|c| Some(format!("{} AS {}", c.cast_sql_for(dialect)?, c.name)))
+        .collect()
+}
+
+/// The synthetic join-key literal used by the JOIN scenarios, per dialect.
+fn join_key_cast(dialect: SqlDialect) -> &'static str {
+    match dialect {
+        SqlDialect::BigQuery => "CAST(1 AS INT64)",
+        _ => "CAST(1 AS INTEGER)",
+    }
 }
 
 /// A generated expression with its expected smelt-inferred type.
@@ -102,6 +142,49 @@ impl BaseType {
             BaseType::Time => "CAST('12:00:00' AS TIME)",
             BaseType::Interval => "CAST('1 day' AS INTERVAL)",
         }
+    }
+
+    /// The cast literal as `dialect` accepts it, or `None` when this base type
+    /// has no rendering there.
+    ///
+    /// Every non-BigQuery dialect uses the canonical rendering unchanged.
+    /// GoogleSQL rejects the canonical spellings (`DOUBLE`, `VARCHAR`,
+    /// `TIMESTAMPTZ` are not types there) and rejects *any* parameterized type
+    /// inside a CAST, so `Decimal` unavoidably loses its precision/scale.
+    /// BigQuery's `TIMESTAMP` is the absolute instant and its `DATETIME` is the
+    /// naive one — the opposite naming to the canonical dialect.
+    pub fn cast_sql_for(self, dialect: SqlDialect) -> Option<&'static str> {
+        if dialect != SqlDialect::BigQuery {
+            return Some(self.cast_sql());
+        }
+        Some(match self {
+            BaseType::Boolean => "CAST(TRUE AS BOOL)",
+            BaseType::Integer => "CAST(42 AS INT64)",
+            BaseType::BigInt => "CAST(100 AS INT64)",
+            BaseType::Double => "CAST(3.14 AS FLOAT64)",
+            BaseType::Varchar => "CAST('hello' AS STRING)",
+            BaseType::Date => "CAST('2024-01-01' AS DATE)",
+            BaseType::Timestamp => "CAST('2024-01-01 12:00:00' AS DATETIME)",
+            BaseType::TimestampTz => "CAST('2024-01-01 12:00:00+00' AS TIMESTAMP)",
+            // Parameterized types are illegal in a GoogleSQL CAST, so the
+            // declared precision/scale cannot be carried over.
+            BaseType::Decimal => "CAST(99.99 AS NUMERIC)",
+            BaseType::Time => "CAST('12:00:00' AS TIME)",
+            // BigQuery has no reliable string-to-INTERVAL cast; the slot only
+            // needs *an expression of that type*, so a literal is the honest
+            // rendering.
+            BaseType::Interval => "INTERVAL 1 DAY",
+        })
+    }
+
+    /// Recover the base type from its canonical cast literal.
+    ///
+    /// Derived from [`BaseType::all`], so it cannot drift from `cast_sql`.
+    pub fn from_canonical_cast_sql(sql: &str) -> Option<BaseType> {
+        BaseType::all()
+            .iter()
+            .copied()
+            .find(|bt| bt.cast_sql() == sql)
     }
 
     pub fn col_prefix(self) -> &'static str {
@@ -2029,13 +2112,26 @@ pub fn assemble_cte_query(
     exprs: &[TypedExpr],
     shape: &QueryShape,
 ) -> String {
-    // Build the CTE
-    let cte_cols: Vec<String> = columns
-        .iter()
-        .map(|c| format!("{} AS {}", c.cast_sql, c.name))
-        .collect();
+    assemble_cte_query_for_dialect(columns, exprs, shape, SqlDialect::DuckDB)
+        .expect("the canonical rendering exists for every base type")
+}
 
-    match shape {
+/// Same as [`assemble_cte_query`], rendering the CTE's source-column cast
+/// literals for `dialect`.
+///
+/// Only the cast literals differ between dialects; the generated expressions
+/// reference column names and are shared unchanged. Returns `None` when a
+/// column has no rendering in `dialect`.
+pub fn assemble_cte_query_for_dialect(
+    columns: &[TypedSource],
+    exprs: &[TypedExpr],
+    shape: &QueryShape,
+    dialect: SqlDialect,
+) -> Option<String> {
+    // Build the CTE
+    let cte_cols: Vec<String> = render_cte_columns(columns, dialect)?;
+
+    Some(match shape {
         QueryShape::GroupBy { group_columns }
         | QueryShape::GroupByHaving { group_columns, .. }
         | QueryShape::GroupByWindow { group_columns } => {
@@ -2141,7 +2237,7 @@ pub fn assemble_cte_query(
                 select_list.join(", ")
             )
         }
-    }
+    })
 }
 
 /// Wraps a generated query in a nested CTE, exercising the "inner query in CTE"
@@ -2247,6 +2343,9 @@ pub struct MultiModelScenario {
     pub downstream_sql: String,
     /// DuckDB-equivalent SQL (flattened CTEs, no smelt.ref)
     pub duckdb_sql: String,
+    /// The same flattened query with BigQuery-accepted source cast literals,
+    /// or `None` when a source column has no BigQuery rendering.
+    pub bigquery_sql: Option<String>,
     /// The downstream expressions with expected types
     pub downstream_exprs: Vec<TypedExpr>,
 }
@@ -2286,10 +2385,8 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                 use_upstream_exprs,
                 use_group_by,
             )| {
-                let cte_cols: Vec<String> = columns
-                    .iter()
-                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
-                    .collect();
+                let cte_cols: Vec<String> = render_cte_columns(&columns, SqlDialect::DuckDB)?;
+                let bq_cte_cols = render_cte_columns(&columns, SqlDialect::BigQuery);
 
                 // Determine upstream output columns
                 let (upstream_select_items, upstream_output_cols) = if use_upstream_exprs {
@@ -2376,28 +2473,33 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                         group_col.name
                     );
 
-                    // DuckDB equivalent
-                    let duckdb_cte = if use_upstream_exprs {
+                    // Oracle-side equivalent, rendered per dialect
+                    let build_oracle = |cte: &[String]| {
+                        let cte_clause = if use_upstream_exprs {
+                            format!(
+                                "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
+                                cte.join(", "),
+                                upstream_select_items.join(", ")
+                            )
+                        } else {
+                            format!("WITH upstream AS (SELECT {})", cte.join(", "))
+                        };
                         format!(
-                            "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
-                            cte_cols.join(", "),
-                            upstream_select_items.join(", ")
+                            "{} SELECT {} FROM upstream GROUP BY {}",
+                            cte_clause,
+                            select_items.join(", "),
+                            group_col.name
                         )
-                    } else {
-                        format!("WITH upstream AS (SELECT {})", cte_cols.join(", "))
                     };
-                    let duckdb_sql = format!(
-                        "{} SELECT {} FROM upstream GROUP BY {}",
-                        duckdb_cte,
-                        select_items.join(", "),
-                        group_col.name
-                    );
+                    let duckdb_sql = build_oracle(&cte_cols);
+                    let bigquery_sql = bq_cte_cols.as_deref().map(build_oracle);
 
                     Some(MultiModelScenario {
                         upstream_sql,
                         upstream_columns: upstream_output_cols,
                         downstream_sql,
                         duckdb_sql,
+                        bigquery_sql,
                         downstream_exprs: down_exprs,
                     })
                 } else {
@@ -2424,26 +2526,31 @@ pub fn multi_model_scenario_strategy() -> impl Strategy<Value = MultiModelScenar
                         expr_items.join(", ")
                     );
 
-                    let duckdb_cte = if use_upstream_exprs {
+                    let build_oracle = |cte: &[String]| {
+                        let cte_clause = if use_upstream_exprs {
+                            format!(
+                                "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
+                                cte.join(", "),
+                                upstream_select_items.join(", ")
+                            )
+                        } else {
+                            format!("WITH upstream AS (SELECT {})", cte.join(", "))
+                        };
                         format!(
-                            "WITH data AS (SELECT {}) , upstream AS (SELECT {} FROM data)",
-                            cte_cols.join(", "),
-                            upstream_select_items.join(", ")
+                            "{} SELECT {} FROM upstream",
+                            cte_clause,
+                            expr_items.join(", ")
                         )
-                    } else {
-                        format!("WITH upstream AS (SELECT {})", cte_cols.join(", "))
                     };
-                    let duckdb_sql = format!(
-                        "{} SELECT {} FROM upstream",
-                        duckdb_cte,
-                        expr_items.join(", ")
-                    );
+                    let duckdb_sql = build_oracle(&cte_cols);
+                    let bigquery_sql = bq_cte_cols.as_deref().map(build_oracle);
 
                     Some(MultiModelScenario {
                         upstream_sql,
                         upstream_columns: upstream_output_cols,
                         downstream_sql,
                         duckdb_sql,
+                        bigquery_sql,
                         downstream_exprs: exprs,
                     })
                 }
@@ -2464,6 +2571,9 @@ pub struct ThreeModelScenario {
     pub model_c_sql: String,
     /// DuckDB-equivalent SQL (all three as CTEs)
     pub duckdb_sql: String,
+    /// The same chained query with BigQuery-accepted source cast literals,
+    /// or `None` when a source column has no BigQuery rendering.
+    pub bigquery_sql: Option<String>,
 }
 
 /// Generate a three-model chain: A (base) → B (refs A) → C (refs B).
@@ -2484,10 +2594,8 @@ pub fn three_model_scenario_strategy() -> impl Strategy<Value = ThreeModelScenar
             "need valid three-model scenario",
             |(columns, b_expr_kinds, b_func_indices, c_expr_kinds, c_func_indices)| {
                 // Model A: base CTE
-                let cte_cols: Vec<String> = columns
-                    .iter()
-                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
-                    .collect();
+                let cte_cols: Vec<String> = render_cte_columns(&columns, SqlDialect::DuckDB)?;
+                let bq_cte_cols = render_cte_columns(&columns, SqlDialect::BigQuery);
                 let a_select: Vec<String> = columns.iter().map(|c| c.name.clone()).collect();
                 let model_a_sql = format!(
                     "WITH data AS (SELECT {}) SELECT {} FROM data",
@@ -2548,19 +2656,24 @@ pub fn three_model_scenario_strategy() -> impl Strategy<Value = ThreeModelScenar
                     c_items.join(", ")
                 );
 
-                // DuckDB equivalent: chain as CTEs
-                let duckdb_sql = format!(
-                    "WITH model_a AS (SELECT {}) , model_b AS (SELECT {} FROM model_a) SELECT {} FROM model_b",
-                    cte_cols.join(", "),
-                    b_items.join(", "),
-                    c_items.join(", ")
-                );
+                // Oracle equivalent: chain as CTEs
+                let build_oracle = |cte: &[String]| {
+                    format!(
+                        "WITH model_a AS (SELECT {}) , model_b AS (SELECT {} FROM model_a) SELECT {} FROM model_b",
+                        cte.join(", "),
+                        b_items.join(", "),
+                        c_items.join(", ")
+                    )
+                };
+                let duckdb_sql = build_oracle(&cte_cols);
+                let bigquery_sql = bq_cte_cols.as_deref().map(build_oracle);
 
                 Some(ThreeModelScenario {
                     model_a_sql,
                     model_b_sql,
                     model_c_sql,
                     duckdb_sql,
+                    bigquery_sql,
                 })
             },
         )
@@ -2579,6 +2692,9 @@ pub struct JoinScenario {
     pub join_sql: String,
     /// DuckDB-equivalent SQL
     pub duckdb_sql: String,
+    /// The same joined query with BigQuery-accepted source cast literals,
+    /// or `None` when a source column has no BigQuery rendering.
+    pub bigquery_sql: Option<String>,
 }
 
 /// Generate a JOIN scenario: left_model INNER JOIN right_model ON shared key.
@@ -2600,10 +2716,7 @@ pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
                 }
 
                 // Build left model CTE
-                let left_cte: Vec<String> = left_cols
-                    .iter()
-                    .map(|c| format!("{} AS {}", c.cast_sql, c.name))
-                    .collect();
+                let left_cte: Vec<String> = render_cte_columns(&left_cols, SqlDialect::DuckDB)?;
                 // Add a join key: CAST(1 AS INTEGER) AS join_key
                 let left_sql = format!(
                     "WITH data AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {}, join_key FROM data",
@@ -2612,10 +2725,13 @@ pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
                 );
 
                 // Build right model CTE — prefix column names with r_ to avoid collision
-                let right_cte: Vec<String> = right_cols
-                    .iter()
-                    .map(|c| format!("{} AS r_{}", c.cast_sql, c.name))
-                    .collect();
+                let render_right = |dialect: SqlDialect| -> Option<Vec<String>> {
+                    right_cols
+                        .iter()
+                        .map(|c| Some(format!("{} AS r_{}", c.cast_sql_for(dialect)?, c.name)))
+                        .collect()
+                };
+                let right_cte: Vec<String> = render_right(SqlDialect::DuckDB)?;
                 let right_sql = format!(
                     "WITH data AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {}, join_key FROM data",
                     right_cte.join(", "),
@@ -2662,18 +2778,30 @@ pub fn join_scenario_strategy() -> impl Strategy<Value = JoinScenario> {
                     expr_items.join(", ")
                 );
 
-                let duckdb_sql = format!(
-                    "WITH left_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) , right_model AS (SELECT {}, CAST(1 AS INTEGER) AS join_key) SELECT {} FROM left_model l INNER JOIN right_model r ON l.join_key = r.join_key",
-                    left_cte.iter().zip(left_cols.iter()).map(|(_cte, c)| format!("{} AS {}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
-                    right_cols.iter().map(|c| format!("{} AS r_{}", c.cast_sql, c.name)).collect::<Vec<_>>().join(", "),
-                    expr_items.join(", ")
-                );
+                let build_oracle = |left: &[String], right: &[String], dialect: SqlDialect| {
+                    let key = join_key_cast(dialect);
+                    format!(
+                        "WITH left_model AS (SELECT {}, {key} AS join_key) , right_model AS (SELECT {}, {key} AS join_key) SELECT {} FROM left_model l INNER JOIN right_model r ON l.join_key = r.join_key",
+                        left.join(", "),
+                        right.join(", "),
+                        expr_items.join(", ")
+                    )
+                };
+                let duckdb_sql = build_oracle(&left_cte, &right_cte, SqlDialect::DuckDB);
+                let bigquery_sql = match (
+                    render_cte_columns(&left_cols, SqlDialect::BigQuery),
+                    render_right(SqlDialect::BigQuery),
+                ) {
+                    (Some(l), Some(r)) => Some(build_oracle(&l, &r, SqlDialect::BigQuery)),
+                    _ => None,
+                };
 
                 Some(JoinScenario {
                     left_sql,
                     right_sql,
                     join_sql,
                     duckdb_sql,
+                    bigquery_sql,
                 })
             },
         )
@@ -2823,5 +2951,242 @@ mod tests {
         let sql = assemble_cte_query(&cols, &exprs, &shape);
         assert!(sql.contains("GROUP BY int_col_0"));
         assert!(sql.contains("COUNT(*) AS expr_0"));
+    }
+
+    /// The canonical CTE column list for one column of every base type, exactly
+    /// as the generator rendered it before dialect awareness was introduced.
+    const CANONICAL_CTE_COLS: &str = "CAST(TRUE AS BOOLEAN) AS bool_col_0, CAST(42 AS INTEGER) AS int_col_1, CAST(100 AS BIGINT) AS bigint_col_2, CAST(3.14 AS DOUBLE) AS dbl_col_3, CAST('hello' AS STRING) AS str_col_4, CAST('2024-01-01' AS DATE) AS date_col_5, CAST('2024-01-01 12:00:00' AS TIMESTAMP) AS ts_col_6, CAST('2024-01-01 12:00:00+00' AS TIMESTAMPTZ) AS tstz_col_7, CAST(99.99 AS DECIMAL(10,2)) AS dec_col_8, CAST('12:00:00' AS TIME) AS time_col_9, CAST('1 day' AS INTERVAL) AS interval_col_10";
+
+    const BIGQUERY_CTE_COLS: &str = "CAST(TRUE AS BOOL) AS bool_col_0, CAST(42 AS INT64) AS int_col_1, CAST(100 AS INT64) AS bigint_col_2, CAST(3.14 AS FLOAT64) AS dbl_col_3, CAST('hello' AS STRING) AS str_col_4, CAST('2024-01-01' AS DATE) AS date_col_5, CAST('2024-01-01 12:00:00' AS DATETIME) AS ts_col_6, CAST('2024-01-01 12:00:00+00' AS TIMESTAMP) AS tstz_col_7, CAST(99.99 AS NUMERIC) AS dec_col_8, CAST('12:00:00' AS TIME) AS time_col_9, INTERVAL 1 DAY AS interval_col_10";
+
+    fn pin_cols() -> Vec<TypedSource> {
+        BaseType::all()
+            .iter()
+            .enumerate()
+            .map(|(i, bt)| TypedSource {
+                name: format!("{}_{}", bt.col_prefix(), i),
+                data_type: bt.to_smelt_type(),
+                cast_sql: bt.cast_sql().to_string(),
+            })
+            .collect()
+    }
+
+    fn pin_exprs() -> Vec<TypedExpr> {
+        vec![
+            TypedExpr {
+                sql: "int_col_1 + 1".into(),
+                alias: "expr_0".into(),
+                expected_smelt_type: DataType::Integer,
+            },
+            TypedExpr {
+                sql: "COUNT(int_col_1)".into(),
+                alias: "expr_1".into(),
+                expected_smelt_type: DataType::BigInt,
+            },
+            TypedExpr {
+                sql: "RANK() OVER (ORDER BY int_col_1)".into(),
+                alias: "expr_2".into(),
+                expected_smelt_type: DataType::BigInt,
+            },
+        ]
+    }
+
+    fn pin_shapes() -> Vec<(QueryShape, String)> {
+        vec![
+            (
+                QueryShape::Scalar,
+                "SELECT int_col_1 + 1 AS expr_0, RANK() OVER (ORDER BY int_col_1) AS expr_2 FROM data".into(),
+            ),
+            (
+                QueryShape::Window,
+                "SELECT int_col_1 + 1 AS expr_0, RANK() OVER (ORDER BY int_col_1) AS expr_2 FROM data".into(),
+            ),
+            (
+                QueryShape::GroupBy {
+                    group_columns: vec!["str_col_4".into()],
+                },
+                "SELECT str_col_4 AS grp_0, COUNT(int_col_1) AS expr_1 FROM data GROUP BY str_col_4".into(),
+            ),
+            (
+                QueryShape::GroupByHaving {
+                    group_columns: vec!["str_col_4".into()],
+                    having_predicate: "COUNT(int_col_1) > 0".into(),
+                },
+                "SELECT str_col_4 AS grp_0, COUNT(int_col_1) AS expr_1 FROM data GROUP BY str_col_4 HAVING COUNT(int_col_1) > 0".into(),
+            ),
+            (
+                QueryShape::GroupByWindow {
+                    group_columns: vec!["str_col_4".into()],
+                },
+                "SELECT str_col_4 AS grp_0, COUNT(int_col_1) AS expr_1, RANK() OVER (ORDER BY COUNT(int_col_1)) AS win_rank FROM data GROUP BY str_col_4".into(),
+            ),
+            (
+                QueryShape::Distinct,
+                "SELECT DISTINCT int_col_1 + 1 AS expr_0 FROM data".into(),
+            ),
+        ]
+    }
+
+    /// Pins the canonical rendering byte for byte: DuckDB's and Spark's
+    /// generated SQL must not move when a new dialect rendering is added.
+    #[test]
+    fn canonical_rendering_is_byte_identical() {
+        // Per-base-type cast literals.
+        let expected: Vec<(BaseType, &str)> = vec![
+            (BaseType::Boolean, "CAST(TRUE AS BOOLEAN)"),
+            (BaseType::Integer, "CAST(42 AS INTEGER)"),
+            (BaseType::BigInt, "CAST(100 AS BIGINT)"),
+            (BaseType::Double, "CAST(3.14 AS DOUBLE)"),
+            (BaseType::Varchar, "CAST('hello' AS STRING)"),
+            (BaseType::Date, "CAST('2024-01-01' AS DATE)"),
+            (
+                BaseType::Timestamp,
+                "CAST('2024-01-01 12:00:00' AS TIMESTAMP)",
+            ),
+            (
+                BaseType::TimestampTz,
+                "CAST('2024-01-01 12:00:00+00' AS TIMESTAMPTZ)",
+            ),
+            (BaseType::Decimal, "CAST(99.99 AS DECIMAL(10,2))"),
+            (BaseType::Time, "CAST('12:00:00' AS TIME)"),
+            (BaseType::Interval, "CAST('1 day' AS INTERVAL)"),
+        ];
+        for (bt, sql) in &expected {
+            assert_eq!(bt.cast_sql(), *sql, "canonical cast moved for {bt:?}");
+            for dialect in [
+                SqlDialect::DuckDB,
+                SqlDialect::SparkSQL,
+                SqlDialect::PostgreSQL,
+            ] {
+                assert_eq!(
+                    bt.cast_sql_for(dialect),
+                    Some(*sql),
+                    "{dialect:?} rendering diverged from canonical for {bt:?}"
+                );
+            }
+        }
+        assert_eq!(
+            expected.len(),
+            BaseType::all().len(),
+            "a base type was added without pinning its canonical cast"
+        );
+
+        // Whole-query rendering, per query shape.
+        let cols = pin_cols();
+        let exprs = pin_exprs();
+        for (shape, tail) in pin_shapes() {
+            let expected = format!("WITH data AS (SELECT {CANONICAL_CTE_COLS}) {tail}");
+            assert_eq!(
+                assemble_cte_query(&cols, &exprs, &shape),
+                expected,
+                "canonical SQL moved for {shape:?}"
+            );
+            assert_eq!(
+                assemble_cte_query_for_dialect(&cols, &exprs, &shape, SqlDialect::DuckDB),
+                Some(expected.clone()),
+                "explicit DuckDB rendering diverged for {shape:?}"
+            );
+            assert_eq!(
+                assemble_cte_query_for_dialect(&cols, &exprs, &shape, SqlDialect::SparkSQL),
+                Some(expected),
+                "Spark rendering diverged from canonical for {shape:?}"
+            );
+        }
+
+        // Shared CTE column rendering (used by the multi-model, three-model and
+        // JOIN scenario builders).
+        assert_eq!(
+            render_cte_columns(&cols, SqlDialect::DuckDB).map(|c| c.join(", ")),
+            Some(CANONICAL_CTE_COLS.to_string())
+        );
+        assert_eq!(join_key_cast(SqlDialect::DuckDB), "CAST(1 AS INTEGER)");
+    }
+
+    #[test]
+    fn bigquery_cast_renderings() {
+        let expected: Vec<(BaseType, &str)> = vec![
+            (BaseType::Boolean, "CAST(TRUE AS BOOL)"),
+            (BaseType::Integer, "CAST(42 AS INT64)"),
+            (BaseType::BigInt, "CAST(100 AS INT64)"),
+            (BaseType::Double, "CAST(3.14 AS FLOAT64)"),
+            (BaseType::Varchar, "CAST('hello' AS STRING)"),
+            (BaseType::Date, "CAST('2024-01-01' AS DATE)"),
+            (
+                BaseType::Timestamp,
+                "CAST('2024-01-01 12:00:00' AS DATETIME)",
+            ),
+            (
+                BaseType::TimestampTz,
+                "CAST('2024-01-01 12:00:00+00' AS TIMESTAMP)",
+            ),
+            (BaseType::Decimal, "CAST(99.99 AS NUMERIC)"),
+            (BaseType::Time, "CAST('12:00:00' AS TIME)"),
+            (BaseType::Interval, "INTERVAL 1 DAY"),
+        ];
+        for (bt, sql) in &expected {
+            assert_eq!(bt.cast_sql_for(SqlDialect::BigQuery), Some(*sql), "{bt:?}");
+        }
+        assert_eq!(expected.len(), BaseType::all().len());
+
+        // No BigQuery rendering may contain a parameterized type or a spelling
+        // GoogleSQL rejects.
+        for bt in BaseType::all() {
+            let sql = bt
+                .cast_sql_for(SqlDialect::BigQuery)
+                .expect("every base type has a BigQuery rendering");
+            for banned in [
+                "DOUBLE",
+                "VARCHAR",
+                "TEXT",
+                "TIMESTAMPTZ",
+                "DECIMAL(",
+                "NUMERIC(",
+                "STRING(",
+            ] {
+                assert!(!sql.contains(banned), "{bt:?} renders as {sql}");
+            }
+        }
+    }
+
+    #[test]
+    fn bigquery_query_rendering_swaps_only_the_source_casts() {
+        let cols = pin_cols();
+        let exprs = pin_exprs();
+        for (shape, tail) in pin_shapes() {
+            let sql = assemble_cte_query_for_dialect(&cols, &exprs, &shape, SqlDialect::BigQuery)
+                .expect("BigQuery rendering available");
+            assert_eq!(
+                sql,
+                format!("WITH data AS (SELECT {BIGQUERY_CTE_COLS}) {tail}")
+            );
+        }
+        assert_eq!(join_key_cast(SqlDialect::BigQuery), "CAST(1 AS INT64)");
+    }
+
+    #[test]
+    fn derived_columns_carry_no_cast_literal_in_any_dialect() {
+        let derived = TypedSource {
+            name: "up_0".into(),
+            data_type: DataType::BigInt,
+            cast_sql: String::new(),
+        };
+        for dialect in [SqlDialect::DuckDB, SqlDialect::BigQuery] {
+            assert_eq!(derived.cast_sql_for(dialect), Some(""));
+        }
+    }
+
+    #[test]
+    fn unknown_cast_literal_has_no_bigquery_rendering() {
+        let exotic = TypedSource {
+            name: "x".into(),
+            data_type: DataType::Integer,
+            cast_sql: "CAST(1 AS HUGEINT)".into(),
+        };
+        assert_eq!(
+            exotic.cast_sql_for(SqlDialect::DuckDB),
+            Some("CAST(1 AS HUGEINT)")
+        );
+        assert_eq!(exotic.cast_sql_for(SqlDialect::BigQuery), None);
+        assert_eq!(render_cte_columns(&[exotic], SqlDialect::BigQuery), None);
     }
 }

@@ -511,7 +511,14 @@ impl LinkCProject {
     ) -> Result<RunOutcome> {
         match target {
             ConformanceTarget::DuckDb => self.run(run_id, request, reporter).await,
-            ConformanceTarget::SparkDelta => {
+            ConformanceTarget::SparkDelta { schema } => {
+                // The schema reaches the run through the project's own
+                // `smelt.yml` (`render::render_smelt_yml_for` wrote it from
+                // this same target), exactly as the BigQuery arm's dataset
+                // does — the factory reads config, not this binding. Bound
+                // outside the `cfg` so the no-`spark` build does not see an
+                // unused variable.
+                let _ = &schema;
                 #[cfg(feature = "spark")]
                 {
                     let (db, graph) = self.build_db_and_graph();
@@ -533,6 +540,34 @@ impl LinkCProject {
                 {
                     unimplemented!(
                         "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
+            ConformanceTarget::BigQuery { dataset } => {
+                #[cfg(feature = "bigquery")]
+                {
+                    let _ = &dataset;
+                    let (db, graph) = self.build_db_and_graph();
+                    let outcome = execute_project(
+                        run_id.to_string(),
+                        request,
+                        Arc::clone(&self.config),
+                        graph,
+                        db,
+                        &self.project_dir,
+                        &BigQueryBackendFactory,
+                        reporter,
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                    Ok(outcome)
+                }
+                #[cfg(not(feature = "bigquery"))]
+                {
+                    let _ = dataset;
+                    unimplemented!(
+                        "ConformanceTarget::BigQuery requires the `bigquery` feature on \
                          smelt-maintenance-testkit"
                     )
                 }
@@ -569,15 +604,32 @@ impl LinkCProject {
     pub async fn backend_for_target(&self, target: ConformanceTarget) -> Result<Box<dyn Backend>> {
         match target {
             ConformanceTarget::DuckDb => self.backend().await,
-            ConformanceTarget::SparkDelta => {
+            ConformanceTarget::SparkDelta { schema } => {
+                // Bound outside the `cfg` so the no-`spark` build, whose arm
+                // never reads it, does not see an unused variable.
+                let _ = &schema;
                 #[cfg(feature = "spark")]
                 {
-                    open_spark_conformance_backend(&self.db_path).await
+                    open_spark_conformance_backend_in(&self.db_path, &schema).await
                 }
                 #[cfg(not(feature = "spark"))]
                 {
                     unimplemented!(
                         "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
+            ConformanceTarget::BigQuery { dataset } => {
+                #[cfg(feature = "bigquery")]
+                {
+                    open_bigquery_backend(&dataset).await
+                }
+                #[cfg(not(feature = "bigquery"))]
+                {
+                    let _ = dataset;
+                    unimplemented!(
+                        "ConformanceTarget::BigQuery requires the `bigquery` feature on \
                          smelt-maintenance-testkit"
                     )
                 }
@@ -593,6 +645,24 @@ impl LinkCProject {
 /// env-unset fallback; the Spark arm never opens it as a file.
 #[cfg(feature = "spark")]
 pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Backend>> {
+    open_spark_conformance_backend_in(db_path, crate::recipe::SPARK_CONFORMANCE_SCHEMA).await
+}
+
+/// [`open_spark_conformance_backend`] parametrized over the schema — the
+/// Spark-arm counterpart of [`open_bigquery_conformance_backend`]'s dataset
+/// parameter, and the seam that lets a case's full-refresh oracle twin land
+/// in different physical storage than its incremental project.
+///
+/// Spark's warehouse is ONE persistent Delta store shared by every project
+/// in a binary, so unlike DuckDB (a private `.duckdb` file per project) the
+/// schema is the only thing separating two projects' tables. `SparkBackend::
+/// new` issues `CREATE DATABASE IF NOT EXISTS`, so a twin schema needs no
+/// separate provisioning step.
+#[cfg(feature = "spark")]
+pub async fn open_spark_conformance_backend_in(
+    db_path: &Path,
+    schema: &str,
+) -> Result<Box<dyn Backend>> {
     use smelt_backend_spark::SparkBackend;
 
     let connect_url = crate::recipe::spark_connect_url();
@@ -604,13 +674,103 @@ pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Ba
     let backend = SparkBackend::new(
         &connect_url,
         "spark_catalog",
-        crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+        schema,
         Some(warehouse_str),
         true,
     )
     .await
     .map_err(|e| anyhow::anyhow!("Spark backend init failed: {e}"))?;
     Ok(Box::new(backend))
+}
+
+/// Open a BigQuery backend bound to `dataset` — the BigQuery-arm counterpart
+/// of [`open_spark_conformance_backend`], parametrized over the dataset
+/// rather than one fixed schema constant since every case in the pool
+/// isolates in its own fresh dataset
+/// (`crate::recipe::bq_conformance_dataset`). Project/location/token are
+/// read from the environment (`crate::recipe::bq_project`/`bq_location`/
+/// `bq_access_token`) — smelt never falls back to Google
+/// application-default credentials (`docs/specs/multi_backend.md` §Surface).
+#[cfg(feature = "bigquery")]
+pub async fn open_bigquery_backend(dataset: &str) -> Result<Box<dyn Backend>> {
+    use smelt_backend_bigquery::BigQueryBackend;
+
+    let project = crate::recipe::bq_project()
+        .ok_or_else(|| anyhow::anyhow!("BigQuery arm requires SMELT_BQ_PROJECT"))?;
+    let location = crate::recipe::bq_location();
+    let token = crate::recipe::bq_access_token().ok_or_else(|| {
+        anyhow::anyhow!(
+            "BigQuery arm requires SMELT_BQ_ACCESS_TOKEN. Mint one with \
+             `bash scripts/bigquery-auth.sh` then `source scripts/bigquery-env.sh`."
+        )
+    })?;
+
+    let backend = BigQueryBackend::new(&project, dataset, location.as_deref(), &token)
+        .await
+        .map_err(|e| anyhow::anyhow!("BigQuery backend init failed: {e}"))?;
+    Ok(Box::new(backend))
+}
+
+/// Build a fully qualified, backtick-quoted BigQuery table name
+/// `` `project.dataset.name` `` from `SMELT_BQ_PROJECT` and `dataset` — the
+/// staging DDL helpers' shared name-quoting routine
+/// (`smelt-backend-bigquery`'s own `sql::qualified_name` is private to that
+/// crate, so this mirrors its shape rather than reusing it).
+#[cfg(feature = "bigquery")]
+pub(crate) fn bigquery_qualified_name(dataset: &str, name: &str) -> Result<String> {
+    let project = crate::recipe::bq_project()
+        .ok_or_else(|| anyhow::anyhow!("BigQuery arm requires SMELT_BQ_PROJECT"))?;
+    Ok(format!("`{project}.{dataset}.{name}`"))
+}
+
+/// `BackendFactory` that opens a BigQuery backend from whatever `Target`
+/// config `execute_project` resolves for the run's target name — mirrors
+/// `crates/smelt-backends/src/lib.rs::create_backend`'s production BigQuery
+/// arm (project/dataset from the target, access token from
+/// `SMELT_BQ_ACCESS_TOKEN`) so the harness's BigQuery run path exercises the
+/// same field resolution real runs do, the same duplication-over-reuse
+/// convention [`SparkBackendFactory`] already established for the Spark arm
+/// rather than adding a `smelt-backends` dependency to this dev-only crate.
+#[cfg(feature = "bigquery")]
+pub struct BigQueryBackendFactory;
+
+#[cfg(feature = "bigquery")]
+impl BackendFactory for BigQueryBackendFactory {
+    fn create<'a>(
+        &'a self,
+        target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        Box::pin(async move {
+            use smelt_backend_bigquery::BigQueryBackend;
+
+            let project = target_config
+                .project
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("BigQuery target requires 'project' field"))?;
+            let dataset = target_config
+                .dataset
+                .as_deref()
+                .unwrap_or(&target_config.schema);
+            let access_token = std::env::var("SMELT_BQ_ACCESS_TOKEN").map_err(|_| {
+                anyhow::anyhow!(
+                    "BigQuery target {target_name:?} requires SMELT_BQ_ACCESS_TOKEN. Mint one \
+                     with `bash scripts/bigquery-auth.sh` then `source scripts/bigquery-env.sh`."
+                )
+            })?;
+
+            let backend = BigQueryBackend::new(
+                project,
+                dataset,
+                target_config.location.as_deref(),
+                &access_token,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("BigQuery backend init failed: {}", e))?;
+            Ok(Box::new(backend) as Box<dyn Backend>)
+        })
+    }
 }
 
 /// `BackendFactory` that opens a Spark/Delta backend from whatever

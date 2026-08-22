@@ -411,6 +411,16 @@ pub struct Target {
     /// an error (fail-loud). Common keys: `memory_limit`, `threads`, `temp_directory`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<BTreeMap<String, String>>,
+    // BigQuery fields
+    /// GCP project the BigQuery jobs are billed to and resolved against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// BigQuery dataset holding this target's tables — the analogue of a schema.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dataset: Option<String>,
+    /// Dataset location (e.g. `US`, `europe-west2`). Must match at query time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }
 
 impl Target {
@@ -423,6 +433,7 @@ impl Target {
         match self.target_type.to_lowercase().as_str() {
             "duckdb" => Ok(BackendType::DuckDB),
             "spark" => Ok(BackendType::Spark),
+            "bigquery" => Ok(BackendType::BigQuery),
             other => Err(anyhow::anyhow!("unknown backend type `{other}`")),
         }
     }
@@ -435,7 +446,9 @@ impl Target {
     /// format is needed).
     pub fn table_format(&self) -> Option<TableFormat> {
         match self.backend_type() {
-            Ok(BackendType::DuckDB) | Err(_) => None,
+            // Table format is a Spark concept; DuckDB and BigQuery each own their
+            // storage and expose no choice.
+            Ok(BackendType::DuckDB) | Ok(BackendType::BigQuery) | Err(_) => None,
             Ok(BackendType::Spark) => Some(self.format.unwrap_or_default()),
         }
     }
@@ -445,6 +458,7 @@ impl Target {
 pub enum BackendType {
     DuckDB,
     Spark,
+    BigQuery,
 }
 
 /// Table format for Spark targets.
@@ -1836,6 +1850,51 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `bigquery` target names project/dataset/location in place of DuckDB's
+    /// `database` or Spark's `connect_url` (`multi_backend.md` §Surface).
+    #[test]
+    fn bigquery_target_parses_project_dataset_location() {
+        let yaml = r#"
+name: test_project
+targets:
+  bq:
+    type: bigquery
+    project: my-gcp-project
+    dataset: analytics
+    location: US
+    schema: analytics
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("bigquery target must parse");
+        let target = &config.targets["bq"];
+        assert!(matches!(
+            target.backend_type().expect("bigquery is a known type"),
+            BackendType::BigQuery
+        ));
+        assert_eq!(target.project.as_deref(), Some("my-gcp-project"));
+        assert_eq!(target.dataset.as_deref(), Some("analytics"));
+        assert_eq!(target.location.as_deref(), Some("US"));
+    }
+
+    /// Table format is a Spark concept; a BigQuery target has none, exactly as
+    /// a DuckDB target has none.
+    #[test]
+    fn bigquery_target_has_no_table_format() {
+        let target = Target {
+            target_type: "bigquery".to_string(),
+            database: None,
+            schema: "analytics".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: Some("p".to_string()),
+            dataset: Some("d".to_string()),
+            location: None,
+        };
+        assert_eq!(target.table_format(), None);
+    }
 
     /// `${VAR}` in a target field resolves against a set (injected) variable.
     #[test]

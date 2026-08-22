@@ -55,7 +55,8 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
     let (models, function_files) =
         discover_models_for_run(&discovery, &args.target, &project_dir, &config)?;
-    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+    let ephemeral_seed_ctes =
+        build_ephemeral_seed_ctes(&seeds, resolve_target_backend_type(&config, &args.target)?);
 
     if models.is_empty() {
         return Err(anyhow::anyhow!(
@@ -369,7 +370,8 @@ async fn run_since_upstream(
     let (salsa_models, function_files) =
         discover_models_for_run(&discovery, &args.target, project_dir, config)?;
     let seeds = smelt_core::discover_seed_infos_with_sidecars(project_dir, &config.paths);
-    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+    let ephemeral_seed_ctes =
+        build_ephemeral_seed_ctes(&seeds, resolve_target_backend_type(config, &args.target)?);
 
     let salsa_db = build_execute_salsa_db(
         &discovery,

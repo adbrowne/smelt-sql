@@ -14,6 +14,7 @@
 #[allow(dead_code)]
 mod prop_helpers;
 
+use prop_helpers::bigquery_oracle::BigQueryOracle;
 use prop_helpers::divergences::{find_divergence, known_divergences};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
@@ -32,6 +33,7 @@ use smelt_types::DataType;
 use std::path::{Path, PathBuf};
 
 use proptest::prelude::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::LazyLock;
 
 /// Shared SparkOracle instance — created once on first access.
@@ -42,15 +44,86 @@ static SPARK: LazyLock<Option<SparkOracle>> = LazyLock::new(|| {
         .map(|id| SparkOracle::new(&id))
 });
 
+/// Shared BigQueryOracle instance — one persistent Python subprocess reused
+/// across all cases, same reasoning as `SPARK` above (a dry-run job is a
+/// ~440ms network round trip; a fresh process per query would dominate the
+/// suite's runtime). `None` when `SMELT_BQ_ACCESS_TOKEN` isn't set — see
+/// `BigQueryOracle::from_env`'s doc comment — which is the local/CI default,
+/// so the BigQuery leg is simply absent and the suite stays green.
+static BIGQUERY: LazyLock<Option<BigQueryOracle>> = LazyLock::new(BigQueryOracle::from_env);
+
+/// Running total of output columns actually compared against a live
+/// BigQuery oracle across the whole `prop_type_inference` sweep. Read after
+/// the sweep completes by `check_bigquery_coverage_floor` — see that
+/// function's doc comment for why a raw count, not a percentage, is the
+/// right floor.
+static BIGQUERY_COLUMNS_COMPARED: AtomicUsize = AtomicUsize::new(0);
+
+/// Floor for `BIGQUERY_COLUMNS_COMPARED` after a full `prop_type_inference`
+/// sweep (256 cases, each generating at least one output column). Below
+/// this, the BigQuery leg has degraded to testing nothing — e.g. every case
+/// silently skipped as a query refusal because the refusal classifier is too
+/// broad, or (before this floor existed) an expired token making every call
+/// `Fatal` but going unnoticed because nothing counted successes at all.
+/// Calibrated against a measured run: a 512-case sweep on 2026-08-17 compared
+/// 285 columns, so the default 256-case sweep sits around 140. The floor is
+/// set well under that — this exists to catch "the leg checks (near)
+/// nothing," not to enforce a coverage percentage. BigQuery legitimately
+/// refuses a slice of generated SQL (dialect gaps are expected, per
+/// `classify_oracle_error`'s doc comment), and that is fine as long as it
+/// isn't *all* of it; a run that drops from ~140 to under 50 has stopped
+/// measuring the warehouse and should say so rather than pass.
+const BIGQUERY_COLUMN_COVERAGE_FLOOR: usize = 50;
+
+/// Fails loudly if too few columns were actually compared against BigQuery
+/// over a sweep — see `BIGQUERY_COLUMN_COVERAGE_FLOOR`'s doc comment for the
+/// reasoning. Kept as a small pure function so the floor logic itself is
+/// unit-tested with synthetic counts, without needing a live warehouse.
+fn check_bigquery_coverage_floor(columns_compared: usize) -> Result<(), String> {
+    if columns_compared < BIGQUERY_COLUMN_COVERAGE_FLOOR {
+        return Err(format!(
+            "BigQuery leg degraded to testing nothing: only {columns_compared} column(s) were \
+             actually compared against a live BigQuery oracle over the sweep (floor is \
+             {BIGQUERY_COLUMN_COVERAGE_FLOOR}). Either every generated case was skipped as a \
+             query refusal (check whether `classify_oracle_error` in oracle_check.rs is too \
+             broad) or the oracle itself is failing in a way that isn't being reported as \
+             Fatal. Check SMELT_BQ_ACCESS_TOKEN validity before assuming a generator problem."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod bigquery_coverage_floor_tests {
+    use super::*;
+
+    #[test]
+    fn below_floor_is_rejected() {
+        assert!(check_bigquery_coverage_floor(0).is_err());
+        assert!(check_bigquery_coverage_floor(BIGQUERY_COLUMN_COVERAGE_FLOOR - 1).is_err());
+    }
+
+    #[test]
+    fn at_or_above_floor_is_accepted() {
+        assert!(check_bigquery_coverage_floor(BIGQUERY_COLUMN_COVERAGE_FLOOR).is_ok());
+        assert!(check_bigquery_coverage_floor(BIGQUERY_COLUMN_COVERAGE_FLOOR * 10).is_ok());
+    }
+}
+
 // ---- Property tests ----
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// Core property test: smelt's inferred types should match DuckDB's (and optionally
-    /// Spark's) actual types for randomly generated SQL expressions.
-    #[test]
-    fn prop_type_inference(
+    /// Spark's and BigQuery's) actual types for randomly generated SQL expressions.
+    ///
+    /// No `#[test]` here on purpose — `prop_type_inference` below wraps this
+    /// so it can assert the BigQuery coverage floor once the whole sweep
+    /// (all 256 cases) has run, not per case. `proptest!`'s expansion is a
+    /// plain function when the inner `fn` has no `#[test]` attribute (see
+    /// `sugar.rs` in the proptest crate), so this is a normal, callable fn.
+    fn prop_type_inference_sweep(
         (columns, shape, expr_kinds, func_indices) in test_scenario_strategy()
     ) {
         let duckdb = DuckDbOracle::new();
@@ -85,6 +158,40 @@ proptest! {
             {
                 prop_assert!(false, "{}", msg);
             }
+        }
+
+        // Check BigQuery if available (shared subprocess, one dry-run per
+        // case). Coverage is accumulated into BIGQUERY_COLUMNS_COMPARED and
+        // checked against a floor once the whole sweep finishes — see
+        // `prop_type_inference` below.
+        if let Some(bigquery) = BIGQUERY.as_ref() {
+            match check_types_against_oracle(
+                bigquery, "bigquery", &sql, &columns, &exprs, &divergences, &unknowns,
+            ) {
+                Ok(outcome) => {
+                    BIGQUERY_COLUMNS_COMPARED
+                        .fetch_add(outcome.columns_compared, Ordering::Relaxed);
+                }
+                Err(msg) => prop_assert!(false, "{}", msg),
+            }
+        }
+    }
+}
+
+/// Wraps `prop_type_inference_sweep` to assert the BigQuery coverage floor
+/// once the full sweep has run — see `BIGQUERY_COLUMN_COVERAGE_FLOOR`'s doc
+/// comment. The counter is reset first so repeated runs within one process
+/// (unusual for `cargo test`, but not impossible with certain harnesses)
+/// don't accumulate across invocations.
+#[test]
+fn prop_type_inference() {
+    BIGQUERY_COLUMNS_COMPARED.store(0, Ordering::Relaxed);
+    prop_type_inference_sweep();
+    if BIGQUERY.is_some() {
+        let compared = BIGQUERY_COLUMNS_COMPARED.load(Ordering::Relaxed);
+        eprintln!("COVERAGE[bigquery] columns_compared={compared}");
+        if let Err(msg) = check_bigquery_coverage_floor(compared) {
+            panic!("{msg}");
         }
     }
 }

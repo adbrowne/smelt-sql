@@ -170,6 +170,7 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         "event_date",
         &region,
         body,
+        body,
         Some("event_id"),
         cell.skeleton_source_closure.as_ref(),
         "silver.events_deduped",

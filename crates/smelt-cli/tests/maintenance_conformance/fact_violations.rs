@@ -802,6 +802,7 @@ async fn count_preservation_conforming() -> anyhow::Result<()> {
         "event_date",
         &cp_region(),
         cp_body(),
+        cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
         CP_UPSTREAM_MODEL,
@@ -826,6 +827,88 @@ async fn count_preservation_conforming() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `body`/`probe_body` are the two different strings a real compile
+/// produces (`docs/plans/20260819-source-derived-projection.md` Phase 5):
+/// `body` here is genuinely type-cast-wrapped, matching production
+/// shape (`CompiledModel::sql`, `apply_type_casts`'s
+/// `SELECT CAST(..) FROM ( <body> ) _smelt_typed` form) — not the
+/// hand-written unwrapped fixture every other recipe in this file feeds.
+/// `probe_body` is the pre-wrap body (`CompiledModel::body_sql`) the
+/// count-preservation probe reads its enrichment join from. Before this
+/// phase, the only body ever threaded to the probe was the wrapped one,
+/// which buries the join inside a derived table the probe never looked
+/// inside — the probe silently found nothing, dropped the delta
+/// restriction, and fell back to the widened scan on every run.
+#[tokio::test]
+async fn count_preservation_conforming_with_a_cast_wrapped_body_still_restricts(
+) -> anyhow::Result<()> {
+    let (_tmp, backend) = cp_setup(true).await?;
+    cp_record_delta(&backend).await?;
+
+    let wrapped_body = smelt_dialect::wrap_with_type_casts(
+        cp_body(),
+        &["event_id", "event_date", "tier"],
+        &[
+            smelt_types::DataType::Text,
+            smelt_types::DataType::Date,
+            smelt_types::DataType::Text,
+        ],
+        smelt_dialect::SqlDialect::DuckDB,
+    );
+
+    let group = execute_delete_insert_with_delta_restriction(
+        &backend,
+        "main",
+        "enriched",
+        "event_date",
+        &cp_region(),
+        &wrapped_body,
+        cp_body(),
+        Some("event_id"),
+        Some(&cp_closure()),
+        CP_UPSTREAM_MODEL,
+        CP_WINDOW_START,
+        CP_WINDOW_END,
+        MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // The delta restriction was actually applied — a declared
+    // `referential_integrity` closure whose count-preservation probe never
+    // located the join falls back silently to the widened scan instead,
+    // which carries no `IN (...)` restriction predicate at all. Asserting
+    // on the emitted statement (not merely on the resulting row contents,
+    // which a widened scan over this conforming fixture would also get
+    // right) is what actually pins the probe having found the join.
+    let insert = group
+        .statements
+        .iter()
+        .find(|s| s.sql.starts_with("INSERT INTO main.enriched"))
+        .expect("an INSERT statement was emitted");
+    assert!(
+        insert.sql.contains("event_id IN ("),
+        "expected the delta restriction to be applied (a count-preservation probe that found \
+         the join inside the cast-wrapped body), got: {}",
+        insert.sql
+    );
+    assert!(insert.sql.contains("'ev-1'"), "{}", insert.sql);
+    assert!(insert.sql.contains("'ev-2'"), "{}", insert.sql);
+
+    let maintained = "SELECT event_id, tier FROM main.enriched";
+    let oracle =
+        "SELECT f.event_id, 'NEW' AS tier FROM main.fact_recompute f JOIN main.dim d ON f.event_id = d.event_id";
+    let equal = multiset_equal_via_backend(&backend, maintained, oracle).await?;
+    anyhow::ensure!(
+        equal,
+        "referential_integrity conforming (cast-wrapped body): maintained output does not \
+         match the full-refresh oracle"
+    );
+    Ok(())
+}
+
 async fn count_preservation_violated() -> anyhow::Result<()> {
     let (_tmp, backend) = cp_setup(false).await?;
     cp_record_delta(&backend).await?;
@@ -837,6 +920,7 @@ async fn count_preservation_violated() -> anyhow::Result<()> {
         "enriched",
         "event_date",
         &cp_region(),
+        cp_body(),
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
@@ -873,6 +957,7 @@ async fn count_preservation_violated_probes_off() -> anyhow::Result<()> {
         "enriched",
         "event_date",
         &cp_region(),
+        cp_body(),
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),

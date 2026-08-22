@@ -27,17 +27,8 @@
 # tests/external_corpus.rs fails the build if a listed statement now passes
 # or no longer matches any corpus statement — remove the entry then.
 
-["b86e3620c3472ed0"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
-["60f4625d09268f8f"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
-["430fadb76ce45e99"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["d16194276459eb33"]
 category = "group_by_tuple_expression"
@@ -511,13 +502,7 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["b07a853630e2551e"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
-["4e2938497df48afe"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["5a40822826a71b22"]
 category = "reserved_word_as_bare_alias"
@@ -575,9 +560,6 @@ note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix
 category = "quoted_type_name_cast"
 note = "PostgreSQL double-quoted type name in a cast (e.g. ::'char' (double-quoted in the source)) is not parsed as a type name"
 
-["a09178ce769ac702"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["778a84897612d89a"]
 category = "row_value_comparison"

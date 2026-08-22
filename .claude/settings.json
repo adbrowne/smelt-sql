@@ -1,4 +1,20 @@
 {
+  "permissions": {
+    "deny": [
+      "Bash(gcloud)",
+      "Bash(gcloud *)",
+      "Bash(bq)",
+      "Bash(bq *)",
+      "Bash(bash scripts/bigquery-key.sh*)",
+      "Bash(bash scripts/bigquery-provision.sh*)",
+      "Bash(bash scripts/bigquery-login.sh*)",
+      "Bash(bash scripts/bigquery-auth.sh*)",
+      "Bash(./scripts/bigquery-auth.sh*)",
+      "Bash(bash scripts/bigquery-setup.sh*)",
+      "Bash(./scripts/bigquery-setup.sh*)",
+      "Read(//home/andrew/.config/gcloud-smelt-bq/**)"
+    ]
+  },
   "enabledPlugins": {
     "rust-analyzer-lsp@claude-plugins-official": true,
     "pyright-lsp@claude-plugins-official": true,

@@ -111,14 +111,14 @@ The output shape is **engine-defined**: whatever the delegated SQL and the engin
 
 ## Known Divergences / Open Questions
 
- **No backend advertises native IVM.** DuckDB and both Spark profiles set `supports_native_ivm = false` (`multi_backend.md`), so `refresh: materialized_view` currently always resolves to the §"No silent fallback" hard error. The mode is specified ahead of a backend that provides it.
+- **Only BigQuery advertises native IVM.** BigQuery sets `supports_native_ivm = true` and resolves this mode to `CREATE OR REPLACE MATERIALIZED VIEW`; DuckDB and both Spark profiles set it `false` (`multi_backend.md`), so on those three the mode resolves to the §"No silent fallback" hard error. Two of the mode's surfaces therefore have exactly one backend exercising them, and a second engine is what would show whether they generalise: BigQuery's materialized views refresh on the engine's own default cadence, so smelt emits no refresh-cadence options at all, and its `supports_retraction` is `false`, so the retraction half of the delegation contract has no live exercise anywhere.
 - **Backend eligibility surfacing is minimal by design.** smelt performs no native-IVM eligibility analysis of its own; it relies on the backend to accept or reject the query and surfaces the engine's reason. Richer smelt-side pre-flight (predicting incrementalisability before submission) is out of scope until a concrete backend motivates it (`docs/research/20260703-model-updates.md` §18.2).
 - **Per-engine physical-strategy modifier is deferred.** If a single engine exposes multiple native IVM implementations of the same view (distinct refresh algorithms), smelt would pick a per-engine default and let the user override it — a physical-strategy override scoped *inside* `materialized_view`, engine-specific and defaulted. This is not a logical-mode selector, so it does not reintroduce the strategy footgun. Deferred until an engine actually presents the choice (`docs/research/20260703-model-updates.md` §17.8).
 
 ## References
 
-- **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy::MaterializedView`, parsing); `crates/smelt-runtime/src/compile.rs` (the `supports_native_ivm` hard-error gate).
-- **Tests**: `test_materialized_view_hard_errors_without_native_ivm` (`smelt-runtime/src/compile.rs`); the `materialized_view` storage-value-rejected and default-materialization-rejected tests (`smelt-core/src/config.rs`).
+- **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy::MaterializedView`, parsing); `crates/smelt-runtime/src/compile.rs` (the `supports_native_ivm` hard-error gate); `crates/smelt-runtime/src/execute.rs` (routing a `MaterializedView` model to the emission instead of the full-refresh write); `crates/smelt-backend/src/lib.rs` (`Backend::create_materialized_view_as`, whose default refuses for a backend without native IVM); `crates/smelt-backend-bigquery/src/sql.rs` (the GoogleSQL statement builders).
+- **Tests**: `crates/smelt-cli/tests/materialized_view_parity.rs` — the live BigQuery leg, asserting the created object's **type** (a substituted table would serve identical rows) and that an ineligible query is refused with the engine's own reason; `test_materialized_view_hard_errors_without_native_ivm` (`smelt-runtime/src/compile.rs`) and `test_materialized_view_hard_errors_on_duckdb` for the no-native-IVM refusal; the `materialized_view` storage-value-rejected and default-materialization-rejected tests (`smelt-core/src/config.rs`).
 - **Related specs**:
   - [`incremental_models.md`](incremental_models.md) — the equivalence invariant (discharged here by the engine), the algebraic ladder (this mode is where smelt-driven maintenance ends and delegation begins), the composition contract, validator-not-chooser; the smelt-owned keyed peer lives in `incremental_shapes.md` §"The key grain (`grain: key`)" (a specific smelt-defined output shape and different discharger, vs this mode's engine-defined shape); and §Limitations (SCD2 is hand-written SQL — engine-maintained under this mode where the backend has native IVM)
   - [`model_transforms.md`](model_transforms.md) — the delegate-to-native-IVM transform this mode drives, and backend lowering/emulation
@@ -126,6 +126,7 @@ The output shape is **engine-defined**: whatever the delegated SQL and the engin
   - [`models.md`](models.md) — the refresh axis; why `materialized_view` is an engine-owned freshness peer, not a storage mode; the three-state law
 - **Research**:
   - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — Parts 13–17 (keyed/stateful refresh modes, emulation vs delegation, the user surface)
+  - [`docs/research/20260816-bigquery-backend.md`](../research/20260816-bigquery-backend.md) §"Materialized views" — the measured GoogleSQL facts the emitter is written from (which forms exist, why no `OPTIONS` clause, the refusal shapes, and the read-time freshness that makes a synchronous parity assertion sound)
 - **Plans (history)**:
   - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — implements the model-updates research
 </content>

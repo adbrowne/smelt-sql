@@ -33,6 +33,9 @@ fn duckdb_target() -> Target {
         warehouse: None,
         format: None,
         settings: None,
+        project: None,
+        dataset: None,
+        location: None,
     }
 }
 

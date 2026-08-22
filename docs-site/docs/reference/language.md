@@ -23,6 +23,18 @@ direction and NULLS placement apply to the whole ordering (`ORDER BY ALL DESC`).
 
 A model file contains at most one query body. Any content after it — a second `SELECT`, stray tokens, or the tail of an unsupported construct — is an error, surfaced as a `trailing-top-level-content` diagnostic; it is never silently ignored.
 
+### Output column names
+
+Every top-level select item resolves to an output column name by one rule, applied in order:
+
+1. An explicit alias (`AS name`, or the implicit `expr name` form) is used unchanged.
+2. Absent an alias, if the item is a bare or qualified column reference (or a `CAST` of one), that name is used — `SELECT t.user_id FROM t` yields `user_id`.
+3. Otherwise — a function call, an arithmetic expression, a literal, a `CASE`, or anything else without an inferable identifier name — smelt synthesizes the name `_smelt_col{n}`, where `n` is the item's 1-based position in the select list. `SELECT id, 1, 2, 3 FROM raw.users` yields columns `id, _smelt_col2, _smelt_col3, _smelt_col4`.
+
+The synthesized name is a real, bound alias — it is the name the compiled SQL actually binds, the same on every backend, so a model writes the same output schema to every warehouse regardless of engine.
+
+The `_smelt_` prefix is reserved for smelt's own generated identifiers. Writing a projection alias that begins with `_smelt_` (e.g. `SELECT 1 AS _smelt_foo`) is rejected with a diagnostic.
+
 ## smelt extensions
 
 ### smelt.&lt;path&gt;

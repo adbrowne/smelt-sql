@@ -753,6 +753,10 @@ collision with a declared or projected user column is a fail-loud `KeyedStateCol
 at compile time to its presented columns (sibling relations keep their own `<rel>.*`); a
 hand-written `__part` name is an ordinary unresolved-column diagnostic, and an unresolvable
 wildcard while a state-bearing model is in scope fails loud, naming the model and the wildcard.
+A pipe query (`pipe_sql.md`) reading a state-bearing model is refused for the same reason — it
+carries no select list to rewrite — and the refusal names that form rather than reporting the
+SQL as unparseable. A model reading no state-bearing relation is never touched by this rewrite,
+whatever its form.
 
 **The state-shape catalogue.** Each decomposable family has one fixed, hand-encoded state shape
 and presentation map; there is no general decomposition procedure:

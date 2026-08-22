@@ -96,6 +96,29 @@ targets:
     format: delta  # default; can also be "parquet"
 ```
 
+### BigQuery Target
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | yes | Must be `bigquery` |
+| `project` | string | yes | GCP project the jobs are billed to |
+| `dataset` | string | no | Dataset holding created tables and views (BigQuery's analogue of a schema). Defaults to `schema`. |
+| `location` | string | no | Dataset location (e.g. `US`, `europe-west2`). Must match at query time. |
+| `schema` | string | yes | Database schema to use |
+
+```yaml
+targets:
+  bigquery_prod:
+    type: bigquery
+    project: my-gcp-project
+    dataset: analytics
+    location: US
+    schema: analytics
+```
+
+Credentials come from `SMELT_BQ_ACCESS_TOKEN`; smelt never falls back to Google
+application-default credentials. See [Targets](../guide/targets.md#credentials).
+
 ### Environment interpolation
 
 Any string value anywhere in `smelt.yml` may reference an environment variable with `${VAR_NAME}`. The reference is resolved once, at config load, before validation — this is how secrets (a Spark `connect_url`, a warehouse credential) stay out of the checked-in file. Write `$$` for a literal `$` that must not trigger a lookup.

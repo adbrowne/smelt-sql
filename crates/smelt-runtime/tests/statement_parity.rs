@@ -1731,6 +1731,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
         "daily_events_enriched",
         &["event_id".to_string()],
         dimension_batch_sql,
+        &[],
         &suppression,
         &window,
         &no_retry_policy(),
@@ -1761,6 +1762,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
         "main.daily_events_enriched",
         &["event_id".to_string()],
         dimension_batch_sql,
+        &[],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -1834,6 +1836,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         "dim_users",
         &["user_id".to_string()],
         dimension_batch_sql,
+        &[],
         &suppression,
         &window,
         &no_retry_policy(),
@@ -1856,6 +1859,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         &["user_id".to_string()],
         dimension_batch_sql,
         &["tier".to_string()],
+        &[],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -2810,6 +2814,7 @@ fn observed_delta_predicate_matches_suppressed_merge_guard_byte_for_byte() {
         &["user_id".to_string()],
         "SELECT * FROM main.sources_users",
         &compared_columns,
+        &[],
         MaintenanceDialect::DuckDb,
     );
     let merge_sql = &merge_group.statements[0].sql;
@@ -3569,6 +3574,7 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         "event_date",
         &region,
         body,
+        body,
         Some("event_id"),
         Some(&closure),
         "silver.fact",
@@ -3648,6 +3654,7 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         "enriched",
         "event_date",
         &region,
+        body,
         body,
         Some("event_id"),
         Some(&closure),

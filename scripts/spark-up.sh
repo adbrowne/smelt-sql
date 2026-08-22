@@ -38,16 +38,24 @@ IVY_CACHE="${SMELT_SPARK_IVY_CACHE:-${REPO_ROOT}/.smelt-spark-ivy}"
 DELTA_VERSION="${SMELT_DELTA_VERSION:-4.0.0}"
 
 mkdir -p "${WAREHOUSE}" "${IVY_CACHE}"
-# The apache/spark image runs as uid 185 (spark); the bind-mounted host
-# warehouse is owned by the host user. Make it group/other-writable so the
-# container can create managed-table dirs in it. Files Spark writes stay
-# world-readable, so host-side DuckDB can read them for cross-engine Parquet.
-# Recursive: IVY_CACHE is restored from actions/cache in CI, which preserves
-# the restrictive mode (e.g. 755) Ivy gave its own subdirectories on save —
-# a non-recursive chmod on the parent alone leaves those unwritable to uid 185
-# and Ivy dies with "Permission denied" writing resolved-*.xml into cache/.
-chmod -R 777 "${WAREHOUSE}"
-chmod -R 777 "${IVY_CACHE}"
+
+# Make a bind-mounted host dir writable by the container's uid 185 (spark).
+#
+# The top-level dir MUST be writable — a failure there is fatal.  The recursive
+# pass is best-effort: anything Spark itself wrote is owned by uid 185, and a
+# non-root host user cannot chmod it (EPERM).  Under `set -e` a plain
+# `chmod -R` over such leftovers aborted the whole script *before* `docker run`,
+# so every Spark test then failed as RetriesExceeded with no hint that
+# spark-up.sh had never started a container.  Entries we cannot chmod are
+# either about to be deleted (warehouse) or already world-writable from the
+# container's own umask (ivy cache), so skipping them is safe.
+ensure_container_writable() {
+  local dir="$1"
+  chmod 777 "${dir}"
+  if ! chmod -R 777 "${dir}" 2>/dev/null; then
+    echo "note: some entries under ${dir} are container-owned (uid 185); left as-is"
+  fi
+}
 
 # Clean warehouse data from previous sessions.  The Spark server keeps an
 # in-memory catalog that is reset on restart; any warehouse directories from
@@ -55,11 +63,27 @@ chmod -R 777 "${IVY_CACHE}"
 # [LOCATION_ALREADY_EXISTS] on the next CREATE TABLE.  Because warehouse
 # sub-dirs are owned by the Spark container's uid (185), only a container
 # process can delete them — use a one-shot container that mounts the same path.
+# This runs BEFORE the chmod below, so the chmod never has to contend with the
+# very leftovers we are about to remove.
 if [ -n "$(ls -A "${WAREHOUSE}" 2>/dev/null)" ]; then
   echo "Cleaning warehouse from previous session (orphaned catalog entries)..."
   docker run --rm -v "${WAREHOUSE}":/opt/spark/work-dir/warehouse \
-    "${IMAGE}" bash -c "rm -rf /opt/spark/work-dir/warehouse/*" >/dev/null 2>&1 || true
+    "${IMAGE}" bash -c 'rm -rf /opt/spark/work-dir/warehouse/* /opt/spark/work-dir/warehouse/.[!.]*' >/dev/null 2>&1 || true
+  if [ -n "$(ls -A "${WAREHOUSE}" 2>/dev/null)" ]; then
+    echo "WARNING: ${WAREHOUSE} is not empty after cleanup — CREATE TABLE may hit [LOCATION_ALREADY_EXISTS]." >&2
+  fi
 fi
+
+# The bind-mounted host dirs are owned by the host user; make them
+# group/other-writable so the container can create managed-table dirs in them.
+# Files Spark writes stay world-readable, so host-side DuckDB can read them for
+# cross-engine Parquet.  Recursive matters for IVY_CACHE: it is restored from
+# actions/cache in CI, which preserves the restrictive mode (e.g. 755) Ivy gave
+# its own subdirectories on save — a non-recursive chmod on the parent alone
+# leaves those unwritable to uid 185 and Ivy dies with "Permission denied"
+# writing resolved-*.xml into cache/.
+ensure_container_writable "${WAREHOUSE}"
+ensure_container_writable "${IVY_CACHE}"
 
 docker rm -f "${NAME}" >/dev/null 2>&1 || true
 

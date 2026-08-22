@@ -25,14 +25,16 @@ use async_trait::async_trait;
 
 /// Map a backend's [`SqlDialect`] to the [`MaintenanceDialect`] the
 /// single-owner emitters key their dialect-specific variants on. The region
-/// `DELETE`+`INSERT` family this maps for today is dialect-invariant (no
-/// emitter branch actually reads it yet); `PostgreSQL` has no
+/// `DELETE`+`INSERT` family is dialect-invariant; the whole-row `MERGE`
+/// families are not — GoogleSQL accepts neither `UPDATE SET *` nor
+/// `INSERT *`, so `BigQuery` selects the spelled-out arms. `PostgreSQL` has no
 /// `smelt-backend-*` implementation, so it shares the `Spark` branch until
 /// one exists.
 pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
     match dialect {
         SqlDialect::DuckDB => MaintenanceDialect::DuckDb,
         SqlDialect::SparkSQL | SqlDialect::PostgreSQL => MaintenanceDialect::Spark,
+        SqlDialect::BigQuery => MaintenanceDialect::BigQuery,
     }
 }
 
@@ -62,6 +64,34 @@ fn build_delete_insert_group(
     )
 }
 
+/// Refuse a whole-row `MERGE` whose dialect needs an explicit column list and
+/// was not given one.
+///
+/// DuckDB and Spark spell the matched arm `UPDATE SET *` and never read
+/// `columns`; GoogleSQL has no star form, so an empty list there would emit a
+/// syntactically valid `MERGE` whose matched arm assigns nothing — rows would
+/// silently stop being updated. Fail-loud discipline (`architecture.md`
+/// §"Fail-loud discipline") makes that an error naming the model, not a
+/// degraded write.
+pub fn require_merge_columns(
+    dialect: SqlDialect,
+    schema: &str,
+    table: &str,
+    columns: &[String],
+) -> Result<(), BackendError> {
+    if matches!(maintenance_dialect(dialect), MaintenanceDialect::BigQuery) && columns.is_empty() {
+        return Err(BackendError::execution_failed(
+            format!("{schema}.{table}"),
+            "column-scoped MERGE on BigQuery needs the model's output column list, and none was \
+             resolved — GoogleSQL has no `UPDATE SET *`, so the emitted matched arm would assign \
+             no columns. This usually means the model's output columns are not statically \
+             resolvable (e.g. a surviving `SELECT *`); name the columns in the model's projection."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Build the column-scoped `MERGE` [`StatementGroup`] for `Backend::
 /// merge_into`'s default implementation — the single call site every
 /// `Backend` impl routes through unless it overrides `merge_into` itself
@@ -71,6 +101,7 @@ fn build_column_scoped_merge_group(
     table: &str,
     source_sql: &str,
     unique_key: &[String],
+    columns: &[String],
     dialect: SqlDialect,
 ) -> StatementGroup {
     let table_name = format!("{schema}.{table}");
@@ -78,8 +109,65 @@ fn build_column_scoped_merge_group(
         &table_name,
         unique_key,
         source_sql,
+        columns,
         maintenance_dialect(dialect),
     )
+}
+
+/// The shared body of [`Backend::execute_model`]'s provided default: drop
+/// whichever materialization kind the model isn't (in case it changed since
+/// the last run), create the requested kind, then report row count and an
+/// optional preview.
+///
+/// This is a free function, not just code inlined into the trait's default
+/// method, because Rust gives an overriding trait impl no way to call back
+/// into the default implementation it replaced — there is no `super`.
+/// `BigQueryBackend::execute_model` needs to run one extra step first
+/// (dropping a leftover materialized view before the ordinary drop/create
+/// pair — `docs/specs/materialized_view.md`, reverse-flip cleanup) and then
+/// run exactly this behaviour; factoring it out here is what lets both the
+/// trait's own default and that override share one implementation instead
+/// of the override duplicating this body.
+pub async fn execute_model_default(
+    backend: &(impl Backend + ?Sized),
+    schema: &str,
+    name: &str,
+    sql: &str,
+    materialization: Materialization,
+    show_preview: bool,
+) -> Result<ExecutionResult, BackendError> {
+    let start = std::time::Instant::now();
+
+    match materialization {
+        Materialization::Table => {
+            // Drop both view and table in case the materialization type changed
+            backend.drop_view_if_exists(schema, name).await?;
+            backend.drop_table_if_exists(schema, name).await?;
+            backend.create_table_as(schema, name, sql).await?;
+        }
+        Materialization::View => {
+            // Drop both table and view in case the materialization type changed
+            backend.drop_table_if_exists(schema, name).await?;
+            backend.drop_view_if_exists(schema, name).await?;
+            backend.create_view_as(schema, name, sql).await?;
+        }
+    }
+
+    let duration = start.elapsed();
+    let row_count = backend.get_row_count(schema, name).await?;
+
+    let preview = if show_preview {
+        Some(backend.get_preview(schema, name, 10).await?)
+    } else {
+        None
+    };
+
+    Ok(ExecutionResult {
+        model_name: name.to_string(),
+        duration,
+        row_count,
+        preview,
+    })
 }
 
 /// Abstract interface for smelt execution backends.
@@ -105,6 +193,40 @@ pub trait Backend: Send + Sync {
     /// Create a view from a SQL query.
     async fn create_view_as(&self, schema: &str, name: &str, sql: &str)
         -> Result<(), BackendError>;
+
+    /// Create (or replace) an engine-maintained materialized view from a SQL
+    /// query — the `refresh: materialized_view` delegation target
+    /// (`docs/specs/materialized_view.md`). Freshness is owned by the
+    /// backend's native incremental-view-maintenance runtime, not by smelt.
+    ///
+    /// This is a **provided** method with an erroring default, not a
+    /// required one: `supports_native_ivm` is `false` for every backend
+    /// today (`docs/specs/multi_backend.md`), and a required method would
+    /// force a stub implementation into every test-only mock `Backend`
+    /// (~14 of them) for a capability none of them exercise. A backend that
+    /// actually has native IVM (e.g. BigQuery) overrides this; every other
+    /// backend inherits the default, which reports — via
+    /// [`BackendError::UnsupportedFeature`] — that it has no native IVM,
+    /// matching `docs/specs/materialized_view.md` §"No silent fallback"
+    /// item 1. Callers should not normally reach this default: the
+    /// `supports_native_ivm` capability gate in `smelt-runtime`'s compiler
+    /// refuses the model before any backend call is made; this default is a
+    /// second line of defense, not the primary enforcement point.
+    async fn create_materialized_view_as(
+        &self,
+        schema: &str,
+        name: &str,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        let _ = sql;
+        Err(BackendError::unsupported(
+            self.dialect().name(),
+            format!(
+                "refresh: materialized_view for '{schema}.{name}' — this backend has no \
+                 native incremental-view maintenance"
+            ),
+        ))
+    }
 
     /// Drop a table if it exists.
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError>;
@@ -168,6 +290,13 @@ pub trait Backend: Send + Sync {
     /// Execute a model (drop + create as table or view).
     ///
     /// This is a convenience method that combines drop + create operations.
+    /// The body lives in the free function [`execute_model_default`] rather
+    /// than inline here so a backend that overrides this method can still
+    /// run it after doing its own extra step first — see that function's
+    /// doc comment for why (a trait override has no way to call back into
+    /// the default it replaced). `BigQueryBackend::execute_model` is the
+    /// first such override, cleaning up a leftover materialized view before
+    /// falling through to this behaviour (`docs/specs/materialized_view.md`).
     async fn execute_model(
         &self,
         schema: &str,
@@ -176,38 +305,7 @@ pub trait Backend: Send + Sync {
         materialization: Materialization,
         show_preview: bool,
     ) -> Result<ExecutionResult, BackendError> {
-        let start = std::time::Instant::now();
-
-        match materialization {
-            Materialization::Table => {
-                // Drop both view and table in case the materialization type changed
-                self.drop_view_if_exists(schema, name).await?;
-                self.drop_table_if_exists(schema, name).await?;
-                self.create_table_as(schema, name, sql).await?;
-            }
-            Materialization::View => {
-                // Drop both table and view in case the materialization type changed
-                self.drop_table_if_exists(schema, name).await?;
-                self.drop_view_if_exists(schema, name).await?;
-                self.create_view_as(schema, name, sql).await?;
-            }
-        }
-
-        let duration = start.elapsed();
-        let row_count = self.get_row_count(schema, name).await?;
-
-        let preview = if show_preview {
-            Some(self.get_preview(schema, name, 10).await?)
-        } else {
-            None
-        };
-
-        Ok(ExecutionResult {
-            model_name: name.to_string(),
-            duration,
-            row_count,
-            preview,
-        })
+        execute_model_default(self, schema, name, sql, materialization, show_preview).await
     }
 
     /// Execute a model with incremental materialization support.
@@ -373,6 +471,11 @@ pub trait Backend: Send + Sync {
     /// full target row (see the emitter's doc comment for the full-row
     /// projection contract `UPDATE SET *` relies on).
     ///
+    /// `columns` names that same full target row. It is inert on the dialects
+    /// with a star form and **required** on BigQuery, whose GoogleSQL has
+    /// none — passing an empty list there emits a `MERGE` whose matched arm
+    /// updates nothing, so this method refuses rather than executing it.
+    ///
     /// Default implementation routes through the shared emitter and
     /// `execute_statement_group`; a backend only needs to override this if
     /// it cannot express the emitted `MERGE` text at all (see
@@ -387,9 +490,13 @@ pub trait Backend: Send + Sync {
         table: &str,
         source_sql: &str,
         unique_key: &[String],
+        columns: &[String],
     ) -> Result<(), BackendError> {
-        let group =
-            build_column_scoped_merge_group(schema, table, source_sql, unique_key, self.dialect());
+        let dialect = self.dialect();
+        require_merge_columns(dialect, schema, table, columns)?;
+        let group = build_column_scoped_merge_group(
+            schema, table, source_sql, unique_key, columns, dialect,
+        );
         self.execute_statement_group(&group).await
     }
 

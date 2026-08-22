@@ -53,7 +53,44 @@ Each axis is delivered end-to-end before the next begins: spec contract → soun
 
 As each axis lands, the fingerprint oracle gains real precision on it instead of falling back to verbatim rebuild.
 
-### 3. Safety-Overrides Review — Partition-Grain Admission Checks
+### 3. Total Output-Schema Resolution
+
+smelt does not always know a model's output schema. `CompiledModel::output_columns` (and the
+`derive_projection` owner behind it) returns *empty = unknown* the moment a select list contains a
+surviving wildcard, even when the upstream columns are fully declared and already resolved for LSP
+completion (`available_columns`). An ETL tool that cannot name its own output is the wrong default:
+too much downstream precision depends on the projection being total — output-fingerprint reuse and
+virtual-environment sharing (#5), cross-model column lineage and backbuild eclipse, schema
+migration planning (#6), and the BigQuery whole-row `MERGE`, which refuses a `ColumnScopedMerge`
+model whose projection is not statically enumerable (`multi_backend.md` §Constraints).
+
+The goal is a *total* output schema: every model resolves to a concrete column list, or names the
+exact reason it cannot. The unresolvable cases today are each independently closable:
+
+- **`SELECT *` derivation gives up unconditionally.** `derive_projection`
+  (`crates/smelt-runtime/src/compile.rs`) returns `None` on any wildcard without consulting the
+  upstream schema it already holds. Teach it to expand a wildcard against resolvable upstream refs
+  (reusing the `RowExtension` / `RefSchemaProvider` machinery `available_columns` already uses), so
+  `SELECT *` over declared upstreams yields a real column list.
+- **External physical tables carry no declared schema.** Support declaring an external table's
+  columns so a projection over one resolves instead of falling to `ColumnSource::ExternalTable` /
+  `Unknown`.
+- **CSV seeds do not participate in `SELECT *` resolution.** Require/declare seed schemas so a
+  `SELECT *` over a seed is enumerable.
+- **`smelt.functions.<f>(args).*` over an unresolved return.** Closed-struct returns already
+  expand; row-tail (`Struct<{…, ..r}>`) and unresolved signatures fall back to a synthetic
+  `Unknown` column — close the gap so the spread is always enumerable or a named refusal.
+- **`SELECT *` over an `ON`-join is not expanded** (duplicate-name hazard, tracked in
+  `docs/TODO.md`). Expand it with explicit duplicate-name handling.
+
+**Done when** `output_columns` is total for every model over declared upstreams, each residual
+unresolvable case is a named diagnostic rather than a silent empty list, and the BigQuery
+`ColumnScopedMerge` constraint narrows to genuinely unresolvable upstreams. Sequenced as a
+precision precondition for the fingerprint fold (#5) and backbuild lineage. Extends
+[`docs/plans/20260819-source-derived-projection.md`](plans/20260819-source-derived-projection.md),
+the projection owner this builds on.
+
+### 4. Safety-Overrides Review — Partition-Grain Admission Checks
 
 The partition-grain recompute-a-region quadrant admits SQL only past a set of per-cell safety
 checks (window functions, `HAVING`, `DISTINCT`, `LIMIT`, FROM/JOIN subqueries, non-deterministic
@@ -88,7 +125,7 @@ rewrite instead of a bypass (window functions, possibly `HAVING`/`DISTINCT`), or
 opt-in risk acceptance that should stay a recorded override (non-deterministic functions) — then
 a spec diff to `incremental_shapes.md` §"Safety checks" for whichever checks change shape.
 
-### 4. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
+### 5. Virtual Environments + Backbuild Change-Detection (specs authored, prototype proven)
 
 SQLMesh-style opt-in virtual data environments: cheap isolated environments that share physical tables with production whenever a model's output is *provably* unchanged, rebuilding only what provably changed. The differentiator over SQLMesh is a **typed, provable equivalence relation** in place of a syntactic edit-script. The same machinery powers **backbuild change-detection** — deciding precisely which models a change forces to rebuild versus spares.
 
@@ -107,11 +144,11 @@ SQLMesh-style opt-in virtual data environments: cheap isolated environments that
 
 Explicit non-goal for now: the un-annotated determinism inversion remains conservative-rebuild until covered (worst-case parity; see `output_fingerprint.md` Known Divergences). The type-system axes that previously forced conservative rebuild are addressed in #2 and unlock fingerprint precision as they land.
 
-### 5. General Schema Migration on the VE Substrate
+### 6. General Schema Migration on the VE Substrate
 
-Generalise schema change management on top of the fingerprint + column-lineage machinery from #3. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
+Generalise schema change management on top of the fingerprint + column-lineage machinery from #5. smelt already has schema evolution (ALTER vs full-refresh, complex/nested types) and offline `smelt diff`; this item makes migration planning lineage-aware, so a plan knows precisely which downstream models are output-affected versus spared (the same eclipse analysis), and can stage and preview migrations across environments before promotion. Sequenced after Virtual Environments because it reuses that substrate.
 
-### 6. Spark — Production Hardening
+### 7. Spark — Production Hardening
 
 The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow, Spark Connect / Databricks Connect). Remaining gaps to production-grade:
 
@@ -119,27 +156,181 @@ The Spark backend is functionally complete (PySpark/PyO3 bridge, zero-copy Arrow
 - **JSON incompatibility rewrites** — `TO_JSON(scalar)`, `JSON_CONTAINS`/`@>`/`<@`, `JSON_OBJECT`/`JSON_ARRAY`; emit compile-time warnings where no faithful rewrite exists.
 - **Authentication docs** — tokens, OAuth, and instance profiles for Databricks Connect / EMR / Dataproc.
 
-### 7. `smelt check` — LLM-Optimised Diagnostic CLI
+### 8. `smelt check` — LLM-Optimised Diagnostic CLI
 
 Structured diagnostic output designed for LLM consumption. Exposes Smelt's semantic analysis (parse errors, type errors, resolution failures, schema compatibility) via `smelt check --format json` with severity filtering, file/project scope, token budget control (`--budget-lines`), and optional extended context (`--explain`). Replaces the previously planned `smelt validate`. Includes a Claude Code skill and eval harness for empirically tuning diagnostic sufficiency.
 
 See [design doc](plans/20260405-smelt-check.md) for full interface spec, JSON schema, and eval plan.
 
-### 8. Orchestrator Integration
+### 9. Orchestrator Integration
 
 Dagster/Airflow plugin API. `smelt explain --json` already provides the graph structure; next step is a thin adapter layer for orchestrator consumption.
 
-### 9. PostgreSQL Backend
+### 10. PostgreSQL Backend
 
 Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, now the remaining major backend gap.
 
-### 10. Databricks Support + Metrics-View Compatibility (low priority)
+### 11. Databricks Support + Metrics-View Compatibility (low priority)
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
 ---
 
 ## Recently Completed
+
+### ~~Schema-evolution DDL for Spark~~ ✅ (August 21, 2026)
+
+The same dispatch bug the BigQuery work uncovered was live on Spark too: only the *complex* change
+kinds ever reached `ddl_spark`, so `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE` and
+`SET NOT NULL` went to a Spark server in DuckDB's dialect. Spark now routes the whole diff through
+its own generator, and the generator's rules were re-derived from measurement.
+
+- **Measured, not read.** `scripts/spark-probe-ddl.sh` runs each form against a fresh Delta and a
+  fresh Parquet table on a live server. Five answers contradicted what the generator claimed:
+  `NOT NULL` on `ADD COLUMNS` is refused by *both* formats (the generator emitted it for Delta), a
+  `DEFAULT` clause needs Delta's `allowColumnDefaults` feature, `DROP COLUMN` needs
+  `delta.columnMapping.mode`, every `ALTER COLUMN … TYPE` widening needs `delta.enableTypeWidening`
+  — the documented-safe integer chain included — and `SET NOT NULL` is refused even on a column
+  holding no NULLs.
+- **The rules are about the table smelt creates**, not the format in the abstract. smelt writes
+  `CREATE TABLE … USING DELTA` with no table properties, and enabling any of the three features
+  above irreversibly raises the table's protocol version — not something a migration should do to a
+  user's table unasked. Those changes resolve to a table rewrite on Delta and a named full refresh
+  on Parquet.
+- **A `default:` still fills the rows already there.** Delta will not take the clause, so the
+  generator emits the plain add followed by `UPDATE … WHERE col IS NULL` — the shape the GoogleSQL
+  generator uses, for the same reason.
+- **Verified against the generator, not the server.** Three new legs in
+  `crates/smelt-backend-spark/tests/ddl_observed.rs` execute the statements
+  `plan_migration_for_backend` actually emits; all green against a live Delta-enabled server, and
+  restoring the old fall-through makes them fail with `ParseException` on
+  `ADD COLUMN note VARCHAR`.
+
+### ~~BigQuery worklist closed~~ ✅ (August 22, 2026)
+
+The remaining items of the [BigQuery worklist](plans/20260821-bigquery-remaining.md) are
+closed, three as decisions and three as work.
+
+- **Decisions recorded as Constraints, not left as open divergences** — cross-engine exchange
+  is a two-engine, filesystem-local capability by design (a third engine that cannot read a
+  host path needs a new object-store boundary, which is cross-cutting, not a BigQuery
+  feature); BigQuery has no CI tier, by decision, with the credential and billing reasoning
+  recorded in place; and a BigQuery `ColumnScopedMerge` model must have a statically
+  enumerable projection, the broader fix being #3 "Total Output-Schema Resolution".
+- **`refresh: materialized_view` now emits on BigQuery** — `supports_native_ivm` flips to
+  `true` and smelt emits `CREATE OR REPLACE MATERIALIZED VIEW`, running no combiner and no
+  ledger. The design was measured (`scripts/bigquery-probe-mv.sh`), and the finding that
+  shaped it was that materialization flips are hazardous in *both* directions:
+  `DROP TABLE/VIEW IF EXISTS` both fail against a materialized view, so a model flipping away
+  from the mode would have errored — a hazard the feature itself introduced.
+- **The non-vacuity assertion is on the object's type, not its rows** — a substituted plain
+  table serves identical rows, so `materialized_view_parity` reads `INFORMATION_SCHEMA`;
+  swapping the emitter to `CREATE OR REPLACE TABLE` fails it while the row assertion would
+  still have passed.
+- **The conformance sweep is no longer pinned to one thread** — per-case dataset isolation
+  was already in place; what blocked concurrency was a preflight that budgeted the credential
+  window *per test*, so concurrent tests each passed their own budget while the sweep
+  overran. Budgeting moved to the sweep, checked once per process against a decided 2700s
+  estimate. Measured live: **22 passed / 0 failed in 621.61s** at 4-way concurrency, against
+  2190.85s sequentially — a 3.5x reduction, finishing with 2828s of the credential window
+  unspent, and with no quota refusals or dataset collisions.
+
+### ~~Schema-evolution DDL for BigQuery~~ ✅ (August 21, 2026)
+
+BigQuery gained its own GoogleSQL DDL generator (`crates/smelt-state/src/ddl_bigquery.rs`), so a
+schema change on a BigQuery model migrates in place instead of resolving to a full refresh. Item 1
+of the [BigQuery worklist](plans/20260821-bigquery-remaining.md).
+
+- **Measured, not read.** `scripts/bigquery-probe-ddl.sh` runs 55 DDL forms against the live
+  warehouse, one fresh table each (repeating on one table trips a per-table update quota, and a
+  quota refusal says nothing about the form). Three answers contradicted the obvious guess: a
+  `DEFAULT` cannot ride on an `ADD COLUMN`, `BIGNUMERIC → FLOAT64` is refused despite being a
+  documented widening, and `SET DATA TYPE` on a `REQUIRED` column is refused outright.
+- **The dispatch was wronger than the divergence entry claimed.** Only the *complex* change kinds
+  ever reached a backend generator; `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN … TYPE` and
+  `SET NOT NULL` were emitted inline in DuckDB's dialect for every backend, so the BigQuery arm
+  that was supposed to refuse sat in a branch those changes never took. A flat schema change on
+  BigQuery emitted DuckDB SQL the warehouse rejects.
+- **Verified against the generator, not the warehouse.** The pre-existing parity leg evolves the
+  schema with hand-written DDL, which measures BigQuery rather than smelt. Two new legs execute
+  the statements `plan_migration_for_backend` actually emits; both are green live, and reverting
+  `SET DATA TYPE` to DuckDB's spelling makes the BigQuery leg fail.
+- **What GoogleSQL cannot express stays a named refusal** — struct/array changes, adding a
+  `NOT NULL` column, tightening to `NOT NULL`, widening a `REQUIRED` column — each resolving to a
+  full refresh whose reason names the column and the limitation.
+
+### ~~BigQuery generative maintenance-conformance leg~~ ✅ (August 21, 2026)
+
+10-phase plan ([plan](plans/20260817-bigquery-generative-conformance.md)) giving BigQuery its own
+leg of the generative dual-execution harness, so its incremental coverage is generative rather
+than fixed-recipe-only — and making `multi_backend.md`'s claim that "the backend under test is a
+parameter, not a duplicated implementation" true, by extracting the shared test families into one
+target-parametrized owner instead of adding a third copy.
+
+- **Measured green in one sweep** — `bash scripts/bigquery-conformance.sh`, `--test-threads=1`:
+  21 passed / 0 failed / 0 ignored, 2190.85s against the live warehouse. Earlier sessions could
+  only ever verify cases in targeted runs, because a one-hour credential could not cover a sweep
+  plus an already-spent window.
+- **Four product-side dialect gaps closed, not just harness ones.** A keyed-fold `MERGE` emitted
+  `INSERT *` where GoogleSQL needs `INSERT ROW`; infix `%` and the power operators reached
+  GoogleSQL unlowered — and `^` was the dangerous one, since smelt reads it as power while
+  GoogleSQL defines it as bitwise XOR, so an unlowered `^` returned a *different number* rather
+  than failing. Each affects real user models on BigQuery, not only the harness.
+- **An exact median left the warehouse rounded** — the output-schema cast wrap re-parsed
+  already-lowered SQL, could not read the GoogleSQL `FLOAT64` spelling, and narrowed a
+  `-284.5` median to `-285`. Division with one unresolved operand now yields no type at all.
+  This is the same re-parse-your-own-output bug class the source-derived projection work closed.
+- **The oracle is demonstrably non-vacuous** — `harness_self_check_bigquery` catches a
+  deliberately seeded divergence live, so the leg's green is evidence rather than absence of
+  checking.
+- **A measurement correction worth keeping** — an all-green sweep costs nearly twice a failing one
+  (2190.85s vs 1142.10s), so the credential window's "large headroom" was an artefact of measuring
+  a red suite. A sweep now must start on a freshly minted token.
+
+Both items deferred during the plan have since closed. The Spark `dags` family really was
+comparing a project against itself — the full-refresh twin shared the incremental project's
+schema, so the equality assertion could read one already-overwritten table for both sides, and
+every earlier green `dags` run on the Spark leg carried no evidence about the incremental engine
+at all. The twin now stages into its own schema, threaded from the target through every Spark
+staging path, and a seeded-divergence self-check proves the comparison refuses a divergence it
+previously reported as equal (August 21, 2026).
+
+And `hardening-budget.sh` no longer mis-classifies the test-support testkit crate as production:
+test-support is now *derived* — a crate that some crate dev-depends on, that no crate depends on
+normally, and that produces no binary — rather than listed somewhere that could go stale. The
+gate also refuses an orphaned baseline entry, so a crate silently dropping out of the budget is
+an error rather than an unnoticed hole (August 21, 2026).
+
+
+### ~~Source-derived projection — one owner for a model's output schema~~ ✅ (August 20, 2026)
+
+6-phase plan ([plan](plans/20260819-source-derived-projection.md)) closing a bug class in which
+several consumers fed `smelt_dialect::print`'s *output* back into `smelt_parser::parse`, asking
+smelt's parser to read dialect-lowered SQL it was never designed to read. Every site failed soft,
+so the damage was silent. A model's projection — its output column names and their inferred
+types — is now derived once, from the model's own source CST, before printing.
+
+- **The median bug fixed** — a BigQuery `MEDIAN` reached the cast wrap as a `FLOAT64`-spelled
+  expression smelt's type parser could not read, and an exact median left the warehouse rounded
+  by a narrowing `CAST(... AS SMALLINT)`. `multi_backend.md` §Known Divergences retires the
+  unfixed-hazard paragraph.
+- **Projection aliases are bound, not invented** — an unaliased expression column previously had
+  a `_colN` name invented at *reference* time that the inner query never exposed. Alias synthesis
+  now splices a real ` AS _smelt_col{n}` into the source before printing, and `_smelt_` is a
+  reserved prefix enforced by a new `ReservedProjectionAliasPrefix` diagnostic emitted from the
+  analyzer, so the editor and the build agree. This unblocked in-model list spread.
+- **A dead safety probe revived** — the count-preservation probe was fed the cast-wrapped body,
+  so the enrichment join it looks for was buried in a derived table and had never fired in
+  production on any dialect. It now receives the pre-wrap body via `CompiledModel::body_sql`, and
+  its derived-table widening is gated on the shared `TYPE_CAST_WRAP_ALIAS` marker and bounded to
+  one level, so a user's own subquery is never mistaken for a cast wrap.
+- **Standing gate** — `cargo test -p smelt-runtime --test projection_dialect_invariance` compiles
+  one model exercising every construct the printer lowers (`MEDIAN`, `%`, `**`, `QUALIFY`, date
+  literals, `::` casts, array literals) for DuckDB, Spark and BigQuery and asserts `output_columns`
+  and the cast-wrap column names are byte-identical across all three. Verified load-bearing:
+  restoring the printed-SQL derivation makes it fail, because Spark's `QUALIFY` lowering emits
+  `SELECT * FROM (...)` which reads back as an empty projection. Needs no live warehouse.
+
 
 ### ~~Keyed Frontier — column-family union + snapshot-reconcile executor~~ ✅ (August 9, 2026)
 

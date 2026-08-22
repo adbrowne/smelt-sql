@@ -645,43 +645,111 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
 /// node/source table from a prior run first — drop-before-seed idempotency,
 /// mirroring [`crate::render::stage_for_target`]'s convention) through a
 /// direct Spark/Delta connection to `crate::recipe::SPARK_CONFORMANCE_SCHEMA`.
-#[cfg(feature = "spark")]
+/// `BigQuery` mirrors `crate::render::stage_for_target`'s BigQuery arm: no
+/// drop-before-seed step, since the case's dataset is fresh.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_dag_for_target(
     dag: &DagRecipe,
     project_dir: &Path,
     db_path: &Path,
     target: crate::recipe::ConformanceTarget,
 ) -> anyhow::Result<LinkCProject> {
-    match target {
+    match &target {
         crate::recipe::ConformanceTarget::DuckDb => stage_dag(dag, project_dir, db_path),
-        crate::recipe::ConformanceTarget::SparkDelta => {
-            std::fs::create_dir_all(project_dir.join("models/sources"))?;
-            for idx in 0..dag.nodes.len() {
+        crate::recipe::ConformanceTarget::SparkDelta { schema } => {
+            // Bound outside the `cfg` so a build without the `spark` feature
+            // does not see an unused variable.
+            let _ = &schema;
+            #[cfg(feature = "spark")]
+            {
+                let schema = schema.clone();
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                for idx in 0..dag.nodes.len() {
+                    std::fs::write(
+                        project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
+                        render_node_file(dag, idx),
+                    )?;
+                }
                 std::fs::write(
-                    project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
-                    render_node_file(dag, idx),
+                    project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
+                    dag.source.source_yaml(),
                 )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    crate::render::render_smelt_yml_for(target, db_path),
+                )?;
+
+                // The target's own schema, never the shared constant: a
+                // paired family stages its full-refresh oracle twin into a
+                // DIFFERENT schema, and the twin's drop-before-seed must
+                // reset the twin's tables rather than the incremental
+                // project's.
+                reset_and_create_spark_dag_tables(db_path, dag, &schema, " USING DELTA")?;
+
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
             }
-            std::fs::write(
-                project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
-                dag.source.source_yaml(),
-            )?;
-            std::fs::write(
-                project_dir.join("smelt.yml"),
-                crate::render::render_smelt_yml_for(target, db_path),
-            )?;
+            #[cfg(not(feature = "spark"))]
+            {
+                unimplemented!(
+                    "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
+        }
+        crate::recipe::ConformanceTarget::BigQuery { dataset } => {
+            #[cfg(feature = "bigquery")]
+            {
+                std::fs::create_dir_all(project_dir.join("models/sources"))?;
+                for idx in 0..dag.nodes.len() {
+                    std::fs::write(
+                        project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
+                        render_node_file(dag, idx),
+                    )?;
+                }
+                std::fs::write(
+                    project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
+                    dag.source.source_yaml(),
+                )?;
+                std::fs::write(
+                    project_dir.join("smelt.yml"),
+                    crate::render::render_smelt_yml_for(target.clone(), db_path),
+                )?;
 
-            reset_and_create_spark_dag_tables(db_path, dag)?;
+                crate::render::create_bigquery_source_table(
+                    dataset,
+                    &dag.source.name,
+                    &format!(
+                        "{d} DATE, {id} INT64, {val} INT64",
+                        d = dag.source.clock_column,
+                        id = dag.source.key_column,
+                        val = dag.source.payload_column,
+                    ),
+                )?;
 
-            LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+                LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+            }
+            #[cfg(not(feature = "bigquery"))]
+            {
+                let _ = dataset;
+                unimplemented!(
+                    "ConformanceTarget::BigQuery requires the `bigquery` feature on \
+                     smelt-maintenance-testkit"
+                )
+            }
         }
     }
 }
 
 #[cfg(feature = "spark")]
-fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow::Result<()> {
+fn reset_and_create_spark_dag_tables(
+    db_path: &Path,
+    dag: &DagRecipe,
+    schema: &str,
+    storage_clause: &str,
+) -> anyhow::Result<()> {
     let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let schema = schema.to_string();
+    let storage_clause = storage_clause.to_string();
     let source_table = format!("{schema}.sources_{}", dag.source.name);
     let column_defs = format!(
         "{d} DATE, {id} INT, {val} INT",
@@ -695,7 +763,11 @@ fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow:
         .map(|n| format!("{schema}.{}", n.name))
         .collect();
     crate::link_c_harness::block_on_isolated(async move {
-        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        // Open IN `schema` (not the shared constant) so `SparkBackend::new`'s
+        // `CREATE DATABASE IF NOT EXISTS` provisions a twin schema the first
+        // time one is staged into.
+        let backend =
+            crate::link_c_harness::open_spark_conformance_backend_in(&db_path, &schema).await?;
         for table in &node_tables {
             smelt_backend::Backend::execute_sql(
                 backend.as_ref(),
@@ -712,7 +784,7 @@ fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow:
         .map_err(|e| anyhow::anyhow!("drop stale Spark DAG source table {source_table}: {e}"))?;
         smelt_backend::Backend::execute_sql(
             backend.as_ref(),
-            &format!("CREATE TABLE {source_table} ({column_defs}) USING DELTA"),
+            &format!("CREATE TABLE {source_table} ({column_defs}){storage_clause}"),
         )
         .await
         .map_err(|e| anyhow::anyhow!("create Spark DAG source table {source_table}: {e}"))?;
@@ -722,13 +794,17 @@ fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow:
 
 /// [`insert_rows`] generalised over `&dyn Backend` (plan Phase 5): appends
 /// `rows` into `dag`'s physical source table via `Backend::execute_sql`
-/// (Delta `INSERT INTO`) rather than a raw `duckdb::Connection` — never a
-/// host-filesystem load path.
-#[cfg(feature = "spark")]
+/// (Delta/BigQuery `INSERT INTO`) rather than a raw `duckdb::Connection` —
+/// never a host-filesystem load path. Takes `schema` explicitly
+/// rather than hardcoding `SPARK_CONFORMANCE_SCHEMA` — `families::dags` (the
+/// only caller) resolves it once per case via `ConformanceBackend::schema`
+/// and threads it through, the same way every other shared family does.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn insert_rows_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,
     rows: &[(chrono::NaiveDate, i64, i64)],
+    schema: &str,
 ) -> anyhow::Result<()> {
     if rows.is_empty() {
         return Ok(());
@@ -739,28 +815,30 @@ pub async fn insert_rows_via_backend(
         .collect();
     backend
         .execute_sql(&format!(
-            "INSERT INTO {}.sources_{} VALUES {}",
-            crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+            "INSERT INTO {schema}.sources_{} VALUES {}",
             dag.source.name,
             values.join(", ")
         ))
         .await
-        .map_err(|e| anyhow::anyhow!("insert DAG source rows on Spark: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("insert DAG source rows: {e}"))?;
     Ok(())
 }
 
 /// [`fetch_node_multiset`] generalised over `&dyn Backend` (plan Phase 5):
 /// same column-exact, no-runtime-introspection comparison primitive, read
-/// back via `Backend::execute_sql` and cast to Spark's unsized `STRING`
+/// back via `Backend::execute_sql` and cast to an unsized string type
 /// (DuckDB's unsized `VARCHAR` is refused by Spark's parser —
 /// `DATATYPE_MISSING_SIZE`, the same dialect gap
-/// `emit_recurrence_bound_probe` had) rather than DuckDB's `VARCHAR`.
-#[cfg(feature = "spark")]
+/// `emit_recurrence_bound_probe` had — `STRING` is accepted by both Spark
+/// and GoogleSQL) rather than DuckDB's `VARCHAR`. Takes `schema` explicitly
+/// for the same reason [`insert_rows_via_backend`] does.
+#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn fetch_node_multiset_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,
     idx: usize,
     where_clause: Option<&str>,
+    schema: &str,
 ) -> anyhow::Result<Vec<Vec<String>>> {
     let node = &dag.nodes[idx];
     let cols = node_output_columns(dag, node);
@@ -769,7 +847,6 @@ pub async fn fetch_node_multiset_via_backend(
         .map(|c| format!("CAST({c} AS STRING) AS {c}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
     let sql = match where_clause {
         Some(w) => format!("SELECT {cast_list} FROM {schema}.{} WHERE {w}", node.name),
         None => format!("SELECT {cast_list} FROM {schema}.{}", node.name),

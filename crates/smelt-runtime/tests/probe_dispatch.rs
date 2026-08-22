@@ -271,6 +271,7 @@ impl smelt_runtime::maintenance_driver::WindowedKeyedRule for RuleWithNoProbe {
         _delta_sql: &str,
         _slice: Option<&TargetSlicePredicate>,
         _suppression: &WriteSuppression,
+        _dialect: smelt_logical::maintenance::emit::MaintenanceDialect,
     ) -> String {
         "SELECT 1".to_string()
     }

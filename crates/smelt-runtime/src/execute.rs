@@ -60,6 +60,15 @@ struct ModelPlan {
     materialization: smelt_core::config::Materialization,
     incremental: Option<IncrementalPlan>,
     model_file: smelt_core::ModelFile,
+    /// Resolved `refresh:` strategy (SQL frontmatter > `smelt.yml` > `Full`,
+    /// via `Config::get_refresh_with_metadata`), resolved once here rather
+    /// than re-read deep in the executor. `refresh: materialized_view`
+    /// models have no `grain:`/timeseries and so always land in the `None`
+    /// (full-refresh) arm of the `plan.incremental` match; this field is
+    /// what that arm consults to route to
+    /// `Backend::create_materialized_view_as` instead of
+    /// `Backend::execute_model` (`docs/specs/materialized_view.md`).
+    refresh: smelt_core::config::RefreshStrategy,
 }
 
 struct IncrementalPlan {
@@ -2107,7 +2116,11 @@ pub async fn execute_project(
                                             &clean_sql_for_merge,
                                         )
                                         .await?;
-                                    let select = crate::maintenance_driver::repair_keys_literal_select(&keys);
+                                    let select =
+                                        crate::maintenance_driver::repair_keys_literal_select(
+                                            &keys,
+                                            smelt_backend::maintenance_dialect(backend.dialect()),
+                                        );
                                     let refresh = crate::maintenance_driver::RepairSidecarRefresh {
                                         schema,
                                         source_address: &source_address,
@@ -2428,6 +2441,7 @@ pub async fn execute_project(
                                     &db_table_name,
                                     &model_unique_key,
                                     &compiled.sql,
+                                    &compiled.output_columns,
                                     suppression,
                                     &window,
                                     &retry_policy,
@@ -3263,6 +3277,7 @@ pub async fn execute_project(
                                     &plan.model_file.db_name_owned(),
                                     &inc_plan.config.unique_key,
                                     &compiled.sql,
+                                    &compiled.output_columns,
                                     suppression,
                                     &partition,
                                     &retry_policy,
@@ -3301,6 +3316,7 @@ pub async fn execute_project(
                                     &inc_plan.timeseries.partition_column,
                                     &conv_ts,
                                     &compiled.sql,
+                                    &compiled.output_columns,
                                     suppression,
                                     &partition,
                                     &retry_policy,
@@ -3346,6 +3362,7 @@ pub async fn execute_project(
                                 &partition.column,
                                 &region,
                                 &compiled.sql,
+                                &compiled.body_sql,
                                 facts.restrict_column.as_deref(),
                                 facts.skeleton_source_closure.as_ref(),
                                 &facts.upstream_model,
@@ -3745,7 +3762,37 @@ pub async fn execute_project(
                 // executes as one INSERT — correct for the model's FIRST
                 // build, the same one-shot shape a plain (non-self-
                 // referential) full refresh already is.
-                let exec_result = if crate::compile::is_self_referential(&plan.model_file)
+                let exec_result = if plan.refresh
+                    == smelt_core::config::RefreshStrategy::MaterializedView
+                {
+                    // `refresh: materialized_view` (`docs/specs/materialized_view.md`):
+                    // delegate to the backend's native incremental-view
+                    // maintenance instead of the ordinary drop+CTAS/CREATE
+                    // VIEW path `Backend::execute_model` runs. The
+                    // `supports_native_ivm` gate (`compile::check_native_ivm_gate`)
+                    // already refused compilation above for any backend
+                    // without native IVM, so this arm only runs against a
+                    // backend that overrides `create_materialized_view_as`
+                    // — the default's `UnsupportedFeature` error is a
+                    // second line of defense, not the primary enforcement.
+                    let db_name = plan.model_file.db_name_owned();
+                    retry_statement_group(request, run_id, &plan.name, reporter, || {
+                        backend.create_materialized_view_as(schema, &db_name, &compiled.sql)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                    let row_count = backend
+                        .get_row_count(schema, &plan.model_file.db_name_owned())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    smelt_backend::ExecutionResult {
+                        model_name: plan.model_file.db_name_owned(),
+                        duration: StdDuration::from_millis(0),
+                        row_count,
+                        preview: None,
+                    }
+                } else if crate::compile::is_self_referential(&plan.model_file)
                     && matches!(mat, Materialization::Table)
                 {
                     backend
@@ -3832,7 +3879,13 @@ pub async fn execute_project(
                 manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
-                        strategy: "full_refresh".to_string(),
+                        strategy: if plan.refresh
+                            == smelt_core::config::RefreshStrategy::MaterializedView
+                        {
+                            "materialized_view".to_string()
+                        } else {
+                            "full_refresh".to_string()
+                        },
                         time_range: None,
                         partitions_updated: vec![],
                         row_count: exec_result.row_count,
@@ -4259,6 +4312,8 @@ fn build_model_plans(
             .cloned()
             .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
+        let refresh = config.get_refresh_with_metadata(model_name, metadata);
+
         match (inc_config, ts_config, start_date, end_date) {
             (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
                 // Resolve data latency from model column metadata for the event-time column.
@@ -4381,6 +4436,7 @@ fn build_model_plans(
                         skew,
                     }),
                     model_file: model.clone(),
+                    refresh: refresh.clone(),
                 });
             }
             (Some(_inc), Some(_ts), _, _) => {
@@ -4392,6 +4448,7 @@ fn build_model_plans(
                     materialization: config.get_materialization_with_metadata(model_name, metadata),
                     incremental: None,
                     model_file: model.clone(),
+                    refresh: refresh.clone(),
                 });
             }
             (Some(_inc), None, _, _) => {
@@ -4404,6 +4461,7 @@ fn build_model_plans(
                     materialization: config.get_materialization_with_metadata(model_name, metadata),
                     incremental: None,
                     model_file: model.clone(),
+                    refresh: refresh.clone(),
                 });
             }
             (None, _, _, _) => {
@@ -4413,6 +4471,7 @@ fn build_model_plans(
                     materialization: config.get_materialization_with_metadata(model_name, metadata),
                     incremental: None,
                     model_file: model.clone(),
+                    refresh: refresh.clone(),
                 });
             }
         }
@@ -4535,6 +4594,7 @@ fn maintenance_dialect_for_target(
         .map(|bt| match bt {
             smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
             smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+            smelt_core::config::BackendType::BigQuery => smelt_backend::SqlDialect::BigQuery,
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)

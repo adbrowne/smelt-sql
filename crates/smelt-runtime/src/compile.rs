@@ -2,12 +2,14 @@ use anyhow::Result;
 use smelt_core::config::{BackendType, Config, Materialization, RefreshStrategy, Target};
 use smelt_core::{ModelFile, SourcesConfig};
 use smelt_db::type_inference::infer_select_column_types;
-use smelt_db::{add_source_info_to_type_context, build_type_context, StaticRefSchemaProvider};
+use smelt_db::{
+    add_source_info_to_type_context, build_type_context, StaticRefSchemaProvider, TypeContext,
+};
 use smelt_dialect::{
     wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
     SmeltPathCallExpander, SmeltPathRefResolver, SqlDialect,
 };
-use smelt_parser::ast::File;
+use smelt_parser::ast::{File, SelectStmt};
 use smelt_types::{DataType, TypedColumn};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -415,12 +417,207 @@ pub struct CompiledModel {
     pub name: String,
     pub sql: String,
     pub materialization: Materialization,
+    /// The model's output column names, in projection order.
+    ///
+    /// Empty when they are not statically resolvable — a surviving wildcard,
+    /// an unnamed item, or SQL whose top level is not a `SELECT`. Consumers
+    /// must treat empty as "unknown", never as "no columns": the
+    /// column-scoped `MERGE` on BigQuery needs this list and refuses loudly
+    /// without it (`smelt_backend::require_merge_columns`), because GoogleSQL
+    /// has no `UPDATE SET *` to fall back to.
+    pub output_columns: Vec<String>,
+    /// This model's own compiled body — dialect-printed (source `smelt.<path>`
+    /// refs already resolved to physical `schema.table` names), but before
+    /// the type-cast wrap `apply_type_casts` applies. `sql` above is what a
+    /// backend executes; `body_sql` is what a consumer that needs this
+    /// model's own top-level `FROM`/`JOIN` text reads — the count-
+    /// preservation probe (`smelt_logical::maintenance::emit::
+    /// emit_count_preservation_probe_from_body`) in particular. Carrying it
+    /// here means that consumer is never asked to recover it by unwrapping
+    /// `sql`'s `_smelt_typed` derived table, which is the same source-vs-
+    /// printed-SQL mistake `docs/plans/20260819-source-derived-
+    /// projection.md` exists to retire everywhere else.
+    pub body_sql: String,
+}
+
+/// A model's projection — the ordered list of output columns, derived once
+/// from the model's **source** `SelectStmt` (before dialect lowering) plus
+/// the `TypeContext` assembled from upstream schemas.
+///
+/// This is the single owner of "what are this model's output columns and
+/// their inferred types": every consumer (the type-cast wrap, the output
+/// column list) reads this value rather than re-deriving it from printed,
+/// dialect-lowered SQL — see `docs/specs/multi_backend.md`
+/// §"Output-schema type conformance".
+struct Projection {
+    /// `None` when the select list is not statically enumerable — a
+    /// wildcard select item is present, or the statement's top level isn't
+    /// a plain `SELECT` at all.
+    columns: Option<Vec<ProjectionColumn>>,
+}
+
+struct ProjectionColumn {
+    /// The item's resolved name — an explicit alias, or (today) the same
+    /// inferred bare/qualified name `Expression::infer_name` would produce.
+    /// `None` when the item has no alias and no inferable name (e.g. a bare
+    /// literal); callers decide how to handle that case, since the cast
+    /// wrap and the MERGE column list want different fallbacks.
+    name: Option<String>,
+    typed: TypedColumn,
+}
+
+/// Whether `expr`'s inferred name is a **valid bare identifier** — a bare or
+/// qualified column reference, or a `CAST` of one — case 2 of the
+/// alias-synthesis rule in `docs/specs/multi_backend.md` §"Output-schema
+/// type conformance". Every dialect agrees on this name, so an item meeting
+/// this predicate needs no synthesized alias.
+fn expr_yields_bare_identifier(expr: &smelt_parser::ast::Expr) -> bool {
+    if expr.as_column_ref().is_some() {
+        return true;
+    }
+    if let Some(cast) = expr.as_cast() {
+        if let Some(inner) = cast.expression() {
+            return expr_yields_bare_identifier(&inner);
+        }
+    }
+    false
+}
+
+/// Splice ` AS _smelt_col{n}` into every top-level select item of `sql` that
+/// falls under case 3 of the alias-synthesis rule in
+/// `docs/specs/multi_backend.md` §"Output-schema type conformance": no
+/// explicit alias, and an expression that is not a bare/qualified column
+/// reference (or a `CAST` of one). `n` is the item's 1-based position, so
+/// the synthesized name is deterministic and independent of source
+/// formatting. An item with an explicit alias, a wildcard, or a struct-spread
+/// call is left untouched.
+///
+/// Operates by text-range splice directly over `sql`, which must be
+/// **source** smelt SQL — never dialect-printed output. Splicing into
+/// printed SQL would reintroduce the re-parse-printed-output hazard this
+/// projection redesign removes; see
+/// `docs/plans/20260819-source-derived-projection.md`. Once spliced, the
+/// alias is a real, bound name — every downstream consumer (the projection
+/// derivation, the dialect printer, the executing backend) sees and emits it
+/// the same way any user-written alias would.
+fn synthesize_projection_aliases(sql: &str) -> String {
+    let parse = smelt_parser::parse(sql);
+    let Some(file) = File::cast(parse.syntax()) else {
+        return sql.to_string();
+    };
+    let Some(select_stmt) = file.select_stmt() else {
+        return sql.to_string();
+    };
+    let Some(select_list) = select_stmt.select_list() else {
+        return sql.to_string();
+    };
+
+    let mut insertions: Vec<(usize, String)> = Vec::new();
+    for (i, item) in select_list.items().enumerate() {
+        if item.alias().is_some() {
+            continue;
+        }
+        if item.is_wildcard() || item.is_struct_spread_call() {
+            continue;
+        }
+        let Some(expr) = item.expression() else {
+            continue;
+        };
+        if expr_yields_bare_identifier(&expr) {
+            continue;
+        }
+        // Splice immediately after the *expression's* own text range, not
+        // the select item's — the item node's range can extend across
+        // trailing whitespace up to the next token (e.g. the `FROM`
+        // keyword) when the item has no alias, which would otherwise glue
+        // the synthesized alias directly onto that keyword.
+        let end: usize = expr.text_range().end().into();
+        insertions.push((end, format!(" AS _smelt_col{}", i + 1)));
+    }
+
+    if insertions.is_empty() {
+        return sql.to_string();
+    }
+
+    // Splice from the end backward so earlier insertion offsets stay valid.
+    insertions.sort_by_key(|(pos, _)| std::cmp::Reverse(*pos));
+    let mut out = sql.to_string();
+    for (pos, text) in insertions {
+        out.insert_str(pos, &text);
+    }
+    out
+}
+
+/// Derive a model's [`Projection`] from its **pre-print** source `SelectStmt`.
+///
+/// Reads the same notion of "output column name" the analyzer's `model_schema`
+/// query reads — `SelectItem::column_name`, which resolves an alias when there
+/// is one and the bare column name otherwise — so the build path and the editor
+/// agree on what a model's columns are (`architecture.md` §"Diagnostic parity
+/// rule"). A wildcard makes the set unknowable here (its expansion needs the
+/// upstream schemas the analyzer resolves lazily), so the whole projection is
+/// reported as unresolvable rather than as a partial list a consumer might
+/// trust.
+fn derive_projection(select_stmt: &SelectStmt, ctx: &TypeContext) -> Projection {
+    let Some(select_list) = select_stmt.select_list() else {
+        return Projection { columns: None };
+    };
+    let items: Vec<_> = select_list.items().collect();
+    // A bare `*`, OR a `smelt.<path>(args).*` struct-spread call: both
+    // expand to however many columns the underlying schema/struct return
+    // type has, a count this source-level select list cannot state on its
+    // own (the struct-spread call's field count is only known once its
+    // signature is resolved, and — unlike a plain aliased/bare column
+    // item — the printer fans it out into N columns, not one). Treating
+    // either as making the whole projection unresolvable (rather than
+    // just skipping that one item) keeps every downstream item's position
+    // aligned with what the printer will actually emit; see
+    // `docs/specs/multi_backend.md` §"Whole-row MERGE" for why "unknown"
+    // is the correct, fail-closed reading of an empty `output_columns`.
+    if items
+        .iter()
+        .any(|item| item.is_wildcard() || item.is_struct_spread_call())
+    {
+        return Projection { columns: None };
+    }
+    let column_types = infer_select_column_types(select_stmt, ctx);
+    let columns = items
+        .into_iter()
+        .zip(column_types)
+        .map(|(item, typed)| ProjectionColumn {
+            name: item.column_name(),
+            typed,
+        })
+        .collect();
+    Projection {
+        columns: Some(columns),
+    }
+}
+
+/// Derive a model's output column names from its already-derived [`Projection`].
+///
+/// Empty means *unknown* (`CompiledModel::output_columns`'s documented
+/// contract): a wildcard select item, or any item lacking a resolvable name,
+/// makes the whole list untrustworthy rather than partially trustworthy.
+fn output_column_names(projection: &Projection) -> Vec<String> {
+    let Some(columns) = &projection.columns else {
+        return Vec::new();
+    };
+    let mut names = Vec::with_capacity(columns.len());
+    for col in columns {
+        match &col.name {
+            Some(name) => names.push(name.clone()),
+            None => return Vec::new(),
+        }
+    }
+    names
 }
 
 fn dialect_for_backend(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
     match backend_type {
         BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
+        BackendType::BigQuery => (SqlDialect::BigQuery, BackendCapabilities::bigquery()),
     }
 }
 
@@ -1167,6 +1364,7 @@ impl SqlCompiler {
             SqlDialect::DuckDB => "duckdb",
             SqlDialect::SparkSQL => "spark",
             SqlDialect::PostgreSQL => "postgres",
+            SqlDialect::BigQuery => "bigquery",
         };
         let as_struct_emitter: Option<AsStructEmitter<'static>> = type_ctx.map(|tc| {
             let backend = dialect_name.to_string();
@@ -1369,6 +1567,11 @@ impl SqlCompiler {
         // text (before printing rewrites them to physical table names) —
         // see `hide_state_columns`.
         let clean_content = self.hide_state_columns(&clean_content)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let clean_content = synthesize_projection_aliases(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
 
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -1385,11 +1588,21 @@ impl SqlCompiler {
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
         };
+        // The projection — output column names and their inferred types — is
+        // derived once, here, from the pre-print source CST (`parse`), before
+        // dialect lowering. Every consumer (the type-cast wrap, the output
+        // column list) reads this single derivation; neither re-parses the
+        // dialect-printed SQL below. See `docs/specs/multi_backend.md`
+        // §"Output-schema type conformance".
+        let projection = self.derive_projection_for(&parse.syntax());
+
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
 
         // Type-conforming cast insertion: wrap SELECT columns with CASTs so
         // backend output types match smelt's type inference exactly.
-        let compiled_sql = self.apply_type_casts(&compiled_sql);
+        let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -1401,38 +1614,27 @@ impl SqlCompiler {
             // Use the full address-based DB name (e.g. "staging_stg_events")
             // so the backend creates/accesses the correct table.
             name: model.db_name_owned(),
+            output_columns: output_column_names(&projection),
             sql: compiled_sql,
+            body_sql,
             materialization,
         })
     }
 
-    /// Wrap SELECT columns with CASTs based on type inference.
+    /// Build the populated `TypeContext` a [`Projection`] derivation needs,
+    /// from upstream model/seed/source schemas, for the given (pre-print)
+    /// parsed `file`.
     ///
-    /// Returns the original SQL unchanged if type inference can't extract
-    /// column names/types (e.g. models referencing other models via smelt.ref()
-    /// where upstream schemas aren't yet available).
-    fn apply_type_casts(&self, sql: &str) -> String {
-        let parse = smelt_parser::parse(sql);
-        let file = match File::cast(parse.syntax()) {
-            Some(f) => f,
-            None => return sql.to_string(),
-        };
-        let select_stmt = match file.select_stmt() {
-            Some(s) => s,
-            None => return sql.to_string(),
-        };
-
-        // Build a populated TypeContext from upstream model/seed/source schemas
-        // so SUM/COUNT/AVG over `smelt.upstream.col` resolve correctly.
-        // Without this populated context, every ref column resolves to Unknown
-        // and SUM falls through to BIGINT — silently corrupting financial
-        // aggregates. See bug #3 in
-        // `docs/research/20260417-0.3-regression-triage.md`.
+    /// Without this populated context, every ref column resolves to Unknown
+    /// and SUM falls through to BIGINT — silently corrupting financial
+    /// aggregates. See bug #3 in
+    /// `docs/research/20260417-0.3-regression-triage.md`.
+    fn build_projection_type_context(&self, file: &File) -> TypeContext {
         let provider = StaticRefSchemaProvider {
             models: &self.upstream_schemas.models,
             seeds: &self.upstream_schemas.seeds,
         };
-        let mut ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+        let mut ctx = build_type_context(file, &self.upstream_schemas.sources, &provider);
         // Per-entity `sources/*.yml` columns (Phase 6) — the same two-path
         // source resolution `smelt-db`'s `type_context()` query performs.
         // Without this, every per-entity source column resolves to Unknown
@@ -1441,37 +1643,68 @@ impl SqlCompiler {
         // (design fork F4's runtime-side sibling; end-to-end pinned by the
         // property loop's G-01 cell with fractional values).
         add_source_info_to_type_context(&self.upstream_schemas.per_entity_sources, &mut ctx);
-        let column_types = infer_select_column_types(&select_stmt, &ctx);
+        ctx
+    }
 
-        let select_list = match select_stmt.select_list() {
-            Some(sl) => sl,
-            None => return sql.to_string(),
+    /// Derive this compiler's [`Projection`] from a parsed, **pre-print**
+    /// source AST — the single call every compile entry point uses so the
+    /// projection is always read off the model's own select list, never off
+    /// dialect-lowered output. `syntax` must be the root of a
+    /// `smelt_parser::parse` call over source smelt SQL (never over already
+    /// dialect-printed SQL). Returns an unresolvable (`columns: None`)
+    /// projection when the syntax doesn't cast to a `File`/`SelectStmt` at
+    /// all (e.g. a non-SELECT top level), mirroring `derive_projection`'s
+    /// own wildcard/non-SELECT fail-closed behaviour.
+    fn derive_projection_for(&self, syntax: &smelt_parser::syntax_kind::SyntaxNode) -> Projection {
+        File::cast(syntax.clone())
+            .and_then(|file| {
+                let select_stmt = file.select_stmt()?;
+                let type_ctx = self.build_projection_type_context(&file);
+                Some(derive_projection(&select_stmt, &type_ctx))
+            })
+            .unwrap_or(Projection { columns: None })
+    }
+
+    /// Wrap SELECT columns with CASTs based on the already-derived [`Projection`].
+    ///
+    /// Returns `sql` unchanged if the projection has no statically-known
+    /// columns (e.g. a wildcard) or no concrete types (e.g. models
+    /// referencing other models via smelt.ref() where upstream schemas
+    /// aren't yet available).
+    fn apply_type_casts(&self, sql: &str, projection: &Projection) -> String {
+        let Some(columns) = &projection.columns else {
+            return sql.to_string();
         };
-        let items: Vec<_> = select_list.items().collect();
 
         // Only apply casts if we have concrete types for at least one column
-        let has_concrete = column_types
+        let has_concrete = columns
             .iter()
-            .any(|tc| !matches!(tc.data_type, DataType::Unknown(_) | DataType::Null));
+            .any(|c| !matches!(c.typed.data_type, DataType::Unknown(_) | DataType::Null));
         if !has_concrete {
             return sql.to_string();
         }
 
-        let col_names: Vec<String> = items
+        // Every statically-resolved item now carries a real name: an explicit
+        // alias, its own bare/qualified column name, or (for anything else)
+        // the `_smelt_col{n}` alias `synthesize_projection_aliases` already
+        // spliced into the source SQL before this projection was derived —
+        // see `docs/specs/multi_backend.md` §"Output-schema type
+        // conformance". The `_smelt_col{n}` fallback below is therefore
+        // defensive only: it can be reached only if an item's expression is
+        // itself unparseable, in which case the name matches what the
+        // splice would have bound anyway.
+        let col_names: Vec<String> = columns
             .iter()
             .enumerate()
-            .map(|(i, item)| {
-                item.alias().unwrap_or_else(|| {
-                    // Fallback: infer name from expression (e.g. bare column ref "user_id")
-                    item.expression()
-                        .and_then(|e| e.infer_name())
-                        .unwrap_or_else(|| format!("_col{}", i + 1))
-                })
+            .map(|(i, col)| {
+                col.name
+                    .clone()
+                    .unwrap_or_else(|| format!("_smelt_col{}", i + 1))
             })
             .collect();
         let col_name_refs: Vec<&str> = col_names.iter().map(|s| s.as_str()).collect();
         let col_type_refs: Vec<DataType> =
-            column_types.iter().map(|tc| tc.data_type.clone()).collect();
+            columns.iter().map(|c| c.typed.data_type.clone()).collect();
 
         wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
     }
@@ -1492,7 +1725,17 @@ impl SqlCompiler {
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let sql = synthesize_projection_aliases(&sql);
         let parse = smelt_parser::parse(&sql);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST — never from `compiled_sql` below. See
+        // `derive_projection_for` and `docs/specs/multi_backend.md`
+        // §"Output-schema type conformance".
+        let projection = self.derive_projection_for(&parse.syntax());
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -1517,6 +1760,9 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&projection),
+            // No cast wrap in this entry point — see `CompiledModel::body_sql`.
+            body_sql: compiled_sql.clone(),
             sql: compiled_sql,
             materialization,
         })
@@ -1555,7 +1801,21 @@ impl SqlCompiler {
 
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let sql = self.hide_state_columns(&sql)?;
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let sql = synthesize_projection_aliases(&sql);
         let parse = smelt_parser::parse(&sql);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST, before both dialect lowering AND the ephemeral-CTE
+        // prepend below. `prepend_ephemeral_ctes` only adds a `WITH`
+        // preamble in front of the existing top-level SELECT; it never
+        // touches that SELECT's own item list, so this projection is still
+        // exactly right for `final_sql`'s output columns. See
+        // `derive_projection_for` and `docs/specs/multi_backend.md`
+        // §"Output-schema type conformance".
+        let projection = self.derive_projection_for(&parse.syntax());
         let (as_struct_emitter, fn_expander, path_call_expander) =
             self.build_emitters(&parse.syntax());
         let ctx = PrintContext {
@@ -1573,7 +1833,9 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
-        let compiled_sql = self.apply_type_casts(&compiled_sql);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
+        let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
         // Multi-segment refs (e.g. `smelt.lookup.regions`) have a canonical
@@ -1597,6 +1859,13 @@ impl SqlCompiler {
         } else {
             let referenced_refs: Vec<&str> = referenced.iter().map(|s| s.as_str()).collect();
             let cte_list = resolver.get_cte_list(&referenced_refs);
+            // `prepend_ephemeral_ctes` still operates on printed SQL — that
+            // stays deferred by design (`docs/plans/20260819-source-derived-
+            // projection.md` Scope → Explicitly deferred: `WITH` spelling is
+            // dialect-invariant, so this textual merge is a style problem,
+            // not a projection-correctness one). Nothing downstream of it
+            // re-parses the result: `output_columns` below reads `projection`,
+            // derived above from source, not from `final_sql`.
             prepend_ephemeral_ctes(&compiled_sql, &cte_list)
         };
 
@@ -1608,7 +1877,9 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&projection),
             sql: final_sql,
+            body_sql,
             materialization,
         })
     }
@@ -2097,7 +2368,17 @@ impl SqlCompiler {
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
+        // Bind a real `_smelt_col{n}` alias into the source text for every
+        // select item case 3 of the alias-synthesis rule covers, before this
+        // parse — see `synthesize_projection_aliases` and
+        // `docs/specs/multi_backend.md` §"Output-schema type conformance".
+        let clean_content = synthesize_projection_aliases(&clean_content);
         let parse = smelt_parser::parse(&clean_content);
+        // The projection is derived here, from `parse` — the pre-print
+        // source AST, before both dialect lowering AND the ephemeral-CTE
+        // prepend below; see the identical note in
+        // `compile_with_sql_and_ephemerals`.
+        let projection = self.derive_projection_for(&parse.syntax());
 
         // Build ephemeral set for the printer
         let ephemeral_refs: HashSet<&str> = resolver
@@ -2124,7 +2405,9 @@ impl SqlCompiler {
             smelt_path_call: path_call_expander,
         };
         let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
-        let compiled_sql = self.apply_type_casts(&compiled_sql);
+        // Captured before the cast wrap below — see `CompiledModel::body_sql`.
+        let body_sql = compiled_sql.clone();
+        let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
 
         // Collect which ephemeral models this model references.
         //
@@ -2146,7 +2429,10 @@ impl SqlCompiler {
             })
             .collect();
 
-        // Prepend ephemeral CTEs if any
+        // Prepend ephemeral CTEs if any. This still operates on printed SQL
+        // — deferred by design, see the identical note in
+        // `compile_with_sql_and_ephemerals`. `output_columns` below reads
+        // `projection`, derived above from source, not from `final_sql`.
         let final_sql = if referenced.is_empty() {
             compiled_sql
         } else {
@@ -2163,7 +2449,9 @@ impl SqlCompiler {
         Ok(CompiledModel {
             // Use the full address-based DB name (e.g. "staging_stg_events").
             name: model.db_name_owned(),
+            output_columns: output_column_names(&projection),
             sql: final_sql,
+            body_sql,
             materialization,
         })
     }
@@ -2257,6 +2545,9 @@ mod tests {
             warehouse: None,
             format: None,
             settings: None,
+            project: None,
+            dataset: None,
+            location: None,
         }
     }
 
@@ -2283,6 +2574,9 @@ mod tests {
                 warehouse: None,
                 format: None,
                 settings: None,
+                project: None,
+                dataset: None,
+                location: None,
             },
         );
 
@@ -2915,6 +3209,57 @@ WHERE event_type = 'click'
         assert_eq!(parts.main_body, "SELECT * FROM b");
     }
 
+    /// The `compile_with_sql` entry point (crate-internal, so unit-tested
+    /// here rather than from `tests/`) must derive `output_columns` from the
+    /// model's source select list, never from dialect-printed SQL: Spark's
+    /// `supports_qualify = false` lowers `QUALIFY` to an outer `SELECT *
+    /// FROM (<original>) _q WHERE <predicate>` — a wildcard select item.
+    /// `output_columns` must still resolve from the model's own, perfectly
+    /// well-named source projection (`id, rn`), not from that printed
+    /// wildcard form — the same regression the ephemeral-aware entry points
+    /// guard against in `tests/projection_source_derived.rs`.
+    #[test]
+    fn compile_with_sql_qualify_lowering_does_not_erase_output_columns() {
+        let sql = "SELECT id, ROW_NUMBER() OVER (PARTITION BY id ORDER BY ts DESC) AS rn \
+                   FROM t QUALIFY rn = 1";
+        let model = ModelFile {
+            name: "qualify_model".to_string(),
+            path: "models/qualify_model.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("qualify_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let target = Target {
+            target_type: "spark".to_string(),
+            database: None,
+            schema: "default".to_string(),
+            connect_url: Some("sc://localhost".to_string()),
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: None,
+            dataset: None,
+            location: None,
+        };
+        let compiled = SqlCompiler::new(make_test_config(), &target)
+            .compile_with_sql(&model, "main", sql)
+            .unwrap();
+
+        assert_eq!(
+            compiled.output_columns,
+            vec!["id".to_string(), "rn".to_string()],
+            "the QUALIFY-to-subquery lowering's outer `SELECT *` must not make \
+             a statically-known source projection look unknown: sql = {}",
+            compiled.sql
+        );
+    }
+
     #[test]
     fn test_rename_table_references() {
         let sql = "SELECT * FROM cleaned WHERE cleaned.id > 0";
@@ -2995,6 +3340,101 @@ WHERE event_type = 'click'
         assert!(
             !compiled.sql.contains("AS ?"),
             "CASE without alias should not produce ... AS ?: {}",
+            compiled.sql
+        );
+    }
+
+    /// The type-cast wrapper now names its columns and infers their types
+    /// from the model's **source** `SelectStmt`, before dialect lowering —
+    /// never by re-parsing the printed SQL. Before this fix, BigQuery's
+    /// `MEDIAN` lowering (`ARRAY_AGG(x IGNORE NULLS ORDER BY x)` inside a
+    /// `CASE`) did not parse back as smelt SQL, so the alias was lost and the
+    /// wrapper emitted a positional `_col2` the warehouse rejected
+    /// (`Unrecognized name: _col2`, seen live).
+    #[test]
+    fn bigquery_median_lowering_keeps_its_alias_through_the_cast_wrapper() {
+        // The `CAST` gives the wrapper a concrete type to engage on.
+        let sql = "SELECT CAST(d AS DATE) AS d, MEDIAN(val) AS med_val \
+                   FROM raw.events GROUP BY d";
+
+        let model = ModelFile {
+            name: "holistic".to_string(),
+            path: "models/holistic.sql".into(),
+            content: sql.to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("holistic.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let target = Target {
+            target_type: "bigquery".to_string(),
+            database: None,
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+            project: Some("p".to_string()),
+            dataset: Some("main".to_string()),
+            location: Some("US".to_string()),
+        };
+        let compiled = SqlCompiler::new(make_test_config(), &target)
+            .compile(&model, "main")
+            .unwrap();
+
+        assert!(
+            !compiled.sql.contains("_col"),
+            "no positional fallback name may reach the backend: {}",
+            compiled.sql
+        );
+        assert!(
+            compiled.sql.contains("med_val"),
+            "the model's own alias must survive: {}",
+            compiled.sql
+        );
+        assert!(
+            !compiled.sql.contains("MEDIAN("),
+            "the BigQuery lowering must still apply: {}",
+            compiled.sql
+        );
+        // Regression (measured live 2026-08-19, `gate_bigquery::
+        // append_only_partition_pool_upholds_equivalence_on_bigquery`,
+        // `recipe_holistic_agg`): the type-cast wrapper used to re-parse the
+        // ALREADY dialect-lowered SQL (this MEDIAN call became an
+        // `ARRAY_AGG`/`CASE`/`CAST(... AS FLOAT64)` expression by the time
+        // `apply_type_casts` ran). `FLOAT64` is a GoogleSQL spelling
+        // `smelt_types::parse_type` doesn't recognise, so the median
+        // expression's own type went unresolved — and an unsound fallback in
+        // `type_inference::binary::promote_numeric_operands_for_op` let the
+        // division's unresolved operand silently adopt the OTHER, known
+        // operand's type (the literal `2`'s `SmallInt`), emitting
+        // `CAST(med_val AS SMALLINT)` around an exact-median value and
+        // rounding interpolated medians (e.g. `-284.5` -> `-285`) before they
+        // ever left BigQuery.
+        //
+        // Now that the cast wrap's types come from the **source** CST
+        // (`MEDIAN(val)`, never the lowered `ARRAY_AGG`/`CASE` form), the
+        // registry resolves `MEDIAN`'s return type as `Double` regardless of
+        // its operand — so a `CAST(med_val AS FLOAT64)` (BigQuery's spelling
+        // of `Double`) is the correct, exact-width output. What must never
+        // reappear is a narrowing integer/fixed-point cast.
+        assert!(
+            !compiled.sql.contains("CAST(med_val AS SMALLINT")
+                && !compiled.sql.contains("CAST(med_val AS INT")
+                && !compiled.sql.contains("CAST(med_val AS NUMERIC")
+                && !compiled.sql.contains("CAST(med_val AS BIGNUMERIC"),
+            "an unresolved median type must not be cast to a guessed narrower \
+             integer/fixed-point type, silently rounding interpolated medians: {}",
+            compiled.sql
+        );
+        assert!(
+            compiled.sql.contains("CAST(med_val AS FLOAT64)"),
+            "MEDIAN's registry-declared Double return type should still \
+             surface as an exact-width FLOAT64 cast on BigQuery: {}",
             compiled.sql
         );
     }

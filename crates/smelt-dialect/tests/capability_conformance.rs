@@ -19,6 +19,7 @@ fn every_flag_matches_matrix() {
     let duckdb = BackendCapabilities::duckdb();
     let delta = BackendCapabilities::spark_delta();
     let parquet = BackendCapabilities::spark_parquet();
+    let bigquery = BackendCapabilities::bigquery();
 
     macro_rules! cell {
         ($caps:expr, $flag:ident, $expected:expr, $backend:literal) => {
@@ -109,7 +110,9 @@ fn every_flag_matches_matrix() {
     cell!(delta, supports_insert_overwrite, true, "Spark(Delta)");
     cell!(parquet, supports_insert_overwrite, true, "Spark(Parquet)");
 
-    // supports_native_ivm — matrix: all ✗ (no backend has native IVM today)
+    // supports_native_ivm — matrix: BigQuery ✓, the rest ✗. On these three the
+    // `false` is a warehouse fact (no native IVM runtime exists to delegate to);
+    // BigQuery's `true` is asserted below.
     cell!(duckdb, supports_native_ivm, false, "DuckDB");
     cell!(delta, supports_native_ivm, false, "Spark(Delta)");
     cell!(parquet, supports_native_ivm, false, "Spark(Parquet)");
@@ -171,6 +174,43 @@ fn every_flag_matches_matrix() {
         false,
         "Spark(Parquet)"
     );
+
+    // BigQuery. Every cell below was established by running the statement the flag
+    // names against a live warehouse (`scripts/bigquery-probe.sh`) rather than read
+    // from documentation, because the spec calls this table the honest matrix.
+    cell!(bigquery, supports_qualify, true, "BigQuery");
+    cell!(bigquery, supports_create_or_replace_table, true, "BigQuery");
+    cell!(bigquery, supports_create_or_replace_view, true, "BigQuery");
+    cell!(bigquery, supports_merge, true, "BigQuery");
+    cell!(bigquery, supports_pivot, true, "BigQuery");
+    cell!(bigquery, supports_date_literal, true, "BigQuery");
+    cell!(bigquery, supports_concat_operator, true, "BigQuery");
+    cell!(bigquery, supports_array_literal, true, "BigQuery");
+    cell!(bigquery, supports_transactional_ddl, true, "BigQuery");
+    cell!(bigquery, supports_double_colon_cast, false, "BigQuery");
+    cell!(bigquery, supports_trailing_commas, true, "BigQuery");
+    cell!(bigquery, supports_insert_overwrite, false, "BigQuery");
+    // BigQuery *does* accept CREATE MATERIALIZED VIEW with incremental refresh, so
+    // The only backend advertising native IVM. `true` obliges smelt to emit the
+    // native maintained object and cede freshness to the engine, which it does:
+    // `CREATE OR REPLACE MATERIALIZED VIEW`, no combiner, no ledger. Live coverage
+    // of the path this flag selects is `crates/smelt-cli/tests/materialized_view_parity.rs`
+    // — which asserts the created object's TYPE, since a substituted table would
+    // serve identical rows.
+    cell!(bigquery, supports_native_ivm, true, "BigQuery");
+    cell!(bigquery, supports_retraction, false, "BigQuery");
+    cell!(bigquery, supports_struct_field_ddl, true, "BigQuery");
+    // No USING clause exists in GoogleSQL — `ALTER COLUMN ... SET DATA TYPE ... USING`
+    // is a syntax error, and the bare form only permits assignable widenings.
+    cell!(bigquery, supports_alter_column_using, false, "BigQuery");
+    cell!(bigquery, supports_nested_array_ddl, true, "BigQuery");
+    cell!(bigquery, supports_merge_schema_write, false, "BigQuery");
+    cell!(bigquery, supports_column_mapping, true, "BigQuery");
+    // First backend to report native pipe support; the printer path behind this
+    // flag has never been exercised before.
+    cell!(bigquery, supports_pipe_syntax, true, "BigQuery");
+    cell!(bigquery, requires_schema_init, true, "BigQuery");
+    cell!(bigquery, supports_column_scoped_merge, true, "BigQuery");
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a

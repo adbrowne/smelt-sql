@@ -9,6 +9,8 @@ pub enum SqlDialect {
     SparkSQL,
     /// PostgreSQL dialect
     PostgreSQL,
+    /// Google BigQuery (GoogleSQL) dialect
+    BigQuery,
 }
 
 impl SqlDialect {
@@ -18,6 +20,7 @@ impl SqlDialect {
             SqlDialect::DuckDB => "DuckDB",
             SqlDialect::SparkSQL => "Spark SQL",
             SqlDialect::PostgreSQL => "PostgreSQL",
+            SqlDialect::BigQuery => "BigQuery",
         }
     }
 }
@@ -67,8 +70,8 @@ pub struct BackendCapabilities {
     /// maintain a declared query as a continuously-refreshed materialized
     /// object with no smelt-driven refresh loop (e.g. Databricks Enzyme,
     /// Snowflake Dynamic Tables). Gates `refresh: materialized_view`
-    /// (`materialized_view.md` §"No silent fallback"); `false` on every
-    /// backend today.
+    /// (`materialized_view.md` §"No silent fallback"); `true` on BigQuery
+    /// alone, `false` on every other backend today.
     pub supports_native_ivm: bool,
 
     /// Supports retraction (inverting / reprocessing a prior input) within
@@ -97,9 +100,8 @@ pub struct BackendCapabilities {
     /// Supports pipe SQL (`|>`) syntax natively.
     ///
     /// When `false`, the dialect printer rewrites pipe queries to standard SQL
-    /// before emitting. Every current backend reports `false`; this field exists
-    /// so future backends (e.g. BigQuery, which has native pipe support) can opt
-    /// in without code changes.
+    /// before emitting. BigQuery is the only backend reporting `true`, on the
+    /// strength of GoogleSQL's native pipe support.
     pub supports_pipe_syntax: bool,
 
     /// Backend requires explicit schema creation during session init.
@@ -221,6 +223,61 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+        }
+    }
+
+    /// Capabilities for Google BigQuery (GoogleSQL).
+    ///
+    /// Every flag below was established by executing the statement it names
+    /// against a live warehouse (`scripts/bigquery-probe.sh`), not read from
+    /// documentation — the capability matrix in `docs/specs/multi_backend.md`
+    /// §Surface is normative and the conformance test asserts this constructor
+    /// against it.
+    pub fn bigquery() -> Self {
+        Self {
+            supports_qualify: true,
+            supports_create_or_replace_table: true,
+            supports_create_or_replace_view: true,
+            supports_merge: true,
+            supports_pivot: true,
+            supports_date_literal: true,
+            supports_concat_operator: true,
+            supports_array_literal: true,
+            supports_transactional_ddl: true,
+            // GoogleSQL has no `::` cast operator: `SELECT 1::INT64` is a syntax error.
+            supports_double_colon_cast: false,
+            supports_trailing_commas: true,
+            // No `INSERT OVERWRITE` in GoogleSQL; partition replacement lowers to a
+            // scoped DELETE + INSERT.
+            supports_insert_overwrite: false,
+            // The one backend that advertises native IVM. smelt emits
+            // `CREATE OR REPLACE MATERIALIZED VIEW` and then owns nothing of the
+            // refresh loop: BigQuery keeps the object current and serves it by
+            // combining the materialized data with a live delta over the base table,
+            // so a read straight after a write already reflects it. smelt runs no
+            // combiner and keeps no ledger for these models
+            // (`materialized_view.md` §Constraints item 4). Eligibility is the
+            // engine's verdict alone — an unsupported query shape is relayed
+            // verbatim, never pre-empted by a smelt-side check.
+            supports_native_ivm: true,
+            // BigQuery's IVM does not invert a prior contribution; retraction-shaped
+            // queries are refused at creation rather than maintained.
+            supports_retraction: false,
+            supports_struct_field_ddl: true,
+            // GoogleSQL has no `USING` clause on ALTER COLUMN at all (syntax error);
+            // the bare `SET DATA TYPE` form permits only assignable widenings, so a
+            // conversion needing an expression is a table rewrite.
+            supports_alter_column_using: false,
+            supports_nested_array_ddl: true,
+            // A write naming a column the table lacks is rejected, not auto-added.
+            supports_merge_schema_write: false,
+            supports_column_mapping: true,
+            // The first backend to advertise native pipe syntax.
+            supports_pipe_syntax: true,
+            // A write into a dataset that does not exist is refused with
+            // `Not found: Dataset ...`, so the dataset must be created first.
+            requires_schema_init: true,
+            supports_column_scoped_merge: true,
         }
     }
 

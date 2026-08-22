@@ -1,0 +1,33 @@
+[package]
+name = "smelt-backend-bigquery"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "BigQuery backend implementation for smelt via google-cloud-bigquery/PyO3 bridge"
+
+[dependencies]
+# Backend trait
+smelt-backend = { path = "../smelt-backend" }
+
+# Arrow (with pyarrow feature for zero-copy conversion)
+arrow = { workspace = true, features = ["pyarrow"] }
+
+# Python bridge
+pyo3 = { workspace = true }
+
+# Async runtime
+tokio.workspace = true
+async-trait = "0.1"
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true
+
+[dev-dependencies]
+smelt-dialect = { path = "../smelt-dialect" }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -56,6 +56,7 @@ pub struct StatementGroup {
 pub enum MaintenanceDialect {
     DuckDb,
     Spark,
+    BigQuery,
 }
 
 /// A half-open region `[start, end)` on the output partition column; values
@@ -200,11 +201,24 @@ pub fn emit_delete_insert_delta_restricted(
 /// actually executes for `Technique::ColumnScopedMerge`
 /// (`crate::maintenance_driver::execute_column_scoped_merge`/
 /// `execute_column_scoped_merge_full` in `smelt-runtime`) —
-/// `WHEN MATCHED THEN UPDATE SET *`, `WHEN NOT MATCHED THEN INSERT *`. There
-/// is no column-list `SET` variant: DuckDB and Spark both key-match on
-/// `unique_key` and update every column from `source_select`'s projection
-/// (dialect-invariant text for this family — no branch reads `dialect` yet,
-/// kept for signature symmetry with the other emitters in this module).
+/// `WHEN MATCHED THEN UPDATE SET *`, `WHEN NOT MATCHED THEN INSERT *` on
+/// DuckDB and Spark, which both key-match on `unique_key` and update every
+/// column from `source_select`'s projection.
+///
+/// **BigQuery spells both arms out.** GoogleSQL accepts neither star form —
+/// `UPDATE SET *` fails with `Expected "(" but got "*"` and `INSERT *` with
+/// `Expected keyword ROW or keyword VALUES but got "*"`, both established
+/// against the live warehouse by `scripts/bigquery-probe-merge.sh` rather than
+/// read from documentation (`multi_backend.md` §Surface — a capability value
+/// comes from the warehouse). So the BigQuery branch renders the matched arm as
+/// `SET c = source.c` over `columns` and the not-matched arm as `INSERT ROW`.
+/// `columns` must therefore be the target's full output projection — the same
+/// full-row set `UPDATE SET *` already writes, so the two forms agree on which
+/// columns change. It is **inert on DuckDB and Spark**, whose text stays
+/// byte-identical whatever is passed, and an empty `columns` under BigQuery
+/// would silently emit a MERGE that updates nothing: callers must refuse that
+/// case before reaching here (fail-loud discipline), which is why no
+/// column-list-free BigQuery path exists in this emitter.
 ///
 /// **Full-row source-projection contract** (moved from
 /// `smelt-backend-duckdb`'s doc comment): `UPDATE SET *` requires
@@ -231,20 +245,55 @@ pub fn emit_column_scoped_merge(
     table: &str,
     unique_key: &[String],
     source_select: &str,
-    _dialect: MaintenanceDialect,
+    columns: &[String],
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let on = unique_key
         .iter()
         .map(|k| format!("target.{k} = source.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    let set = whole_row_update_set(columns, "source", dialect);
+    let insert = whole_row_insert_arm(dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
-             WHEN MATCHED THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN MATCHED THEN UPDATE SET {set} \
+             WHEN NOT MATCHED THEN {insert}"
         ))],
         transactional: false,
+    }
+}
+
+/// The assignment list of a whole-row `UPDATE SET`, in the grammar `dialect`
+/// accepts.
+///
+/// DuckDB and Spark take the star form and ignore `columns` entirely; BigQuery
+/// has no star form and is given `c = <alias>.c` for each column.
+/// `source_alias` names the `USING` relation, which differs by emitter
+/// (`source` for the column-scoped merge, `delta` for the keyed fold).
+fn whole_row_update_set(
+    columns: &[String],
+    source_alias: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "*".to_string(),
+        MaintenanceDialect::BigQuery => columns
+            .iter()
+            .map(|c| format!("{c} = {source_alias}.{c}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// The `WHEN NOT MATCHED` arm of a whole-row upsert. Needs no column list in
+/// either grammar, so emitters that render their own explicit `UPDATE SET`
+/// (the keyed folds) use this alone.
+fn whole_row_insert_arm(dialect: MaintenanceDialect) -> &'static str {
+    match dialect {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "INSERT *",
+        MaintenanceDialect::BigQuery => "INSERT ROW",
     }
 }
 
@@ -277,7 +326,8 @@ pub fn emit_column_scoped_merge_suppressed(
     unique_key: &[String],
     source_select: &str,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    columns: &[String],
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !compared_columns.is_empty(),
@@ -293,11 +343,13 @@ pub fn emit_column_scoped_merge_suppressed(
         .map(|c| format!("target.{c} IS DISTINCT FROM source.{c}"))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let set = whole_row_update_set(columns, "source", dialect);
+    let insert = whole_row_insert_arm(dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
-             WHEN MATCHED AND ({suppression}) THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET {set} \
+             WHEN NOT MATCHED THEN {insert}"
         ))],
         transactional: false,
     }
@@ -394,9 +446,10 @@ pub enum TargetSlicePredicate {
 /// never depend on it, so the emitter only assembles plain strings it is
 /// handed, never chooses or renders a combiner itself.
 ///
-/// `dialect` is accepted for signature symmetry with the other emitters in
-/// this module; the keyed-fold `MERGE` shape is currently dialect-invariant
-/// (no branch reads it yet).
+/// `dialect` selects the not-matched arm only. The matched arm is already an
+/// explicit `SET` list (the fold expressions), so unlike
+/// [`emit_column_scoped_merge`] this family needs no column list to reach
+/// GoogleSQL, which rejects `INSERT *` and takes `INSERT ROW`.
 ///
 /// `slice` is the target-scan slice predicate a locality-admitted model
 /// (`incremental_shapes.md` §"Key temporal locality") licenses: an extra
@@ -415,7 +468,7 @@ pub fn emit_keyed_fold(
     folds: &[(String, String)],
     delta_select: &str,
     slice: Option<&TargetSlicePredicate>,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     let mut on = key
         .iter()
@@ -455,7 +508,8 @@ pub fn emit_keyed_fold(
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED THEN UPDATE SET {sets} \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN NOT MATCHED THEN {insert}",
+            insert = whole_row_insert_arm(dialect)
         ))],
         transactional: false,
     }
@@ -496,7 +550,7 @@ pub fn emit_keyed_fold_suppressed(
     delta_select: &str,
     slice: Option<&TargetSlicePredicate>,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !compared_columns.is_empty(),
@@ -557,7 +611,8 @@ pub fn emit_keyed_fold_suppressed(
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED AND ({suppression}) THEN UPDATE SET {sets} \
-             WHEN NOT MATCHED THEN INSERT *"
+             WHEN NOT MATCHED THEN {insert}",
+            insert = whole_row_insert_arm(dialect)
         ))],
         transactional: false,
     }
@@ -1095,6 +1150,18 @@ pub fn emit_recurrence_bound_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
+/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
+/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
+/// exactly DuckDB, Spark, and BigQuery.
+fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
+    match dialect {
+        MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
+        MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
+        MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+    }
+}
+
 /// The unsized string-cast type name for a probe's key-display expression:
 /// DuckDB accepts an unsized `VARCHAR`; Spark SQL requires a length on
 /// `VARCHAR` (`DATATYPE_MISSING_SIZE`), so its unsized string type is
@@ -1104,6 +1171,9 @@ pub(crate) fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static
     match dialect {
         MaintenanceDialect::DuckDb => "VARCHAR",
         MaintenanceDialect::Spark => "STRING",
+        // GoogleSQL has no VARCHAR at all (`Type not found: VARCHAR`); its
+        // unsized string type is STRING. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "STRING",
     }
 }
 
@@ -1117,6 +1187,9 @@ fn probe_dialect_sample_agg(dialect: MaintenanceDialect) -> String {
     match dialect {
         MaintenanceDialect::DuckDb => "STRING_AGG(violation_key, ', ')".to_string(),
         MaintenanceDialect::Spark => "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
+        // GoogleSQL has STRING_AGG with the same shape as DuckDB's.
+        // Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "STRING_AGG(violation_key, ', ')".to_string(),
     }
 }
 
@@ -1193,6 +1266,81 @@ pub fn emit_count_preservation_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// Find the `SelectStmt` whose own `FROM` clause carries a join against
+/// `enrichment_source` — either `select` itself, or, when `select`'s `FROM`
+/// is exactly one derived-table source with no joins of its own AND that
+/// source is aliased [`smelt_dialect::TYPE_CAST_WRAP_ALIAS`] (the exact
+/// marker `wrap_with_type_casts` emits), the `SelectStmt` inside that
+/// derived table. This widening exists to see through *that one shape* — a
+/// type-cast wrap — and no other: gating on the wrap's own alias, rather
+/// than on "any single non-joined derived-table source", is what keeps a
+/// user's own legitimate subquery (`SELECT ... FROM (SELECT ... JOIN ...)
+/// sub WHERE ...`) from being mistaken for a wrapped body. Matching that
+/// shape by accident would have the caller build its driving/enriched
+/// selects from the INNER select — silently discarding the OUTER select's
+/// own `WHERE`, verifying count-preservation over a different row set than
+/// the model actually writes (`docs/plans/20260819-source-derived-projection.md`
+/// Phase 5 review finding).
+///
+/// Recurses through that single shape only, and — matching the "a type-cast
+/// wrap nests once, never repeatedly" contract literally, not just in
+/// prose — only ever one level deep: the recursive call below is not
+/// itself recursive, so a doubly-wrapped body still fails closed. This is
+/// structural navigation of the one parse tree
+/// `emit_count_preservation_probe_from_body` already built from `body_sql`,
+/// over text ranges that remain valid offsets into that same string — never
+/// a second parse of a separately reconstructed substring.
+///
+/// Returns `None` (fail-closed, matching the caller) when `select`'s `FROM`
+/// has joins that don't match `enrichment_source` (a genuine miss — no
+/// deeper source could still contain the join the caller is scoped to),
+/// when the single non-joined source isn't a derived table at all, or when
+/// that derived table isn't aliased the wrap marker.
+fn select_with_enrichment_join(
+    select: &smelt_parser::SelectStmt,
+    enrichment_source: &str,
+) -> Option<smelt_parser::SelectStmt> {
+    let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
+    let target_last = last_segment(enrichment_source);
+    let matches = |from: &smelt_parser::FromClause| {
+        from.joins().any(|join| {
+            join.table_ref()
+                .and_then(|table_ref| table_ref.bare_path_text())
+                .is_some_and(|path| path == enrichment_source || last_segment(&path) == target_last)
+        })
+    };
+
+    let from_clause = select.from_clause()?;
+    if matches(&from_clause) {
+        return Some(select.clone());
+    }
+    if from_clause.joins().next().is_some() {
+        // Has joins, just none against `enrichment_source` — a genuine
+        // structural miss, not a wrapped body.
+        return None;
+    }
+    let mut sources = from_clause.table_refs();
+    let only_source = sources.next()?;
+    if sources.next().is_some() {
+        return None;
+    }
+    if only_source.alias().as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS) {
+        // Not the cast-wrap shape — some other single-derived-table FROM
+        // (a user's own subquery, most commonly). Fail closed rather than
+        // guess it's a wrap.
+        return None;
+    }
+    let inner = only_source.subquery()?.select_stmt()?;
+    let inner_from = inner.from_clause()?;
+    if matches(&inner_from) {
+        return Some(inner);
+    }
+    // Bounded to one level: a wrap nests once, never repeatedly. Do not
+    // recurse into `inner` a second time even if it happens to look like
+    // another wrap.
+    None
+}
+
 /// Build [`emit_count_preservation_probe`]'s `driving_select`/`enriched_select`
 /// pair directly from a model's own already-compiled `body_sql`, for a
 /// caller (`smelt-runtime`'s `execute_delete_insert_with_delta_restriction`)
@@ -1218,14 +1366,20 @@ pub fn emit_count_preservation_probe(
 ///
 /// Fail-closed to `None` — never a best-effort guess — when `body_sql` has
 /// no top-level `SELECT`, no `FROM` clause, or no join against
-/// `enrichment_source` found in that `FROM` clause's own joins.
+/// `enrichment_source` found either in that `FROM` clause's own joins or
+/// (see [`select_with_enrichment_join`]) one level inside a single
+/// derived-table source — the shape a type-cast wrap produces. A caller
+/// that has the model's own pre-wrap body available should still prefer
+/// passing that directly; this widening exists so a body that happens to
+/// arrive already wrapped is not a spurious miss.
 pub fn emit_count_preservation_probe_from_body(
     body_sql: &str,
     enrichment_source: &str,
 ) -> Option<MaintenanceStatement> {
     let parse = smelt_parser::parse(body_sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
-    let select = file.select_stmt()?;
+    let top_select = file.select_stmt()?;
+    let select = select_with_enrichment_join(&top_select, enrichment_source)?;
     let from_clause = select.from_clause()?;
 
     let last_segment = |s: &str| s.rsplit('.').next().unwrap_or(s).to_string();
@@ -1481,24 +1635,39 @@ pub fn emit_append_only_posture_probe(
     let cast_type = probe_dialect_string_type(dialect);
     let snapshot =
         emit_append_only_baseline_snapshot(source_table, partition_column, digest_columns, dialect);
-    let baseline_values = baseline
+    let baseline_rows: Vec<Vec<String>> = baseline
         .iter()
         .map(|b| {
             let value = b.partition_value.replace('\'', "''");
             let fingerprint = b.recorded_fingerprint.replace('\'', "''");
             let check_fingerprint = if b.check_fingerprint { "TRUE" } else { "FALSE" };
-            format!(
-                "('{value}', {}, '{fingerprint}', {check_fingerprint})",
-                b.recorded_count
-            )
+            vec![
+                format!("'{value}'"),
+                b.recorded_count.to_string(),
+                format!("'{fingerprint}'"),
+                check_fingerprint.to_string(),
+            ]
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
+    // The row-set constructor itself — `VALUES (…)` where `dialect`
+    // supports one, the portable `SELECT … UNION ALL SELECT …` rewrite
+    // GoogleSQL requires otherwise — comes from
+    // `smelt_core::build_row_set_table`, the single dialect-aware owner.
+    let baseline_row_set = smelt_core::build_row_set_table(
+        maintenance_dialect_to_backend_type(dialect),
+        "__baseline",
+        &[
+            "partition_value",
+            "recorded_count",
+            "recorded_fingerprint",
+            "check_fingerprint",
+        ],
+        &baseline_rows,
+    );
     let violations_select = format!(
         "SELECT CAST(__current.partition_value AS {cast_type}) AS violation_key \
          FROM ({}) AS __current \
-         JOIN (VALUES {baseline_values}) AS __baseline(partition_value, recorded_count, \
-               recorded_fingerprint, check_fingerprint) \
+         JOIN {baseline_row_set} \
          ON __current.partition_value = __baseline.partition_value \
          WHERE __current.current_count < __baseline.recorded_count \
          OR (__baseline.check_fingerprint AND __current.current_fingerprint IS DISTINCT FROM \
@@ -1545,6 +1714,12 @@ pub fn emit_append_only_baseline_snapshot(
         MaintenanceDialect::Spark => {
             format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
         }
+        // GoogleSQL's SHA256 returns BYTES rather than a hex string, so the
+        // digest is wrapped in TO_HEX to keep the fingerprint a STRING the way
+        // every other dialect's is. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => {
+            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+        }
     };
     let sql = format!(
         "SELECT CAST({partition_column} AS {cast_type}) AS partition_value, \
@@ -1582,6 +1757,10 @@ pub fn emit_create_table_as(
     let using_clause = match dialect {
         MaintenanceDialect::DuckDb => "",
         MaintenanceDialect::Spark => " USING DELTA",
+        // BigQuery has one table format and no format clause; MERGE against a
+        // plainly-created table is accepted, so the bootstrap needs nothing
+        // extra. Confirmed live (scripts/bigquery-probe3.sh).
+        MaintenanceDialect::BigQuery => "",
     };
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
@@ -1658,6 +1837,19 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
         | (smelt_types::DataType::Varchar { max_length: None }, MaintenanceDialect::Spark) => {
             "STRING".to_string()
         }
+        // GoogleSQL rejects the string and floating-point names `to_backend_sql`
+        // emits — VARCHAR, TEXT, DOUBLE, REAL and FLOAT are all `Type not found`
+        // (verified by scripts/bigquery-probe4.sh, which also confirms the integer
+        // aliases, DECIMAL, TIMESTAMP and DATE are accepted verbatim). Only the
+        // rejected families are rewritten here; the rest pass through unchanged.
+        (dt, MaintenanceDialect::BigQuery) => match dt {
+            smelt_types::DataType::Text
+            | smelt_types::DataType::Varchar { .. }
+            | smelt_types::DataType::Char { .. } => "STRING".to_string(),
+            smelt_types::DataType::Float | smelt_types::DataType::Double => "FLOAT64".to_string(),
+            smelt_types::DataType::Blob => "BYTES".to_string(),
+            other => other.to_backend_sql(),
+        },
         _ => dt.to_backend_sql(),
     }
 }
@@ -1843,6 +2035,12 @@ pub enum PresentationRefusal {
         /// `<qualifier>.*`).
         wildcard: String,
     },
+    /// The SQL is a pipe query (`pipe_sql.md`) reading a state-bearing
+    /// model. This emitter hides state columns behind a SELECT list, and a
+    /// pipe query has none to edit, so passing it through would leak them.
+    /// Distinguished from [`PresentationRefusal::Unparseable`] because the
+    /// SQL parses fine — it is this rewrite that cannot express the hiding.
+    PipeQueryOverStateBearingModel,
 }
 
 impl std::fmt::Display for PresentationRefusal {
@@ -1851,6 +2049,12 @@ impl std::fmt::Display for PresentationRefusal {
             PresentationRefusal::Unparseable => {
                 write!(f, "SQL could not be parsed for presentation projection")
             }
+            PresentationRefusal::PipeQueryOverStateBearingModel => write!(
+                f,
+                "a pipe query cannot hide the decomposed state columns of the model it reads \
+                 behind a presentation projection — rewrite it as a SELECT that names the \
+                 columns it presents"
+            ),
             PresentationRefusal::UnresolvableWildcard { wildcard } => write!(
                 f,
                 "wildcard `{wildcard}` could not be resolved to a FROM/JOIN relation while a \
@@ -1911,6 +2115,25 @@ fn from_relations(from: &smelt_parser::ast::FromClause) -> Vec<Relation> {
         .collect()
 }
 
+/// Whether any table this pipe query reads — its entry `FROM`, a `\|> JOIN`
+/// stage's right side, or a table inside a CTE/subquery — is a model
+/// `state_bearing` names.
+///
+/// Traverses every `TABLE_REF` under the pipe query rather than the entry
+/// `FROM` alone: a pipe query reaching a state-bearing model from any of
+/// those positions would present its state columns just the same, and this
+/// decides a refusal, so it errs wide.
+fn pipe_reads_state_bearing(
+    pipe: &smelt_parser::ast::PipeQuery,
+    state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    pipe.syntax()
+        .descendants()
+        .filter_map(smelt_parser::ast::TableRef::cast)
+        .filter_map(|table_ref| table_ref_model_name(&table_ref).or_else(|| table_ref.identifier()))
+        .any(|name| state_bearing.contains_key(&name))
+}
+
 /// Rewrite `sql`'s wildcard select items so a state-bearing model's
 /// `__part` state columns never reach a consumer's schema: a wildcard over
 /// a relation `state_bearing` names is expanded to that model's presented
@@ -1942,9 +2165,27 @@ pub fn presentation_projection(
     sql: &str,
     state_bearing: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Result<String, PresentationRefusal> {
+    // Nothing state-bearing anywhere in the project: there are no columns to
+    // hide, so this rewrite has no work to do and must not judge the SQL's
+    // form. It runs on *every* compiled model, so parsing first and refusing
+    // on a non-SELECT body (a pipe query) failed those models outright.
+    if state_bearing.is_empty() {
+        return Ok(sql.to_string());
+    }
+
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax()).ok_or(PresentationRefusal::Unparseable)?;
-    let select = file.select_stmt().ok_or(PresentationRefusal::Unparseable)?;
+    let Some(select) = file.select_stmt() else {
+        // A pipe query parses cleanly but carries no SELECT list to edit.
+        // Only refuse when it actually reads a state-bearing model.
+        if file
+            .pipe_query()
+            .is_some_and(|pipe| pipe_reads_state_bearing(&pipe, state_bearing))
+        {
+            return Err(PresentationRefusal::PipeQueryOverStateBearingModel);
+        }
+        return Ok(sql.to_string());
+    };
     let list = select
         .select_list()
         .ok_or(PresentationRefusal::Unparseable)?;
@@ -2174,10 +2415,13 @@ fn concat_varchar_expr_typed(columns: &[String], cast_type: &str) -> String {
 /// `VARCHAR` or Spark's `STRING` — so the fingerprint is well-formed under
 /// either dialect, unlike [`concat_varchar_expr`]'s DuckDB-only default.
 fn row_fingerprint_expr(columns: &[String], dialect: MaintenanceDialect) -> String {
-    format!(
-        "sha256({})",
-        concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect))
-    )
+    let concatenated = concat_varchar_expr_typed(columns, probe_dialect_string_type(dialect));
+    match dialect {
+        // GoogleSQL's SHA256 returns BYTES; the row hash is fed straight into a
+        // STRING_AGG, so it has to be hex-encoded to stay a STRING.
+        MaintenanceDialect::BigQuery => format!("TO_HEX(SHA256({concatenated}))"),
+        _ => format!("sha256({concatenated})"),
+    }
 }
 
 /// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
@@ -3035,6 +3279,7 @@ mod column_scoped_merge_tests {
             "warehouse.dim_users",
             &keys(),
             "SELECT * FROM delta",
+            &[],
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(group.statements.len(), 1);
@@ -3056,6 +3301,7 @@ mod column_scoped_merge_tests {
             &keys(),
             "SELECT * FROM delta",
             &compared,
+            &[],
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(group.statements.len(), 1);
@@ -3078,6 +3324,7 @@ mod column_scoped_merge_tests {
             "warehouse.dim_users",
             &keys(),
             "SELECT * FROM delta",
+            &[],
             &[],
             MaintenanceDialect::DuckDb,
         );

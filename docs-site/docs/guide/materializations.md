@@ -217,7 +217,11 @@ WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
 ```
 
-smelt never silently substitutes another refresh mode for this one: on a backend without native incremental-view maintenance (every backend today — DuckDB and both Spark profiles), `refresh: materialized_view` is a **hard error** rather than a silent fallback to `grain: key` or a full-refresh table. Use `refresh: incremental` + `grain: key` for smelt-driven maintenance on those backends.
+**Backend support.** BigQuery is the only backend that provides this today: smelt creates a real BigQuery materialized view, and BigQuery keeps it current on its own cadence. You do not run `smelt build` to refresh it — that is the point of the mode. Reads are current immediately, because BigQuery combines the view's stored data with a live delta over the base table when you query it.
+
+smelt never silently substitutes another refresh mode for this one. On DuckDB and both Spark profiles, which have no native incremental-view maintenance, `refresh: materialized_view` is a **hard error** rather than a silent fallback to `grain: key` or a full-refresh table. Use `refresh: incremental` + `grain: key` for smelt-driven maintenance there.
+
+**Eligibility is BigQuery's call, not smelt's.** BigQuery only maintains certain query shapes incrementally, and smelt does not try to predict which — it submits your SQL and relays BigQuery's own verdict verbatim if it is refused. Shapes BigQuery rejects include a top-level `ORDER BY` (*"do not support the Sort operation"*), `LIMIT`, analytic/window functions, referencing the same table more than once (a self-join, or a `UNION ALL` of one table), and an aggregate carrying any further transformation — `SUM(x) * 100` is refused, `SUM(x)` is fine. A refused query fails the run; it is never quietly downgraded to an ordinary table.
 
 ## Decision guide
 

@@ -34,6 +34,7 @@
 //! (e.g. per-test schema/table namespacing) as follow-up, not blocking this
 //! plan's phases.
 
+mod backend;
 mod dags_spark;
 mod feed_spark;
 mod gate_composed_spark;

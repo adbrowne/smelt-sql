@@ -12,13 +12,21 @@
 //!
 //! With `SPARK_CONNECT_URL` unset: DuckDB only (Spark path skips green).
 //! With `SPARK_CONNECT_URL` set AND `--features spark`: also covers Spark.
+//! With `SMELT_BQ_PROJECT`/`SMELT_BQ_ACCESS_TOKEN` set AND `--features
+//! bigquery`: also covers BigQuery.
 
 mod common;
-use common::{assert_table_parity, fetch_rows, spark_connect_url, targets_to_run, TargetKind};
+use common::{
+    assert_table_parity, bq_target_block, drop_bq_dataset, fetch_rows, spark_connect_url,
+    targets_to_run, TargetKind,
+};
 use std::process::Command;
 use tempfile::TempDir;
 
 const SPARK_SCHEMA: &str = "smelt_mat_p6";
+
+/// Scopes this suite's BigQuery dataset, as `SPARK_SCHEMA` does for Spark.
+const BQ_LABEL: &str = "mat_p6";
 
 const VIEW_MODEL: &str = r#"---
 materialization: view
@@ -70,8 +78,9 @@ fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf
          paths:\n  - models\n\
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n  \
            spark:\n    type: spark\n    connect_url: {url}\n    catalog: spark_catalog\n    \
-           schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n\
-         default_materialization: table\n"
+           schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}\
+         default_materialization: table\n",
+        bq_block = bq_target_block(BQ_LABEL)
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
     std::fs::write(root.join("models").join("view_model.sql"), VIEW_MODEL).unwrap();
@@ -109,10 +118,11 @@ fn view_and_table_materialize_consistently_on_both() {
     let mut ref_view: Vec<Vec<String>> = Vec::new();
     let mut ref_table: Vec<Vec<String>> = Vec::new();
 
-    for kind in targets_to_run() {
+    for kind in targets_to_run(BQ_LABEL) {
         let (target_name, schema) = match &kind {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),
+            TargetKind::BigQuery { dataset } => ("bq", dataset.as_str()),
         };
 
         let out = run_smelt(&root, target_name);
@@ -138,6 +148,7 @@ fn view_and_table_materialize_consistently_on_both() {
 
         // table model: physical table.
         let table_rows = fetch_rows(&kind, &db_path, &warehouse, schema, "table_model");
+        drop_bq_dataset(&kind);
         assert_table_parity(
             &table_rows,
             &expected,

@@ -225,6 +225,7 @@ pub fn format_strategy(strategy: &ModelStrategy) -> String {
             granularity,
         } => format!("incremental (by {}, {})", partition_column, granularity),
         ModelStrategy::Keyed => "keyed".to_string(),
+        ModelStrategy::MaterializedView => "materialized-view".to_string(),
         ModelStrategy::Ephemeral => "ephemeral".to_string(),
         ModelStrategy::Skipped { .. } => "skipped".to_string(),
     }

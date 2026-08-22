@@ -143,6 +143,14 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// slice) — the composition itself lives in the single-owner emitter
     /// (`smelt_logical::maintenance::emit::emit_keyed_fold_suppressed`),
     /// this method only threads the two already-resolved values to it.
+    ///
+    /// `dialect` is the target's maintenance-statement dialect (`docs/specs/
+    /// multi_backend.md` §"Whole-row MERGE"), resolved once by the driver
+    /// from `backend.dialect()` — the same resolution every other
+    /// maintenance statement in this driver uses (`smelt_backend::
+    /// maintenance_dialect`). Implementors thread it straight to their own
+    /// single-owner emitter call; this trait method never hardcodes a
+    /// dialect of its own.
     fn merge_sql(
         &self,
         schema: &str,
@@ -150,6 +158,7 @@ pub trait WindowedKeyedRule: Send + Sync {
         delta_sql: &str,
         slice: Option<&TargetSlicePredicate>,
         suppression: &WriteSuppression,
+        dialect: MaintenanceDialect,
     ) -> String;
 
     /// The reconciliation ledger's storage grading for this rule's cell
@@ -319,6 +328,7 @@ pub async fn run_windowed_keyed_maintenance(
                 &delta_sql,
                 slice_predicate.as_ref(),
                 suppression,
+                smelt_backend::maintenance_dialect(backend.dialect()),
             ),
         };
 
@@ -2414,6 +2424,7 @@ pub async fn execute_column_scoped_merge_full(
     table: &str,
     unique_key: &[String],
     dimension_batch_sql: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
@@ -2427,6 +2438,7 @@ pub async fn execute_column_scoped_merge_full(
         table,
         unique_key,
         dimension_batch_sql,
+        columns,
         suppression,
         dialect,
         window,
@@ -2556,11 +2568,16 @@ async fn execute_column_scoped_write_with_observed_delta(
     table: &str,
     unique_key: &[String],
     source_select: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     dialect: MaintenanceDialect,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<(), BackendError> {
+    // Both arms below emit a whole-row MERGE, so a dialect without a star form
+    // needs `columns` populated. Refuse here — before either emitter runs —
+    // rather than let a matched arm that assigns nothing reach the warehouse.
+    smelt_backend::require_merge_columns(backend.dialect(), schema, table, columns)?;
     let full_table = format!("{schema}.{table}");
     match suppression {
         WriteSuppression::Suppressed { compared_columns } => {
@@ -2569,6 +2586,7 @@ async fn execute_column_scoped_write_with_observed_delta(
                 unique_key,
                 source_select,
                 compared_columns,
+                columns,
                 dialect,
             );
             if backend.dialect() != SqlDialect::DuckDB {
@@ -2607,7 +2625,8 @@ async fn execute_column_scoped_write_with_observed_delta(
             .await
         }
         WriteSuppression::Unconditional { .. } => {
-            let group = emit_column_scoped_merge(&full_table, unique_key, source_select, dialect);
+            let group =
+                emit_column_scoped_merge(&full_table, unique_key, source_select, columns, dialect);
             crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
                 .await
         }
@@ -2995,16 +3014,38 @@ fn repair_group_partition_identity(group_key: &[String], digest_columns: &[Strin
 /// An empty `keys` list yields a well-typed EMPTY relation (`WHERE FALSE`),
 /// never an invalid `VALUES ()` — a repair with no affected keys this run is
 /// a legitimate (if unusual) outcome, not an error.
-pub fn repair_keys_literal_select(keys: &[String]) -> String {
+///
+/// The row-set constructor itself — `VALUES (…)` where `dialect` supports
+/// one, the portable `SELECT … UNION ALL SELECT …` rewrite GoogleSQL
+/// requires otherwise — comes from `smelt_core::build_row_set_table`, the
+/// single dialect-aware owner.
+pub fn repair_keys_literal_select(keys: &[String], dialect: MaintenanceDialect) -> String {
     if keys.is_empty() {
         return "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE".to_string();
     }
-    let values = keys
+    let rows: Vec<Vec<String>> = keys
         .iter()
-        .map(|k| format!("('{}')", k.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("SELECT * FROM (VALUES {values}) AS __smelt_repair_group_keys(delta_key)")
+        .map(|k| vec![format!("'{}'", k.replace('\'', "''"))])
+        .collect();
+    let row_set = smelt_core::build_row_set_table(
+        maintenance_dialect_to_backend_type(dialect),
+        "__smelt_repair_group_keys",
+        &["delta_key"],
+        &rows,
+    );
+    format!("SELECT * FROM {row_set}")
+}
+
+/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
+/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
+/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
+/// exactly DuckDB, Spark, and BigQuery.
+fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
+    match dialect {
+        MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
+        MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
+        MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+    }
 }
 
 /// Read-side: the repair family's group-grain affected-key set for a
@@ -3223,6 +3264,14 @@ pub fn build_delete_insert_group_dispatched(
 /// Returns the [`StatementGroup`] actually executed, mirroring
 /// `execute_column_scoped_write_with_observed_delta`'s shape so a caller
 /// (and a test) can assert on exactly what ran.
+///
+/// `body` and `probe_body` are deliberately two different strings: `body`
+/// is what the emitted DELETE/INSERT actually executes (a caller compiling
+/// through `SqlCompiler` passes its type-cast-wrapped `CompiledModel::sql`),
+/// while `probe_body` is the pre-wrap body the count-preservation probe
+/// below reads its enrichment join from (`CompiledModel::body_sql`). Never
+/// derive one from the other here — see
+/// `docs/plans/20260819-source-derived-projection.md` Phase 5.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -3231,6 +3280,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     partition_col: &str,
     region: &Region,
     body: &str,
+    probe_body: &str,
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
     upstream_model: &str,
@@ -3284,7 +3334,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
             ) {
                 smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
                 smelt_logical::maintenance::ProbeDispatch::Dispatch => {
-                    match emit_count_preservation_probe_from_body(body, source) {
+                    match emit_count_preservation_probe_from_body(probe_body, source) {
                         Some(probe) => {
                             let batches = backend.execute_sql(&probe.sql).await?;
                             let rows = crate::check_runner::batches_to_rows(&batches);
@@ -3475,6 +3525,7 @@ pub async fn execute_column_scoped_merge(
     conv_ts_column: &str,
     conv_ts: &str,
     dimension_batch_sql: &str,
+    columns: &[String],
     suppression: &WriteSuppression,
     window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
@@ -3498,6 +3549,7 @@ pub async fn execute_column_scoped_merge(
         table,
         unique_key,
         &source_sql,
+        columns,
         suppression,
         dialect,
         window,
@@ -3703,6 +3755,50 @@ mod tests {
         }
     }
 
+    /// The rejection test at the `maintenance_driver` call site: for
+    /// `MaintenanceDialect::BigQuery` the emitted affected-keys relation is
+    /// never a `FROM (VALUES …)` table-value constructor, and for
+    /// DuckDB/Spark it is byte-identical (both route through the shared
+    /// `smelt_core::build_row_set_table` owner).
+    #[test]
+    fn repair_keys_literal_select_bigquery_is_not_a_values_constructor() {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let select = repair_keys_literal_select(&keys, MaintenanceDialect::BigQuery);
+        assert!(
+            !select.contains("VALUES"),
+            "BigQuery has no table-value constructor, got: {select}"
+        );
+        assert!(select.contains("UNION ALL"));
+    }
+
+    #[test]
+    fn repair_keys_literal_select_duckdb_and_spark_are_byte_identical() {
+        let keys = vec!["a".to_string(), "b".to_string()];
+        let duckdb = repair_keys_literal_select(&keys, MaintenanceDialect::DuckDb);
+        let spark = repair_keys_literal_select(&keys, MaintenanceDialect::Spark);
+        assert_eq!(duckdb, spark);
+        assert_eq!(
+            duckdb,
+            "SELECT * FROM (VALUES ('a'), ('b')) AS __smelt_repair_group_keys(delta_key)"
+        );
+    }
+
+    #[test]
+    fn repair_keys_literal_select_empty_keys_is_dialect_independent() {
+        let empty: Vec<String> = vec![];
+        for dialect in [
+            MaintenanceDialect::DuckDb,
+            MaintenanceDialect::Spark,
+            MaintenanceDialect::BigQuery,
+        ] {
+            let select = repair_keys_literal_select(&empty, dialect);
+            assert_eq!(
+                select,
+                "SELECT CAST(NULL AS VARCHAR) AS delta_key WHERE FALSE"
+            );
+        }
+    }
+
     #[test]
     fn driving_steps_day_granularity_in_temporal_order() {
         let steps = driving_steps("2024-01-01", "2024-01-04", &Granularity::Day).unwrap();
@@ -3754,6 +3850,7 @@ mod tests {
             _delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             unreachable!("merge_sql must not be called once refuse() fires")
         }
@@ -3888,6 +3985,7 @@ mod tests {
             _table: &str,
             _source_sql: &str,
             _unique_key: &[String],
+            _columns: &[String],
         ) -> Result<(), BackendError> {
             unreachable!("driver merges via execute_sql, not native merge_into")
         }
@@ -3916,6 +4014,7 @@ mod tests {
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -3937,6 +4036,7 @@ mod tests {
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -4135,6 +4235,7 @@ mod tests {
             delta_sql: &str,
             slice: Option<&TargetSlicePredicate>,
             _suppression: &WriteSuppression,
+            _dialect: MaintenanceDialect,
         ) -> String {
             self.captured.lock().unwrap().push(slice.cloned());
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
