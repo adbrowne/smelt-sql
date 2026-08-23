@@ -17,11 +17,16 @@ use crate::overrides;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Position {
-    /// `SELECT <expr> AS a FROM fixture`
+    /// `SELECT <expr> AS a FROM fixture ORDER BY rid`
     Scalar,
-    /// `SELECT g, <expr> AS a FROM fixture GROUP BY g`
+    /// `SELECT g, <expr> AS a FROM fixture GROUP BY g ORDER BY g`
     Aggregate,
-    /// `SELECT <expr> OVER (PARTITION BY g ORDER BY n_bigint) AS a FROM fixture`
+    /// `SELECT <expr> OVER (PARTITION BY g ORDER BY rid) AS a FROM fixture ORDER BY rid`
+    ///
+    /// The window's own `ORDER BY` is `rid`, not a data column: a data column
+    /// carries NULLs, and engines disagree on where NULLs sort, which would
+    /// make the frame — and so the result — engine-dependent for reasons that
+    /// have nothing to do with emission.
     Window,
 }
 
@@ -53,13 +58,16 @@ impl Probe {
     /// and before the fixture CTE is prefixed.
     pub fn statement(&self) -> String {
         match self.position {
-            Position::Scalar => format!("SELECT {} AS {} FROM fixture", self.expr, self.alias),
+            Position::Scalar => format!(
+                "SELECT {} AS {} FROM fixture ORDER BY rid",
+                self.expr, self.alias
+            ),
             Position::Aggregate => format!(
                 "SELECT g, {} AS {} FROM fixture GROUP BY g ORDER BY g",
                 self.expr, self.alias
             ),
             Position::Window => format!(
-                "SELECT {} OVER (PARTITION BY g ORDER BY n_bigint) AS {} FROM fixture",
+                "SELECT {} OVER (PARTITION BY g ORDER BY rid) AS {} FROM fixture ORDER BY rid",
                 self.expr, self.alias
             ),
         }

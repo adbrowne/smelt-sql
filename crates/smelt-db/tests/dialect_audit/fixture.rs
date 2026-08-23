@@ -13,6 +13,13 @@ use smelt_types::DialectId;
 /// Columns, in fixture order. `TypeConstraint` selection in `probe.rs` maps
 /// onto exactly these names.
 pub const COLUMNS: &[(&str, &str)] = &[
+    (
+        "rid",
+        "row id 1..8, never NULL — the deterministic total order every probe sorts by, \
+         and the window frame's ORDER BY. Without it two executions of the same probe \
+         can return rows in different orders and the value comparator reports a \
+         divergence that is really a missing ORDER BY.",
+    ),
     ("g", "grouping key, 2 distinct values"),
     ("n_int", "INTEGER, one NULL"),
     ("n_bigint", "BIGINT, one NULL"),
@@ -35,6 +42,13 @@ fn ty(dialect: DialectId, col: &str) -> &'static str {
     let spark = dialect == DialectId::SparkSql;
     let pg = dialect == DialectId::PostgreSql;
     match col {
+        "rid" => {
+            if bq {
+                "INT64"
+            } else {
+                "BIGINT"
+            }
+        }
         "g" | "s_text" | "j_json" => {
             if bq || spark {
                 "STRING"
@@ -106,12 +120,13 @@ fn array_lit(dialect: DialectId, elems: &str) -> String {
 }
 
 /// One cell's literal text, before the cast wrap. `None` is SQL NULL.
-type Row = [Option<&'static str>; 11];
+type Row = [Option<&'static str>; 12];
 
 /// Eight rows. Read down a column to see its NULL placement; every column that
 /// the doc table above calls nullable has exactly one.
 const ROWS: &[Row] = &[
     [
+        Some("1"),
         Some("'a'"),
         Some("1"),
         Some("10"),
@@ -125,6 +140,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 1}'"#),
     ],
     [
+        Some("2"),
         Some("'a'"),
         Some("2"),
         Some("20"),
@@ -138,6 +154,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 2}'"#),
     ],
     [
+        Some("3"),
         Some("'a'"),
         Some("3"),
         Some("30"),
@@ -151,6 +168,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 3}'"#),
     ],
     [
+        Some("4"),
         Some("'a'"),
         None,
         Some("40"),
@@ -164,6 +182,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 4}'"#),
     ],
     [
+        Some("5"),
         Some("'b'"),
         Some("5"),
         None,
@@ -177,6 +196,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 5}'"#),
     ],
     [
+        Some("6"),
         Some("'b'"),
         Some("6"),
         Some("60"),
@@ -190,6 +210,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 6}'"#),
     ],
     [
+        Some("7"),
         Some("'b'"),
         Some("7"),
         Some("70"),
@@ -203,6 +224,7 @@ const ROWS: &[Row] = &[
         Some(r#"'{"k": 7}'"#),
     ],
     [
+        Some("8"),
         Some("'b'"),
         Some("8"),
         Some("80"),

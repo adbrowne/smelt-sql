@@ -5,11 +5,18 @@
 //! never dropped. Offline; the engine legs land alongside it.
 
 mod fixture;
+mod ledger;
 mod overrides;
 mod probe;
 
-use smelt_oracle_testkit::{DuckDbOracle, ValueOracle};
+use smelt_oracle_testkit::{
+    classify_oracle_error, compare_cells, Cell, DuckDbOracle, OracleErrorKind, TypeOracle,
+    ValueMatch, ValueOracle,
+};
 use smelt_types::{BuiltinRegistry, DialectId};
+use std::collections::HashSet;
+
+use probe::{Position, Probe};
 
 #[test]
 fn every_registry_entry_yields_a_probe_or_a_recorded_reason() {
@@ -181,4 +188,455 @@ fn nondeterministic_entries_are_schema_only_with_a_reason() {
             );
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Ledger gates. Static data, so these need no warehouse and run per-PR.
+// ─────────────────────────────────────────────────────────────────────────
+
+fn baseline(metric: &str) -> usize {
+    include_str!("../../../../.claude/dialect-gaps-baseline.txt")
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .find_map(|l| {
+            let (k, v) = l.trim().split_once(' ')?;
+            if k != metric {
+                return None;
+            }
+            v.trim().parse::<usize>().ok()
+        })
+        .unwrap_or_else(|| panic!("`{metric}` not found in .claude/dialect-gaps-baseline.txt"))
+}
+
+#[test]
+fn gap_count_ratchet() {
+    for d in DialectId::ALL {
+        let metric = format!("dialect_gaps_{}", d.slug());
+        let current = ledger::dialect_divergences()
+            .iter()
+            .filter(|r| r.dialect == *d && matches!(r.verdict, ledger::Verdict::Gap { .. }))
+            .count();
+        let base = baseline(&metric);
+        assert!(
+            current <= base,
+            "Registered dialect-gap count REGRESSED for {}: current={current} > baseline={base}.\n\
+             A new gap must be justified by editing .claude/dialect-gaps-baseline.txt \
+             (reviewer-visible), never absorbed silently.",
+            d.slug()
+        );
+        assert!(
+            current >= base,
+            "STALE baseline for {}: current={current} < baseline={base}.\n\
+             A lowering closed a gap — tighten .claude/dialect-gaps-baseline.txt to {current}.",
+            d.slug()
+        );
+    }
+}
+
+#[test]
+fn every_ledger_row_names_a_real_registry_entry_and_a_probed_pair() {
+    // The unreachable-row direction: a row naming an entry the registry no
+    // longer has, or a pair the harness never probes, can never fire — and
+    // reads as coverage while covering nothing.
+    let probed: HashSet<&str> = probe::derive_probes().iter().map(|p| p.name).collect();
+    let mut orphans = Vec::new();
+    for row in ledger::dialect_divergences() {
+        if BuiltinRegistry::resolve(row.name).is_none() {
+            orphans.push(format!(
+                "  {} ({}): no such registry entry",
+                row.name,
+                row.dialect.slug()
+            ));
+        } else if !probed.contains(row.name) {
+            orphans.push(format!(
+                "  {} ({}): entry is never probed, so this row can never fire",
+                row.name,
+                row.dialect.slug()
+            ));
+        }
+    }
+    assert!(
+        orphans.is_empty(),
+        "ORPHANED LEDGER ROWS — registered but unreachable. Delete them:\n{}",
+        orphans.join("\n")
+    );
+}
+
+#[test]
+fn a_pair_has_at_most_one_ledger_row() {
+    let mut seen = HashSet::new();
+    for row in ledger::dialect_divergences() {
+        assert!(
+            seen.insert((row.name, row.dialect)),
+            "duplicate ledger row for {} on {}",
+            row.name,
+            row.dialect.slug()
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// The legs.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// What one leg actually verified.
+///
+/// `probes_compared` exists so a leg that "ran" every probe but compared none
+/// — because every one was refused — cannot report green. It is the same
+/// anti-silent-skip guard `type_property_tests.rs` uses for its BigQuery leg.
+#[derive(Debug, Default)]
+struct LegOutcome {
+    probes_compared: usize,
+    /// Probes the engine refused that the ledger accounts for.
+    registered: Vec<String>,
+    /// Probes skipped because the entry is nondeterministic.
+    schema_only: Vec<String>,
+    /// Unregistered problems. Non-empty means the leg fails.
+    failures: Vec<String>,
+}
+
+impl LegOutcome {
+    fn report(&self) -> String {
+        format!(
+            "compared={} registered={} schema_only={} failures={}\n{}",
+            self.probes_compared,
+            self.registered.len(),
+            self.schema_only.len(),
+            self.failures.len(),
+            self.failures.join("\n")
+        )
+    }
+}
+
+/// A probe the ledger already accounts for on this dialect.
+fn is_registered(name: &str, dialect: DialectId) -> bool {
+    ledger::find(name, dialect).is_some()
+}
+
+/// One batched query per (position, group of probes), so a sweep is a few
+/// dozen round trips rather than a few hundred. Probes the ledger already
+/// accounts for are left out of the batch: one refused probe would otherwise
+/// fail the whole group and force the per-probe fallback every time.
+fn batch_statement(position: Position, probes: &[&Probe]) -> String {
+    let items: Vec<String> = probes
+        .iter()
+        .map(|p| match position {
+            Position::Window => format!(
+                "{} OVER (PARTITION BY g ORDER BY rid) AS {}",
+                p.expr, p.alias
+            ),
+            _ => format!("{} AS {}", p.expr, p.alias),
+        })
+        .collect();
+    match position {
+        Position::Scalar => format!("SELECT {} FROM fixture ORDER BY rid", items.join(", ")),
+        Position::Aggregate => format!(
+            "SELECT g, {} FROM fixture GROUP BY g ORDER BY g",
+            items.join(", ")
+        ),
+        Position::Window => format!("SELECT {} FROM fixture ORDER BY rid", items.join(", ")),
+    }
+}
+
+/// Group probes by position, preserving derivation order within a group.
+fn by_position(probes: &[Probe]) -> Vec<(Position, Vec<&Probe>)> {
+    let mut out: Vec<(Position, Vec<&Probe>)> = Vec::new();
+    for position in [Position::Scalar, Position::Aggregate, Position::Window] {
+        let group: Vec<&Probe> = probes.iter().filter(|p| p.position == position).collect();
+        if !group.is_empty() {
+            out.push((position, group));
+        }
+    }
+    out
+}
+
+/// Print each probe for the dialect and ask the oracle for its output schema.
+///
+/// Acceptance is what this leg proves, and it is most of the audit's value: it
+/// catches every missing lowering and every construct the target rejects.
+/// Comparing the *reported type* against smelt's inference is not repeated
+/// here — `type_property_tests` owns that comparison, with its own divergence
+/// registry.
+fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
+    let probes = probe::derive_probes();
+    let mut outcome = LegOutcome::default();
+
+    for (position, group) in by_position(&probes) {
+        let (expected_pass, known): (Vec<&Probe>, Vec<&Probe>) =
+            group.iter().partition(|p| !is_registered(p.name, dialect));
+
+        // Fast path: one query for everything expected to work.
+        if !expected_pass.is_empty() {
+            let sql = probe::print_for(dialect, &batch_statement(position, &expected_pass));
+            match oracle.query_types(&sql) {
+                Ok(cols) => {
+                    let names: HashSet<String> =
+                        cols.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+                    for p in &expected_pass {
+                        if names.contains(&p.alias) {
+                            outcome.probes_compared += 1;
+                        } else {
+                            outcome.failures.push(format!(
+                                "  {} [{:?}] on {}: the batch succeeded but produced no column \
+                                 named {}",
+                                p.name,
+                                p.position,
+                                dialect.slug(),
+                                p.alias
+                            ));
+                        }
+                    }
+                }
+                // The batch failed. Re-run one probe per query so the error
+                // names the function rather than the group.
+                Err(_) => {
+                    for p in &expected_pass {
+                        probe_schema_once(dialect, oracle, p, &mut outcome);
+                    }
+                }
+            }
+        }
+
+        // Ledger-accounted probes always run individually: the point is to
+        // confirm the row is still live.
+        for p in &known {
+            probe_schema_once(dialect, oracle, p, &mut outcome);
+        }
+    }
+    outcome
+}
+
+fn probe_schema_once(
+    dialect: DialectId,
+    oracle: &dyn TypeOracle,
+    p: &Probe,
+    outcome: &mut LegOutcome,
+) {
+    let sql = probe::print_for(dialect, &p.statement());
+    match oracle.query_types(&sql) {
+        Ok(_) => {
+            if is_registered(p.name, dialect) {
+                outcome.failures.push(format!(
+                    "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
+                     Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
+                    p.name,
+                    p.position,
+                    dialect.slug()
+                ));
+            } else {
+                outcome.probes_compared += 1;
+            }
+        }
+        Err(e) => match classify_oracle_error(&e) {
+            OracleErrorKind::QueryRefusal if is_registered(p.name, dialect) => {
+                outcome
+                    .registered
+                    .push(format!("{} [{:?}]", p.name, p.position));
+            }
+            OracleErrorKind::QueryRefusal => outcome.failures.push(format!(
+                "  {} [{:?}] on {}: refused with `{}`. Either give the entry an \
+                 `Emission` verdict in `signatures.rs`, or register the pair in \
+                 `ledger.rs` with a reason.\n    sql: {sql}",
+                p.name,
+                p.position,
+                dialect.slug(),
+                e.lines().next().unwrap_or("").trim()
+            )),
+            // The oracle itself is unusable — never "skip" this, or the leg
+            // reports green while verifying nothing.
+            OracleErrorKind::Fatal => outcome.failures.push(format!(
+                "  FATAL oracle error on {} while probing {} [{:?}]: {e}",
+                dialect.slug(),
+                p.name,
+                p.position
+            )),
+        },
+    }
+}
+
+/// Execute each probe on the target and on DuckDB and compare row-wise.
+///
+/// DuckDB is the reference, matching the repo's oracle convention. This is the
+/// leg that catches `^`: a bitwise-XOR reading and a power reading are the same
+/// type, so no schema comparison can tell them apart.
+fn run_value_leg(
+    dialect: DialectId,
+    target: &dyn ValueOracle,
+    reference: &DuckDbOracle,
+) -> LegOutcome {
+    let probes = probe::derive_probes();
+    let mut outcome = LegOutcome::default();
+
+    for p in &probes {
+        if let Some(reason) = p.schema_only {
+            outcome
+                .schema_only
+                .push(format!("{} [{:?}]: {reason}", p.name, p.position));
+            continue;
+        }
+        if is_registered(p.name, dialect) || is_registered(p.name, DialectId::DuckDb) {
+            outcome
+                .registered
+                .push(format!("{} [{:?}]", p.name, p.position));
+            continue;
+        }
+
+        let reference_rows =
+            match reference.execute_rows(&probe::print_for(DialectId::DuckDb, &p.statement())) {
+                Ok(rows) => rows,
+                // The reference cannot answer, so there is nothing to compare
+                // against. That is a harness gap, not a dialect finding.
+                Err(e) => {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}]: the DuckDB reference refused its own probe (`{}`), so \
+                         nothing on {} can be compared against it",
+                        p.name,
+                        p.position,
+                        e.lines().next().unwrap_or("").trim(),
+                        dialect.slug()
+                    ));
+                    continue;
+                }
+            };
+
+        match target.execute_rows(&probe::print_for(dialect, &p.statement())) {
+            Ok(actual) => {
+                outcome.probes_compared += 1;
+                if let Some(detail) = first_row_difference(&reference_rows, &actual) {
+                    outcome.failures.push(format!(
+                        "  {} [{:?}] on {}: VALUE DIVERGENCE {detail}",
+                        p.name,
+                        p.position,
+                        dialect.slug()
+                    ));
+                }
+            }
+            Err(e) => match classify_oracle_error(&e) {
+                OracleErrorKind::QueryRefusal => outcome.failures.push(format!(
+                    "  {} [{:?}] on {}: refused during execution with `{}`",
+                    p.name,
+                    p.position,
+                    dialect.slug(),
+                    e.lines().next().unwrap_or("").trim()
+                )),
+                OracleErrorKind::Fatal => outcome.failures.push(format!(
+                    "  FATAL oracle error on {} while executing {} [{:?}]: {e}",
+                    dialect.slug(),
+                    p.name,
+                    p.position
+                )),
+            },
+        }
+    }
+    outcome
+}
+
+/// The first cell that differs between the reference and the target, or `None`
+/// when every cell agrees.
+fn first_row_difference(reference: &[Vec<Cell>], actual: &[Vec<Cell>]) -> Option<String> {
+    if reference.len() != actual.len() {
+        return Some(format!("row count {} vs {}", reference.len(), actual.len()));
+    }
+    for (r, (rrow, arow)) in reference.iter().zip(actual).enumerate() {
+        if rrow.len() != arow.len() {
+            return Some(format!(
+                "row {r}: column count {} vs {}",
+                rrow.len(),
+                arow.len()
+            ));
+        }
+        for (c, (rc, ac)) in rrow.iter().zip(arow).enumerate() {
+            if let ValueMatch::Divergent { detail } = compare_cells(rc, ac) {
+                return Some(format!("row {r} column {c}: {detail}"));
+            }
+        }
+    }
+    None
+}
+
+/// The floor below which a leg is not proving anything, whatever it reports.
+const PROBE_COVERAGE_FLOOR: usize = 100;
+
+#[test]
+fn schema_leg_duckdb() {
+    let oracle = DuckDbOracle::new();
+    let outcome = run_schema_leg(DialectId::DuckDb, &oracle);
+    assert!(outcome.failures.is_empty(), "{}", outcome.report());
+    assert!(
+        outcome.probes_compared >= PROBE_COVERAGE_FLOOR,
+        "schema leg compared only {} probes — the enumeration collapsed",
+        outcome.probes_compared
+    );
+    eprintln!(
+        "COVERAGE[duckdb schema] probes_compared={}",
+        outcome.probes_compared
+    );
+}
+
+#[test]
+fn value_leg_duckdb_is_self_consistent() {
+    // DuckDB against itself: proves the harness, the fixture and the comparator
+    // agree before any cross-engine claim is made.
+    let oracle = DuckDbOracle::new();
+    let outcome = run_value_leg(DialectId::DuckDb, &oracle, &oracle);
+    assert!(outcome.failures.is_empty(), "{}", outcome.report());
+    assert!(
+        outcome.probes_compared >= PROBE_COVERAGE_FLOOR,
+        "value leg compared only {} probes — the enumeration collapsed",
+        outcome.probes_compared
+    );
+    eprintln!(
+        "COVERAGE[duckdb value] probes_compared={} schema_only={}",
+        outcome.probes_compared,
+        outcome.schema_only.len()
+    );
+}
+
+/// The leg's comparator actually reports a difference — a self-consistent
+/// green run proves the plumbing, not the detection.
+///
+/// The planted values are the real case: DuckDB's `2 ^ 3` is 8, and a dialect
+/// reading `^` as bitwise XOR answers 1. Both are the same type, so no schema
+/// comparison can tell them apart.
+#[test]
+fn the_value_leg_reports_a_planted_divergence() {
+    let reference = vec![vec![Cell::Int(8)]];
+    let xor_reading = vec![vec![Cell::Int(1)]];
+    let detail =
+        first_row_difference(&reference, &xor_reading).expect("8 and 1 are not the same number");
+    assert!(detail.contains("row 0 column 0"), "{detail}");
+
+    // …and a shorter result set is a difference too, not a silently truncated
+    // comparison.
+    assert!(first_row_difference(&reference, &[]).is_some());
+    assert!(first_row_difference(&reference, &reference).is_none());
+}
+
+/// A ledger row that the engine has started accepting is reported as stale
+/// rather than left standing — the same two-sidedness the hardening baseline
+/// has. Proven by pointing the check at a pair with a live row and a query the
+/// engine does accept.
+#[test]
+fn a_ledger_row_the_engine_now_accepts_is_reported_stale() {
+    let oracle = DuckDbOracle::new();
+    let mut outcome = LegOutcome::default();
+    let accepted = Probe {
+        // A registered DuckDB gap…
+        name: "INITCAP",
+        position: Position::Scalar,
+        // …but an expression DuckDB accepts, standing in for the day the
+        // lowering lands.
+        expr: "n_bigint".to_string(),
+        alias: "p_initcap_scalar".to_string(),
+        schema_only: None,
+    };
+    probe_schema_once(DialectId::DuckDb, &oracle, &accepted, &mut outcome);
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|f| f.contains("STALE LEDGER ROW")),
+        "{}",
+        outcome.report()
+    );
 }
