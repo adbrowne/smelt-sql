@@ -205,7 +205,9 @@ fn test_compile_with_ephemeral_dep() {
         "upstream_ephemeral".to_string(),
         "SELECT 1 AS x".to_string(),
     )];
-    let resolver = compiler.build_ephemeral_resolver(&ephemerals, "main");
+    let resolver = compiler
+        .build_ephemeral_resolver(&ephemerals, "main")
+        .expect("ephemerals compile");
 
     let compiled = compiler
         .compile_with_sql_and_ephemerals(&downstream, "main", downstream_sql, &resolver)

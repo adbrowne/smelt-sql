@@ -4,10 +4,12 @@
 //! consumer (LSP, CLI, optimizer) without pulling in heavy async/native deps.
 
 mod dialect;
+mod emission_check;
 mod printer;
 mod type_conformance;
 
 pub use dialect::{BackendCapabilities, SqlDialect};
+pub use emission_check::{unsupported_emissions, UnsupportedEmission};
 pub use printer::{
     print, AsStructEmitter, PrintContext, SmeltFnExpander, SmeltPathCallExpander,
     SmeltPathRefResolver,

@@ -947,6 +947,15 @@ pub enum DiagnosticCode {
     /// it would make that synthesis ambiguous. Anchored at the alias token.
     /// Error severity.
     ReservedProjectionAliasPrefix,
+
+    /// A model uses a built-in or operator the registry declares
+    /// `Emission::Unsupported` on the selected backend's dialect
+    /// (`multi_backend.md` §"Operator lowering"). The compiler refuses rather
+    /// than emitting SQL the engine will reject — or, worse, accept with
+    /// different semantics — at runtime. Carries the registry's own reason
+    /// text, which names the construct and suggests the portable spelling.
+    /// Anchored at the offending expression. Error severity.
+    UnsupportedOnBackend,
 }
 
 /// Structured metadata attached to diagnostics for code actions

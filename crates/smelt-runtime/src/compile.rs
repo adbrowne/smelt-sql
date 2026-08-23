@@ -644,6 +644,41 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
+/// Print `syntax` for `dialect`, refusing first any construct the registry
+/// declares [`smelt_types::Emission::Unsupported`] there.
+///
+/// The printer itself has no diagnostic channel (`print` returns a `String`),
+/// which is why the refusal is a pre-pass rather than part of printing. Every
+/// dialect-parameterised print in this module goes through here; the two
+/// hardwired-DuckDB helpers above (`resolve_refs_in_sql`, the function-body
+/// expander) do not, because DuckDB declares nothing unsupported and they have
+/// no error channel to report one on.
+fn print_checked_for(
+    dialect: &SqlDialect,
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    ctx: &PrintContext,
+) -> Result<String> {
+    let refused = smelt_dialect::unsupported_emissions(syntax, *dialect);
+    if !refused.is_empty() {
+        // Every occurrence, not just the first: a user fixing one at a time
+        // would otherwise pay a compile round trip per site.
+        let detail = refused
+            .iter()
+            .map(|u| format!("  `{}` — {}", u.name, u.reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "{:?}: this model uses {} construct{} the {} backend cannot express:\n{}",
+            smelt_db::DiagnosticCode::UnsupportedOnBackend,
+            refused.len(),
+            if refused.len() == 1 { "" } else { "s" },
+            dialect.name(),
+            detail
+        );
+    }
+    Ok(smelt_dialect::print(syntax, ctx))
+}
+
 /// Whether `model` is **self-referential** — it reads its own prior output
 /// via `smelt.<self>` (`docs/specs/incremental_shapes.md` §"Window independence
 /// and self-referential models"). The single shared predicate for every
@@ -1551,6 +1586,21 @@ impl SqlCompiler {
         Ok(())
     }
 
+    /// Print `syntax` for this compiler's dialect, refusing first any construct
+    /// the registry declares [`smelt_types::Emission::Unsupported`] there.
+    ///
+    /// Every `SqlCompiler` print goes through here, so a new compile entry point
+    /// cannot quietly skip the refusal — `dialect_seam::every_compile_path_is_emission_checked`
+    /// asserts no direct `smelt_dialect::print` call survives in this module
+    /// outside `print_checked_for`.
+    fn print_checked(
+        &self,
+        syntax: &smelt_parser::syntax_kind::SyntaxNode,
+        ctx: &PrintContext,
+    ) -> Result<String> {
+        print_checked_for(&self.dialect, syntax, ctx)
+    }
+
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
         self.check_native_ivm_gate(model)?;
@@ -1596,7 +1646,7 @@ impl SqlCompiler {
         // §"Output-schema type conformance".
         let projection = self.derive_projection_for(&parse.syntax());
 
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
 
@@ -1749,7 +1799,7 @@ impl SqlCompiler {
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -1773,7 +1823,7 @@ impl SqlCompiler {
         &self,
         ephemeral_models: &[(String, String)],
         schema: &str,
-    ) -> EphemeralResolver {
+    ) -> Result<EphemeralResolver> {
         EphemeralResolver::new(
             ephemeral_models,
             &self.dialect,
@@ -1832,7 +1882,7 @@ impl SqlCompiler {
             ),
             smelt_path_call: path_call_expander,
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
@@ -1938,7 +1988,7 @@ impl EphemeralResolver {
         capabilities: &BackendCapabilities,
         schema: &str,
         vars: &std::collections::BTreeMap<String, String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let ephemeral_names: HashSet<String> =
             ephemeral_models.iter().map(|(n, _)| n.clone()).collect();
 
@@ -1956,14 +2006,14 @@ impl EphemeralResolver {
                 schema,
                 vars,
             );
-            cte_fragments.insert(model_name.clone(), fragments);
+            cte_fragments.insert(model_name.clone(), fragments?);
         }
 
-        Self {
+        Ok(Self {
             order,
             cte_fragments,
             ephemeral_names,
-        }
+        })
     }
 
     /// Compile a single ephemeral model's SQL into CTE fragments.
@@ -1979,7 +2029,7 @@ impl EphemeralResolver {
         capabilities: &BackendCapabilities,
         schema: &str,
         vars: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>> {
         let ephemeral_refs: HashSet<&str> = ephemeral_names.iter().map(|s| s.as_str()).collect();
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
         let clean_sql = crate::meta_eval::expand_in_model_meta(
@@ -2024,7 +2074,7 @@ impl EphemeralResolver {
             smelt_path_ref: Some(path_ref_resolver),
             smelt_path_call: None,
         };
-        let compiled = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled = print_checked_for(dialect, &parse.syntax(), &ctx)?;
 
         // Check for internal CTEs by parsing the compiled output
         let file = File::cast(parse.syntax());
@@ -2034,7 +2084,7 @@ impl EphemeralResolver {
         if !has_with {
             // Simple case — no internal CTEs
             let alias = format!("__smelt_{}", model_name);
-            return vec![(alias, compiled)];
+            return Ok(vec![(alias, compiled)]);
         }
 
         // Has internal CTEs — extract CTE names, namespace them, and hoist
@@ -2067,7 +2117,7 @@ impl EphemeralResolver {
         let alias = format!("__smelt_{}", model_name);
         fragments.push((alias, parts.main_body));
 
-        fragments
+        Ok(fragments)
     }
 
     /// Add pre-built CTE fragments for ephemeral seeds.
@@ -2404,7 +2454,7 @@ impl SqlCompiler {
             ),
             smelt_path_call: path_call_expander,
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
@@ -3020,7 +3070,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3065,7 +3116,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3109,7 +3161,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3149,7 +3202,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3557,7 +3611,8 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)

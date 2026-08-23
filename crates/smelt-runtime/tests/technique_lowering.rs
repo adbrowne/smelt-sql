@@ -4073,7 +4073,10 @@ mod in_place_update_lowering {
 
         let config = test_config();
         let registry = CompilerRegistry::new(&config, &config.targets);
-        let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+        let resolver = registry
+            .get("dev")
+            .build_ephemeral_resolver(&[], "main")
+            .expect("no ephemerals");
         let source_timeseries = SourceTimeseriesMap::new();
         let cell = admitted_in_place_update_plan();
 

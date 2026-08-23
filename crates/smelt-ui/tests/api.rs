@@ -276,7 +276,8 @@ fn assemble_diagnostics_independently(
         .collect();
     let resolver = registry
         .get(&target)
-        .build_ephemeral_resolver(&ephemeral_models, &schema);
+        .build_ephemeral_resolver(&ephemeral_models, &schema)
+        .expect("no ephemeral model here declares an unsupported construct");
 
     let unique_key: Vec<String> = config
         .get_incremental_with_metadata(model_name, model.metadata.as_deref())
