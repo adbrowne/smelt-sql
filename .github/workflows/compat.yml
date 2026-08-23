@@ -240,8 +240,8 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-compat-spark-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Pull Spark Docker image
-        run: docker pull apache/spark:latest
+      - name: Pull Spark Docker image (apache/spark:4.0.0)
+        run: docker pull apache/spark:4.0.0
 
       - name: Build smelt-parser-compat
         run: cargo build -p smelt-parser-compat
@@ -283,12 +283,12 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-type-prop-spark-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Pull Spark Docker image
-        run: docker pull apache/spark:latest
+      - name: Pull Spark Docker image (apache/spark:4.0.0)
+        run: docker pull apache/spark:4.0.0
 
       - name: Start Spark container
         run: |
-          docker run -d --name spark-type-test apache/spark:latest tail -f /dev/null
+          docker run -d --name spark-type-test apache/spark:4.0.0 tail -f /dev/null
           echo "SPARK_CONTAINER_ID=spark-type-test" >> $GITHUB_ENV
 
       - name: Build smelt-db

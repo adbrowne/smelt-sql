@@ -38,12 +38,9 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: >
-          cargo clippy
-          --all-targets
-          --no-default-features
-          --features smelt-cli/duckdb,smelt-ui/duckdb
-          -- -D warnings
+        # Shared with the local pre-commit gate (.claude/scripts/verify-phase.sh)
+        # so CI and local can't drift into linting different feature sets.
+        run: bash .claude/scripts/clippy-gate.sh
 
       - name: Run hardening budget gate
         # Counts production unwrap/expect/println per crate (excluding test code)

@@ -109,8 +109,11 @@ cargo fmt --all
 # Check formatting without modifying files
 cargo fmt --all -- --check
 
-# Run clippy (linter) - must pass with no warnings
-cargo clippy --all-targets
+# Run clippy (linter) - must pass with no warnings.
+# Prefer the shared gate: it lints BOTH feature sets CI lints (default, and
+# --no-default-features + duckdb backends), and is the same script CI runs, so
+# a local pass cannot diverge from CI.
+bash .claude/scripts/clippy-gate.sh
 
 # Run tests
 cargo test
@@ -395,7 +398,7 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test nullability_property_tests pro
 4. Update LSP features if needed (diagnostics, goto-definition, etc.)
 5. Test with examples/test_workspace models
 6. **Run `cargo fmt --all` to format code**
-7. **Run `bash .claude/scripts/verify-phase.sh`** — the bundled gate (fmt-check + clippy zero-warnings + `cargo test` + example_diagnostics) in one command with failures-only output
+7. **Run `bash .claude/scripts/verify-phase.sh`** — the bundled gate (fmt-check + clippy zero-warnings over both CI feature sets + `cargo test` + example_diagnostics) in one command with failures-only output
 8. **Run `cargo test -p smelt-lsp --test example_workspaces`** to verify examples have no diagnostics via the real LSP backend (catches asymmetric-discovery bugs the Salsa-direct test misses)
 9. Update docs/ROADMAP.md with completion status and date
 10. **Commit** with descriptive message (includes ROADMAP.md update)

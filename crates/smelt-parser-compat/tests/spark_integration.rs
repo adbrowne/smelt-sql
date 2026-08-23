@@ -1,7 +1,7 @@
 //! Spark SQL integration tests via Docker
 //!
 //! These tests validate SQL by running `EXPLAIN <sql>` against a real Spark SQL instance
-//! inside the `apache/spark` Docker container.
+//! inside the pinned `apache/spark` Docker container (see `DEFAULT_SPARK_IMAGE`).
 //!
 //! All tests are `#[ignore]` — run with:
 //! ```sh
@@ -11,6 +11,18 @@
 //! Requires Docker to be available.
 
 use std::process::Command;
+
+/// Spark image used by these tests.
+///
+/// Pinned, never `:latest` — an unpinned tag lets an upstream Spark release
+/// change what CI asserts with no code change (Spark 4.1.x has an internal API
+/// break relative to 4.0.0). Override with `SMELT_SPARK_IMAGE` to test another
+/// version; keep in sync with `scripts/spark-up.sh` and `.github/workflows/compat.yml`.
+const DEFAULT_SPARK_IMAGE: &str = "apache/spark:4.0.0";
+
+fn spark_image() -> String {
+    std::env::var("SMELT_SPARK_IMAGE").unwrap_or_else(|_| DEFAULT_SPARK_IMAGE.to_string())
+}
 
 /// Check if Docker is available and the Spark image can be used
 fn spark_docker_available() -> bool {
@@ -25,11 +37,12 @@ fn spark_docker_available() -> bool {
 /// Returns Ok(()) if Spark successfully parses the SQL, Err with details otherwise.
 fn spark_explain(sql: &str) -> Result<(), String> {
     let explain_sql = format!("EXPLAIN {}", sql);
+    let image = spark_image();
     let output = Command::new("docker")
         .args([
             "run",
             "--rm",
-            "apache/spark:latest",
+            image.as_str(),
             "/opt/spark/bin/spark-sql",
             "--conf",
             "spark.sql.ansi.enabled=true",

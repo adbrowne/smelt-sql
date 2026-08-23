@@ -42,7 +42,7 @@ run_gate() {
 }
 
 run_gate "cargo fmt --check"            cargo fmt --all -- --check
-run_gate "cargo clippy (zero warnings)" cargo clippy --all-targets -- -D warnings
+run_gate "cargo clippy (zero warnings, both feature sets)" bash .claude/scripts/clippy-gate.sh
 if [ "$FAST" -eq 0 ]; then
   run_gate "cargo test (workspace)"     cargo test --quiet
 fi
