@@ -1,8 +1,8 @@
 /// Phase 50: registry coverage tests — verify that newly-seeded built-ins
 /// are present and carry the correct `ExprKind`.
 use smelt_types::{
-    signatures::{ExprKind, SyntaxForm},
-    BuiltinRegistry,
+    signatures::{Emission, ExprKind, RewriteId, SyntaxForm},
+    BuiltinRegistry, DialectId,
 };
 
 // ─── Operators ──────────────────────────────────────────────────────────────
@@ -660,4 +660,112 @@ fn dedicated_syntax_entries_are_not_call_form() {
              callable-function consistency gate"
         );
     }
+}
+
+// ─── Emission
+
+#[test]
+fn the_rename_matrix_matches_the_printer_it_replaces() {
+    // Transcribed from `remap_function_name` (printer.rs:1881-1925) before its
+    // deletion. This test is what makes the printer refactor mechanical.
+    let expected: &[(&str, DialectId, &str)] = &[
+        ("EXPLODE", DialectId::DuckDb, "UNNEST"),
+        ("EXPLODE", DialectId::PostgreSql, "UNNEST"),
+        ("EXPLODE", DialectId::BigQuery, "UNNEST"),
+        ("UNNEST", DialectId::SparkSql, "EXPLODE"),
+        ("EVERY", DialectId::DuckDb, "BOOL_AND"),
+        ("EVERY", DialectId::BigQuery, "LOGICAL_AND"),
+        ("BOOL_AND", DialectId::SparkSql, "EVERY"),
+        ("BOOL_AND", DialectId::BigQuery, "LOGICAL_AND"),
+        ("BOOL_OR", DialectId::SparkSql, "SOME"),
+        ("BOOL_OR", DialectId::BigQuery, "LOGICAL_OR"),
+    ];
+    for (name, dialect, renamed) in expected {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(
+            sig.emission_for(*dialect),
+            Emission::Rename(renamed),
+            "{name} on {}",
+            dialect.slug()
+        );
+    }
+}
+
+#[test]
+fn every_is_native_on_postgresql() {
+    // `remap_function_name` deliberately leaves PostgreSQL's EVERY alone while
+    // DuckDB rewrites it; snapshots.rs:401 pins the asymmetry.
+    let sig = BuiltinRegistry::resolve("EVERY").expect("EVERY");
+    assert_eq!(sig.emission_for(DialectId::PostgreSql), Emission::Native);
+}
+
+#[test]
+fn caret_is_rewritten_wherever_infix_caret_means_xor() {
+    // GoogleSQL and Spark SQL both define infix `^` as bitwise XOR while smelt's
+    // grammar reads it as power. Emitting it verbatim returns a different number
+    // rather than failing — the silent-divergence class this work exists to close.
+    for dialect in [DialectId::SparkSql, DialectId::BigQuery] {
+        for op in ["^", "**"] {
+            let sig = BuiltinRegistry::resolve(op).expect(op);
+            assert_eq!(
+                sig.emission_for(dialect),
+                Emission::Rewrite(RewriteId::PowerCall),
+                "{op} on {}",
+                dialect.slug()
+            );
+        }
+    }
+    for op in ["^", "**"] {
+        let sig = BuiltinRegistry::resolve(op).expect(op);
+        assert_eq!(sig.emission_for(DialectId::DuckDb), Emission::Native);
+        assert_eq!(sig.emission_for(DialectId::PostgreSql), Emission::Native);
+    }
+}
+
+#[test]
+fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
+    let sig = BuiltinRegistry::resolve("//").expect("//");
+    assert_eq!(sig.emission_for(DialectId::DuckDb), Emission::Native);
+    for dialect in [
+        DialectId::SparkSql,
+        DialectId::PostgreSql,
+        DialectId::BigQuery,
+    ] {
+        assert!(
+            matches!(sig.emission_for(dialect), Emission::Unsupported { .. }),
+            "// on {} must be a declared refusal, not a pass-through",
+            dialect.slug()
+        );
+    }
+}
+
+#[test]
+fn an_unlisted_dialect_defaults_to_native() {
+    let sig = BuiltinRegistry::resolve("LOWER").expect("LOWER");
+    for d in DialectId::ALL {
+        assert_eq!(sig.emission_for(*d), Emission::Native);
+    }
+}
+
+#[test]
+fn every_declared_rewrite_id_is_reachable_from_some_entry() {
+    // A RewriteId with no registry row is printer code nothing can call.
+    let mut seen: Vec<RewriteId> = BuiltinRegistry::names()
+        .filter_map(BuiltinRegistry::resolve)
+        .flat_map(|sig| sig.emission.iter())
+        .filter_map(|(_, e)| match e {
+            Emission::Rewrite(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(
+        seen,
+        vec![
+            RewriteId::BigQueryMedian,
+            RewriteId::ModuloCall,
+            RewriteId::PowerCall
+        ],
+    );
 }

@@ -106,6 +106,39 @@ pub enum SyntaxForm {
     Special,
 }
 
+/// The per-dialect verdict for one registry entry: how the built-in must be
+/// spelled so the backend computes what smelt's semantics say it computes.
+///
+/// `Native` is a **claim, not an assumption**. The audit's value leg exists to
+/// test it, and an untested `Native` is reported as *unverified* rather than as
+/// *passing*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emission {
+    /// Same spelling, same semantics.
+    Native,
+    /// Same call shape, different name.
+    Rename(&'static str),
+    /// Structural rewrite: the printer owns the code, the registry owns the claim.
+    Rewrite(RewriteId),
+    /// The backend cannot express this. A diagnostic, never a silent pass-through.
+    Unsupported { reason: &'static str },
+}
+
+/// A structural rewrite the printer implements. Enumerable by construction, so
+/// the set of rewrites is knowable without reading `printer.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RewriteId {
+    /// `MEDIAN(x)` → `PERCENTILE_CONT(x, 0.5)` in window position, an
+    /// `ARRAY_AGG`-indexing `CASE` in aggregate position. Position-dependent;
+    /// the registry says *that* it needs rewriting, the printer says *how*.
+    BigQueryMedian,
+    /// `a % b` → `MOD(a, b)`.
+    ModuloCall,
+    /// `a ^ b` / `a ** b` → `POWER(a, b)`. Needed wherever infix `^` means
+    /// bitwise XOR (GoogleSQL **and** Spark SQL) or `**` is unparseable.
+    PowerCall,
+}
+
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
 ///
 /// `Concrete(dt)` pins the parameter to a single [`DataType`]. The abstract
@@ -2784,6 +2817,13 @@ pub struct Signature {
     /// registry entries for hover/completion but are not part of the
     /// callable-function surface.
     pub syntax_form: SyntaxForm,
+    /// Per-dialect emission verdicts for this entry (Phase 3, #171).
+    ///
+    /// `&[]` means every dialect is `Native`. Use [`Self::with_emission`] to
+    /// populate and [`Self::emission_for`] to query. Populated only for entries
+    /// whose printer treatment differs from plain name-pass-through on at least
+    /// one dialect.
+    pub emission: &'static [(DialectId, Emission)],
 }
 
 /// Nullability-propagation policy for a registry-resolved call's result,
@@ -2872,6 +2912,7 @@ impl Signature {
             aliases: &[],
             nullability: NullabilityPropagation::None,
             syntax_form: SyntaxForm::Call,
+            emission: &[],
         })
     }
 
@@ -2932,6 +2973,25 @@ impl Signature {
     pub fn with_syntax_form(mut self, form: SyntaxForm) -> Self {
         self.syntax_form = form;
         self
+    }
+
+    /// Attach a per-dialect emission table to this signature (Phase 3, #171).
+    ///
+    /// Builder-style — used by the registry seed to declare how each dialect
+    /// must spell or rewrite this entry. Unlisted dialects are implicitly
+    /// [`Emission::Native`].
+    pub fn with_emission(mut self, table: &'static [(DialectId, Emission)]) -> Self {
+        self.emission = table;
+        self
+    }
+
+    /// The emission verdict for `dialect`. Unlisted dialects are `Native`.
+    pub fn emission_for(&self, dialect: DialectId) -> Emission {
+        self.emission
+            .iter()
+            .find(|(d, _)| *d == dialect)
+            .map(|(_, e)| *e)
+            .unwrap_or(Emission::Native)
     }
 
     /// Does the signature require a CAST back to the canonical return
@@ -4190,7 +4250,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T")],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[(
+            DialectId::BigQuery,
+            Emission::Rewrite(RewriteId::BigQueryMedian),
+        )]),
     );
     insert(
         Signature::new(
@@ -4253,7 +4317,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![concrete(DataType::Boolean)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (DialectId::SparkSql, Emission::Rename("EVERY")),
+            (DialectId::BigQuery, Emission::Rename("LOGICAL_AND")),
+        ]),
     );
     insert(
         Signature::new(
@@ -4262,7 +4330,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![concrete(DataType::Boolean)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (DialectId::SparkSql, Emission::Rename("SOME")),
+            (DialectId::BigQuery, Emission::Rename("LOGICAL_OR")),
+        ]),
     );
     insert(
         Signature::new(
@@ -4701,7 +4773,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (DialectId::DuckDb, Emission::Rename("BOOL_AND")),
+            (DialectId::BigQuery, Emission::Rename("LOGICAL_AND")),
+        ]),
     );
     // Text-returning aggregate.
     insert(
@@ -4938,7 +5014,18 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // the registry entirely. They are registered so per-dialect emission has one
     // owner and so the audit enumeration cannot walk past them — `^` is the
     // silent-divergence case issue #171 was filed about.
-    for op in ["%", "^", "**", "//"] {
+    for op in ["%", "^", "**"] {
+        let emission: &'static [(DialectId, Emission)] = match op {
+            "%" => &[(
+                DialectId::BigQuery,
+                Emission::Rewrite(RewriteId::ModuloCall),
+            )],
+            "^" | "**" => &[
+                (DialectId::SparkSql, Emission::Rewrite(RewriteId::PowerCall)),
+                (DialectId::BigQuery, Emission::Rewrite(RewriteId::PowerCall)),
+            ],
+            _ => &[],
+        };
         insert(
             Signature::new(
                 op,
@@ -4946,9 +5033,44 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 vec![var("T"), var("T")],
                 TypeExpr::Var("T".into()),
             )
-            .with_syntax_form(SyntaxForm::Infix),
+            .with_syntax_form(SyntaxForm::Infix)
+            .with_emission(emission),
         );
     }
+    insert(
+        Signature::new(
+            "//",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T"), var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::Infix)
+        .with_emission(&[
+            // DuckDB's `//` truncates toward zero for integer operands and
+            // degrades to plain division for floats; the printer carries no
+            // operand types with which to tell those cases apart, so no
+            // substitution is safe. Declaring it unsupported turns an engine-side
+            // syntax error into a compile-time diagnostic.
+            (
+                DialectId::SparkSql,
+                Emission::Unsupported {
+                    reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+            (
+                DialectId::PostgreSql,
+                Emission::Unsupported {
+                    reason: "PostgreSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+            (
+                DialectId::BigQuery,
+                Emission::Unsupported {
+                    reason: "GoogleSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+        ]),
+    );
     insert(
         Signature::new(
             "||",
@@ -4960,17 +5082,30 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     );
 
     // ─── Table functions.
-    for name in ["EXPLODE", "UNNEST"] {
-        insert(
-            Signature::new(
-                name,
-                vec![tp("T", TypeConstraint::Any)],
-                vec![var("T")],
-                TypeExpr::Var("T".into()),
-            )
-            .with_syntax_form(SyntaxForm::TableFn),
-        );
-    }
+    insert(
+        Signature::new(
+            "EXPLODE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::TableFn)
+        .with_emission(&[
+            (DialectId::DuckDb, Emission::Rename("UNNEST")),
+            (DialectId::PostgreSql, Emission::Rename("UNNEST")),
+            (DialectId::BigQuery, Emission::Rename("UNNEST")),
+        ]),
+    );
+    insert(
+        Signature::new(
+            "UNNEST",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::TableFn)
+        .with_emission(&[(DialectId::SparkSql, Emission::Rename("EXPLODE"))]),
+    );
 
     m
 });
