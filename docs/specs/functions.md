@@ -195,7 +195,7 @@ The types involved:
   - `Unsupported { reason }` — the compiler emits `UnsupportedOnBackend` and refuses to compile
     rather than passing invalid SQL to the engine at runtime.
 - **`RewriteId`** — the closed set of structural rewrites the printer implements
-  (`BigQueryMedian`, `BigQueryPower`, …). An entry in this set means the rewrite exists; the
+  (`BigQueryMedian`, `PowerCall`, `ModuloCall`, …). An entry in this set means the rewrite exists; the
   printer's implementation is reached through `RewriteId` dispatch, never through a name-matched
   dialect arm.
 - **`Signature::emission_for(dialect: DialectId) -> Emission`** — returns the emission verdict
