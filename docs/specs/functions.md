@@ -176,6 +176,37 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 
 Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
 
+### Registry emission surface
+
+Every `Signature` in `BuiltinRegistry` carries per-dialect emission data alongside its type data.
+The types involved:
+
+- **`DialectId`** — `DuckDb | SparkSql | PostgreSql | BigQuery`. Replaces stringly-keyed engine
+  identifiers; a misspelled key silently meant "no override" under the old convention, which is a
+  fail-loud violation.
+- **`SyntaxForm`** — `Call | Infix | Prefix | Postfix | Special`. Required so infix operators
+  (`^`, `**`, `%`, `||`) can be registry entries, which in turn lets the audit harness derive a
+  probe from a signature rather than a hand-written table.
+- **`Emission`** — the per-dialect verdict for one entry:
+  - `Native` — same spelling, same semantics on the target dialect.
+  - `Rename(&'static str)` — same call shape, different name.
+  - `Rewrite(RewriteId)` — structural; the printer owns the rewrite code, the registry owns the
+    claim that a rewrite is needed and which one.
+  - `Unsupported { reason }` — the compiler emits `UnsupportedOnBackend` and refuses to compile
+    rather than passing invalid SQL to the engine at runtime.
+- **`RewriteId`** — the closed set of structural rewrites the printer implements
+  (`BigQueryMedian`, `BigQueryPower`, …). An entry in this set means the rewrite exists; the
+  printer's implementation is reached through `RewriteId` dispatch, never through a name-matched
+  dialect arm.
+- **`Signature::emission_for(dialect: DialectId) -> Emission`** — returns the emission verdict
+  for one `(entry, dialect)` pair, defaulting to `Native` for dialects not listed.
+
+**`Native` is a claim, not a pass.** An untested `(entry, dialect)` pair that carries `Native`
+(by default or by explicit declaration) is reported as *unverified* in the coverage table — not
+as *passing*. The value leg of the audit suite exists to test the claim. This keeps authoring
+cheap — roughly ten entries are non-`Native` today — without recreating the silent hole that a
+default-passing assumption would open.
+
 ### Diagnostic codes
 
 User-visible codes anchored to the surface above. Full descriptions live alongside `DiagnosticCode` in `crates/smelt-db/src/lib.rs`.

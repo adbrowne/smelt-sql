@@ -242,6 +242,16 @@ Owned by `docs/specs/multi_backend.md` §"Output-schema type conformance".
 
 ---
 
+### Dialect emission
+
+Owned by `docs/specs/multi_backend.md` §"Cross-engine emission audit" and `docs/specs/functions.md` §"Registry emission surface".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `UnsupportedOnBackend` | Error | A model uses a built-in or operator the registry declares unsupported on the selected backend's dialect; the compiler refuses rather than emitting SQL the engine will reject at runtime. |
+
+---
+
 ### Python models
 
 Owned by `docs/specs/models.md` (Python model section).

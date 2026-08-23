@@ -194,26 +194,93 @@ aggregate inside `UNNEST`. The aggregate form casts to `FLOAT64`, matching the n
 type; a temporal argument, which DuckDB's `MEDIAN` accepts, is refused by the backend rather than
 silently coerced.
 
+The *decision* that `MEDIAN` needs rewriting on BigQuery is registry data —
+`Emission::Rewrite(RewriteId::BigQueryMedian)` on `MEDIAN`'s `BuiltinRegistry` entry. The
+*position-dependent shape* of the rewrite stays printer code, because it depends on the CST's
+window/aggregate position which no static table can express; the registry names the rewrite, the
+printer holds its logic.
+
 ### Operator lowering
 An infix operator smelt's grammar accepts but a backend's SQL does not is lowered by the dialect
-printer, never emitted verbatim and left to the engine. Two operators need this on GoogleSQL, and
-they need it for opposite reasons. `%` (modulo) has no infix form there at all, so an unlowered
-`a % b` is a syntax error; it lowers to `MOD(a, b)`. `^` is worse: GoogleSQL *does* define infix
-`^`, as bitwise XOR, while smelt's grammar reads it as DuckDB does — a synonym for `**`, power.
-An unlowered `^` therefore does not fail on BigQuery, it silently returns a different number, so
-`^` and `**` both lower to `POWER(a, b)`. Every other dialect prints all three unchanged. The
-lowerings are exact: DuckDB's power operator returns a double for every operand type, negative
-base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They diverge only
-at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure, not a wrong
-answer.
+printer, never emitted verbatim and left to the engine. Emission ownership for every operator is
+data in `BuiltinRegistry` — the printer reads the `Emission` verdict for the active dialect and
+dispatches on it; no name-matched dialect arm lives in `printer.rs`.
 
-`//` (floor division) is deliberately **not** lowered. DuckDB's `//` truncates toward zero when
-both operands are integers, but degrades to plain division the moment either is floating point,
-and the printer carries no operand types with which to tell those cases apart. GoogleSQL's `DIV`
-matches only the integer case, so substituting it unconditionally would silently floor a result
-that should not have been floored. GoogleSQL has no infix `//` either, so leaving it alone makes
-it a loud syntax error instead — the correct outcome under fail-loud discipline until the printer
-can see operand types.
+`^` is the critical case. In smelt's grammar, and in DuckDB and PostgreSQL, `^` means power —
+a synonym for `**`. But **both GoogleSQL and Spark SQL** define infix `^` as **bitwise XOR**, so
+emitting `^` verbatim against either backend silently returns a different number from what smelt's
+semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`.
+
+`%` (modulo) has no infix form in GoogleSQL at all, so an unlowered `a % b` is a syntax error
+there; it lowers to `MOD(a, b)`.
+
+`//` (floor division) is not lowered anywhere. DuckDB's `//` truncates toward zero when both
+operands are integers but degrades to plain division the moment either is floating point, and the
+printer carries no operand types with which to tell those cases apart. GoogleSQL has no infix `//`
+and no safe universal substitute, so `//` is declared `Unsupported` on Spark, PostgreSQL, and
+BigQuery — the compiler refuses it rather than emitting SQL the engine will reject or
+misinterpret at runtime.
+
+The `POWER` lowerings are exact: DuckDB's power operator returns a double for every operand type,
+negative base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They
+diverge only at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure,
+not a wrong answer.
+
+### Cross-engine emission audit
+
+Two complementary legs verify what the registry declares:
+
+- **Schema leg** — for each `(entry, dialect)` pair, the probe is compiled and sent to the
+  dialect's oracle (DuckDB prepare, Spark `DESCRIBE QUERY`, BigQuery dry run). The oracle returns
+  the output schema; the leg asserts acceptance and compares smelt's inferred type against the
+  oracle's report using the existing `compare_types`/`divergences` machinery. Acceptance alone
+  catches every missing lowering and every `Unsupported` entry.
+- **Value leg** — the same probe is executed on the target dialect and on DuckDB (the reference);
+  rows are compared using a typed comparator (exact for integers, strings, booleans; relative
+  tolerance for floats; scale-normalised for decimals; NULL equals NULL; deterministic `ORDER BY`).
+  This is the leg that catches the `^` class of silent semantic divergence.
+
+**Probes are derived from registry data, not authored by hand.** `SyntaxForm` determines the
+spelling (`a % b` versus `MOD(a, b)`); `kind` determines the query shape (scalar `SELECT`,
+aggregate `GROUP BY`, window `OVER`). A small override table covers the minority where a
+type-correct argument is not a meaningful one — regex patterns, date-part strings, JSON paths.
+Aggregates are probed in both positions because `MEDIAN` proves the lowering differs per position.
+
+**The fixture** is a single inline `VALUES` CTE — approximately eight rows, one typed column per
+`TypeConstraint` family — with NULL-bearing rows. No DDL, no cleanup, no materialised objects.
+The same fixture serves a BigQuery dry run and a real execution.
+
+**Ledger verdicts** — `dialect_divergences.rs` records one row per `(entry, dialect)` when a pair
+does not pass both legs cleanly:
+
+| Verdict | Meaning | Fails? |
+|---|---|---|
+| `Divergent { reason }` | Accepted and permanent (e.g. Spark integer-division semantics) | No — reported as a semantic difference users must know about |
+| `Gap { issue }` | A lowering we owe, with a tracking issue | No — but the count ratchets down only |
+| `SchemaOnly { reason }` | Nondeterministic entry (`RANDOM`, `NOW`, `CURRENT_DATE`, `UUID`) | No — value leg skipped, reason recorded |
+| absent | Must pass both legs | Yes |
+
+The ledger is two-sided: an unregistered mismatch fails loudly, and so does an unreachable row —
+an entry naming a pair that no longer diverges is an error telling you to delete it.
+
+**Coverage table** — the suite emits a standing table to `docs/reference/dialect-coverage.md`:
+entry × dialect → native / rename / rewrite / unsupported / divergent / gap. The table is derived
+from registry data and ledger verdicts alone, so it is deterministic and gateable per-PR. The legs
+*test the claims the table makes* rather than producing it — a mismatch between a registry verdict
+and what the oracle observes fails the suite. A doc-sync gate fails when the generated table
+diverges from the checked-in file.
+
+**Gates, by tier:**
+
+| Gate | Needs a warehouse? | Tier |
+|---|---|---|
+| Coverage totality — every entry × dialect has a verdict; every probe derivable or overridden | no | per-PR |
+| Printer/registry consistency — no name-matched dialect arms remain in `printer.rs` | no | per-PR |
+| Schema + value legs, DuckDB | no (in-memory) | per-PR |
+| Schema + value legs, Spark | Spark Connect | labeled PR + nightly |
+| Schema + value legs, BigQuery | live BigQuery | manual sweep, `scripts/bigquery-dialect-audit.sh`, gated on `SMELT_BQ_PROJECT` |
+
+BigQuery remains manual, consistent with §"BigQuery has no CI tier, by decision, not by omission".
 
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
@@ -495,6 +562,11 @@ resolves nested widening to a table rewrite.
   their `UPDATE SET *` needs no list. Making every model's output schema knowable (ROADMAP
   "Total Output-Schema Resolution") would narrow this to genuinely unresolvable upstreams, not
   retire it.
+- **A built-in's per-dialect spelling derives from `BuiltinRegistry`; `printer.rs` holds no
+  name-matched dialect arm.** Recognition, lowering decision, and rewrite dispatch all flow
+  from `BuiltinRegistry::emission_for(dialect)`. A dialect arm keyed on a function name is a
+  violation of single ownership (§"Function-registry single ownership" in `architecture.md`
+  §Constraints #14). Gate: `cargo test -p smelt-dialect --test emission_ownership`.
 
 ## Known Divergences / Open Questions
 
