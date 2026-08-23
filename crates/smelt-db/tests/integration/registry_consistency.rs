@@ -8,27 +8,8 @@
 
 use smelt_db::type_inference::{infer_select_column_types, registry_migrated_names, TypeContext};
 use smelt_parser::ast::File;
-use smelt_types::signatures::{BuiltinRegistry, ExprKind};
+use smelt_types::signatures::{BuiltinRegistry, ExprKind, SyntaxForm};
 use smelt_types::{DataType, FunctionCategory, SqlFunction, TypedColumn};
-
-/// Registry entries that model SQL *operators* / dedicated-syntax forms
-/// (predicates, `CAST`, interval add/sub) rather than callable functions.
-/// They live in the registry for hover/completion/lint purposes but are not
-/// part of the `SqlFunction` (callable-function) surface, so they are exempt
-/// from the enum⇔registry function-consistency check.
-const OPERATOR_REGISTRY_ENTRIES: &[&str] = &[
-    "BETWEEN",
-    "CAST",
-    "DATE_ADD",
-    "DATE_SUB",
-    "EXISTS",
-    "GLOB",
-    "ILIKE",
-    "IN",
-    "IS_NULL",
-    "IS_NOT_NULL",
-    "LIKE",
-];
 
 /// Expected `ExprKind` classification for a `SqlFunction`, derived from its
 /// category. This is the oracle for registry-vs-enum classification parity.
@@ -69,7 +50,15 @@ fn every_recognized_function_is_registry_backed() {
     // Direction 2: every non-operator registry entry is a recognised function.
     let mut missing_from_enum: Vec<String> = Vec::new();
     for name in BuiltinRegistry::names() {
-        if OPERATOR_REGISTRY_ENTRIES.contains(&name) {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        // Dedicated-syntax entries (operators, CAST, interval add/sub, table
+        // functions) are exempt from the callable-function surface. The
+        // exemption is registry data, not a hand-written list: a new operator
+        // entry is exempt automatically, and an entry that stops being one
+        // re-enters the gate.
+        if sig.syntax_form != SyntaxForm::Call {
             continue;
         }
         if SqlFunction::from_name(name).is_none() {

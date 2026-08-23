@@ -28,8 +28,8 @@ pub use signatures::{
     ExprKind, FrameInfo, FrontmatterParseError, FunctionSig, ModelOrigin, ModelRefValue, ParamSpec,
     RowTail, RowVarBinding, SchemaRequirement, SigOrigin, SigParam, Signature, SignatureBuildError,
     SmeltMetaSignature, SmeltType, SmeltTypeParseError, SourceOrigin, SourceRefValue,
-    StructRowTail, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError, UnifyResult,
-    COLUMN_REF_FIELDS,
+    StructRowTail, SyntaxForm, Tier, TypeConstraint, TypeExpr, TypeParam, UnificationError,
+    UnifyResult, COLUMN_REF_FIELDS,
 };
 
 /// Reason a type resolved to `Unknown`.

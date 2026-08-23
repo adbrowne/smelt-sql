@@ -87,6 +87,25 @@ pub fn kind_ceiling(items: &[ExprKind]) -> ExprKind {
     max
 }
 
+/// How a built-in is spelled at a call site. Required so operators can be
+/// registry entries at all, and what lets the audit harness derive a probe from
+/// a signature instead of a hand-written table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum SyntaxForm {
+    /// `NAME(a, b)` — the default, and the only form on the callable-function surface.
+    #[default]
+    Call,
+    /// `a OP b` — `%`, `^`, `**`, `||`, `//`, `LIKE`, `ILIKE`, `GLOB`.
+    Infix,
+    /// `a OP` — `IS NULL`, `IS NOT NULL`.
+    Postfix,
+    /// `FROM UNNEST(a)` — a table function; not a scalar call position.
+    TableFn,
+    /// Dedicated syntax with no uniform shape — `CAST(x AS T)`, `a BETWEEN b AND c`,
+    /// `a IN (…)`, `EXISTS (…)`, interval add/sub.
+    Special,
+}
+
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
 ///
 /// `Concrete(dt)` pins the parameter to a single [`DataType`]. The abstract
@@ -2758,6 +2777,13 @@ pub struct Signature {
     /// on top of the generic "always nullable" default a registry-resolved
     /// call otherwise gets. See [`NullabilityPropagation`].
     pub nullability: NullabilityPropagation,
+    /// How this built-in is spelled at a call site (Phase 2, #171).
+    ///
+    /// Defaults to [`SyntaxForm::Call`]. Non-`Call` entries are operators,
+    /// predicates, table functions, and dedicated-syntax forms that have
+    /// registry entries for hover/completion but are not part of the
+    /// callable-function surface.
+    pub syntax_form: SyntaxForm,
 }
 
 /// Nullability-propagation policy for a registry-resolved call's result,
@@ -2845,6 +2871,7 @@ impl Signature {
             kind: ExprKind::Scalar,
             aliases: &[],
             nullability: NullabilityPropagation::None,
+            syntax_form: SyntaxForm::Call,
         })
     }
 
@@ -2894,6 +2921,16 @@ impl Signature {
     /// instead of the generic "always nullable" default.
     pub fn with_nullability(mut self, rule: NullabilityPropagation) -> Self {
         self.nullability = rule;
+        self
+    }
+
+    /// Set the [`SyntaxForm`] for this signature (Phase 2, #171).
+    ///
+    /// Builder-style — used by the registry seed to mark operators, predicates,
+    /// table functions, and dedicated-syntax forms. Defaults to
+    /// [`SyntaxForm::Call`] if never called.
+    pub fn with_syntax_form(mut self, form: SyntaxForm) -> Self {
+        self.syntax_form = form;
         self
     }
 
@@ -4557,18 +4594,24 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         // family — YEAR/MONTH/DAY/… — all return BigInt).
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
-    insert(Signature::new(
-        "DATE_ADD",
-        vec![],
-        vec![concrete(DataType::Date), concrete(DataType::Interval)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
-    insert(Signature::new(
-        "DATE_SUB",
-        vec![],
-        vec![concrete(DataType::Date), concrete(DataType::Interval)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
+    insert(
+        Signature::new(
+            "DATE_ADD",
+            vec![],
+            vec![concrete(DataType::Date), concrete(DataType::Interval)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "DATE_SUB",
+            vec![],
+            vec![concrete(DataType::Date), concrete(DataType::Interval)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
     insert(Signature::new(
         "MAKE_DATE",
         vec![],
@@ -4805,62 +4848,129 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // (they use dedicated SQL syntax), but having registry entries enables
     // hover, completion, and future lint rules.
 
-    insert(Signature::new(
-        "LIKE",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "ILIKE",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "GLOB",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IS_NULL",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IS_NOT_NULL",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "BETWEEN",
-        vec![tp("T", TypeConstraint::Ordered)],
-        vec![var("T"), var("T"), var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IN",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T"), var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "EXISTS",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "CAST",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
-            crate::UnknownReason::Dynamic,
-        ))),
-    ));
+    insert(
+        Signature::new(
+            "LIKE",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "ILIKE",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "GLOB",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "IS_NULL",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Postfix),
+    );
+    insert(
+        Signature::new(
+            "IS_NOT_NULL",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Postfix),
+    );
+    insert(
+        Signature::new(
+            "BETWEEN",
+            vec![tp("T", TypeConstraint::Ordered)],
+            vec![var("T"), var("T"), var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "IN",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T"), var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "EXISTS",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "CAST",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
+                crate::UnknownReason::Dynamic,
+            ))),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+
+    // ─── Infix operators.
+    //
+    // These are BINARY_EXPR in the CST, not FUNCTION_CALL, and were absent from
+    // the registry entirely. They are registered so per-dialect emission has one
+    // owner and so the audit enumeration cannot walk past them — `^` is the
+    // silent-divergence case issue #171 was filed about.
+    for op in ["%", "^", "**", "//"] {
+        insert(
+            Signature::new(
+                op,
+                vec![tp("T", TypeConstraint::Numeric)],
+                vec![var("T"), var("T")],
+                TypeExpr::Var("T".into()),
+            )
+            .with_syntax_form(SyntaxForm::Infix),
+        );
+    }
+    insert(
+        Signature::new(
+            "||",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+
+    // ─── Table functions.
+    for name in ["EXPLODE", "UNNEST"] {
+        insert(
+            Signature::new(
+                name,
+                vec![tp("T", TypeConstraint::Any)],
+                vec![var("T")],
+                TypeExpr::Var("T".into()),
+            )
+            .with_syntax_form(SyntaxForm::TableFn),
+        );
+    }
 
     m
 });

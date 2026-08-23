@@ -1,6 +1,9 @@
 /// Phase 50: registry coverage tests — verify that newly-seeded built-ins
 /// are present and carry the correct `ExprKind`.
-use smelt_types::{signatures::ExprKind, BuiltinRegistry};
+use smelt_types::{
+    signatures::{ExprKind, SyntaxForm},
+    BuiltinRegistry,
+};
 
 // ─── Operators ──────────────────────────────────────────────────────────────
 
@@ -596,6 +599,65 @@ fn window_kinds_correct() {
             ExprKind::Window,
             "{name} should have kind Window, got {:?}",
             sig.kind
+        );
+    }
+}
+
+// ─── Syntax forms and the operator surface
+
+#[test]
+fn infix_operators_are_registered_with_the_infix_form() {
+    for op in ["%", "^", "**", "//", "||"] {
+        let sig =
+            BuiltinRegistry::resolve(op).unwrap_or_else(|| panic!("operator {op} not in registry"));
+        assert_eq!(
+            sig.syntax_form,
+            SyntaxForm::Infix,
+            "{op} must be Infix so the audit enumerates it as an operator"
+        );
+    }
+}
+
+#[test]
+fn table_functions_are_registered_with_the_tablefn_form() {
+    for name in ["EXPLODE", "UNNEST"] {
+        let sig =
+            BuiltinRegistry::resolve(name).unwrap_or_else(|| panic!("{name} not in registry"));
+        assert_eq!(sig.syntax_form, SyntaxForm::TableFn);
+    }
+}
+
+#[test]
+fn ordinary_functions_default_to_the_call_form() {
+    for name in ["SUM", "LOWER", "ROW_NUMBER", "DATE_TRUNC"] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(sig.syntax_form, SyntaxForm::Call);
+    }
+}
+
+#[test]
+fn dedicated_syntax_entries_are_not_call_form() {
+    // The exemption the registry-consistency gate derives. Each of these is a
+    // registry entry for hover/completion but not a callable function.
+    for name in [
+        "LIKE",
+        "ILIKE",
+        "GLOB",
+        "IS_NULL",
+        "IS_NOT_NULL",
+        "BETWEEN",
+        "IN",
+        "EXISTS",
+        "CAST",
+        "DATE_ADD",
+        "DATE_SUB",
+    ] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_ne!(
+            sig.syntax_form,
+            SyntaxForm::Call,
+            "{name} is dedicated syntax; leaving it Call re-enters it into the \
+             callable-function consistency gate"
         );
     }
 }
