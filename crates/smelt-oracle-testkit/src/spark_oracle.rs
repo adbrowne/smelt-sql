@@ -5,6 +5,7 @@
 //! long-lived `spark-sql` process with stdin/stdout pipes and feed queries through it.
 
 use crate::duckdb_oracle::TypeOracle;
+use crate::value::{Cell, ValueOracle};
 use smelt_types::DataType;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -100,40 +101,143 @@ impl TypeOracle for SparkOracle {
     fn query_types(&self, sql: &str) -> Result<Vec<(String, DataType)>, String> {
         let mut session = self.inner.lock().map_err(|e| format!("lock: {e}"))?;
 
-        // Use a unique sentinel so we know when output for this query ends
-        let sentinel = format!(
-            "__SMELT_SENTINEL_{}_{}",
-            std::process::id(),
-            CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let describe_sql = format!("DESCRIBE QUERY {sql}");
-
-        // Send the DESCRIBE QUERY, then a sentinel query
-        writeln!(session.stdin, "{describe_sql};").map_err(|e| format!("write describe: {e}"))?;
-        writeln!(session.stdin, "SELECT '{sentinel}';")
-            .map_err(|e| format!("write sentinel: {e}"))?;
-        session.stdin.flush().map_err(|e| format!("flush: {e}"))?;
-
-        // Collect lines until we see the sentinel
-        let mut lines = Vec::new();
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match session.reader.read_line(&mut line) {
-                Ok(0) => return Err("spark-sql EOF".into()),
-                Ok(_) => {
-                    if line.contains(&sentinel) {
-                        break;
-                    }
-                    lines.push(line.clone());
-                }
-                Err(e) => return Err(format!("read: {e}")),
-            }
-        }
-
-        let output = lines.join("");
-
+        let output = run_framed(&mut session, &format!("DESCRIBE QUERY {sql}"))?;
         interpret_describe_output(&output)
+    }
+}
+
+/// Send one statement and read back everything it printed, framed by a unique
+/// sentinel `SELECT` so the reader knows where this statement's output ends.
+///
+/// Shared by the schema leg (`DESCRIBE QUERY …`) and the value leg (the query
+/// itself); `spark-sql` has no other end-of-output marker.
+fn run_framed(session: &mut SparkSession, statement: &str) -> Result<String, String> {
+    let sentinel = format!(
+        "__SMELT_SENTINEL_{}_{}",
+        std::process::id(),
+        CALL_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    writeln!(session.stdin, "{statement};").map_err(|e| format!("write statement: {e}"))?;
+    writeln!(session.stdin, "SELECT '{sentinel}';").map_err(|e| format!("write sentinel: {e}"))?;
+    session.stdin.flush().map_err(|e| format!("flush: {e}"))?;
+
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match session.reader.read_line(&mut line) {
+            Ok(0) => return Err("spark-sql EOF".into()),
+            Ok(_) => {
+                if line.contains(&sentinel) {
+                    break;
+                }
+                lines.push(line.clone());
+            }
+            Err(e) => return Err(format!("read: {e}")),
+        }
+    }
+    Ok(lines.join(""))
+}
+
+impl ValueOracle for SparkOracle {
+    /// Execute `sql` and decode each cell using the column types
+    /// `DESCRIBE QUERY` reports for the same SQL.
+    ///
+    /// The type pre-pass is not optional: `spark-sql`'s tabular output is
+    /// untyped text, so `1.50` could be a decimal, a double, or a string, and
+    /// the comparator's rules differ for each.
+    ///
+    /// **Fixture constraint.** Spark renders SQL `NULL` as the four-character
+    /// text `NULL`, indistinguishable from a genuine `'NULL'` string value. No
+    /// probe fixture may contain that string; `fixture.rs` asserts it.
+    fn execute_rows(&self, sql: &str) -> Result<Vec<Vec<Cell>>, String> {
+        let mut session = self.inner.lock().map_err(|e| format!("lock: {e}"))?;
+        let describe = run_framed(&mut session, &format!("DESCRIBE QUERY {sql}"))?;
+        let types: Vec<DataType> = interpret_describe_output(&describe)?
+            .into_iter()
+            .map(|(_, dt)| dt)
+            .collect();
+        let output = run_framed(&mut session, sql)?;
+        parse_value_output(&output, &types)
+    }
+}
+
+/// Decode `spark-sql`'s tab-separated result rows against the column types
+/// `DESCRIBE QUERY` reported.
+fn parse_value_output(output: &str, types: &[DataType]) -> Result<Vec<Vec<Cell>>, String> {
+    if output.contains("AnalysisException")
+        || output.contains("ParseException")
+        || output.contains("Error in query")
+        || output.contains("SQLSTATE:")
+    {
+        return Err("spark-sql error in output".to_string());
+    }
+    let mut rows = Vec::new();
+    for line in diagnostic_lines(output) {
+        let fields: Vec<&str> = line.split('\t').collect();
+        // A row must have exactly one field per declared column. Anything else
+        // is CLI scaffolding, not data — silently coercing it would fabricate
+        // rows the engine never returned.
+        if fields.len() != types.len() {
+            continue;
+        }
+        rows.push(
+            fields
+                .iter()
+                .zip(types)
+                .map(|(text, dt)| decode_spark_cell(text, dt))
+                .collect(),
+        );
+    }
+    Ok(rows)
+}
+
+/// Decode one `spark-sql` text cell against its declared Spark type.
+fn decode_spark_cell(text: &str, dt: &DataType) -> Cell {
+    if text == "NULL" {
+        return Cell::Null;
+    }
+    match dt {
+        DataType::Boolean => match text {
+            "true" => Cell::Bool(true),
+            "false" => Cell::Bool(false),
+            other => Cell::Text(other.to_string()),
+        },
+        DataType::SmallInt | DataType::Integer | DataType::BigInt => match text.parse::<i128>() {
+            Ok(n) => Cell::Int(n),
+            Err(_) => Cell::Text(text.to_string()),
+        },
+        DataType::Float | DataType::Double => match text.parse::<f64>() {
+            Ok(f) => Cell::Float(f),
+            Err(_) => Cell::Text(text.to_string()),
+        },
+        DataType::Decimal { .. } => decode_decimal_text(text),
+        DataType::Date => Cell::Date(text.to_string()),
+        DataType::Timestamp { .. } => Cell::Timestamp(text.to_string()),
+        _ => Cell::Text(text.to_string()),
+    }
+}
+
+/// Parse a plain decimal rendering (`-1.50`, `42`) into an unscaled/scale pair.
+///
+/// Scale comes from the rendered text rather than the declared type: Spark
+/// prints a `DECIMAL(10,2)` zero as `0.00`, but a `DECIMAL(38,0)` sum as `42`,
+/// and the comparator normalises scale anyway.
+fn decode_decimal_text(text: &str) -> Cell {
+    let (int_part, frac_part) = match text.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (text, ""),
+    };
+    if frac_part.chars().any(|c| !c.is_ascii_digit()) {
+        return Cell::Text(text.to_string());
+    }
+    let joined = format!("{int_part}{frac_part}");
+    match joined.parse::<i128>() {
+        Ok(unscaled) => Cell::Decimal {
+            unscaled,
+            scale: frac_part.len() as u32,
+        },
+        Err(_) => Cell::Text(text.to_string()),
     }
 }
 
@@ -444,5 +548,130 @@ mod tests {
         let err = interpret_describe_output("spark-sql (default)> \n\n").unwrap_err();
         assert!(err.contains("no output at all"), "got {err:?}");
         assert_ne!(err, "spark-sql error in output");
+    }
+
+    #[test]
+    fn a_null_renders_as_the_bare_word_and_decodes_to_null() {
+        assert_eq!(decode_spark_cell("NULL", &DataType::BigInt), Cell::Null);
+        // …which is exactly why a fixture may not contain the string `NULL`:
+        // Spark's output cannot distinguish the two.
+        assert_eq!(
+            decode_spark_cell("NULL", &DataType::Varchar { max_length: None }),
+            Cell::Null
+        );
+    }
+
+    #[test]
+    fn cells_decode_against_their_declared_type() {
+        assert_eq!(decode_spark_cell("42", &DataType::BigInt), Cell::Int(42));
+        assert_eq!(decode_spark_cell("-7", &DataType::Integer), Cell::Int(-7));
+        assert_eq!(
+            decode_spark_cell("1.5", &DataType::Double),
+            Cell::Float(1.5)
+        );
+        assert_eq!(
+            decode_spark_cell("true", &DataType::Boolean),
+            Cell::Bool(true)
+        );
+        assert_eq!(
+            decode_spark_cell("2026-08-24", &DataType::Date),
+            Cell::Date("2026-08-24".into())
+        );
+        // The same text under a string type stays text — the declared type is
+        // what decides, not the shape of the characters.
+        assert_eq!(
+            decode_spark_cell("42", &DataType::Varchar { max_length: None }),
+            Cell::Text("42".into())
+        );
+    }
+
+    #[test]
+    fn decimal_scale_comes_from_the_rendering() {
+        assert_eq!(
+            decode_spark_cell(
+                "1.50",
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }
+            ),
+            Cell::Decimal {
+                unscaled: 150,
+                scale: 2
+            }
+        );
+        assert_eq!(
+            decode_spark_cell(
+                "-1.50",
+                &DataType::Decimal {
+                    precision: 10,
+                    scale: 2
+                }
+            ),
+            Cell::Decimal {
+                unscaled: -150,
+                scale: 2
+            }
+        );
+        assert_eq!(
+            decode_spark_cell(
+                "42",
+                &DataType::Decimal {
+                    precision: 38,
+                    scale: 0
+                }
+            ),
+            Cell::Decimal {
+                unscaled: 42,
+                scale: 0
+            }
+        );
+    }
+
+    #[test]
+    fn value_rows_are_parsed_per_declared_column() {
+        let types = vec![DataType::BigInt, DataType::Varchar { max_length: None }];
+        let output = "spark-sql (default)> SELECT ...;\n1\ta\n2\tb\nTime taken: 0.1 seconds\n";
+        let rows = parse_value_output(output, &types).expect("parse");
+        assert_eq!(
+            rows,
+            vec![
+                vec![Cell::Int(1), Cell::Text("a".into())],
+                vec![Cell::Int(2), Cell::Text("b".into())],
+            ]
+        );
+    }
+
+    /// A line whose field count does not match the declared columns is CLI
+    /// scaffolding, not data. Coercing it would fabricate a row.
+    #[test]
+    fn a_line_with_the_wrong_arity_is_not_a_row() {
+        let types = vec![DataType::BigInt, DataType::BigInt];
+        let rows = parse_value_output("some prose the CLI printed\n1\t2\n", &types).expect("parse");
+        assert_eq!(rows, vec![vec![Cell::Int(1), Cell::Int(2)]]);
+    }
+
+    #[test]
+    fn a_refused_query_is_an_error_not_an_empty_result() {
+        let types = vec![DataType::BigInt];
+        let err = parse_value_output("[SOMETHING_WRONG] ... SQLSTATE: 42K01\n", &types)
+            .expect_err("a refusal must not read as zero rows");
+        assert!(err.contains("spark-sql error"));
+    }
+
+    /// Live leg. Skips green when no Spark container is exported.
+    #[test]
+    fn the_spark_value_oracle_round_trips_against_a_live_session() {
+        let Ok(container) = std::env::var("SPARK_CONTAINER_ID") else {
+            eprintln!("SPARK_CONTAINER_ID unset — skipping live Spark value leg");
+            return;
+        };
+        let oracle = SparkOracle::new(&container);
+        let rows = oracle.execute_rows("SELECT 2 + 3 AS s").expect("execute");
+        assert_eq!(rows, vec![vec![Cell::Int(5)]]);
+        let rows = oracle
+            .execute_rows("SELECT CAST(NULL AS BIGINT) AS n")
+            .expect("execute");
+        assert_eq!(rows, vec![vec![Cell::Null]]);
     }
 }

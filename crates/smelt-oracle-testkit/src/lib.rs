@@ -17,6 +17,7 @@ mod duckdb_oracle;
 mod error_class;
 mod spark_oracle;
 mod type_comparison;
+mod value;
 
 pub use arrow_mapping::arrow_to_smelt;
 pub use bigquery_oracle::{BigQueryOracle, BqField};
@@ -24,3 +25,4 @@ pub use duckdb_oracle::{DuckDbOracle, TypeOracle};
 pub use error_class::{classify_oracle_error, OracleErrorKind};
 pub use spark_oracle::SparkOracle;
 pub use type_comparison::{compare_types, TypeMatch};
+pub use value::{compare_cells, Cell, ValueMatch, ValueOracle};
