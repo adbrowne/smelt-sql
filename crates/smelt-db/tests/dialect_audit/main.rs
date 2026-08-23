@@ -10,11 +10,12 @@ mod overrides;
 mod probe;
 
 use smelt_oracle_testkit::{
-    classify_oracle_error, compare_cells, Cell, DuckDbOracle, OracleErrorKind, TypeOracle,
-    ValueMatch, ValueOracle,
+    classify_oracle_error, compare_cells, Cell, DuckDbOracle, OracleErrorKind, SparkOracle,
+    TypeOracle, ValueMatch, ValueOracle,
 };
 use smelt_types::{BuiltinRegistry, DialectId};
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use probe::{Position, Probe};
 
@@ -308,9 +309,30 @@ impl LegOutcome {
     }
 }
 
-/// A probe the ledger already accounts for on this dialect.
-fn is_registered(name: &str, dialect: DialectId) -> bool {
-    ledger::find(name, dialect).is_some()
+/// A probe the ledger already accounts for on this dialect, position and leg.
+fn is_registered(name: &str, dialect: DialectId, position: Position, leg: ledger::Leg) -> bool {
+    ledger::find(name, dialect, position, leg).is_some()
+}
+
+/// Whether the registry itself declares this entry unsupported on `dialect`.
+///
+/// The printer emits such a construct verbatim by design — the compile path
+/// refuses the model before printing (`UnsupportedOnBackend`) — so the engine
+/// rejecting it here is the *declared* outcome, not a finding. Acceptance would
+/// be: it would mean the verdict is wrong.
+fn is_declared_unsupported(name: &str, dialect: DialectId) -> bool {
+    BuiltinRegistry::resolve(name).is_some_and(|sig| {
+        matches!(
+            sig.emission_for(dialect),
+            smelt_types::Emission::Unsupported { .. }
+        )
+    })
+}
+
+/// A pair the legs must not treat as a plain pass/fail: either the registry
+/// declares it unsupported, or the ledger accepts it.
+fn is_exempt(name: &str, dialect: DialectId, position: Position, leg: ledger::Leg) -> bool {
+    is_declared_unsupported(name, dialect) || is_registered(name, dialect, position, leg)
 }
 
 /// One batched query per (position, group of probes), so a sweep is a few
@@ -362,8 +384,9 @@ fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
     let mut outcome = LegOutcome::default();
 
     for (position, group) in by_position(&probes) {
-        let (expected_pass, known): (Vec<&Probe>, Vec<&Probe>) =
-            group.iter().partition(|p| !is_registered(p.name, dialect));
+        let (expected_pass, known): (Vec<&Probe>, Vec<&Probe>) = group
+            .iter()
+            .partition(|p| !is_exempt(p.name, dialect, position, ledger::Leg::Schema));
 
         // Fast path: one query for everything expected to work.
         if !expected_pass.is_empty() {
@@ -415,7 +438,16 @@ fn probe_schema_once(
     let sql = probe::print_for(dialect, &p.statement());
     match oracle.query_types(&sql) {
         Ok(_) => {
-            if is_registered(p.name, dialect) {
+            if is_declared_unsupported(p.name, dialect) {
+                outcome.failures.push(format!(
+                    "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
+                     engine accepts it. Either the verdict is wrong or the printer is \
+                     lowering it after all.",
+                    p.name,
+                    p.position,
+                    dialect.slug()
+                ));
+            } else if is_registered(p.name, dialect, p.position, ledger::Leg::Schema) {
                 outcome.failures.push(format!(
                     "  {} [{:?}] on {}: STALE LEDGER ROW — the engine now accepts this. \
                      Delete the row and tighten .claude/dialect-gaps-baseline.txt.",
@@ -428,7 +460,9 @@ fn probe_schema_once(
             }
         }
         Err(e) => match classify_oracle_error(&e) {
-            OracleErrorKind::QueryRefusal if is_registered(p.name, dialect) => {
+            OracleErrorKind::QueryRefusal
+                if is_exempt(p.name, dialect, p.position, ledger::Leg::Schema) =>
+            {
                 outcome
                     .registered
                     .push(format!("{} [{:?}]", p.name, p.position));
@@ -436,11 +470,12 @@ fn probe_schema_once(
             OracleErrorKind::QueryRefusal => outcome.failures.push(format!(
                 "  {} [{:?}] on {}: refused with `{}`. Either give the entry an \
                  `Emission` verdict in `signatures.rs`, or register the pair in \
-                 `ledger.rs` with a reason.\n    sql: {sql}",
+                 `ledger.rs` with a reason.\n    probe: {}",
                 p.name,
                 p.position,
                 dialect.slug(),
-                e.lines().next().unwrap_or("").trim()
+                e.lines().next().unwrap_or("").trim(),
+                p.statement()
             )),
             // The oracle itself is unusable — never "skip" this, or the leg
             // reports green while verifying nothing.
@@ -474,7 +509,9 @@ fn run_value_leg(
                 .push(format!("{} [{:?}]: {reason}", p.name, p.position));
             continue;
         }
-        if is_registered(p.name, dialect) || is_registered(p.name, DialectId::DuckDb) {
+        if is_exempt(p.name, dialect, p.position, ledger::Leg::Value)
+            || is_exempt(p.name, DialectId::DuckDb, p.position, ledger::Leg::Value)
+        {
             outcome
                 .registered
                 .push(format!("{} [{:?}]", p.name, p.position));
@@ -639,4 +676,73 @@ fn a_ledger_row_the_engine_now_accepts_is_reported_stale() {
         "{}",
         outcome.report()
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Spark. Skips green when `SPARK_CONTAINER_ID` is unset; a live Spark Connect
+// container is a labelled-PR / nightly cost, not a per-PR one.
+// ─────────────────────────────────────────────────────────────────────────
+
+static SPARK: LazyLock<Option<SparkOracle>> = LazyLock::new(|| {
+    std::env::var("SPARK_CONTAINER_ID")
+        .ok()
+        .filter(|id| !id.is_empty())
+        .map(|id| SparkOracle::new(&id))
+});
+
+#[test]
+fn schema_leg_spark() {
+    let Some(oracle) = SPARK.as_ref() else {
+        eprintln!("SPARK_CONTAINER_ID unset — skipping schema_leg_spark");
+        return;
+    };
+    let outcome = run_schema_leg(DialectId::SparkSql, oracle);
+    assert!(outcome.failures.is_empty(), "{}", outcome.report());
+    eprintln!(
+        "COVERAGE[spark schema] probes_compared={}",
+        outcome.probes_compared
+    );
+}
+
+#[test]
+fn value_leg_spark() {
+    let Some(oracle) = SPARK.as_ref() else {
+        eprintln!("SPARK_CONTAINER_ID unset — skipping value_leg_spark");
+        return;
+    };
+    let outcome = run_value_leg(DialectId::SparkSql, oracle, &DuckDbOracle::new());
+    assert!(outcome.failures.is_empty(), "{}", outcome.report());
+    eprintln!(
+        "COVERAGE[spark value] probes_compared={}",
+        outcome.probes_compared
+    );
+}
+
+/// The regression test for the finding that motivated this work: Spark's infix
+/// `^` is bitwise XOR, not exponentiation. Before the emission row that lowers
+/// it to `POWER(a, b)`, `SELECT 2 ^ 3` returned 1 on Spark and 8 on DuckDB — a
+/// silently wrong number, not an error, and the same type on both engines, so
+/// no schema comparison could see it.
+#[test]
+fn spark_caret_agrees_with_duckdb_power() {
+    let Some(spark) = SPARK.as_ref() else {
+        eprintln!("SPARK_CONTAINER_ID unset — skipping spark_caret_agrees_with_duckdb_power");
+        return;
+    };
+    let duckdb = DuckDbOracle::new();
+    let smelt_expr = "SELECT n_bigint ^ 2 AS p FROM fixture ORDER BY rid";
+    let spark_rows = spark
+        .execute_rows(&probe::print_for(DialectId::SparkSql, smelt_expr))
+        .expect("spark");
+    let duck_rows = duckdb
+        .execute_rows(&probe::print_for(DialectId::DuckDb, smelt_expr))
+        .expect("duckdb");
+    assert_eq!(spark_rows.len(), duck_rows.len());
+    for (s, d) in spark_rows.iter().zip(&duck_rows) {
+        assert_eq!(
+            compare_cells(&d[0], &s[0]),
+            ValueMatch::Equal,
+            "`^` diverges on Spark: it is bitwise XOR there, and must be lowered to POWER"
+        );
+    }
 }

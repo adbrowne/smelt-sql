@@ -118,6 +118,11 @@ static OVERRIDES: &[Override] = &[
     args("EVERY", &["b_bool"]),
     args("POW", &["n_double", "2"]),
     args("REVERSE", &["s_text"]),
+    // Spark requires at least two arguments for the variadic min/max pair, and
+    // `nth_value` takes the position as a second argument.
+    args("GREATEST", &["n_bigint", "n_int"]),
+    args("LEAST", &["n_bigint", "n_int"]),
+    args("NTH_VALUE", &["n_bigint", "2"]),
     args("TRANSLATE", &["s_text", "'a'", "'z'"]),
     args("JSON_CONTAINS", &["j_json", "'1'"]),
     args("JSON_OBJECT", &["'k'", "n_bigint"]),
@@ -161,6 +166,18 @@ static OVERRIDES: &[Override] = &[
     // Dedicated argument syntax the registry models as a plain call.
     spell_args("EXTRACT", "EXTRACT(YEAR FROM {0})", &["ts_ts"]),
     spell_args("POSITION", "POSITION('a' IN {0})", &["s_text"]),
+    // ── Order-dependent aggregates: schema leg only ──────────────────────
+    // These pick *a* row, not *the* row, and engines are entitled to pick
+    // different ones. Comparing their values across engines measures the
+    // engines' scan order, not smelt's emission.
+    nondeterministic(
+        "ANY_VALUE",
+        "returns an unspecified row's value; engines may pick different rows",
+    ),
+    nondeterministic(
+        "MODE",
+        "ties are broken arbitrarily, and the fixture's values are all distinct within a group",
+    ),
     // ── Nondeterministic: schema leg only ────────────────────────────────
     nondeterministic("NOW", "engines execute at different instants"),
 ];

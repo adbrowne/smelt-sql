@@ -157,10 +157,19 @@ impl ValueOracle for SparkOracle {
             .into_iter()
             .map(|(_, dt)| dt)
             .collect();
-        let output = run_framed(&mut session, sql)?;
+        // Wrap the query so every data row carries a marker column. Without
+        // it a one-column result cannot be told from the CLI's own prose: the
+        // arity check passes for any single-field line.
+        let marked = format!(
+            "SELECT '{ROW_MARKER}' AS __smelt_marker, __smelt_q.* FROM ({sql}) AS __smelt_q"
+        );
+        let output = run_framed(&mut session, &marked)?;
         parse_value_output(&output, &types)
     }
 }
+
+/// Prefixed to every data row so a row can be told from the CLI's own prose.
+const ROW_MARKER: &str = "__SMELT_ROW__";
 
 /// Decode `spark-sql`'s tab-separated result rows against the column types
 /// `DESCRIBE QUERY` reported.
@@ -174,10 +183,19 @@ fn parse_value_output(output: &str, types: &[DataType]) -> Result<Vec<Vec<Cell>>
     }
     let mut rows = Vec::new();
     for line in diagnostic_lines(output) {
-        let fields: Vec<&str> = line.split('\t').collect();
-        // A row must have exactly one field per declared column. Anything else
-        // is CLI scaffolding, not data — silently coercing it would fabricate
-        // rows the engine never returned.
+        // Only marker-prefixed lines are data. The CLI echoes the submitted
+        // SQL and prints timing notes, and a one-column result would otherwise
+        // be indistinguishable from either.
+        let Some(rest) = line.strip_prefix(ROW_MARKER) else {
+            continue;
+        };
+        let rest = rest.strip_prefix('\t').unwrap_or(rest);
+        let fields: Vec<&str> = if types.is_empty() {
+            Vec::new()
+        } else {
+            rest.split('\t').collect()
+        };
+        // A row must have exactly one field per declared column.
         if fields.len() != types.len() {
             continue;
         }
@@ -631,7 +649,7 @@ mod tests {
     #[test]
     fn value_rows_are_parsed_per_declared_column() {
         let types = vec![DataType::BigInt, DataType::Varchar { max_length: None }];
-        let output = "spark-sql (default)> SELECT ...;\n1\ta\n2\tb\nTime taken: 0.1 seconds\n";
+        let output = "spark-sql (default)> SELECT ...;\n__SMELT_ROW__\t1\ta\n__SMELT_ROW__\t2\tb\nTime taken: 0.1 seconds\n";
         let rows = parse_value_output(output, &types).expect("parse");
         assert_eq!(
             rows,
@@ -642,12 +660,17 @@ mod tests {
         );
     }
 
-    /// A line whose field count does not match the declared columns is CLI
-    /// scaffolding, not data. Coercing it would fabricate a row.
+    /// A line without the row marker is CLI scaffolding, not data — and a
+    /// marked line whose field count does not match the declared columns is
+    /// not a row either. Coercing either would fabricate rows.
     #[test]
     fn a_line_with_the_wrong_arity_is_not_a_row() {
         let types = vec![DataType::BigInt, DataType::BigInt];
-        let rows = parse_value_output("some prose the CLI printed\n1\t2\n", &types).expect("parse");
+        let rows = parse_value_output(
+            "some prose the CLI printed\n__SMELT_ROW__\t1\t2\n__SMELT_ROW__\t3\n",
+            &types,
+        )
+        .expect("parse");
         assert_eq!(rows, vec![vec![Cell::Int(1), Cell::Int(2)]]);
     }
 

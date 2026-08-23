@@ -68,6 +68,31 @@ fn decimals_equal(a: (i128, u32), b: (i128, u32)) -> Option<bool> {
     Some(lift(au, asc)? == lift(bu, bsc)?)
 }
 
+/// Normalise a timestamp rendering to a single spelling.
+///
+/// Arrow's formatter writes the ISO-8601 `T` separator; `spark-sql` writes a
+/// space. Both name the same instant, and treating them as different values
+/// would report a divergence on every temporal probe — noise that would bury
+/// the real ones.
+fn temporal(text: &str) -> String {
+    text.replacen('T', " ", 1)
+}
+
+/// Normalise a rendered array or struct.
+///
+/// Arrow's formatter writes `[10, 20]`; `spark-sql` writes `[10,20]`. This is a
+/// property of the two *transports*, not of the two engines. It is a
+/// normalisation of the rendering only: element order, element count and every
+/// character of the elements themselves still have to match.
+fn collection_text(text: &str) -> String {
+    let looks_like_collection = matches!(text.chars().next(), Some('[') | Some('{'));
+    if looks_like_collection {
+        text.replace(", ", ",")
+    } else {
+        text.to_string()
+    }
+}
+
 fn as_f64(cell: &Cell) -> Option<f64> {
     match cell {
         Cell::Float(f) => Some(*f),
@@ -96,9 +121,9 @@ pub fn compare_cells(reference: &Cell, actual: &Cell) -> ValueMatch {
         (Cell::Null, _) | (_, Cell::Null) => false,
 
         (Cell::Bool(a), Cell::Bool(b)) => a == b,
-        (Cell::Text(a), Cell::Text(b)) => a == b,
+        (Cell::Text(a), Cell::Text(b)) => collection_text(a) == collection_text(b),
         (Cell::Date(a), Cell::Date(b)) => a == b,
-        (Cell::Timestamp(a), Cell::Timestamp(b)) => a == b,
+        (Cell::Timestamp(a), Cell::Timestamp(b)) => temporal(a) == temporal(b),
         (Cell::Int(a), Cell::Int(b)) => a == b,
 
         (
@@ -356,6 +381,52 @@ mod tests {
         };
         assert!(matches!(
             compare_cells(&a, &b),
+            ValueMatch::Divergent { .. }
+        ));
+    }
+
+    /// Arrow writes the ISO `T` separator, `spark-sql` writes a space. Same
+    /// instant, so the comparator must not call it a divergence.
+    #[test]
+    fn timestamp_separators_are_normalised_but_the_instant_is_not() {
+        assert_eq!(
+            compare_cells(
+                &Cell::Timestamp("2026-01-01T00:00:00".into()),
+                &Cell::Timestamp("2026-01-01 00:00:00".into())
+            ),
+            ValueMatch::Equal
+        );
+        assert!(matches!(
+            compare_cells(
+                &Cell::Timestamp("2026-01-01T00:00:00".into()),
+                &Cell::Timestamp("2026-01-02 00:00:00".into())
+            ),
+            ValueMatch::Divergent { .. }
+        ));
+    }
+
+    /// Collection rendering differs by transport, not by engine. The contents
+    /// still have to match exactly.
+    #[test]
+    fn collection_spacing_is_normalised_but_the_contents_are_not() {
+        assert_eq!(
+            compare_cells(
+                &Cell::Text("[10, 20]".into()),
+                &Cell::Text("[10,20]".into())
+            ),
+            ValueMatch::Equal
+        );
+        assert!(matches!(
+            compare_cells(
+                &Cell::Text("[10, 20]".into()),
+                &Cell::Text("[20,10]".into())
+            ),
+            ValueMatch::Divergent { .. }
+        ));
+        // A plain string keeps its spaces: only bracketed renderings are
+        // treated as a collection.
+        assert!(matches!(
+            compare_cells(&Cell::Text("a, b".into()), &Cell::Text("a,b".into())),
             ValueMatch::Divergent { .. }
         ));
     }
