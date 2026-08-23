@@ -130,17 +130,30 @@ fn the_duckdb_fixture_executes_and_yields_eight_rows() {
 
 /// An override naming an entry the registry does not have is dead weight that
 /// reads as coverage. Two-sided, like every other ledger in this repo.
+///
+/// The row must also name the **canonical** entry, not one of its aliases:
+/// `overrides::find` looks rows up by canonical name, so an alias-named row
+/// resolves in the registry and still never applies. That is worse than a
+/// missing row, because it reads as covered. Caught for real —
+/// `JSON_EXTRACT_STRING` was such a row until the live sweep tripped over it.
 #[test]
-fn every_override_names_a_real_registry_entry() {
-    let unknown: Vec<&str> = overrides::overrides()
-        .iter()
-        .map(|o| o.name)
-        .filter(|n| BuiltinRegistry::resolve(n).is_none())
-        .collect();
+fn every_override_names_a_real_canonical_registry_entry() {
+    let mut bad = Vec::new();
+    for o in overrides::overrides() {
+        match BuiltinRegistry::canonical_name(o.name) {
+            None => bad.push(format!("  {}: names nothing in the registry", o.name)),
+            Some(canonical) if canonical != o.name => bad.push(format!(
+                "  {}: is an alias of `{canonical}`, so this row never applies — \
+                 rename it to the canonical entry",
+                o.name
+            )),
+            Some(_) => {}
+        }
+    }
     assert!(
-        unknown.is_empty(),
-        "these override rows name nothing in the registry — delete them rather \
-         than leaving a dead exemption: {unknown:?}"
+        bad.is_empty(),
+        "dead override rows — each reads as coverage while covering nothing:\n{}",
+        bad.join("\n")
     );
 }
 

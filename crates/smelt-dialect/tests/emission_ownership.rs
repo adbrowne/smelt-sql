@@ -20,7 +20,16 @@ const PRINTER_SRC: &str = include_str!("../src/printer.rs");
 /// different way (`to_ascii_uppercase()`, `to_lowercase()`, a `matches!` on
 /// both cases) to slip past the substring check is the same violation, written
 /// less honestly.
-const NON_EMISSION_CASE_FOLDS: &[&str] = &[r#"token.text().eq_ignore_ascii_case("DATE")"#];
+const NON_EMISSION_CASE_FOLDS: &[&str] = &[
+    // `DATE 'lit'` -> `DATE('lit')` matches the literal *keyword* `DATE`, not a
+    // function name, and is gated on `supports_date_literal`.
+    r#"token.text().eq_ignore_ascii_case("DATE")"#,
+    // "did the author already write the target spelling?" — compares the source
+    // text against the *registry's own* `Rename` target, so it names no dialect
+    // and hardcodes no spelling. Suppressing a no-op rewrite is what keeps
+    // DuckDB byte-identity when a user writes `json_extract_string` themselves.
+    r#"if name.eq_ignore_ascii_case(new_name) {"#,
+];
 
 #[test]
 fn the_printer_matches_no_function_name() {

@@ -602,3 +602,30 @@ fn duckdb_byte_identity_preserved_on_path_form() {
         result
     );
 }
+
+/// A rename must not fire when the author already wrote the target spelling.
+///
+/// `json_extract_string` is DuckDB's own name for `JSON_EXTRACT_TEXT`, carried
+/// as an alias on that entry — so the canonical entry's DuckDB `Rename` would
+/// otherwise rewrite the user's text into different case, breaking the
+/// byte-identity `architecture.md` promises for DuckDB-flavoured input.
+#[test]
+fn a_rename_is_suppressed_when_the_source_already_uses_the_target_spelling() {
+    let sql = "SELECT json_extract_string(payload, '$.k') AS k FROM events";
+    let result = print_with(
+        sql,
+        &SqlDialect::DuckDB,
+        &BackendCapabilities::duckdb(),
+        "main",
+    );
+    assert_eq!(result, sql, "the author's own DuckDB spelling must survive");
+
+    // …and the rename still fires for a spelling that is not the target.
+    let renamed = print_with(
+        "SELECT EVERY(flag) AS a FROM events",
+        &SqlDialect::DuckDB,
+        &BackendCapabilities::duckdb(),
+        "main",
+    );
+    assert!(renamed.contains("BOOL_AND("), "{renamed}");
+}

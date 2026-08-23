@@ -89,14 +89,26 @@ static OVERRIDES: &[Override] = &[
     args("DATE_PART", &["'year'", "ts_ts"]),
     args("LPAD", &["s_text", "10", "'.'"]),
     args("RPAD", &["s_text", "10", "'.'"]),
-    args("PERCENTILE_CONT", &["0.5", "n_double"]),
-    args("PERCENTILE_DISC", &["0.5", "n_double"]),
+    // The ordered-set form, which is what a user actually writes and what
+    // DuckDB and PostgreSQL support. Probing the two-argument
+    // `PERCENTILE_CONT(x, f)` shape instead made DuckDB look like it lacked the
+    // function entirely, when it only spells that shape `quantile_cont`.
+    spell_args(
+        "PERCENTILE_CONT",
+        "PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {0})",
+        &["n_double"],
+    ),
+    spell_args(
+        "PERCENTILE_DISC",
+        "PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER BY {0})",
+        &["n_double"],
+    ),
     args("NTILE", &["4"]),
     args("TO_CHAR", &["ts_ts", "'%Y-%m-%d'"]),
     args("JSON_EXTRACT", &["j_json", "'$.k'"]),
-    args("JSON_EXTRACT_STRING", &["j_json", "'$.k'"]),
-    args("JSON_VALUE", &["j_json", "'$.k'"]),
-    args("GET_JSON_OBJECT", &["j_json", "'$.k'"]),
+    // Canonical name, not the `JSON_EXTRACT_STRING` alias: `find` looks rows up
+    // by canonical name, so an alias-named row would never apply.
+    args("JSON_EXTRACT_TEXT", &["j_json", "'$.k'"]),
     // ── Arity and argument-type corrections ──────────────────────────────
     // Much of the registry spells "arity not yet modelled" as
     // `Variadic(Any)`, and `TypeConstraint::Numeric` picks the widest numeric
@@ -131,11 +143,14 @@ static OVERRIDES: &[Override] = &[
     args("JSON_CONTAINS", &["j_json", "'1'"]),
     args("JSON_OBJECT", &["'k'", "n_bigint"]),
     args("LISTAGG", &["s_text", "','"]),
+    // A string aggregate wants strings; `Variadic(Any)` derives a number.
+    args("GROUP_CONCAT", &["s_text"]),
     args("STRING_AGG", &["s_text", "','"]),
     args("MAKE_DATE", &["2026", "1", "2"]),
-    args("MAKE_TIME", &["1", "2", "3.0"]),
-    args("MAKE_TIMESTAMP", &["2026", "1", "2", "3", "4", "5.0"]),
-    args("MAKE_TIMESTAMPTZ", &["2026", "1", "2", "3", "4", "5.0"]),
+    // Seconds as an integer: GoogleSQL's TIME/DATETIME want INT64 there.
+    args("MAKE_TIME", &["1", "2", "3"]),
+    args("MAKE_TIMESTAMP", &["2026", "1", "2", "3", "4", "5"]),
+    args("MAKE_TIMESTAMPTZ", &["2026", "1", "2", "3", "4", "5"]),
     // Domain-restricted maths. `n_double` carries a negative row on purpose
     // (a probe over only-positive numbers would not exercise sign handling),
     // so the entries whose domain excludes it take the all-positive column.

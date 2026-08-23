@@ -200,6 +200,21 @@ pub fn find(
 /// Closing one means adding an `Emission::Rename`, an `Emission::Rewrite`, or
 /// an `Emission::Unsupported` row to the entry, and deleting its row here.
 static ROWS: &[LedgerRow] = &[
+    // The ordered-set form has no window form: `PERCENTILE_CONT(f) WITHIN GROUP
+    // (ORDER BY x) OVER (...)` is not a thing on DuckDB. Scoped to the position
+    // that fails, so the aggregate position stays covered.
+    gap_at(
+        "PERCENTILE_CONT",
+        DialectId::DuckDb,
+        Position::Window,
+        "DuckDB has the ordered-set aggregate but no window form of it",
+    ),
+    gap_at(
+        "PERCENTILE_DISC",
+        DialectId::DuckDb,
+        Position::Window,
+        "DuckDB has the ordered-set aggregate but no window form of it",
+    ),
     //
     // Type-leg gaps: the engine accepts the probe, but smelt's inferred output
     // type disagrees with what the engine reports. These are inference holes,
@@ -255,24 +270,17 @@ static ROWS: &[LedgerRow] = &[
     gap("JSON_ARRAY", DialectId::SparkSql, "no `json_array`; Spark builds JSON with `to_json(array(...))`"),
     gap("JSON_ARRAY_LENGTH", DialectId::SparkSql, "Spark's `json_array_length` wants a JSON string, not a number"),
     gap("JSON_CONTAINS", DialectId::SparkSql, "no `json_contains` in Spark"),
-    gap("JSON_EXTRACT", DialectId::SparkSql, "Spark spells it `get_json_object`"),
-    gap("JSON_EXTRACT_TEXT", DialectId::SparkSql, "Spark spells it `get_json_object`"),
     gap("JSON_OBJECT", DialectId::SparkSql, "no `json_object`; Spark builds JSON with `to_json(named_struct(...))`"),
     gap("JSON_OBJECT_KEYS", DialectId::SparkSql, "Spark reaches object keys through `from_json`, not a scalar function"),
     gap("MAKE_TIME", DialectId::SparkSql, "no `make_time` in Spark"),
     gap("MAKE_TIMESTAMPTZ", DialectId::SparkSql, "no `make_timestamptz`; Spark has `make_timestamp`"),
     gap("QUOTE_IDENT", DialectId::SparkSql, "PostgreSQL-only builtin"),
     gap("QUOTE_LITERAL", DialectId::SparkSql, "PostgreSQL-only builtin"),
-    gap("STRPOS", DialectId::SparkSql, "Spark spells it `instr` / `position`"),
     gap("TO_JSON", DialectId::SparkSql, "Spark's `to_json` takes a struct or array, not a scalar"),
     gap("TO_SECONDS", DialectId::SparkSql, "no `to_seconds` in Spark"),
     gap("TRUNC", DialectId::SparkSql, "Spark's `trunc(date, fmt)` is temporal; there is no numeric `trunc`"),
     gap("TRUNCATE", DialectId::SparkSql, "no `truncate` scalar in Spark"),
-    gap("ARG_MAX", DialectId::SparkSql, "Spark spells it `max_by`"),
-    gap("ARG_MIN", DialectId::SparkSql, "Spark spells it `min_by`"),
     gap("GROUP_CONCAT", DialectId::SparkSql, "Spark spells it `concat_ws(sep, collect_list(x))`"),
-    gap("PERCENTILE_CONT", DialectId::SparkSql, "Spark's ordered-set form requires `WITHIN GROUP (ORDER BY ...)`"),
-    gap("PERCENTILE_DISC", DialectId::SparkSql, "Spark's ordered-set form requires `WITHIN GROUP (ORDER BY ...)`"),
     value_gap("LOG", DialectId::SparkSql, "Spark's `log(x)` is the natural logarithm; DuckDB's is base 10 - a silently wrong number, closable by a rename to `log10`"),
     value_gap("DAYOFWEEK", DialectId::SparkSql, "Spark numbers the week from Sunday=1, DuckDB from Sunday=0 - a silently wrong number, closable by a rewrite"),
     // `MEDIAN` works as an aggregate on Spark but not as a window function, so
@@ -282,6 +290,20 @@ static ROWS: &[LedgerRow] = &[
         DialectId::SparkSql,
         Position::Window,
         "Spark has `median` as an aggregate but not as a window function",
+    ),
+    // Spark accepts the ordered-set `WITHIN GROUP` form as an aggregate; only
+    // the window form is missing, so the row is scoped to that position.
+    gap_at(
+        "PERCENTILE_CONT",
+        DialectId::SparkSql,
+        Position::Window,
+        "Spark has the ordered-set aggregate but no window form of it",
+    ),
+    gap_at(
+        "PERCENTILE_DISC",
+        DialectId::SparkSql,
+        Position::Window,
+        "Spark has the ordered-set aggregate but no window form of it",
     ),
     //
     // Type-leg gaps. The same two inference families DuckDB surfaces, confirmed
@@ -314,24 +336,16 @@ static ROWS: &[LedgerRow] = &[
     gap("QUARTER", DialectId::BigQuery, "no `quarter`; GoogleSQL spells it `EXTRACT(QUARTER FROM d)`"),
     gap("QUOTE_IDENT", DialectId::BigQuery, "PostgreSQL-only builtin"),
     gap("QUOTE_LITERAL", DialectId::BigQuery, "PostgreSQL-only builtin"),
-    gap("RANDOM", DialectId::BigQuery, "GoogleSQL spells it `RAND`"),
     gap("SPLIT_PART", DialectId::BigQuery, "no `split_part`; GoogleSQL has `SPLIT` returning an array"),
     gap("TO_CHAR", DialectId::BigQuery, "no `to_char`; GoogleSQL has `FORMAT_TIMESTAMP` / `FORMAT`"),
     gap("TO_SECONDS", DialectId::BigQuery, "no `to_seconds` in GoogleSQL"),
-    gap("TRUNCATE", DialectId::BigQuery, "no `truncate` scalar in GoogleSQL"),
     gap("YEAR", DialectId::BigQuery, "no `year`; GoogleSQL spells it `EXTRACT(YEAR FROM d)`"),
     gap("POSITION", DialectId::BigQuery, "no `POSITION(x IN y)` form; GoogleSQL has `STRPOS(y, x)`"),
     gap("UNNEST", DialectId::BigQuery, "GoogleSQL allows `UNNEST` only in a FROM clause, never in a select list"),
-    gap("ARG_MAX", DialectId::BigQuery, "GoogleSQL spells it `MAX_BY`"),
-    gap("ARG_MIN", DialectId::BigQuery, "GoogleSQL spells it `MIN_BY`"),
-    gap("GROUP_CONCAT", DialectId::BigQuery, "GoogleSQL spells it `STRING_AGG`"),
-    gap("LISTAGG", DialectId::BigQuery, "GoogleSQL spells it `STRING_AGG`"),
     gap("MODE", DialectId::BigQuery, "no `mode`; GoogleSQL has `APPROX_TOP_COUNT`"),
     gap("REGR_SLOPE", DialectId::BigQuery, "no regression aggregates in GoogleSQL"),
     gap("FIRST", DialectId::BigQuery, "GoogleSQL's `FIRST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
     gap("LAST", DialectId::BigQuery, "GoogleSQL's `LAST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
-    gap("PERCENTILE_CONT", DialectId::BigQuery, "GoogleSQL requires argument 2 to be a literal, so a column percentile is not expressible"),
-    gap("PERCENTILE_DISC", DialectId::BigQuery, "GoogleSQL requires argument 2 to be a literal, so a column percentile is not expressible"),
     // `MEDIAN` lowers correctly in aggregate position; the window rewrite emits
     // `PERCENTILE_CONT ... OVER (... ORDER BY ...)`, and GoogleSQL forbids a
     // window ORDER BY on that analytic function. Scoped to the failing position.
@@ -365,15 +379,10 @@ static ROWS: &[LedgerRow] = &[
     gap("ILIKE", DialectId::BigQuery, "no `ILIKE` operator; GoogleSQL case-folds with `LOWER(x) LIKE LOWER(p)`"),
     gap("JSON_ARRAY_LENGTH", DialectId::BigQuery, "no `json_array_length`; GoogleSQL has `ARRAY_LENGTH(JSON_QUERY_ARRAY(...))`"),
     gap("JSON_CONTAINS", DialectId::BigQuery, "no `json_contains` in GoogleSQL"),
-    gap("JSON_EXTRACT_TEXT", DialectId::BigQuery, "GoogleSQL spells it `JSON_VALUE`"),
     gap("JSON_OBJECT_KEYS", DialectId::BigQuery, "no `json_object_keys` in GoogleSQL"),
     gap("LOG2", DialectId::BigQuery, "no `log2`; GoogleSQL spells it `LOG(x, 2)`"),
-    gap("MAKE_DATE", DialectId::BigQuery, "no `make_date`; GoogleSQL spells it `DATE(y, m, d)`"),
-    gap("MAKE_TIME", DialectId::BigQuery, "no `make_time`; GoogleSQL spells it `TIME(h, m, s)`"),
-    gap("MAKE_TIMESTAMP", DialectId::BigQuery, "no `make_timestamp`; GoogleSQL spells it `DATETIME(...)`"),
     gap("MAKE_TIMESTAMPTZ", DialectId::BigQuery, "no `make_timestamptz` in GoogleSQL"),
     gap("MONTH", DialectId::BigQuery, "no `month`; GoogleSQL spells it `EXTRACT(MONTH FROM d)`"),
-    gap("NOW", DialectId::BigQuery, "no `now()`; GoogleSQL spells it `CURRENT_TIMESTAMP()`"),
     gap("PI", DialectId::BigQuery, "no `pi()` in GoogleSQL"),
     //
     // The `%` finding is sharper than a missing name: smelt *does* lower
@@ -465,6 +474,36 @@ static ROWS: &[LedgerRow] = &[
         "a GoogleSQL ARRAY cannot hold a NULL element, so aggregating a NULL-bearing column raises; DuckDB keeps the NULL.",
     ),
     //
+    // Renamed correctly, but the *shape* still differs — each found only after
+    // the rename landed, because until then the name itself was missing.
+    gap_at(
+        "ARG_MAX",
+        DialectId::BigQuery,
+        Position::Window,
+        "GoogleSQL's MAX_BY is an aggregate only; it does not accept an OVER clause",
+    ),
+    gap_at(
+        "ARG_MIN",
+        DialectId::BigQuery,
+        Position::Window,
+        "GoogleSQL's MIN_BY is an aggregate only; it does not accept an OVER clause",
+    ),
+    gap(
+        "PERCENTILE_CONT",
+        DialectId::BigQuery,
+        "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
+    ),
+    gap(
+        "PERCENTILE_DISC",
+        DialectId::BigQuery,
+        "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
+    ),
+    type_gap(
+        "TRUNCATE",
+        DialectId::BigQuery,
+        "renames to TRUNC, which returns FLOAT64; smelt infers the argument's integer type",
+    ),
+    //
     // Divergences: accepted, permanent semantic differences. No rename or
     // rewrite closes these, so users have to know about them.
     divergent(
@@ -499,36 +538,11 @@ static ROWS: &[LedgerRow] = &[
         DialectId::DuckDb,
         "no `to_char` in DuckDB; `strftime` is the temporal half of it",
     ),
-    gap(
-        "TRUNCATE",
-        DialectId::DuckDb,
-        "no `truncate` scalar in DuckDB; `trunc` is the numeric one",
-    ),
     gap("QUOTE_IDENT", DialectId::DuckDb, "PostgreSQL-only builtin"),
     gap(
         "QUOTE_LITERAL",
         DialectId::DuckDb,
         "PostgreSQL-only builtin",
-    ),
-    gap(
-        "JSON_EXTRACT_TEXT",
-        DialectId::DuckDb,
-        "DuckDB spells it `json_extract_string`",
-    ),
-    gap(
-        "JSON_OBJECT_KEYS",
-        DialectId::DuckDb,
-        "DuckDB spells it `json_keys`",
-    ),
-    gap(
-        "PERCENTILE_CONT",
-        DialectId::DuckDb,
-        "DuckDB spells the ordered-set aggregate `quantile_cont`",
-    ),
-    gap(
-        "PERCENTILE_DISC",
-        DialectId::DuckDb,
-        "DuckDB spells the ordered-set aggregate `quantile_disc`",
     ),
     gap(
         "DATE_SUB",

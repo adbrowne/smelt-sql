@@ -1870,6 +1870,14 @@ fn emit_registered_function(
         // printer unit test.
         Emission::Native | Emission::Unsupported { .. } => false,
         Emission::Rename(new_name) => {
+            // The author already wrote the target spelling — via an alias, or
+            // in different case. Rewriting it would churn the user's own text
+            // (and break DuckDB byte-identity, `architecture.md` §"Print-level
+            // identity for the DuckDB dialect": input already using
+            // DuckDB-flavoured spellings round-trips byte-identically).
+            if name.eq_ignore_ascii_case(new_name) {
+                return false;
+            }
             print_function_with_renamed(node, ctx, out, new_name);
             true
         }

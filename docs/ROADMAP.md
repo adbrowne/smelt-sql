@@ -221,23 +221,32 @@ engine:
   and, in window position, a select item with no alias at all — while the registry classifies
   both as aggregates. Closing it is a contextual-keyword change in `smelt-parser`.
 
-**Residual gaps the sweeps found**, all recorded in
-`crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted per-dialect by
-`.claude/dialect-gaps-baseline.txt`:
+Sixteen gaps closed in the same pass, as verified `Emission::Rename` rows — each measured
+against the live engine, never read from documentation: `ARG_MAX`/`ARG_MIN` → `MAX_BY`/`MIN_BY`,
+`STRPOS` → `INSTR`, `JSON_EXTRACT`/`JSON_EXTRACT_TEXT` → `GET_JSON_OBJECT` on Spark;
+`RANDOM` → `RAND`, `NOW` → `CURRENT_TIMESTAMP`, `TRUNCATE` → `TRUNC`,
+`GROUP_CONCAT`/`LISTAGG` → `STRING_AGG`, `JSON_EXTRACT_TEXT` → `JSON_VALUE`,
+`MAKE_DATE`/`MAKE_TIME`/`MAKE_TIMESTAMP` → `DATE`/`TIME`/`DATETIME` on BigQuery;
+`JSON_OBJECT_KEYS` → `JSON_KEYS` and `TRUNCATE` → `TRUNC` on DuckDB.
 
-- **DuckDB: 15.** Ten names smelt's registry recognises that DuckDB has no function for
-  (`INITCAP`, `TO_CHAR`, `TRUNCATE`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `JSON_EXTRACT_TEXT`,
-  `JSON_OBJECT_KEYS`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `DATE_SUB`), plus the five
-  type-inference rows above.
-- **Spark: 32.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
+A rename now suppresses itself when the author already wrote the target spelling, so a user
+writing DuckDB's own `json_extract_string` keeps their text — the byte-identity promise held.
+
+**Residual gaps**, all recorded in `crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted
+per-dialect by `.claude/dialect-gaps-baseline.txt`:
+
+- **DuckDB: 12.** Seven names smelt's registry recognises that DuckDB has no function for
+  (`INITCAP`, `TO_CHAR`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `DATE_SUB`, …), the five
+  type-inference rows above, and the ordered-set percentiles in window position.
+- **Spark: 27.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
   logarithm on Spark and base 10 on DuckDB, and `DAYOFWEEK` numbers the week from a different
   day. Four more are permanent semantic differences no rename can close (`CONCAT`'s NULL
   propagation, `ARRAY_AGG`'s NULL elements, `CORR`/`REGR_SLOPE`'s NaN-versus-NULL convention).
-- **BigQuery: 50**, from a live sweep on August 24. `LOG` diverges the same way it does on
+- **BigQuery: 42**, from a live sweep on August 24. `LOG` diverges the same way it does on
   Spark. Two findings are sharper than a missing name: **`%` lowers to `MOD`, and GoogleSQL's
   `MOD` accepts only `INT64`/`NUMERIC`** — so the lowering is correct for integer operands and a
   hard failure for floating-point ones, the same operand-type dependence that made `//`
-  unlowerable; and **`DATE_TRUNC`'s argument order is reversed** relative to DuckDB's. Seven are
+  unlowerable; and **`DATE_TRUNC`'s argument order is reversed** relative to DuckDB's. Eleven are
   accepted permanent divergences (`GREATEST`/`LEAST` NULL propagation, `MD5`'s BYTES-versus-hex
   return, `TO_JSON`'s JSON `null`, `POWER`'s domain on a negative base, `ARRAY_AGG`'s refusal of
   NULL elements).

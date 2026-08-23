@@ -4188,14 +4188,20 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         })],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
     ));
-    insert(Signature::new(
-        "NOW",
-        vec![],
-        vec![],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: true,
-        })),
-    ));
+    insert(
+        Signature::new(
+            "NOW",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: true,
+            })),
+        )
+        .with_emission(&[
+            // GoogleSQL has no `now()`; verified live 2026-08-24.
+            (DialectId::BigQuery, Emission::Rename("CURRENT_TIMESTAMP")),
+        ]),
+    );
     insert(Signature::new(
         "CURRENT_DATE",
         vec![],
@@ -4229,7 +4235,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T"), concrete(DataType::Text)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // GoogleSQL spells the separator-taking string aggregate `STRING_AGG`.
+            // Verified live 2026-08-24: `STRING_AGG(x, ',')` -> STRING.
+            (DialectId::BigQuery, Emission::Rename("STRING_AGG")),
+        ]),
     );
     insert(
         Signature::new(
@@ -4384,7 +4395,13 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Var("T".into()),
         )
         .with_kind(ExprKind::Agg)
-        .with_aliases(&["MAX_BY"]),
+        .with_aliases(&["MAX_BY"])
+        .with_emission(&[
+            // Both spell it `MAX_BY`. Verified live 2026-08-24 on Spark 4.0.0 and
+            // BigQuery: `MAX_BY(x, y)` resolves on each.
+            (DialectId::SparkSql, Emission::Rename("MAX_BY")),
+            (DialectId::BigQuery, Emission::Rename("MAX_BY")),
+        ]),
     );
     // arg_min(value, key) → value: the order-monotone-overwrite family's
     // minimum-ordering counterpart to `ARG_MAX`, aliased `MIN_BY`.
@@ -4396,7 +4413,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Var("T".into()),
         )
         .with_kind(ExprKind::Agg)
-        .with_aliases(&["MIN_BY"]),
+        .with_aliases(&["MIN_BY"])
+        .with_emission(&[
+            // Both spell it `MIN_BY`. Verified live 2026-08-24.
+            (DialectId::SparkSql, Emission::Rename("MIN_BY")),
+            (DialectId::BigQuery, Emission::Rename("MIN_BY")),
+        ]),
     );
     insert(
         Signature::new(
@@ -4543,12 +4565,19 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
     ));
-    insert(Signature::new(
-        "STRPOS",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
-    ));
+    insert(
+        Signature::new(
+            "STRPOS",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_emission(&[
+            // Spark spells it `INSTR`, with the same (haystack, needle) argument order.
+            // Verified live 2026-08-24: `instr('abc','b')` -> 2.
+            (DialectId::SparkSql, Emission::Rename("INSTR")),
+        ]),
+    );
     insert(Signature::new(
         "LEFT",
         vec![],
@@ -4684,31 +4713,44 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_syntax_form(SyntaxForm::Special),
     );
-    insert(Signature::new(
-        "MAKE_DATE",
-        vec![],
-        vec![
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-        ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
-    insert(Signature::new(
-        "MAKE_TIMESTAMP",
-        vec![],
-        vec![
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::Double),
-        ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: false,
-        })),
-    ));
+    insert(
+        Signature::new(
+            "MAKE_DATE",
+            vec![],
+            vec![
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_emission(&[
+            // GoogleSQL's three-argument `DATE(y, m, d)` is the same constructor.
+            // Verified live 2026-08-24.
+            (DialectId::BigQuery, Emission::Rename("DATE")),
+        ]),
+    );
+    insert(
+        Signature::new(
+            "MAKE_TIMESTAMP",
+            vec![],
+            vec![
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::Double),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: false,
+            })),
+        )
+        .with_emission(&[
+            // GoogleSQL's `DATETIME(y, m, d, h, mi, s)`. Verified live 2026-08-24.
+            (DialectId::BigQuery, Emission::Rename("DATETIME")),
+        ]),
+    );
     insert(Signature::new(
         "AGE",
         vec![],
@@ -4747,14 +4789,27 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     };
 
     // Extended statistical / distribution aggregates → Double.
-    for name in [
-        "CORR",
-        "COVAR_POP",
-        "COVAR_SAMP",
-        "REGR_SLOPE",
-        "PERCENTILE_CONT",
-        "PERCENTILE_DISC",
-    ] {
+    for name in ["CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE"] {
+        insert(
+            Signature::new(
+                name,
+                vec![],
+                any_args(),
+                TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+            )
+            .with_kind(ExprKind::Agg),
+        );
+    }
+
+    // Deliberately NOT renamed to DuckDB's `quantile_cont`/`quantile_disc`.
+    // DuckDB has both spellings with *different shapes*: `percentile_disc(f)
+    // WITHIN GROUP (ORDER BY x)` is the ordered-set aggregate, and
+    // `quantile_disc(x, f)` is a plain two-argument aggregate. A blanket rename
+    // turns the first into a parser error ("Unknown ordered aggregate
+    // QUANTILE_DISC") — caught by `proptests::type_conformance_tests`, which
+    // generates the WITHIN GROUP form. Closing the BigQuery gap here needs a
+    // shape-aware rewrite, not a rename.
+    for name in ["PERCENTILE_CONT", "PERCENTILE_DISC"] {
         insert(
             Signature::new(
                 name,
@@ -4787,7 +4842,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // GoogleSQL spells it `STRING_AGG`. Verified live 2026-08-24.
+            (DialectId::BigQuery, Emission::Rename("STRING_AGG")),
+        ]),
     );
     // First-argument identity aggregates (typing stays in the exception list).
     for name in ["FIRST", "LAST", "MODE"] {
@@ -4802,10 +4861,35 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         );
     }
 
+    // Lifted out of the loop below so each can carry its own emission verdict,
+    // both verified live on 2026-08-24.
+    insert(
+        Signature::new(
+            "RANDOM",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        // GoogleSQL spells it `RAND`.
+        .with_emission(&[(DialectId::BigQuery, Emission::Rename("RAND"))]),
+    );
+    insert(
+        Signature::new(
+            "TRUNCATE",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        // Neither DuckDB nor GoogleSQL has `truncate`; both spell the numeric
+        // truncation `TRUNC`.
+        .with_emission(&[
+            (DialectId::DuckDb, Emission::Rename("TRUNC")),
+            (DialectId::BigQuery, Emission::Rename("TRUNC")),
+        ]),
+    );
+
     // Extended math / trig scalars → Double.
-    for name in [
-        "ACOS", "ASIN", "POW", "CEILING", "RANDOM", "TRUNC", "TRUNCATE",
-    ] {
+    for name in ["ACOS", "ASIN", "POW", "CEILING", "TRUNC"] {
         insert(Signature::new(
             name,
             vec![],
@@ -4846,12 +4930,18 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ));
     }
     // Temporal constructors.
-    insert(Signature::new(
-        "MAKE_TIME",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Time)),
-    ));
+    insert(
+        Signature::new(
+            "MAKE_TIME",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Time)),
+        )
+        .with_emission(&[
+            // GoogleSQL's `TIME(h, m, s)`. Verified live 2026-08-24.
+            (DialectId::BigQuery, Emission::Rename("TIME")),
+        ]),
+    );
     insert(Signature::new(
         "MAKE_TIMESTAMPTZ",
         vec![],
@@ -4871,16 +4961,6 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ("JSON_OBJECT", &["JSON_BUILD_OBJECT"]),
         ("JSON_ARRAY", &["JSON_BUILD_ARRAY"]),
         ("TO_JSON", &["TO_JSONB", "ROW_TO_JSON"]),
-        ("JSON_EXTRACT", &["JSON_EXTRACT_PATH"]),
-        (
-            "JSON_EXTRACT_TEXT",
-            &[
-                "JSON_EXTRACT_STRING",
-                "JSON_EXTRACT_PATH_TEXT",
-                "GET_JSON_OBJECT",
-                "JSON_VALUE",
-            ],
-        ),
     ];
     for (name, aliases) in json_text_aliases {
         insert(
@@ -4893,6 +4973,40 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             .with_aliases(aliases),
         );
     }
+    // Lifted out of the alias loop above so each can carry its own emission
+    // verdict. The alias lists already record what the other engines *call*
+    // these; the emission rows are what smelt now *emits*, so resolution and
+    // emission finally agree. All verified live on 2026-08-24.
+    insert(
+        Signature::new(
+            "JSON_EXTRACT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&["JSON_EXTRACT_PATH"])
+        .with_emission(&[(DialectId::SparkSql, Emission::Rename("GET_JSON_OBJECT"))]),
+    );
+    insert(
+        Signature::new(
+            "JSON_EXTRACT_TEXT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&[
+            "JSON_EXTRACT_STRING",
+            "JSON_EXTRACT_PATH_TEXT",
+            "GET_JSON_OBJECT",
+            "JSON_VALUE",
+        ])
+        .with_emission(&[
+            (DialectId::DuckDb, Emission::Rename("JSON_EXTRACT_STRING")),
+            (DialectId::SparkSql, Emission::Rename("GET_JSON_OBJECT")),
+            (DialectId::BigQuery, Emission::Rename("JSON_VALUE")),
+        ]),
+    );
+
     insert(Signature::new(
         "JSON_ARRAY_LENGTH",
         vec![],
@@ -4909,7 +5023,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             )))),
         )
         // DuckDB alias.
-        .with_aliases(&["JSON_KEYS"]),
+        .with_aliases(&["JSON_KEYS"])
+        .with_emission(&[
+            // DuckDB spells it `json_keys` — already carried as an alias on this entry,
+            // so resolution and emission now agree. Verified live 2026-08-24.
+            (DialectId::DuckDb, Emission::Rename("JSON_KEYS")),
+        ]),
     );
     insert(Signature::new(
         "JSON_CONTAINS",

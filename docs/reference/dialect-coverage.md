@@ -34,8 +34,8 @@ Cell vocabulary:
 | `AGE` | call | native | native (gap #171) | native | native (gap #171) |
 | `ANY_VALUE` | call | native | native | native | native |
 | `APPROX_COUNT_DISTINCT` | call | native | native | native | native (gap #171) |
-| `ARG_MAX` | call | native | native (gap #171) | native | native (gap #171) |
-| `ARG_MIN` | call | native | native (gap #171) | native | native (gap #171) |
+| `ARG_MAX` | call | native | rename:MAX_BY | native | rename:MAX_BY (gap #171) |
+| `ARG_MIN` | call | native | rename:MIN_BY | native | rename:MIN_BY (gap #171) |
 | `ARRAY_AGG` | call | native | native (gap divergent) | native | native (gap divergent) |
 | `ASIN` | call | native | native | native | native |
 | `ATAN` | call | native | native | native | native |
@@ -81,7 +81,7 @@ Cell vocabulary:
 | `FLOOR` | call | native | native | native | native |
 | `GLOB` | infix | native | native (gap #171) | native | native (gap #171) |
 | `GREATEST` | call | native | native | native | native (gap divergent) |
-| `GROUP_CONCAT` | call | native | native (gap #171) | native | native (gap #171) |
+| `GROUP_CONCAT` | call | native | native (gap #171) | native | rename:STRING_AGG |
 | `IFNULL` | call | native | native | native | native |
 | `ILIKE` | infix | native | native | native | native (gap #171) |
 | `IN` | special | native | native | native | native |
@@ -91,10 +91,10 @@ Cell vocabulary:
 | `JSON_ARRAY` | call | native | native (gap #171) | native | native |
 | `JSON_ARRAY_LENGTH` | call | native | native (gap #171) | native | native (gap #171) |
 | `JSON_CONTAINS` | call | native | native (gap #171) | native | native (gap #171) |
-| `JSON_EXTRACT` | call | native | native (gap #171) | native | native |
-| `JSON_EXTRACT_TEXT` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native | native |
+| `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | native | rename:JSON_VALUE |
 | `JSON_OBJECT` | call | native | native (gap #171) | native | native |
-| `JSON_OBJECT_KEYS` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap #171) | native | native (gap #171) |
 | `LAG` | call | native | native | native | native |
 | `LAST` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `LAST_VALUE` | call | native | native | native | native |
@@ -103,7 +103,7 @@ Cell vocabulary:
 | `LEFT` | call | native | native | native | native |
 | `LENGTH` | call | native | native | native | native |
 | `LIKE` | infix | native | native | native | native |
-| `LISTAGG` | call | native | native | native | native (gap #171) |
+| `LISTAGG` | call | native | native | native | rename:STRING_AGG |
 | `LN` | call | native | native | native | native |
 | `LOG` | call | native | native (gap #171) | native | native (gap #171) |
 | `LOG10` | call | native | native | native | native |
@@ -111,9 +111,9 @@ Cell vocabulary:
 | `LOWER` | call | native | native | native | native |
 | `LPAD` | call | native | native | native | native |
 | `LTRIM` | call | native | native | native | native |
-| `MAKE_DATE` | call | native | native | native | native (gap #171) |
-| `MAKE_TIME` | call | native | native (gap #171) | native | native (gap #171) |
-| `MAKE_TIMESTAMP` | call | native | native | native | native (gap #171) |
+| `MAKE_DATE` | call | native | native | native | rename:DATE |
+| `MAKE_TIME` | call | native | native (gap #171) | native | rename:TIME |
+| `MAKE_TIMESTAMP` | call | native | native | native | rename:DATETIME |
 | `MAKE_TIMESTAMPTZ` | call | native | native (gap #171) | native | native (gap #171) |
 | `MAX` | call | native | native | native | native |
 | `MD5` | call | native | native | native | native (gap #171, divergent) |
@@ -122,7 +122,7 @@ Cell vocabulary:
 | `MOD` | call | native | native | native | native |
 | `MODE` | call | native | native | native | native (gap #171) |
 | `MONTH` | call | native | native | native | native (gap #171) |
-| `NOW` | call | native | native | native | native (gap #171) |
+| `NOW` | call | native | native | native | rename:CURRENT_TIMESTAMP |
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
@@ -136,7 +136,7 @@ Cell vocabulary:
 | `QUARTER` | call | native | native | native | native (gap #171) |
 | `QUOTE_IDENT` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `QUOTE_LITERAL` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
-| `RANDOM` | call | native | native | native | native (gap #171) |
+| `RANDOM` | call | native | native | native | rename:RAND |
 | `RANK` | call | native | native | native | native |
 | `REGR_SLOPE` | call | native | native (gap divergent) | native | native (gap #171) |
 | `REPEAT` | call | native | native | native | native |
@@ -156,7 +156,7 @@ Cell vocabulary:
 | `STDDEV_POP` | call | native | native | native | native |
 | `STDDEV_SAMP` | call | native | native | native | native |
 | `STRING_AGG` | call | native | native | native | native |
-| `STRPOS` | call | native | native (gap #171) | native | native |
+| `STRPOS` | call | native | rename:INSTR | native | native |
 | `SUBSTR` | call | native | native | native | native |
 | `SUBSTRING` | call | native | native | native | native |
 | `SUM` | call | native | native | native | native |
@@ -168,7 +168,7 @@ Cell vocabulary:
 | `TRANSLATE` | call | native | native | native | native |
 | `TRIM` | call | native | native | native | native |
 | `TRUNC` | call | native | native (gap #171) | native | native (gap #171) |
-| `TRUNCATE` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `TRUNCATE` | call | rename:TRUNC | native (gap #171) | native | rename:TRUNC (gap #171) |
 | `UNNEST` | table-fn | native (gap #171) | rename:EXPLODE (gap #171) | native | native (gap #171) |
 | `UPPER` | call | native | native | native | native |
 | `VARIANCE` | call | native | native | native | native |
