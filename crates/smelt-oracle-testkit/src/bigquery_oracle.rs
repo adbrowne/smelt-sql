@@ -15,7 +15,7 @@
 
 #![allow(dead_code)]
 
-use super::duckdb_oracle::TypeOracle;
+use crate::duckdb_oracle::TypeOracle;
 use serde::Deserialize;
 use smelt_types::DataType;
 use std::io::{BufRead, BufReader, Write};

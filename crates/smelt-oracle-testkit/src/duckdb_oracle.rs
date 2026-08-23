@@ -3,7 +3,7 @@
 //! The `TypeOracle` trait enables future PostgreSQL/Spark backends without changing
 //! the property test harness.
 
-use super::arrow_mapping::arrow_to_smelt;
+use crate::arrow_mapping::arrow_to_smelt;
 use duckdb::Connection;
 use smelt_types::DataType;
 
@@ -18,7 +18,14 @@ pub struct DuckDbOracle {
     conn: Connection,
 }
 
+impl Default for DuckDbOracle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DuckDbOracle {
+    /// Open a fresh in-memory DuckDB.
     pub fn new() -> Self {
         Self {
             conn: Connection::open_in_memory().expect("failed to open in-memory DuckDB"),

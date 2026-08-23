@@ -4253,6 +4253,7 @@ dependencies = [
  "smelt-core",
  "smelt-dialect",
  "smelt-logical",
+ "smelt-oracle-testkit",
  "smelt-parser",
  "smelt-runtime",
  "smelt-types",
@@ -4347,6 +4348,17 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "smelt-oracle-testkit"
+version = "0.3.2"
+dependencies = [
+ "arrow",
+ "duckdb",
+ "serde",
+ "serde_json",
+ "smelt-types",
 ]
 
 [[package]]

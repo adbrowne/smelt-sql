@@ -14,9 +14,7 @@
 #[allow(dead_code)]
 mod prop_helpers;
 
-use prop_helpers::bigquery_oracle::BigQueryOracle;
 use prop_helpers::divergences::{find_divergence, known_divergences};
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, join_scenario_strategy, multi_model_scenario_strategy,
     test_scenario_strategy, three_model_scenario_strategy, wrap_in_outer_cte, TypedExpr,
@@ -25,8 +23,10 @@ use prop_helpers::known_unknowns::{find_known_unknown, known_unknowns};
 use prop_helpers::oracle_check::{
     check_types_against_oracle, expr_sql_by_alias, run_smelt_inference,
 };
-use prop_helpers::spark_oracle::SparkOracle;
-use prop_helpers::type_comparison::{compare_types, TypeMatch};
+use smelt_oracle_testkit::BigQueryOracle;
+use smelt_oracle_testkit::SparkOracle;
+use smelt_oracle_testkit::{compare_types, TypeMatch};
+use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 
 use smelt_types::DataType;
 

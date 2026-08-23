@@ -18,11 +18,11 @@
 mod prop_helpers;
 
 use prop_helpers::divergences::known_divergences;
-use prop_helpers::duckdb_oracle::DuckDbOracle;
 use prop_helpers::generators::{TypedExpr, TypedSource};
 use prop_helpers::known_unknowns::known_unknowns;
 use prop_helpers::oracle_check::check_types_against_oracle;
-use prop_helpers::spark_oracle::SparkOracle;
+use smelt_oracle_testkit::DuckDbOracle;
+use smelt_oracle_testkit::SparkOracle;
 
 use smelt_types::DataType;
 

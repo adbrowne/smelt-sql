@@ -1,0 +1,15 @@
+[package]
+name = "smelt-oracle-testkit"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Dev-only cross-engine oracle transport: DuckDB / Spark / BigQuery schema and value probing, error classification, and the type comparator. Not a production dependency of any crate."
+
+[dependencies]
+smelt-types = { path = "../smelt-types" }
+duckdb = { workspace = true }
+arrow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

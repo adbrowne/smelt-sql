@@ -38,11 +38,11 @@
 #[allow(dead_code)]
 mod prop_helpers;
 
-use prop_helpers::duckdb_oracle::DuckDbOracle;
 use prop_helpers::monotonicity_gen::{
     gen_case_strategy, hazard_corpus, ts_literal, GenCase, Shape, SOURCE_COLUMN, SOURCE_NAME,
     SOURCE_REF, SOURCE_TABLE,
 };
+use smelt_oracle_testkit::DuckDbOracle;
 
 use smelt_core::config::{Config, Materialization, Target};
 use smelt_logical::{trace_event_time, BoundContext, EventTimeTrace, Offset};

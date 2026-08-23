@@ -26,7 +26,7 @@ use smelt_logical::analysis::source_bounds::{
 };
 use smelt_types::SqlFunction;
 
-use crate::prop_helpers::duckdb_oracle::DuckDbOracle;
+use smelt_oracle_testkit::DuckDbOracle;
 
 const PARTITION_DATE: &str = "2024-06-10";
 

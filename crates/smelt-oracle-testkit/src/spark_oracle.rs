@@ -4,7 +4,7 @@
 //! Instead of spawning a new JVM per query (which takes ~3-5s each), we keep a
 //! long-lived `spark-sql` process with stdin/stdout pipes and feed queries through it.
 
-use super::duckdb_oracle::TypeOracle;
+use crate::duckdb_oracle::TypeOracle;
 use smelt_types::DataType;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
