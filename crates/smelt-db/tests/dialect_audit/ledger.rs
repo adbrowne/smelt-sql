@@ -45,11 +45,14 @@ pub enum Verdict {
 /// the probe; a `Value` row says it runs and computes something different. Two
 /// very different findings, and conflating them would make the schema leg
 /// report a value-only row as stale the moment the engine parsed the query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Leg {
     /// The engine refuses the probe outright.
     Schema,
-    /// The engine accepts the probe and returns a different answer.
+    /// The engine accepts the probe but reports a different output *type* than
+    /// smelt inferred for it.
+    Type,
+    /// The engine accepts the probe and returns a different *answer*.
     Value,
 }
 
@@ -82,8 +85,44 @@ const fn gap(name: &'static str, dialect: DialectId, detail: &'static str) -> Le
     }
 }
 
+/// A one-position gap the engine surfaces only at execution: the dry run
+/// accepts the query and running it does not.
+const fn value_gap_at(
+    name: &'static str,
+    dialect: DialectId,
+    position: Position,
+    detail: &'static str,
+) -> LedgerRow {
+    LedgerRow {
+        name,
+        dialect,
+        position: Some(position),
+        leg: Leg::Value,
+        verdict: Verdict::Gap {
+            issue: "#171",
+            detail,
+        },
+    }
+}
+
+/// A gap the engine surfaces in the *type* of the result: it accepts the probe
+/// but reports a different output type than smelt inferred.
+const fn type_gap(name: &'static str, dialect: DialectId, detail: &'static str) -> LedgerRow {
+    LedgerRow {
+        name,
+        dialect,
+        position: None,
+        leg: Leg::Type,
+        verdict: Verdict::Gap {
+            issue: "#171",
+            detail,
+        },
+    }
+}
+
 /// A gap the engine hides: it accepts the probe and computes a different
-/// number. The dangerous class — the schema leg cannot see it.
+/// number. The dangerous class — neither the schema nor the type leg can see
+/// it.
 const fn value_gap(name: &'static str, dialect: DialectId, detail: &'static str) -> LedgerRow {
     LedgerRow {
         name,
@@ -133,8 +172,8 @@ pub fn dialect_divergences() -> &'static [LedgerRow] {
 
 /// The row covering `(name, dialect, position)` on `leg`, if one exists.
 ///
-/// A `Schema` row also exempts the value leg: a probe the engine refuses can
-/// never be value-compared. The reverse is not true.
+/// A `Schema` row also exempts the type and value legs: a probe the engine
+/// refuses has neither a type nor a value to compare. The reverse is not true.
 pub fn find(
     name: &str,
     dialect: DialectId,
@@ -145,7 +184,10 @@ pub fn find(
         r.name == name
             && r.dialect == dialect
             && r.position.map(|p| p == position).unwrap_or(true)
-            && (r.leg == leg || (r.leg == Leg::Schema && leg == Leg::Value))
+            // A `Schema` row exempts every downstream leg: a probe the engine
+            // refuses has neither a type nor a value to compare. The reverse
+            // does not hold.
+            && (r.leg == leg || r.leg == Leg::Schema)
     })
 }
 
@@ -158,6 +200,44 @@ pub fn find(
 /// Closing one means adding an `Emission::Rename`, an `Emission::Rewrite`, or
 /// an `Emission::Unsupported` row to the entry, and deleting its row here.
 static ROWS: &[LedgerRow] = &[
+    //
+    // Type-leg gaps: the engine accepts the probe, but smelt's inferred output
+    // type disagrees with what the engine reports. These are inference holes,
+    // not emission ones — and none of them is reachable by
+    // `type_property_tests`, which generates from `core_functions()`, a
+    // hand-maintained registry-blind table.
+    type_gap(
+        "DATE_ADD",
+        DialectId::DuckDb,
+        "`DATE_ADD(date, INTERVAL …)` infers Unknown(Dynamic); DuckDB returns TIMESTAMP",
+    ),
+    type_gap(
+        "EXPLODE",
+        DialectId::DuckDb,
+        "unnesting an ARRAY<T> infers Unknown(Dynamic) rather than the element type T",
+    ),
+    type_gap(
+        "UNNEST",
+        DialectId::DuckDb,
+        "unnesting an ARRAY<T> infers Unknown(Dynamic) rather than the element type T",
+    ),
+    // `FIRST` and `LAST` are lexed as keywords (`FIRST_KW`/`LAST_KW`, for
+    // `NULLS FIRST` / `NULLS LAST`), so a call to either never parses as a
+    // FUNCTION_CALL at all. In aggregate position that surfaces as an
+    // Unknown type; in window position the select item does not even yield an
+    // alias. The registry claims both are aggregates, so this is a
+    // registry-versus-parser gap, and closing it is a contextual-keyword
+    // change in `smelt-parser`, not a registry edit.
+    type_gap(
+        "FIRST",
+        DialectId::DuckDb,
+        "lexed as the `NULLS FIRST` keyword, so `FIRST(x)` never parses as a call",
+    ),
+    type_gap(
+        "LAST",
+        DialectId::DuckDb,
+        "lexed as the `NULLS LAST` keyword, so `LAST(x)` never parses as a call",
+    ),
     // ── Spark ────────────────────────────────────────────────────────────
     // Established by running the derived probes against a live Spark 4.0.0
     // (`SPARK_CONTAINER_ID=$(docker ps -qf name=smelt-spark) cargo test -p
@@ -202,6 +282,187 @@ static ROWS: &[LedgerRow] = &[
         DialectId::SparkSql,
         Position::Window,
         "Spark has `median` as an aggregate but not as a window function",
+    ),
+    //
+    // Type-leg gaps. The same two inference families DuckDB surfaces, confirmed
+    // independently on Spark — so neither is an engine quirk.
+    type_gap(
+        "EXPLODE",
+        DialectId::SparkSql,
+        "unnesting an ARRAY<T> infers Unknown(Dynamic) rather than the element type T",
+    ),
+    type_gap(
+        "UNNEST",
+        DialectId::SparkSql,
+        "unnesting an ARRAY<T> infers Unknown(Dynamic) rather than the element type T",
+    ),
+    type_gap(
+        "FIRST",
+        DialectId::SparkSql,
+        "lexed as the `NULLS FIRST` keyword, so `FIRST(x)` never parses as a call",
+    ),
+    type_gap(
+        "LAST",
+        DialectId::SparkSql,
+        "lexed as the `NULLS LAST` keyword, so `LAST(x)` never parses as a call",
+    ),
+    //
+    // ── BigQuery ─────────────────────────────────────────────────────────
+    // Established by `bash scripts/bigquery-dialect-audit.sh` against the live
+    // warehouse on 2026-08-24 — measured, not read from documentation. This is
+    // the manual tier: the value leg executes rather than dry-runs, so it bills.
+    gap("QUARTER", DialectId::BigQuery, "no `quarter`; GoogleSQL spells it `EXTRACT(QUARTER FROM d)`"),
+    gap("QUOTE_IDENT", DialectId::BigQuery, "PostgreSQL-only builtin"),
+    gap("QUOTE_LITERAL", DialectId::BigQuery, "PostgreSQL-only builtin"),
+    gap("RANDOM", DialectId::BigQuery, "GoogleSQL spells it `RAND`"),
+    gap("SPLIT_PART", DialectId::BigQuery, "no `split_part`; GoogleSQL has `SPLIT` returning an array"),
+    gap("TO_CHAR", DialectId::BigQuery, "no `to_char`; GoogleSQL has `FORMAT_TIMESTAMP` / `FORMAT`"),
+    gap("TO_SECONDS", DialectId::BigQuery, "no `to_seconds` in GoogleSQL"),
+    gap("TRUNCATE", DialectId::BigQuery, "no `truncate` scalar in GoogleSQL"),
+    gap("YEAR", DialectId::BigQuery, "no `year`; GoogleSQL spells it `EXTRACT(YEAR FROM d)`"),
+    gap("POSITION", DialectId::BigQuery, "no `POSITION(x IN y)` form; GoogleSQL has `STRPOS(y, x)`"),
+    gap("UNNEST", DialectId::BigQuery, "GoogleSQL allows `UNNEST` only in a FROM clause, never in a select list"),
+    gap("ARG_MAX", DialectId::BigQuery, "GoogleSQL spells it `MAX_BY`"),
+    gap("ARG_MIN", DialectId::BigQuery, "GoogleSQL spells it `MIN_BY`"),
+    gap("GROUP_CONCAT", DialectId::BigQuery, "GoogleSQL spells it `STRING_AGG`"),
+    gap("LISTAGG", DialectId::BigQuery, "GoogleSQL spells it `STRING_AGG`"),
+    gap("MODE", DialectId::BigQuery, "no `mode`; GoogleSQL has `APPROX_TOP_COUNT`"),
+    gap("REGR_SLOPE", DialectId::BigQuery, "no regression aggregates in GoogleSQL"),
+    gap("FIRST", DialectId::BigQuery, "GoogleSQL's `FIRST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
+    gap("LAST", DialectId::BigQuery, "GoogleSQL's `LAST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
+    gap("PERCENTILE_CONT", DialectId::BigQuery, "GoogleSQL requires argument 2 to be a literal, so a column percentile is not expressible"),
+    gap("PERCENTILE_DISC", DialectId::BigQuery, "GoogleSQL requires argument 2 to be a literal, so a column percentile is not expressible"),
+    // `MEDIAN` lowers correctly in aggregate position; the window rewrite emits
+    // `PERCENTILE_CONT ... OVER (... ORDER BY ...)`, and GoogleSQL forbids a
+    // window ORDER BY on that analytic function. Scoped to the failing position.
+    gap_at(
+        "MEDIAN",
+        DialectId::BigQuery,
+        Position::Window,
+        "the window rewrite emits PERCENTILE_CONT with a window ORDER BY, which GoogleSQL forbids",
+    ),
+    //
+    // Type-leg gaps.
+    type_gap(
+        "SIGN",
+        DialectId::BigQuery,
+        "GoogleSQL's SIGN(FLOAT64) returns FLOAT64; smelt infers SmallInt, matching DuckDB's TINYINT",
+    ),
+    type_gap(
+        "TRUNC",
+        DialectId::BigQuery,
+        "GoogleSQL's TRUNC always returns FLOAT64; smelt infers the argument's integer type",
+    ),
+    //
+    // A second BigQuery family: names GoogleSQL has no function for at all.
+    gap("AGE", DialectId::BigQuery, "no `age`; GoogleSQL expresses interval difference with `TIMESTAMP_DIFF`"),
+    gap("DATE_PART", DialectId::BigQuery, "no `date_part`; GoogleSQL spells it `EXTRACT(part FROM d)`"),
+    gap("DATE_TRUNC", DialectId::BigQuery, "GoogleSQL's argument order is `DATE_TRUNC(date, part)`, the reverse of DuckDB's"),
+    gap("DAY", DialectId::BigQuery, "no `day`; GoogleSQL spells it `EXTRACT(DAY FROM d)`"),
+    gap("DAYOFWEEK", DialectId::BigQuery, "no `dayofweek`; GoogleSQL spells it `EXTRACT(DAYOFWEEK FROM d)`"),
+    gap("EXPLODE", DialectId::BigQuery, "GoogleSQL allows `UNNEST` only in a FROM clause, never in a select list"),
+    gap("GLOB", DialectId::BigQuery, "no `GLOB` operator in GoogleSQL"),
+    gap("ILIKE", DialectId::BigQuery, "no `ILIKE` operator; GoogleSQL case-folds with `LOWER(x) LIKE LOWER(p)`"),
+    gap("JSON_ARRAY_LENGTH", DialectId::BigQuery, "no `json_array_length`; GoogleSQL has `ARRAY_LENGTH(JSON_QUERY_ARRAY(...))`"),
+    gap("JSON_CONTAINS", DialectId::BigQuery, "no `json_contains` in GoogleSQL"),
+    gap("JSON_EXTRACT_TEXT", DialectId::BigQuery, "GoogleSQL spells it `JSON_VALUE`"),
+    gap("JSON_OBJECT_KEYS", DialectId::BigQuery, "no `json_object_keys` in GoogleSQL"),
+    gap("LOG2", DialectId::BigQuery, "no `log2`; GoogleSQL spells it `LOG(x, 2)`"),
+    gap("MAKE_DATE", DialectId::BigQuery, "no `make_date`; GoogleSQL spells it `DATE(y, m, d)`"),
+    gap("MAKE_TIME", DialectId::BigQuery, "no `make_time`; GoogleSQL spells it `TIME(h, m, s)`"),
+    gap("MAKE_TIMESTAMP", DialectId::BigQuery, "no `make_timestamp`; GoogleSQL spells it `DATETIME(...)`"),
+    gap("MAKE_TIMESTAMPTZ", DialectId::BigQuery, "no `make_timestamptz` in GoogleSQL"),
+    gap("MONTH", DialectId::BigQuery, "no `month`; GoogleSQL spells it `EXTRACT(MONTH FROM d)`"),
+    gap("NOW", DialectId::BigQuery, "no `now()`; GoogleSQL spells it `CURRENT_TIMESTAMP()`"),
+    gap("PI", DialectId::BigQuery, "no `pi()` in GoogleSQL"),
+    //
+    // The `%` finding is sharper than a missing name: smelt *does* lower
+    // `a % b` to `MOD(a, b)` on GoogleSQL, but GoogleSQL's MOD accepts only
+    // INT64 and NUMERIC. The lowering is therefore correct for integer
+    // operands and a hard failure for floating-point ones — the same
+    // operand-type-dependence that made `//` unlowerable.
+    gap(
+        "%",
+        DialectId::BigQuery,
+        "the MOD lowering only type-checks for INT64/NUMERIC operands; a float `%` is refused",
+    ),
+    //
+    // Type-leg gaps.
+    type_gap("DATE_ADD", DialectId::BigQuery, "`DATE_ADD(date, INTERVAL …)` infers Unknown(Dynamic); GoogleSQL returns DATE"),
+    type_gap("DATE_SUB", DialectId::BigQuery, "`DATE_SUB(date, INTERVAL …)` infers Unknown(Dynamic); GoogleSQL returns DATE"),
+    type_gap("MD5", DialectId::BigQuery, "GoogleSQL's MD5 returns BYTES; smelt infers Text, matching DuckDB's hex string"),
+    //
+    // Value-leg gaps: accepted, and computing something different.
+    value_gap(
+        "LOG",
+        DialectId::BigQuery,
+        "GoogleSQL's LOG(x) is the natural logarithm; DuckDB's is base 10 - the same silently wrong number Spark has",
+    ),
+    divergent(
+        "CONCAT",
+        DialectId::BigQuery,
+        "GoogleSQL's CONCAT propagates NULL where DuckDB's treats it as the empty string. A NULL-propagation model difference, not a spelling one.",
+    ),
+    divergent(
+        "CORR",
+        DialectId::BigQuery,
+        "GoogleSQL returns NULL for a degenerate correlation where DuckDB returns NaN.",
+    ),
+    divergent(
+        "GREATEST",
+        DialectId::BigQuery,
+        "GoogleSQL returns NULL if any argument is NULL; DuckDB ignores NULL arguments. A NULL-propagation model difference.",
+    ),
+    divergent(
+        "LEAST",
+        DialectId::BigQuery,
+        "GoogleSQL returns NULL if any argument is NULL; DuckDB ignores NULL arguments. A NULL-propagation model difference.",
+    ),
+    divergent(
+        "MD5",
+        DialectId::BigQuery,
+        "GoogleSQL returns raw BYTES where DuckDB returns a hex string; the digests agree byte for byte.",
+    ),
+    divergent(
+        "TO_JSON",
+        DialectId::BigQuery,
+        "GoogleSQL renders a SQL NULL as the JSON text `null`; DuckDB returns SQL NULL.",
+    ),
+    divergent(
+        "DATE_ADD",
+        DialectId::BigQuery,
+        "GoogleSQL's DATE_ADD on a DATE stays a DATE; DuckDB widens to TIMESTAMP. Both name the same day.",
+    ),
+    //
+    // Execution-time findings, reachable only by the value leg: the query is
+    // accepted, then the warehouse refuses the data.
+    // Dry-run-invisible: BigQuery plans the analytic form happily and only
+    // refuses it on execution, so this is a value-leg row, not a schema one.
+    value_gap_at(
+        "APPROX_COUNT_DISTINCT",
+        DialectId::BigQuery,
+        Position::Window,
+        "GoogleSQL has APPROX_COUNT_DISTINCT as an aggregate but not as an analytic function",
+    ),
+    divergent(
+        "POWER",
+        DialectId::BigQuery,
+        "GoogleSQL raises on a negative base with a fractional exponent (POW(-2.5, -2.5)); DuckDB returns NaN. A loud failure, not a wrong number.",
+    ),
+    divergent(
+        "**",
+        DialectId::BigQuery,
+        "lowers to POWER, and inherits its domain: GoogleSQL raises on a negative base with a fractional exponent where DuckDB returns NaN.",
+    ),
+    divergent(
+        "^",
+        DialectId::BigQuery,
+        "lowers to POWER, and inherits its domain: GoogleSQL raises on a negative base with a fractional exponent where DuckDB returns NaN.",
+    ),
+    divergent(
+        "ARRAY_AGG",
+        DialectId::BigQuery,
+        "a GoogleSQL ARRAY cannot hold a NULL element, so aggregating a NULL-bearing column raises; DuckDB keeps the NULL.",
     ),
     //
     // Divergences: accepted, permanent semantic differences. No rename or

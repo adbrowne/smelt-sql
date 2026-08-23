@@ -6,16 +6,19 @@
 //! dropped, which is how a registry-blind harness quietly stops covering
 //! things.
 
+use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_parser::ast::File;
 use smelt_types::{
-    BuiltinRegistry, DialectId, ExprKind, SigParam, Signature, SyntaxForm, TypeConstraint,
+    BuiltinRegistry, DataType, DialectId, ExprKind, SigParam, Signature, SyntaxForm,
+    TypeConstraint, TypedColumn,
 };
 use std::collections::{HashMap, HashSet};
 
 use crate::fixture;
 use crate::overrides;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Position {
     /// `SELECT <expr> AS a FROM fixture ORDER BY rid`
     Scalar,
@@ -304,4 +307,43 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         fixture::fixture_cte(dialect),
         print(&parsed.syntax(), &ctx)
     )
+}
+
+/// smelt's own inferred type for each column of `smelt_sql`, as
+/// `(alias, DataType)` pairs in select-list order.
+///
+/// Inference runs over the probe's *source* SQL — before any dialect lowering —
+/// which is the same rule the compile path follows
+/// (`multi_backend.md` §"Output-schema type conformance"). The fixture is
+/// declared to the `TypeContext` as a CTE rather than re-parsed out of the
+/// generated `VALUES` text, so a change to the fixture's rendering cannot
+/// silently change what inference is asked about.
+pub fn infer_types(smelt_sql: &str) -> Vec<(String, DataType)> {
+    let parse = smelt_parser::parse(smelt_sql);
+    let Some(file) = File::cast(parse.syntax()) else {
+        return Vec::new();
+    };
+    let Some(select_stmt) = file.select_stmt() else {
+        return Vec::new();
+    };
+
+    let mut ctx = TypeContext::new();
+    for (name, data_type) in fixture::column_types() {
+        ctx.add_cte_column("fixture", name, TypedColumn::nullable(data_type));
+    }
+
+    let column_types = infer_select_column_types(&select_stmt, &ctx);
+    let Some(select_list) = select_stmt.select_list() else {
+        return Vec::new();
+    };
+    select_list
+        .items()
+        .zip(column_types.iter())
+        .map(|item| {
+            (
+                item.0.alias().unwrap_or_else(|| "?".to_string()),
+                item.1.data_type.clone(),
+            )
+        })
+        .collect()
 }

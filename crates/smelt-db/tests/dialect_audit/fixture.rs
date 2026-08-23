@@ -8,7 +8,7 @@
 //! every nullable column. The first row carries an explicit cast on every value
 //! so the column types are pinned rather than inferred.
 
-use smelt_types::DialectId;
+use smelt_types::{DataType, DialectId};
 
 /// Columns, in fixture order. `TypeConstraint` selection in `probe.rs` maps
 /// onto exactly these names.
@@ -304,6 +304,41 @@ pub fn fixture_cte(dialect: DialectId) -> String {
         tuples.join(", "),
         names.join(", ")
     )
+}
+
+/// Each fixture column's smelt `DataType`, for building the `TypeContext` the
+/// type leg infers against.
+///
+/// This is the same information `ty()` renders per dialect, in smelt's own
+/// vocabulary rather than an engine's. The two are kept in one file precisely
+/// so a column cannot be declared one type to the engine and another to
+/// inference.
+pub fn column_types() -> Vec<(&'static str, DataType)> {
+    vec![
+        ("rid", DataType::BigInt),
+        ("g", DataType::Varchar { max_length: None }),
+        ("n_int", DataType::Integer),
+        ("n_bigint", DataType::BigInt),
+        ("n_double", DataType::Double),
+        (
+            "n_dec",
+            DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+        ),
+        ("s_text", DataType::Varchar { max_length: None }),
+        ("b_bool", DataType::Boolean),
+        ("d_date", DataType::Date),
+        (
+            "ts_ts",
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+        ),
+        ("arr_int", DataType::Array(Box::new(DataType::BigInt))),
+        ("j_json", DataType::Varchar { max_length: None }),
+    ]
 }
 
 /// How many rows the fixture has. Asserted by the DuckDB execution test rather

@@ -118,6 +118,10 @@ static OVERRIDES: &[Override] = &[
     args("EVERY", &["b_bool"]),
     args("POW", &["n_double", "2"]),
     args("REVERSE", &["s_text"]),
+    // Title-casing and integer modulo want the argument types they are named
+    // for; `Variadic(Any)` and `Numeric` both derive the wrong one.
+    args("INITCAP", &["s_text"]),
+    args("MOD", &["n_bigint", "n_int"]),
     // Spark requires at least two arguments for the variadic min/max pair, and
     // `nth_value` takes the position as a second argument.
     args("GREATEST", &["n_bigint", "n_int"]),

@@ -26,17 +26,17 @@ Cell vocabulary:
 
 | Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |
 |---|---|---|---|---|---|
-| `%` | infix | native | native | native | rewrite:ModuloCall |
-| `**` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall |
+| `%` | infix | native | native | native | rewrite:ModuloCall (gap #171) |
+| `**` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall (gap divergent) |
 | `//` | infix | native | unsupported | unsupported | unsupported |
 | `ABS` | call | native | native | native | native |
 | `ACOS` | call | native | native | native | native |
-| `AGE` | call | native | native (gap #171) | native | native |
+| `AGE` | call | native | native (gap #171) | native | native (gap #171) |
 | `ANY_VALUE` | call | native | native | native | native |
-| `APPROX_COUNT_DISTINCT` | call | native | native | native | native |
-| `ARG_MAX` | call | native | native (gap #171) | native | native |
-| `ARG_MIN` | call | native | native (gap #171) | native | native |
-| `ARRAY_AGG` | call | native | native (gap divergent) | native | native |
+| `APPROX_COUNT_DISTINCT` | call | native | native | native | native (gap #171) |
+| `ARG_MAX` | call | native | native (gap #171) | native | native (gap #171) |
+| `ARG_MIN` | call | native | native (gap #171) | native | native (gap #171) |
+| `ARRAY_AGG` | call | native | native (gap divergent) | native | native (gap divergent) |
 | `ASIN` | call | native | native | native | native |
 | `ATAN` | call | native | native | native | native |
 | `ATAN2` | call | native | native | native | native |
@@ -53,8 +53,8 @@ Cell vocabulary:
 | `CHARACTER_LENGTH` | call | native | native | native | native |
 | `CHAR_LENGTH` | call | native | native | native | native |
 | `COALESCE` | call | native | native | native | native |
-| `CONCAT` | call | native | native (gap divergent) | native | native |
-| `CORR` | call | native | native (gap divergent) | native | native |
+| `CONCAT` | call | native | native (gap divergent) | native | native (gap divergent) |
+| `CORR` | call | native | native (gap divergent) | native | native (gap divergent) |
 | `COS` | call | native | native | native | native |
 | `COSH` | call | native | native | native | native |
 | `COUNT` | call | native | native | native | native |
@@ -64,81 +64,81 @@ Cell vocabulary:
 | `CURRENT_DATE` | call | native | native | native | native |
 | `CURRENT_TIMESTAMP` | call | native | native | native | native |
 | `DATE` | call | native | native | native | native |
-| `DATE_ADD` | special | native | native (gap #171) | native | native |
-| `DATE_PART` | call | native | native | native | native |
-| `DATE_SUB` | special | native (gap #171) | native (gap #171) | native | native |
-| `DATE_TRUNC` | call | native | native | native | native |
-| `DAY` | call | native | native | native | native |
-| `DAYOFWEEK` | call | native | native (gap #171) | native | native |
+| `DATE_ADD` | special | native (gap #171) | native (gap #171) | native | native (gap #171, divergent) |
+| `DATE_PART` | call | native | native | native | native (gap #171) |
+| `DATE_SUB` | special | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `DATE_TRUNC` | call | native | native | native | native (gap #171) |
+| `DAY` | call | native | native | native | native (gap #171) |
+| `DAYOFWEEK` | call | native | native (gap #171) | native | native (gap #171) |
 | `DENSE_RANK` | call | native | native | native | native |
 | `EVERY` | call | rename:BOOL_AND | native | native | rename:LOGICAL_AND |
 | `EXISTS` | special | native | native | native | native |
 | `EXP` | call | native | native | native | native |
-| `EXPLODE` | table-fn | rename:UNNEST | native | rename:UNNEST | rename:UNNEST |
+| `EXPLODE` | table-fn | rename:UNNEST (gap #171) | native (gap #171) | rename:UNNEST | rename:UNNEST (gap #171) |
 | `EXTRACT` | call | native | native | native | native |
-| `FIRST` | call | native | native | native | native |
+| `FIRST` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `FIRST_VALUE` | call | native | native | native | native |
 | `FLOOR` | call | native | native | native | native |
-| `GLOB` | infix | native | native (gap #171) | native | native |
-| `GREATEST` | call | native | native | native | native |
-| `GROUP_CONCAT` | call | native | native (gap #171) | native | native |
+| `GLOB` | infix | native | native (gap #171) | native | native (gap #171) |
+| `GREATEST` | call | native | native | native | native (gap divergent) |
+| `GROUP_CONCAT` | call | native | native (gap #171) | native | native (gap #171) |
 | `IFNULL` | call | native | native | native | native |
-| `ILIKE` | infix | native | native | native | native |
+| `ILIKE` | infix | native | native | native | native (gap #171) |
 | `IN` | special | native | native | native | native |
 | `INITCAP` | call | native (gap #171) | native | native | native |
 | `IS_NOT_NULL` | postfix | native | native | native | native |
 | `IS_NULL` | postfix | native | native | native | native |
 | `JSON_ARRAY` | call | native | native (gap #171) | native | native |
-| `JSON_ARRAY_LENGTH` | call | native | native (gap #171) | native | native |
-| `JSON_CONTAINS` | call | native | native (gap #171) | native | native |
+| `JSON_ARRAY_LENGTH` | call | native | native (gap #171) | native | native (gap #171) |
+| `JSON_CONTAINS` | call | native | native (gap #171) | native | native (gap #171) |
 | `JSON_EXTRACT` | call | native | native (gap #171) | native | native |
-| `JSON_EXTRACT_TEXT` | call | native (gap #171) | native (gap #171) | native | native |
+| `JSON_EXTRACT_TEXT` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `JSON_OBJECT` | call | native | native (gap #171) | native | native |
-| `JSON_OBJECT_KEYS` | call | native (gap #171) | native (gap #171) | native | native |
+| `JSON_OBJECT_KEYS` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `LAG` | call | native | native | native | native |
-| `LAST` | call | native | native | native | native |
+| `LAST` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `LAST_VALUE` | call | native | native | native | native |
 | `LEAD` | call | native | native | native | native |
-| `LEAST` | call | native | native | native | native |
+| `LEAST` | call | native | native | native | native (gap divergent) |
 | `LEFT` | call | native | native | native | native |
 | `LENGTH` | call | native | native | native | native |
 | `LIKE` | infix | native | native | native | native |
-| `LISTAGG` | call | native | native | native | native |
+| `LISTAGG` | call | native | native | native | native (gap #171) |
 | `LN` | call | native | native | native | native |
-| `LOG` | call | native | native (gap #171) | native | native |
+| `LOG` | call | native | native (gap #171) | native | native (gap #171) |
 | `LOG10` | call | native | native | native | native |
-| `LOG2` | call | native | native | native | native |
+| `LOG2` | call | native | native | native | native (gap #171) |
 | `LOWER` | call | native | native | native | native |
 | `LPAD` | call | native | native | native | native |
 | `LTRIM` | call | native | native | native | native |
-| `MAKE_DATE` | call | native | native | native | native |
-| `MAKE_TIME` | call | native | native (gap #171) | native | native |
-| `MAKE_TIMESTAMP` | call | native | native | native | native |
-| `MAKE_TIMESTAMPTZ` | call | native | native (gap #171) | native | native |
+| `MAKE_DATE` | call | native | native | native | native (gap #171) |
+| `MAKE_TIME` | call | native | native (gap #171) | native | native (gap #171) |
+| `MAKE_TIMESTAMP` | call | native | native | native | native (gap #171) |
+| `MAKE_TIMESTAMPTZ` | call | native | native (gap #171) | native | native (gap #171) |
 | `MAX` | call | native | native | native | native |
-| `MD5` | call | native | native | native | native |
-| `MEDIAN` | call | native | native (gap #171) | native | rewrite:BigQueryMedian |
+| `MD5` | call | native | native | native | native (gap #171, divergent) |
+| `MEDIAN` | call | native | native (gap #171) | native | rewrite:BigQueryMedian (gap #171) |
 | `MIN` | call | native | native | native | native |
 | `MOD` | call | native | native | native | native |
-| `MODE` | call | native | native | native | native |
-| `MONTH` | call | native | native | native | native |
-| `NOW` | call | native | native | native | native |
+| `MODE` | call | native | native | native | native (gap #171) |
+| `MONTH` | call | native | native | native | native (gap #171) |
+| `NOW` | call | native | native | native | native (gap #171) |
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
-| `PERCENTILE_CONT` | call | native (gap #171) | native (gap #171) | native | native |
-| `PERCENTILE_DISC` | call | native (gap #171) | native (gap #171) | native | native |
+| `PERCENTILE_CONT` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `PERCENTILE_DISC` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
 | `PERCENT_RANK` | call | native | native | native | native |
-| `PI` | call | native | native | native | native |
-| `POSITION` | call | native | native | native | native |
+| `PI` | call | native | native | native | native (gap #171) |
+| `POSITION` | call | native | native | native | native (gap #171) |
 | `POW` | call | native | native | native | native |
-| `POWER` | call | native | native | native | native |
-| `QUARTER` | call | native | native | native | native |
-| `QUOTE_IDENT` | call | native (gap #171) | native (gap #171) | native | native |
-| `QUOTE_LITERAL` | call | native (gap #171) | native (gap #171) | native | native |
-| `RANDOM` | call | native | native | native | native |
+| `POWER` | call | native | native | native | native (gap divergent) |
+| `QUARTER` | call | native | native | native | native (gap #171) |
+| `QUOTE_IDENT` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `QUOTE_LITERAL` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `RANDOM` | call | native | native | native | native (gap #171) |
 | `RANK` | call | native | native | native | native |
-| `REGR_SLOPE` | call | native | native (gap divergent) | native | native |
+| `REGR_SLOPE` | call | native | native (gap divergent) | native | native (gap #171) |
 | `REPEAT` | call | native | native | native | native |
 | `REPLACE` | call | native | native | native | native |
 | `REVERSE` | call | native | native | native | native |
@@ -147,10 +147,10 @@ Cell vocabulary:
 | `ROW_NUMBER` | call | native | native | native | native |
 | `RPAD` | call | native | native | native | native |
 | `RTRIM` | call | native | native | native | native |
-| `SIGN` | call | native | native | native | native |
+| `SIGN` | call | native | native | native | native (gap #171) |
 | `SIN` | call | native | native | native | native |
 | `SINH` | call | native | native | native | native |
-| `SPLIT_PART` | call | native | native | native | native |
+| `SPLIT_PART` | call | native | native | native | native (gap #171) |
 | `SQRT` | call | native | native | native | native |
 | `STDDEV` | call | native | native | native | native |
 | `STDDEV_POP` | call | native | native | native | native |
@@ -162,20 +162,20 @@ Cell vocabulary:
 | `SUM` | call | native | native | native | native |
 | `TAN` | call | native | native | native | native |
 | `TANH` | call | native | native | native | native |
-| `TO_CHAR` | call | native (gap #171) | native | native | native |
-| `TO_JSON` | call | native | native (gap #171) | native | native |
-| `TO_SECONDS` | call | native | native (gap #171) | native | native |
+| `TO_CHAR` | call | native (gap #171) | native | native | native (gap #171) |
+| `TO_JSON` | call | native | native (gap #171) | native | native (gap divergent) |
+| `TO_SECONDS` | call | native | native (gap #171) | native | native (gap #171) |
 | `TRANSLATE` | call | native | native | native | native |
 | `TRIM` | call | native | native | native | native |
-| `TRUNC` | call | native | native (gap #171) | native | native |
-| `TRUNCATE` | call | native (gap #171) | native (gap #171) | native | native |
-| `UNNEST` | table-fn | native | rename:EXPLODE | native | native |
+| `TRUNC` | call | native | native (gap #171) | native | native (gap #171) |
+| `TRUNCATE` | call | native (gap #171) | native (gap #171) | native | native (gap #171) |
+| `UNNEST` | table-fn | native (gap #171) | rename:EXPLODE (gap #171) | native | native (gap #171) |
 | `UPPER` | call | native | native | native | native |
 | `VARIANCE` | call | native | native | native | native |
 | `VAR_POP` | call | native | native | native | native |
 | `VAR_SAMP` | call | native | native | native | native |
-| `YEAR` | call | native | native | native | native |
-| `^` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall |
+| `YEAR` | call | native | native | native | native (gap #171) |
+| `^` | infix | native | rewrite:PowerCall | native | rewrite:PowerCall (gap divergent) |
 | `||` | infix | native | native | native | native |
 
 ## Schema-only entries

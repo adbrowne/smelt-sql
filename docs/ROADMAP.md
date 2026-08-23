@@ -204,20 +204,43 @@ query succeeds and returns a different number. Closes #171.
   both read it as bitwise XOR. `10 ^ 2` returned 8 on Spark and 100 on DuckDB. Proven against a
   live Spark by reverting the emission row and watching the value leg catch it.
 
+**The type leg.** The schema leg does not stop at "does the printed SQL run?" — it also
+compares smelt's inferred output type against what the engine reports, for every entry the
+enumeration reaches. `type_property_tests` generates from `core_functions()`, a hand-maintained
+registry-blind table, so most of the registry had never been type-checked against any engine.
+The comparison shares `prop_helpers/divergences.rs` rather than building a second registry: a
+type difference belongs in the table both suites read.
+
+It found two inference families immediately, both confirmed independently on more than one
+engine:
+
+- **Unnesting an `ARRAY<T>` infers `Unknown(Dynamic)`** rather than the element type `T`
+  (`UNNEST`, `EXPLODE`).
+- **`FIRST` and `LAST` never parse as calls at all.** Both are lexed as keywords for
+  `NULLS FIRST` / `NULLS LAST`, so `FIRST(x)` yields an `Unknown` type in aggregate position
+  and, in window position, a select item with no alias at all — while the registry classifies
+  both as aggregates. Closing it is a contextual-keyword change in `smelt-parser`.
+
 **Residual gaps the sweeps found**, all recorded in
-`crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted by
+`crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted per-dialect by
 `.claude/dialect-gaps-baseline.txt`:
 
-- **DuckDB: 10.** Names smelt's registry recognises that DuckDB has no function for —
-  `INITCAP`, `TO_CHAR`, `TRUNCATE`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `JSON_EXTRACT_TEXT`,
-  `JSON_OBJECT_KEYS`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `DATE_SUB`.
-- **Spark: 28.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
+- **DuckDB: 15.** Ten names smelt's registry recognises that DuckDB has no function for
+  (`INITCAP`, `TO_CHAR`, `TRUNCATE`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `JSON_EXTRACT_TEXT`,
+  `JSON_OBJECT_KEYS`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `DATE_SUB`), plus the five
+  type-inference rows above.
+- **Spark: 32.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
   logarithm on Spark and base 10 on DuckDB, and `DAYOFWEEK` numbers the week from a different
   day. Four more are permanent semantic differences no rename can close (`CONCAT`'s NULL
   propagation, `ARRAY_AGG`'s NULL elements, `CORR`/`REGR_SLOPE`'s NaN-versus-NULL convention).
-- **BigQuery: unmeasured.** The leg and `scripts/bigquery-dialect-audit.sh` exist; the sweep needs
-  a human to unlock the passphrase-protected service-account key, and it bills, because the value
-  leg executes rather than dry-runs. The baseline reads 0 as "not yet measured", not "no gaps".
+- **BigQuery: 50**, from a live sweep on August 24. `LOG` diverges the same way it does on
+  Spark. Two findings are sharper than a missing name: **`%` lowers to `MOD`, and GoogleSQL's
+  `MOD` accepts only `INT64`/`NUMERIC`** — so the lowering is correct for integer operands and a
+  hard failure for floating-point ones, the same operand-type dependence that made `//`
+  unlowerable; and **`DATE_TRUNC`'s argument order is reversed** relative to DuckDB's. Seven are
+  accepted permanent divergences (`GREATEST`/`LEAST` NULL propagation, `MD5`'s BYTES-versus-hex
+  return, `TO_JSON`'s JSON `null`, `POWER`'s domain on a negative base, `ARRAY_AGG`'s refusal of
+  NULL elements).
 - **PostgreSQL: unverified.** A `SqlDialect` variant with no backend crate and no oracle, so
   nothing exercises its verdicts. Marked as such in the published table.
 

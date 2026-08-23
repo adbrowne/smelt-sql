@@ -430,6 +430,26 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             bigquery_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-08-24 (dialect_audit sweep, live Spark 4.0.0)
+        // `SELECT CURRENT_TIMESTAMP` and `SELECT NOW()` — Spark's DESCRIBE
+        // QUERY reports `timestamp` for both, which is Spark's session-local
+        // type and carries no zone. smelt infers a zone-aware timestamp,
+        // matching DuckDB's TIMESTAMPTZ.
+        TypeDivergence {
+            id: "spark_timestamp_is_zone_naive",
+            description: "Spark's TIMESTAMP is session-local and reports no zone, so any \
+                expression smelt types as zone-aware (CURRENT_TIMESTAMP, NOW) reports as a \
+                plain timestamp there.",
+            smelt_type: DataType::Timestamp {
+                with_timezone: true,
+            },
+            duckdb_type: None,
+            spark_type: Some(DataType::Timestamp {
+                with_timezone: false,
+            }),
+            bigquery_type: None,
+            status: DivergenceStatus::BackendSpecific,
+        },
         // verified: 2026-07-20 `SELECT ROW_NUMBER() OVER (ORDER BY x) FROM
         // (SELECT 1 x)` and the RANK/DENSE_RANK variants — Spark's DESCRIBE
         // QUERY reports `int` for all three.

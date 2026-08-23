@@ -102,6 +102,24 @@ fn is_recognized_query_refusal(msg: &str) -> bool {
         }
     }
 
+    // BigQuery, *execution* rather than job submission. The dry-run path above
+    // fails at submission and carries the endpoint URL; a real execution fails
+    // after the job is accepted and carries none, so the URL check cannot see
+    // it. Verified against a live warehouse by the dialect-audit value leg:
+    // `POWER(-2.5, -2.5)` -> "400 Floating point error in function: POW(...);
+    // reason: invalidQuery"; `ARRAY_AGG` over a NULL-bearing group -> "400
+    // Array cannot have a null element ...; reason: invalidQuery"; an
+    // unsupported analytic function -> "400 Analytic function
+    // APPROX_COUNT_DISTINCT is not supported.; reason: invalidQuery".
+    //
+    // `reason: invalidQuery` is the discriminator, and it is deliberately
+    // narrow: BigQuery tags a *client-side query* problem that way, and tags
+    // auth, quota, and backend failures with other reasons — which therefore
+    // still fall through to Fatal, as fail-loud discipline requires.
+    if trimmed.starts_with("400 ") && msg.contains("reason: invalidQuery") {
+        return true;
+    }
+
     false
 }
 
@@ -117,6 +135,24 @@ mod classify_oracle_error_tests {
     fn cases() -> Vec<(&'static str, OracleErrorKind)> {
         use OracleErrorKind::{Fatal, QueryRefusal};
         vec![
+            // --- BigQuery *execution* refusals, captured verbatim from the
+            // dialect-audit value leg against a live warehouse.
+            (
+                "400 Floating point error in function: POW(-2.5, -2.5); reason: invalidQuery, location: query",
+                QueryRefusal,
+            ),
+            (
+                "400 Array cannot have a null element; error in writing field p_array_agg_agg; reason: invalidQuery",
+                QueryRefusal,
+            ),
+            (
+                "400 Analytic function APPROX_COUNT_DISTINCT is not supported.; reason: invalidQuery, location: query",
+                QueryRefusal,
+            ),
+            // …but a 400 whose reason is NOT a query problem stays Fatal: an
+            // expired credential must never read as "this SQL was rejected".
+            ("400 Request had invalid authentication credentials; reason: authError", Fatal),
+            ("400 Quota exceeded; reason: quotaExceeded", Fatal),
             // --- DuckDB refusals (verified: `SELECT nosuchfunction(1)`,
             // `SELECT 1 +`, `CAST(1 AS FOOBAR)` against a real DuckDB) ---
             (

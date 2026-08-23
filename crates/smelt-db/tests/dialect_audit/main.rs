@@ -6,16 +6,30 @@
 
 mod fixture;
 mod ledger;
+
+/// The existing type-divergence registry, shared rather than duplicated.
+///
+/// `type_property_tests` already records every known smelt-versus-engine type
+/// difference here, with a `// verified:` provenance line per row. Building a
+/// second registry for the same facts is the two-sources-of-truth problem
+/// single ownership exists to avoid, so the type leg consults this one — it
+/// simply reaches many more entries than the property sweep's generators do.
+// The audit reads only `id` and the type patterns; the property sweep that owns
+// this file reads the rest. Compiling a shared module into a second binary that
+// happens to use less of it is not dead code in any meaningful sense.
+#[allow(dead_code)]
+#[path = "../prop_helpers/divergences.rs"]
+mod divergences;
 mod overrides;
 mod probe;
 mod report;
 
 use smelt_oracle_testkit::{
-    classify_oracle_error, compare_cells, BigQueryOracle, Cell, DuckDbOracle, OracleErrorKind,
-    SparkOracle, TypeOracle, ValueMatch, ValueOracle,
+    classify_oracle_error, compare_cells, compare_types, BigQueryOracle, Cell, DuckDbOracle,
+    OracleErrorKind, SparkOracle, TypeMatch, TypeOracle, ValueMatch, ValueOracle,
 };
 use smelt_types::{BuiltinRegistry, DialectId};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use probe::{Position, Probe};
@@ -264,15 +278,20 @@ fn every_ledger_row_names_a_real_registry_entry_and_a_probed_pair() {
     );
 }
 
+/// One row per `(entry, dialect, position, leg)`. The key includes the leg
+/// because a pair can legitimately be registered on more than one: `DATE_ADD`
+/// on BigQuery both infers the wrong type and returns a different value.
 #[test]
 fn a_pair_has_at_most_one_ledger_row() {
     let mut seen = HashSet::new();
     for row in ledger::dialect_divergences() {
         assert!(
-            seen.insert((row.name, row.dialect)),
-            "duplicate ledger row for {} on {}",
+            seen.insert((row.name, row.dialect, row.position, row.leg)),
+            "duplicate ledger row for {} on {} ({:?}, {:?})",
             row.name,
-            row.dialect.slug()
+            row.dialect.slug(),
+            row.position,
+            row.leg
         );
     }
 }
@@ -289,6 +308,9 @@ fn a_pair_has_at_most_one_ledger_row() {
 #[derive(Debug, Default)]
 struct LegOutcome {
     probes_compared: usize,
+    /// Probes whose smelt-inferred output type was checked against the
+    /// engine's reported one.
+    types_compared: usize,
     /// Probes the engine refused that the ledger accounts for.
     registered: Vec<String>,
     /// Probes skipped because the entry is nondeterministic.
@@ -300,8 +322,9 @@ struct LegOutcome {
 impl LegOutcome {
     fn report(&self) -> String {
         format!(
-            "compared={} registered={} schema_only={} failures={}\n{}",
+            "compared={} types={} registered={} schema_only={} failures={}\n{}",
             self.probes_compared,
+            self.types_compared,
             self.registered.len(),
             self.schema_only.len(),
             self.failures.len(),
@@ -394,20 +417,29 @@ fn run_schema_leg(dialect: DialectId, oracle: &dyn TypeOracle) -> LegOutcome {
             let sql = probe::print_for(dialect, &batch_statement(position, &expected_pass));
             match oracle.query_types(&sql) {
                 Ok(cols) => {
-                    let names: HashSet<String> =
-                        cols.iter().map(|(n, _)| n.to_ascii_lowercase()).collect();
+                    let reported: HashMap<String, smelt_types::DataType> = cols
+                        .iter()
+                        .map(|(n, t)| (n.to_ascii_lowercase(), t.clone()))
+                        .collect();
                     for p in &expected_pass {
-                        if names.contains(&p.alias) {
-                            outcome.probes_compared += 1;
-                        } else {
-                            outcome.failures.push(format!(
+                        match reported.get(&p.alias) {
+                            Some(engine_type) => {
+                                outcome.probes_compared += 1;
+                                check_inferred_type(
+                                    dialect,
+                                    p,
+                                    engine_type,
+                                    outcome_mut(&mut outcome),
+                                );
+                            }
+                            None => outcome.failures.push(format!(
                                 "  {} [{:?}] on {}: the batch succeeded but produced no column \
                                  named {}",
                                 p.name,
                                 p.position,
                                 dialect.slug(),
                                 p.alias
-                            ));
+                            )),
                         }
                     }
                 }
@@ -438,7 +470,7 @@ fn probe_schema_once(
 ) {
     let sql = probe::print_for(dialect, &p.statement());
     match oracle.query_types(&sql) {
-        Ok(_) => {
+        Ok(cols) => {
             if is_declared_unsupported(p.name, dialect) {
                 outcome.failures.push(format!(
                     "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
@@ -458,6 +490,11 @@ fn probe_schema_once(
                 ));
             } else {
                 outcome.probes_compared += 1;
+                if let Some((_, engine_type)) =
+                    cols.iter().find(|(n, _)| n.eq_ignore_ascii_case(&p.alias))
+                {
+                    check_inferred_type(dialect, p, engine_type, outcome);
+                }
             }
         }
         Err(e) => match classify_oracle_error(&e) {
@@ -487,6 +524,95 @@ fn probe_schema_once(
                 p.position
             )),
         },
+    }
+}
+
+/// Identity helper so the batch arm can pass `&mut outcome` while the closure
+/// above still borrows it immutably for the failure push.
+fn outcome_mut(outcome: &mut LegOutcome) -> &mut LegOutcome {
+    outcome
+}
+
+/// Compare smelt's inferred output type for `p` against what the engine
+/// reported.
+///
+/// This is the leg the type property tests do **not** cover: they generate from
+/// `core_functions()`, a hand-maintained registry-blind table, so most of the
+/// registry is never type-checked against any engine at all. Here every entry
+/// the enumeration reaches is.
+///
+/// `compare_types`' `Compatible` verdict (the named string-family leniency and
+/// decimal-precision tolerance) counts as agreement, matching
+/// `type_property_tests`' convention rather than inventing a second one.
+fn check_inferred_type(
+    dialect: DialectId,
+    p: &Probe,
+    engine_type: &smelt_types::DataType,
+    outcome: &mut LegOutcome,
+) {
+    let inferred = probe::infer_types(&p.statement());
+    let Some((_, smelt_type)) = inferred
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(&p.alias))
+    else {
+        // Inference produced no column for this alias at all. That is an
+        // inference finding like any other — it goes through the same ledger,
+        // rather than being an unregistrable hard failure.
+        if is_registered(p.name, dialect, p.position, ledger::Leg::Type) {
+            outcome.registered.push(format!(
+                "{} [{:?}] (no inferred column)",
+                p.name, p.position
+            ));
+        } else {
+            outcome.failures.push(format!(
+                "  {} [{:?}] on {}: smelt inferred NO COLUMN named {} for its own probe — the \
+                 select item did not even yield an alias. Register the pair in `ledger.rs` \
+                 with `Leg::Type` and a reason.\n    probe: {}",
+                p.name,
+                p.position,
+                dialect.slug(),
+                p.alias,
+                p.statement()
+            ));
+        }
+        return;
+    };
+
+    outcome.types_compared += 1;
+    match compare_types(smelt_type, engine_type) {
+        TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
+        TypeMatch::Mismatch => {
+            // Built once per process: `known_divergences()` rebuilds the whole
+            // table on every call, and the type leg asks ~150 times per dialect.
+            static KNOWN: LazyLock<Vec<divergences::TypeDivergence>> =
+                LazyLock::new(divergences::known_divergences);
+            let known =
+                divergences::find_divergence(smelt_type, engine_type, dialect.slug(), &KNOWN);
+            if let Some(d) = known {
+                outcome
+                    .registered
+                    .push(format!("{} [{:?}] (type: {})", p.name, p.position, d.id));
+            } else if is_registered(p.name, dialect, p.position, ledger::Leg::Type) {
+                outcome
+                    .registered
+                    .push(format!("{} [{:?}] (type)", p.name, p.position));
+            } else {
+                outcome.failures.push(format!(
+                    "  {} [{:?}] on {}: TYPE MISMATCH — smelt inferred {:?}, {} reported {:?}. \
+                     Either fix the inference, register the type pattern in \
+                     `prop_helpers/divergences.rs` (preferred — that registry is shared \
+                     with `type_property_tests`), or register this one pair in \
+                     `ledger.rs` with `Leg::Type`.\n    probe: {}",
+                    p.name,
+                    p.position,
+                    dialect.slug(),
+                    smelt_type,
+                    dialect.slug(),
+                    engine_type,
+                    p.statement()
+                ));
+            }
+        }
     }
 }
 
