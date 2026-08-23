@@ -1,5 +1,7 @@
 //! SQL dialect definitions and backend capabilities.
 
+use smelt_types::DialectId;
+
 /// SQL dialect used by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlDialect {
@@ -21,6 +23,19 @@ impl SqlDialect {
             SqlDialect::SparkSQL => "Spark SQL",
             SqlDialect::PostgreSQL => "PostgreSQL",
             SqlDialect::BigQuery => "BigQuery",
+        }
+    }
+
+    /// Map this SQL dialect to its canonical [`DialectId`] identity.
+    ///
+    /// Used by the registry and type-divergence ledger to key on a
+    /// closed enum rather than a stringly-typed name.
+    pub fn id(self) -> DialectId {
+        match self {
+            SqlDialect::DuckDB => DialectId::DuckDb,
+            SqlDialect::SparkSQL => DialectId::SparkSql,
+            SqlDialect::PostgreSQL => DialectId::PostgreSql,
+            SqlDialect::BigQuery => DialectId::BigQuery,
         }
     }
 }
@@ -371,5 +386,25 @@ mod tests {
         assert!(!caps.supports_nested_array_ddl);
         assert!(!caps.supports_merge_schema_write);
         assert!(!caps.supports_column_mapping);
+    }
+
+    #[test]
+    fn every_sql_dialect_maps_to_a_distinct_dialect_id() {
+        let dialects = [
+            SqlDialect::DuckDB,
+            SqlDialect::SparkSQL,
+            SqlDialect::PostgreSQL,
+            SqlDialect::BigQuery,
+        ];
+        let ids: Vec<_> = dialects.iter().map(|d| d.id()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "SqlDialect::id() is not injective");
+        assert_eq!(
+            sorted.len(),
+            DialectId::ALL.len(),
+            "a DialectId has no SqlDialect"
+        );
     }
 }

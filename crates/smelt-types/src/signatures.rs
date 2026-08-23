@@ -18,7 +18,7 @@
 //! commonly-used SQL built-ins. Non-`Expr` sorts (TableExpr, AggExpr, …) remain
 //! deferred to later phases of the smelt-functions plan.
 
-use crate::{parse_type, DataType};
+use crate::{parse_type, DataType, DialectId};
 use smelt_parser::ast::{File as AstFile, Param as AstParam, SmeltDefine, SmeltExtern, TypeRef};
 use smelt_parser::TextRange;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2734,7 +2734,7 @@ pub struct Signature {
     /// Phase 12: recording-only. `HashMap::default()` on entries that
     /// need no override (the canonical type is also the native type on
     /// every backend).
-    pub engine_native: HashMap<String, DataType>,
+    pub engine_native: HashMap<DialectId, DataType>,
     /// Default [`ExprKind`] for a call to this signature when no `OVER (…)`
     /// clause is present (Phase 14, §16 #24).
     ///
@@ -2882,11 +2882,10 @@ impl Signature {
 
     /// Declare a per-backend native return-type override (Phase 12).
     ///
-    /// The `engine` key is lowercased on insert. Calling this multiple
-    /// times with different engines builds up the full override table.
-    pub fn with_engine_native(mut self, engine: &str, dt: DataType) -> Self {
-        self.engine_native
-            .insert(engine.trim().to_ascii_lowercase(), dt);
+    /// Calling this multiple times with different dialects builds up the full
+    /// override table.
+    pub fn with_engine_native(mut self, dialect: DialectId, dt: DataType) -> Self {
+        self.engine_native.insert(dialect, dt);
         self
     }
 
@@ -2901,21 +2900,20 @@ impl Signature {
     }
 
     /// Does the signature require a CAST back to the canonical return
-    /// type when executed on `engine`? (§16 #9 / Phase 12, recording
+    /// type when executed on `dialect`? (§16 #9 / Phase 12, recording
     /// only — Step 7+ consumes this.)
     ///
     /// Returns `false` when no canonical type is declared (the common
     /// case — the signature's own [`Self::return_type`] is already
-    /// canonical) or when the engine's native type equals the canonical
-    /// type. Returns `true` when the engine is listed in
+    /// canonical) or when the dialect's native type equals the canonical
+    /// type. Returns `true` when the dialect is listed in
     /// [`Self::engine_native`] with a type that differs from
     /// [`Self::canonical_return`].
-    pub fn needs_cast_for(&self, engine: &str) -> bool {
+    pub fn needs_cast_for(&self, dialect: DialectId) -> bool {
         let Some(canonical) = &self.canonical_return else {
             return false;
         };
-        let key = engine.trim().to_ascii_lowercase();
-        match self.engine_native.get(&key) {
+        match self.engine_native.get(&dialect) {
             Some(native) => native != canonical,
             None => false,
         }
@@ -3824,7 +3822,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_canonical_return(DataType::BigInt)
         .with_engine_native(
-            "duckdb",
+            DialectId::DuckDb,
             DataType::Decimal {
                 precision: 38,
                 scale: 0,
@@ -5780,31 +5778,29 @@ mod tests {
     #[test]
     fn cast_flag_set_when_canonical_differs_from_engine() {
         // Phase 12 TDD test 3 (§16 #9): `SUM` is seeded with
-        // canonical = BigInt and engine_native[duckdb] = DECIMAL(38,0)
+        // canonical = BigInt and engine_native[DuckDb] = DECIMAL(38,0)
         // — the smelt stand-in for DuckDB's HUGEINT return. The
-        // `needs_cast_for("duckdb")` hook must flag divergence so
+        // `needs_cast_for(DialectId::DuckDb)` hook must flag divergence so
         // Step 7+ can emit a CAST back to BigInt.
         let sum = BuiltinRegistry::resolve("SUM").expect("SUM seeded");
         assert_eq!(sum.canonical_return, Some(DataType::BigInt));
         assert_eq!(
-            sum.engine_native.get("duckdb"),
+            sum.engine_native.get(&DialectId::DuckDb),
             Some(&DataType::Decimal {
                 precision: 38,
                 scale: 0,
             })
         );
         assert!(
-            sum.needs_cast_for("duckdb"),
+            sum.needs_cast_for(DialectId::DuckDb),
             "SUM on DuckDB returns HUGEINT (DECIMAL(38,0)) but canonical is BigInt \
              — needs_cast_for must flag the divergence"
         );
-        // Engines that aren't listed default to "native == canonical".
+        // Dialects that aren't listed default to "native == canonical".
         assert!(
-            !sum.needs_cast_for("spark"),
-            "No override for spark → canonical matches native → no cast needed"
+            !sum.needs_cast_for(DialectId::SparkSql),
+            "No override for SparkSql → canonical matches native → no cast needed"
         );
-        // Key lookup is case-insensitive / trimmed.
-        assert!(sum.needs_cast_for("  DuckDB  "));
     }
 
     #[test]
@@ -5814,9 +5810,9 @@ mod tests {
         // return `false` unconditionally for those.
         let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER seeded");
         assert!(lower.canonical_return.is_none());
-        assert!(!lower.needs_cast_for("duckdb"));
-        assert!(!lower.needs_cast_for("spark"));
-        assert!(!lower.needs_cast_for(""));
+        assert!(!lower.needs_cast_for(DialectId::DuckDb));
+        assert!(!lower.needs_cast_for(DialectId::SparkSql));
+        assert!(!lower.needs_cast_for(DialectId::PostgreSql));
     }
 
     #[test]
@@ -5832,8 +5828,8 @@ mod tests {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
         )
         .with_canonical_return(DataType::Integer)
-        .with_engine_native("duckdb", DataType::Integer);
-        assert!(!sig.needs_cast_for("duckdb"));
+        .with_engine_native(DialectId::DuckDb, DataType::Integer);
+        assert!(!sig.needs_cast_for(DialectId::DuckDb));
     }
 
     #[test]

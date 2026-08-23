@@ -9,6 +9,9 @@
 //! - smelt-cli for source configuration
 //! - smelt-lsp for type-aware editor features
 
+pub mod dialect_id;
+pub use dialect_id::DialectId;
+
 mod functions;
 mod parse;
 pub mod signatures;
