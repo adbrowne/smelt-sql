@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787452094228,
+  "lastUpdate": 1787452096744,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 31.529613284206818,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "8540b8da2877b266a60def425a4be2e8b796e260",
+          "message": "ci: pin Spark image and close the local-vs-CI clippy gate\n\nTwo ways a green local run could still fail CI, both closed:\n\n1. `apache/spark:latest` was unpinned in two compat.yml jobs — the channel\n   through which a Spark 4 behaviour change reached CI with no code change.\n   Pinned to `apache/spark:4.0.0`, matching the jobs that were already pinned\n   and `scripts/spark-up.sh`. Pinning the workflow's `docker pull` alone was\n   not enough: `spark_integration.rs` and `scripts/test-spark-types.sh` name\n   the image themselves when they spawn containers, so both now use the same\n   pin with a `SMELT_SPARK_IMAGE` override.\n\n2. The local gate linted a different feature set than CI. verify-phase.sh ran\n   plain `cargo clippy --all-targets`; CI added `--no-default-features\n   --features smelt-cli/duckdb,smelt-ui/duckdb`, which strips defaults\n   workspace-wide and yields a different cfg surface. That gap is why a\n   `format!` warning survived a green local run.\n\n   Rather than copy CI's invocation into the local script (where it can drift\n   again), both callers now run `.claude/scripts/clippy-gate.sh`, which lints\n   both feature sets — neither subsumes the other. Verified: both sets pass.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>",
+          "timestamp": "2026-08-23T12:24:49+10:00",
+          "tree_id": "b8c0d99d98eb0a06dc3d59186517c9159d1262d1",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/8540b8da2877b266a60def425a4be2e8b796e260"
+        },
+        "date": 1787452095899,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 34.19461827023396,
             "unit": "MB/s"
           }
         ]
