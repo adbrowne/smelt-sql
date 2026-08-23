@@ -666,8 +666,9 @@ fn dedicated_syntax_entries_are_not_call_form() {
 
 #[test]
 fn the_rename_matrix_matches_the_printer_it_replaces() {
-    // Transcribed from `remap_function_name` (printer.rs:1881-1925) before its
-    // deletion. This test is what makes the printer refactor mechanical.
+    // These rows were transcribed from the printer's hand-written rename chain
+    // before that chain was deleted, so the registry is provably a faithful
+    // replacement for it rather than a re-derivation.
     let expected: &[(&str, DialectId, &str)] = &[
         ("EXPLODE", DialectId::DuckDb, "UNNEST"),
         ("EXPLODE", DialectId::PostgreSql, "UNNEST"),
@@ -693,8 +694,9 @@ fn the_rename_matrix_matches_the_printer_it_replaces() {
 
 #[test]
 fn every_is_native_on_postgresql() {
-    // `remap_function_name` deliberately leaves PostgreSQL's EVERY alone while
-    // DuckDB rewrites it; snapshots.rs:401 pins the asymmetry.
+    // PostgreSQL has `EVERY` natively; DuckDB does not and renames it to
+    // `BOOL_AND`. The printer's old rename chain carried the same asymmetry, and
+    // `smelt-dialect`'s `snapshots.rs` pins both halves of it.
     let sig = BuiltinRegistry::resolve("EVERY").expect("EVERY");
     assert_eq!(sig.emission_for(DialectId::PostgreSql), Emission::Native);
 }
