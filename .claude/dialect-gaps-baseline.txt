@@ -5,7 +5,10 @@
 #
 # Each metric is the number of `Verdict::Gap` rows in
 # `crates/smelt-db/tests/dialect_audit/ledger.rs` for that dialect — a lowering
-# smelt owes, with a tracking issue.
+# smelt owes, with a tracking issue. The bulk trackers are #177 (DuckDB),
+# #178 (Spark) and #179 (BigQuery); rows with a cause of their own point at
+# #173 (`%` on BigQuery), #174 (LOG / DAYOFWEEK), #175 (FIRST / LAST) and
+# #176 (inference returning Unknown).
 #
 # This is a RATCHET, mirroring `.claude/parser-gaps-baseline.txt`:
 #   - The count may only go DOWN as lowerings land.

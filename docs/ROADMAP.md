@@ -253,6 +253,16 @@ per-dialect by `.claude/dialect-gaps-baseline.txt`:
 - **PostgreSQL: unverified.** A `SqlDialect` variant with no backend crate and no oracle, so
   nothing exercises its verdicts. Marked as such in the published table.
 
+Every residual row points at a live tracking issue rather than at #171, which this work closes:
+[#173](https://github.com/adbrowne/smelt-sql/issues/173) (`%` on BigQuery),
+[#174](https://github.com/adbrowne/smelt-sql/issues/174) (`LOG` / `DAYOFWEEK` silent divergence),
+[#175](https://github.com/adbrowne/smelt-sql/issues/175) (`FIRST` / `LAST` lexed as keywords),
+[#176](https://github.com/adbrowne/smelt-sql/issues/176) (inference returning `Unknown`),
+[#177](https://github.com/adbrowne/smelt-sql/issues/177) / [#178](https://github.com/adbrowne/smelt-sql/issues/178) / [#179](https://github.com/adbrowne/smelt-sql/issues/179)
+(the per-dialect verdict backlogs),
+[#180](https://github.com/adbrowne/smelt-sql/issues/180) (documenting the accepted divergences for users),
+[#181](https://github.com/adbrowne/smelt-sql/issues/181) (PostgreSQL is unverified).
+
 The coverage table issue #171 asked for is generated and drift-gated at
 [`docs/reference/dialect-coverage.md`](reference/dialect-coverage.md).
 
