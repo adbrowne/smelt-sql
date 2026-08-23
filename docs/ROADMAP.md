@@ -178,6 +178,52 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Registry-owned dialect emission and the cross-engine audit~~ ✅ (August 24, 2026)
+
+BigQuery dialect coverage was incident-driven: probe a live warehouse, hit a failure, add a
+lowering. Nothing walked the builtin registry and asked whether each name is native, needs a
+lowering, or — the dangerous class — exists on both engines with *different semantics*, so the
+query succeeds and returns a different number. Closes #171.
+
+- **The registry owns emission.** `DialectId`, `SyntaxForm`, `Emission` and `RewriteId` on
+  `Signature`; `printer.rs` resolves the entry and dispatches on the verdict, and holds no
+  name-matched dialect arm. `remap_function_name` and the three `matches!(ctx.dialect, …)` guards
+  are gone. The one residual dialect branch — the pipe `SET`/`DROP`/`RENAME` lowering — turned out
+  to be capability-shaped, not emission-shaped, and became
+  `BackendCapabilities::supports_pipe_set_drop_rename`.
+- **`Unsupported` is a compile-time refusal**, not a warehouse round trip. `UnsupportedOnBackend`
+  names the construct, the backend, and the registry's own reason. The ephemeral-CTE path is
+  checked too, since an ephemeral model is inlined into its consumer and never passes through the
+  consumer's own check.
+- **The audit is derived, not authored.** 186 probes over 165 registry entries: a parameter's
+  `TypeConstraint` picks a fixture column, `SyntaxForm` picks the spelling, `ExprKind` picks the
+  query shape. Aggregates are probed in both aggregate and window position, because `MEDIAN`
+  proves the lowering differs between them. Two legs — schema (does it run?) and value (does it
+  compute the same thing?) — against DuckDB per-PR and Spark nightly.
+- **`^` was silently wrong on Spark.** smelt's grammar reads `^` as power; Spark SQL and GoogleSQL
+  both read it as bitwise XOR. `10 ^ 2` returned 8 on Spark and 100 on DuckDB. Proven against a
+  live Spark by reverting the emission row and watching the value leg catch it.
+
+**Residual gaps the sweeps found**, all recorded in
+`crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted by
+`.claude/dialect-gaps-baseline.txt`:
+
+- **DuckDB: 10.** Names smelt's registry recognises that DuckDB has no function for —
+  `INITCAP`, `TO_CHAR`, `TRUNCATE`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `JSON_EXTRACT_TEXT`,
+  `JSON_OBJECT_KEYS`, `PERCENTILE_CONT`, `PERCENTILE_DISC`, `DATE_SUB`.
+- **Spark: 28.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
+  logarithm on Spark and base 10 on DuckDB, and `DAYOFWEEK` numbers the week from a different
+  day. Four more are permanent semantic differences no rename can close (`CONCAT`'s NULL
+  propagation, `ARRAY_AGG`'s NULL elements, `CORR`/`REGR_SLOPE`'s NaN-versus-NULL convention).
+- **BigQuery: unmeasured.** The leg and `scripts/bigquery-dialect-audit.sh` exist; the sweep needs
+  a human to unlock the passphrase-protected service-account key, and it bills, because the value
+  leg executes rather than dry-runs. The baseline reads 0 as "not yet measured", not "no gaps".
+- **PostgreSQL: unverified.** A `SqlDialect` variant with no backend crate and no oracle, so
+  nothing exercises its verdicts. Marked as such in the published table.
+
+The coverage table issue #171 asked for is generated and drift-gated at
+[`docs/reference/dialect-coverage.md`](reference/dialect-coverage.md).
+
 ### ~~Schema-evolution DDL for Spark~~ ✅ (August 21, 2026)
 
 The same dispatch bug the BigQuery work uncovered was live on Spark too: only the *complex* change
