@@ -59,6 +59,7 @@ owners: [andrew]
   | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ |
   | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ |
   | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
+  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ |
   | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
@@ -66,6 +67,15 @@ owners: [andrew]
   `::bigquery()`) match it. When a flag changes, this table changes in the same commit. A
   backend's column is established by executing the statement each flag names against a live
   instance of that backend, never by reading its documentation.
+
+  Two flags in the table describe pipe-query emission. `supports_pipe_syntax` decides whether a
+  `|>` query is emitted natively or lowered to standard SQL. `supports_pipe_set_drop_rename`
+  qualifies the lowering: the lowered forms of `|> SET`, `|> DROP` and `|> RENAME` are built from
+  the star-modifier trio `SELECT * REPLACE (…)` / `* EXCLUDE (…)` / `* RENAME (…)`, which only
+  DuckDB accepts. A backend that lowers pipes but does not accept that trio (both Spark profiles)
+  leaves those three stages unlowered rather than emitting SQL it would reject. BigQuery reads
+  `✗` because GoogleSQL has `* EXCEPT` and `* REPLACE` but neither `* EXCLUDE` nor `* RENAME`;
+  the value is not reached in practice, since BigQuery emits pipes natively.
 - **`SPARK_CONNECT_URL`.** Spark integration tests connect to a Spark Connect server at this
   URL. When it is unset, Spark-targeted tests **skip** (not fail). The runtime backend reads
   `connect_url` from the target config (see `smelt_yml.md`).

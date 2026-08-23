@@ -140,6 +140,21 @@ pub struct BackendCapabilities {
     /// the backend can execute `merge_into` against a source projection
     /// carrying the full target row.
     pub supports_column_scoped_merge: bool,
+
+    /// The canonical dialect this capabilities set was built for.
+    ///
+    /// Stored here so callers that construct capabilities from `BackendCapabilities::duckdb()` etc.
+    /// can recover the dialect without naming a concrete `SqlDialect::*` variant.
+    pub dialect: SqlDialect,
+
+    /// Accepts the star-modifier trio the pipe `SET`/`DROP`/`RENAME` lowering emits:
+    /// `SELECT * REPLACE (…)`, `SELECT * EXCLUDE (…)`, `SELECT * RENAME (…)`.
+    ///
+    /// Only DuckDB accepts all three. A backend that lowers pipe queries
+    /// (`supports_pipe_syntax == false`) but does not accept the trio leaves those
+    /// three stages unlowered rather than emitting SQL it would reject. The gate is
+    /// capability-shaped, not dialect-name-shaped.
+    pub supports_pipe_set_drop_rename: bool,
 }
 
 impl BackendCapabilities {
@@ -169,6 +184,9 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::DuckDB,
+            // The only backend accepting `* REPLACE` / `* EXCLUDE` / `* RENAME`.
+            supports_pipe_set_drop_rename: true,
         }
     }
 
@@ -207,6 +225,8 @@ impl BackendCapabilities {
             // full-row source projection — the same shape DuckDB's MERGE
             // uses (`docs/specs/multi_backend.md` capability matrix).
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::SparkSQL,
+            supports_pipe_set_drop_rename: false,
         }
     }
 
@@ -238,6 +258,8 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+            dialect: SqlDialect::SparkSQL,
+            supports_pipe_set_drop_rename: false,
         }
     }
 
@@ -293,6 +315,8 @@ impl BackendCapabilities {
             // `Not found: Dataset ...`, so the dataset must be created first.
             requires_schema_init: true,
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::BigQuery,
+            supports_pipe_set_drop_rename: false,
         }
     }
 
@@ -323,6 +347,8 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+            dialect: SqlDialect::PostgreSQL,
+            supports_pipe_set_drop_rename: false,
         }
     }
 }

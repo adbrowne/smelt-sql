@@ -160,6 +160,18 @@ fn every_flag_matches_matrix() {
     cell!(delta, supports_pipe_syntax, false, "Spark(Delta)");
     cell!(parquet, supports_pipe_syntax, false, "Spark(Parquet)");
 
+    // supports_pipe_set_drop_rename — the lowered forms of `|> SET`/`|> DROP`/
+    // `|> RENAME` are built from DuckDB's star-modifier trio (`* REPLACE`,
+    // `* EXCLUDE`, `* RENAME`), which no other backend accepts.
+    cell!(duckdb, supports_pipe_set_drop_rename, true, "DuckDB");
+    cell!(delta, supports_pipe_set_drop_rename, false, "Spark(Delta)");
+    cell!(
+        parquet,
+        supports_pipe_set_drop_rename,
+        false,
+        "Spark(Parquet)"
+    );
+
     // requires_schema_init
     cell!(duckdb, requires_schema_init, true, "DuckDB");
     cell!(delta, requires_schema_init, true, "Spark(Delta)");
@@ -209,6 +221,10 @@ fn every_flag_matches_matrix() {
     // First backend to report native pipe support; the printer path behind this
     // flag has never been exercised before.
     cell!(bigquery, supports_pipe_syntax, true, "BigQuery");
+    // GoogleSQL has `* EXCEPT` and `* REPLACE` but neither `* EXCLUDE` nor
+    // `* RENAME`, so the star-modifier lowering is unavailable. Moot in practice:
+    // BigQuery emits pipes natively and never reaches the lowering.
+    cell!(bigquery, supports_pipe_set_drop_rename, false, "BigQuery");
     cell!(bigquery, requires_schema_init, true, "BigQuery");
     cell!(bigquery, supports_column_scoped_merge, true, "BigQuery");
 }
@@ -240,6 +256,8 @@ fn all_fields_destructured() {
         supports_pipe_syntax: _,
         requires_schema_init: _,
         supports_column_scoped_merge: _,
+        dialect: _,
+        supports_pipe_set_drop_rename: _,
     } = BackendCapabilities::duckdb();
     // Adding a field to BackendCapabilities without listing it here is a compile error.
     // When that happens: add the field above, add it to every_flag_matches_matrix(),

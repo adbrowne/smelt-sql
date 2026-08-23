@@ -23,6 +23,7 @@ use std::collections::{HashMap, HashSet};
 
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::parse;
+use smelt_types::{BuiltinRegistry, Emission};
 
 fn print_with(sql: &str, dialect: &SqlDialect, caps: &BackendCapabilities) -> String {
     let parsed = parse(sql);
@@ -89,9 +90,11 @@ fn the_lowered_power_parses_back_cleanly() {
 
 #[test]
 fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
+    // DuckDB and PostgreSQL have no XOR hazard for `^` — both treat it as
+    // power (DuckDB) or raise a syntax error at parse time (PostgreSQL has no `**`).
+    // Neither needs a rewrite; verbatim emission is correct.
     for (dialect, caps) in [
         (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
-        (SqlDialect::SparkSQL, BackendCapabilities::spark()),
         (SqlDialect::PostgreSQL, BackendCapabilities::postgresql()),
     ] {
         for sql in ["SELECT val ^ 2 FROM t", "SELECT val ** 2 FROM t"] {
@@ -106,42 +109,53 @@ fn other_dialects_keep_infix_caret_and_double_star_verbatim() {
     }
 }
 
-/// `//` is lexed and parsed by smelt (`FLOOR_DIVIDE`), but DuckDB's own
-/// semantics for it are type-polymorphic in a way that makes an exact
-/// GoogleSQL lowering impossible without operand-type information the
-/// dialect printer does not have (`PrintContext` carries no type inference).
-///
-/// Measured directly against DuckDB 1.5.4:
-/// - `7 // 2` (both INTEGER) = `3`; `-7 // 2` = `-3`; `7 // -2` = `-3`;
-///   `-7 // -2` = `3` — truncating (toward-zero) integer division.
-/// - `7.5 // 2` (a DOUBLE operand) = `3.75`; `-7.0 // 2` = `-3.5` — i.e. once
-///   either operand is floating point, `//` is *not* division at all, it is
-///   literally `/` with no floor or truncation applied.
-///
-/// GoogleSQL's only floor-division-shaped primitive is `DIV(x, y)`, which
-/// requires `INT64`/`NUMERIC` operands, truncates toward zero (matching
-/// DuckDB's integer case only), and has no defined behavior for the floating
-/// operand case at all. Substituting `DIV` unconditionally would therefore
-/// silently compute the wrong answer for float operands (exactly the hazard
-/// this task exists to close), and the printer has no static type
-/// information to choose correctly between `DIV` and plain `/`. It also has
-/// no diagnostic-emission channel (`print` returns a plain `String`, not a
-/// `Result`), so a proper compile-time diagnostic cannot be raised from this
-/// layer without a larger structural change (tracked as follow-up work, not
-/// done here per "no speculative lowerings").
-///
-/// Leaving `//` unlowered is therefore the correct choice: like `%` before
-/// `print_bigquery_modulo` existed, GoogleSQL has no infix `//` either, so an
-/// unlowered `//` still fails loud as a BigQuery syntax error — never a
-/// silently wrong number.
+/// Spark's `^` is bitwise XOR, not exponentiation — the same silent-wrong-answer
+/// hazard as BigQuery. The registry maps `^` and `**` to `RewriteId::PowerCall`
+/// for Spark, so the printer must lower them to `POWER(...)`.
 #[test]
-fn no_lowering_registered_for_floor_divide() {
+fn spark_lowers_infix_caret_to_power_call() {
+    let (dialect, caps) = (SqlDialect::SparkSQL, BackendCapabilities::spark());
+    let out = print_with("SELECT a ^ b FROM t", &dialect, &caps);
+    assert_eq!(
+        out, "SELECT POWER(a, b) FROM t",
+        "Spark `^` is bitwise XOR, not power — must lower to POWER(...): {out}"
+    );
+}
+
+/// `//` (floor divide) is declared `Unsupported` in the registry for Spark,
+/// PostgreSQL, and BigQuery. The printer still emits `//` verbatim; the compile
+/// path owns the refusal (`UnsupportedOnBackend`). The unsupported verdict is
+/// asserted here as a registry fact so it is not silently dropped.
+///
+/// DuckDB's `//` semantics are type-polymorphic (`7 // 2 = 3` integer division,
+/// `7.5 // 2 = 3.75` floating-point division) in a way that makes a portable
+/// lowering impossible without operand-type information.  No rewrite exists that
+/// maps correctly across all operand types, so the registry records
+/// `Unsupported` rather than a wrong approximation.
+#[test]
+fn floor_divide_is_declared_unsupported_rather_than_lowered() {
     let sql = "SELECT a // b FROM t";
+    // Printer still emits verbatim — the refusal lives in the compile path.
     let out = bigquery(sql);
     assert_eq!(
         out, sql,
-        "`//` is deliberately left unlowered (see doc comment above) — it \
-         must still fail loud as a BigQuery syntax error rather than silently \
-         approximate: {out}"
+        "`//` must reach the warehouse verbatim so it fails loud rather than \
+         silently approximates: {out}"
     );
+
+    // Registry verdict: Unsupported on Spark, PostgreSQL, and BigQuery.
+    let sig = BuiltinRegistry::resolve("//").expect("floor-divide `//` must have a registry entry");
+    for dialect in [
+        SqlDialect::SparkSQL,
+        SqlDialect::PostgreSQL,
+        SqlDialect::BigQuery,
+    ] {
+        let emission = sig.emission_for(dialect.id());
+        assert!(
+            matches!(emission, Emission::Unsupported { .. }),
+            "floor-divide `//` must be Unsupported on {}, got {:?}",
+            dialect.name(),
+            emission
+        );
+    }
 }

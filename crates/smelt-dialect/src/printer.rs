@@ -18,6 +18,7 @@ use smelt_parser::{CastExpr, FunctionCall};
 use std::collections::{HashMap, HashSet};
 
 use crate::{BackendCapabilities, SqlDialect};
+use smelt_types::{BuiltinRegistry, Emission, RewriteId};
 
 /// Emitter closure type for `smelt.as_struct(alias [EXCEPT cols])`.
 /// Called with `(alias, except_columns)` → emitted SQL, or `None` to pass through.
@@ -248,18 +249,8 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         }
         SyntaxKind::FUNCTION_CALL => {
             if let Some(fc) = FunctionCall::cast(node.clone()) {
-                // Function name remapping per dialect
                 if let Some(name) = fc.name() {
-                    // `MEDIAN` needs more than a rename on GoogleSQL, which has
-                    // no such built-in — see `print_bigquery_median`.
-                    if matches!(ctx.dialect, SqlDialect::BigQuery)
-                        && name.eq_ignore_ascii_case("MEDIAN")
-                        && print_bigquery_median(node, &fc, ctx, out)
-                    {
-                        return;
-                    }
-                    if let Some(new_name) = remap_function_name(ctx.dialect, &name) {
-                        print_function_with_renamed(node, ctx, out, new_name);
+                    if emit_registered_function(node, &fc, &name, ctx, out) {
                         return;
                     }
                 }
@@ -267,18 +258,7 @@ fn print_node(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
             print_children(node, ctx, out);
         }
         SyntaxKind::BINARY_EXPR => {
-            // `%` needs more than a rename on GoogleSQL, which has no infix
-            // modulo operator — see `print_bigquery_modulo`.
-            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_modulo(node, ctx, out)
-            {
-                return;
-            }
-            // `^` is a strictly more dangerous gap than `%`: GoogleSQL *does*
-            // define infix `^`, but as bitwise XOR, not power — so an
-            // unlowered `^` doesn't fail, it silently computes the wrong
-            // number. `**` shares the same DuckDB "power" semantics and has
-            // no infix form on GoogleSQL at all. See `print_bigquery_power`.
-            if matches!(ctx.dialect, SqlDialect::BigQuery) && print_bigquery_power(node, ctx, out) {
+            if emit_registered_operator(node, ctx, out) {
                 return;
             }
             print_children(node, ctx, out);
@@ -399,9 +379,9 @@ fn print_pipe_rewrite(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) {
         });
         match op {
             None => true,
-            // SET/DROP/RENAME are only handled on DuckDB; non-DuckDB → verbatim.
+            // SET/DROP/RENAME are only handled when the backend supports them; others → verbatim.
             Some(PIPE_OP_SET) | Some(PIPE_OP_DROP) | Some(PIPE_OP_RENAME) => {
-                !matches!(ctx.dialect, SqlDialect::DuckDB)
+                !ctx.capabilities.supports_pipe_set_drop_rename
             }
             _ => false,
         }
@@ -1785,20 +1765,19 @@ fn print_bigquery_median(
     true
 }
 
-/// Lower infix `%` (modulo) to GoogleSQL, which has no infix modulo operator
-/// — only the `MOD(x, y)` function (verified live: BigQuery rejects `id % 2`
-/// with `Syntax error: Expected ")" but got "%"`, the failure this closes).
+/// Lower infix `%` (modulo) to `MOD(x, y)`.
+///
+/// The registry establishes that this operator needs a `ModuloCall` rewrite for
+/// the target dialect before this function is called; the operator identity check
+/// is not repeated here.
 ///
 /// Returns `true` when the expression was printed here (a `%` `BINARY_EXPR`
 /// with both operands present), `false` to fall through to the normal path
 /// so every other `BINARY_EXPR` (`+`, `-`, `AND`, …) still prints verbatim.
-fn print_bigquery_modulo(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+fn print_modulo_call(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
     let Some(bin) = BinaryExpr::cast(node.clone()) else {
         return false;
     };
-    if bin.operator().as_deref() != Some("%") {
-        return false;
-    }
     let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
         return false;
     };
@@ -1817,28 +1796,22 @@ fn print_bigquery_modulo(node: &SyntaxNode, ctx: &PrintContext, out: &mut String
     true
 }
 
-/// Lower infix `^` and `**` (power) to GoogleSQL, which has no infix `**`
-/// and defines infix `^` as bitwise XOR — a silent-wrong-answer hazard, not a
-/// syntax error, if left unlowered. Both operators are DuckDB-exact synonyms
-/// for `POWER(x, y)` (measured against DuckDB 1.5.4: `2 ^ 10`, `2 ** 10`, and
-/// `power(2, 10)` all print `1024.0`; the equivalence holds across negative
-/// bases, negative exponents, fractional exponents, and integer-typed
-/// operands — every case always returns `DOUBLE`, matching GoogleSQL's
-/// `POWER`, which always returns `FLOAT64`). The one measured divergence is
-/// `0 ^ (-1)`: DuckDB returns `inf`, GoogleSQL's `POWER` raises a runtime
-/// "invalid argument" error per SQL:2003 — a loud BigQuery-side failure, not
-/// a silent one, so it does not block this lowering.
+/// Lower infix `^` and `**` (power) to `POWER(x, y)`.
+///
+/// Both operators are DuckDB-exact synonyms for `POWER(x, y)` (measured against
+/// DuckDB 1.5.4: `2 ^ 10`, `2 ** 10`, and `power(2, 10)` all print `1024.0`).
+/// On Spark, `^` is bitwise XOR — a silent-wrong-answer hazard, not a syntax
+/// error, if left unlowered. The registry establishes which dialects need this
+/// rewrite before this function is called; the operator identity check is not
+/// repeated here.
 ///
 /// Returns `true` when the expression was printed here (a `^`/`**`
 /// `BINARY_EXPR` with both operands present), `false` to fall through so
 /// every other `BINARY_EXPR` still prints verbatim.
-fn print_bigquery_power(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+fn print_power_call(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
     let Some(bin) = BinaryExpr::cast(node.clone()) else {
         return false;
     };
-    if !matches!(bin.operator().as_deref(), Some("^") | Some("**")) {
-        return false;
-    }
     let (Some(left), Some(right)) = (bin.left(), bin.right()) else {
         return false;
     };
@@ -1875,52 +1848,61 @@ fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
     }
 }
 
-/// Print a FUNCTION_CALL node with the function name replaced by `new_name`.
-/// Remap a function name for a specific dialect.
-/// Returns `Some(new_name)` if the function should be renamed, `None` to keep as-is.
-fn remap_function_name<'a>(dialect: &SqlDialect, name: &str) -> Option<&'a str> {
-    match dialect {
-        SqlDialect::DuckDB => {
-            if name.eq_ignore_ascii_case("EXPLODE") {
-                Some("UNNEST")
-            } else if name.eq_ignore_ascii_case("EVERY") {
-                Some("BOOL_AND")
-            } else {
-                None
-            }
+/// Resolve the call's registry entry and dispatch on its emission verdict for
+/// this dialect. Returns `true` when the node was fully printed.
+///
+/// `BuiltinRegistry::resolve` folds case; `FunctionCall::name()` returns the raw
+/// source spelling, preserving whatever casing the author used.
+fn emit_registered_function(
+    node: &SyntaxNode,
+    fc: &FunctionCall,
+    name: &str,
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    let Some(sig) = BuiltinRegistry::resolve(name) else {
+        return false;
+    };
+    match sig.emission_for(ctx.dialect.id()) {
+        // An `Unsupported` entry still prints verbatim; the compile path refuses
+        // the model before reaching the printer (see `emission_check`), so a
+        // verbatim print here is unreachable in production and harmless in a
+        // printer unit test.
+        Emission::Native | Emission::Unsupported { .. } => false,
+        Emission::Rename(new_name) => {
+            print_function_with_renamed(node, ctx, out, new_name);
+            true
         }
-        SqlDialect::PostgreSQL => {
-            if name.eq_ignore_ascii_case("EXPLODE") {
-                Some("UNNEST")
-            } else {
-                None
-            }
-        }
-        SqlDialect::SparkSQL => {
-            if name.eq_ignore_ascii_case("UNNEST") {
-                Some("EXPLODE")
-            } else if name.eq_ignore_ascii_case("BOOL_AND") {
-                Some("EVERY")
-            } else if name.eq_ignore_ascii_case("BOOL_OR") {
-                Some("SOME")
-            } else {
-                None
-            }
-        }
-        SqlDialect::BigQuery => {
-            // GoogleSQL spells the boolean aggregates LOGICAL_AND / LOGICAL_OR and
-            // has no BOOL_AND / BOOL_OR / EVERY. It does have UNNEST natively, so
-            // only EXPLODE needs remapping onto it.
-            if name.eq_ignore_ascii_case("EXPLODE") {
-                Some("UNNEST")
-            } else if name.eq_ignore_ascii_case("BOOL_AND") || name.eq_ignore_ascii_case("EVERY") {
-                Some("LOGICAL_AND")
-            } else if name.eq_ignore_ascii_case("BOOL_OR") {
-                Some("LOGICAL_OR")
-            } else {
-                None
-            }
-        }
+        Emission::Rewrite(id) => apply_rewrite(id, node, Some(fc), ctx, out),
+    }
+}
+
+fn emit_registered_operator(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> bool {
+    let Some(op) = BinaryExpr::cast(node.clone()).and_then(|b| b.operator()) else {
+        return false;
+    };
+    let Some(sig) = BuiltinRegistry::resolve(&op) else {
+        return false;
+    };
+    match sig.emission_for(ctx.dialect.id()) {
+        Emission::Rewrite(id) => apply_rewrite(id, node, None, ctx, out),
+        _ => false,
+    }
+}
+
+/// The one place a `RewriteId` becomes code. Adding a variant is a compile error
+/// here until it is implemented.
+fn apply_rewrite(
+    id: RewriteId,
+    node: &SyntaxNode,
+    fc: Option<&FunctionCall>,
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    match id {
+        RewriteId::BigQueryMedian => fc.is_some_and(|fc| print_bigquery_median(node, fc, ctx, out)),
+        RewriteId::ModuloCall => print_modulo_call(node, ctx, out),
+        RewriteId::PowerCall => print_power_call(node, ctx, out),
     }
 }
 
@@ -2037,15 +2019,18 @@ mod tests {
     use smelt_parser::parse;
 
     fn duckdb_ctx() -> (SqlDialect, BackendCapabilities) {
-        (SqlDialect::DuckDB, BackendCapabilities::duckdb())
+        let caps = BackendCapabilities::duckdb();
+        (caps.dialect, caps)
     }
 
     fn postgresql_ctx() -> (SqlDialect, BackendCapabilities) {
-        (SqlDialect::PostgreSQL, BackendCapabilities::postgresql())
+        let caps = BackendCapabilities::postgresql();
+        (caps.dialect, caps)
     }
 
     fn spark_ctx() -> (SqlDialect, BackendCapabilities) {
-        (SqlDialect::SparkSQL, BackendCapabilities::spark())
+        let caps = BackendCapabilities::spark();
+        (caps.dialect, caps)
     }
 
     fn print_with(
