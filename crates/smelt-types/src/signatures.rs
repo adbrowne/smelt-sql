@@ -2722,13 +2722,11 @@ pub struct Signature {
     /// "derive from [`Signature::return_type`] at call time" — the common
     /// case for monomorphic signatures.
     ///
-    /// Phase 12: recording-only. Step 7+ will consume this via a CAST
-    /// emitter when `needs_cast_for(engine)` returns `true`.
+    /// emitter when `needs_cast_for` returns `true`.
     pub canonical_return: Option<DataType>,
-    /// Per-backend native return-type overrides. Keyed on lowercase
-    /// backend id (e.g. `"duckdb"`, `"spark"`). An entry here means
-    /// "this backend natively returns a type that differs from
-    /// [`Self::canonical_return`]" — Step 7+ emits a CAST at emit-time
+    /// Per-backend native return-type overrides. Keyed on [`DialectId`].
+    /// An entry here means "this backend natively returns a type that differs
+    /// from [`Self::canonical_return`]" — Step 7+ emits a CAST at emit-time
     /// to preserve the canonical type.
     ///
     /// Phase 12: recording-only. `HashMap::default()` on entries that
