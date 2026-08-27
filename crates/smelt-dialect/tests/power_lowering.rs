@@ -150,7 +150,7 @@ fn floor_divide_is_declared_unsupported_rather_than_lowered() {
         SqlDialect::PostgreSQL,
         SqlDialect::BigQuery,
     ] {
-        let emission = sig.emission_for(dialect.id());
+        let emission = sig.emission_at(dialect.id(), smelt_types::signatures::Position::Any);
         assert!(
             matches!(emission, Emission::Unsupported { .. }),
             "floor-divide `//` must be Unsupported on {}, got {:?}",

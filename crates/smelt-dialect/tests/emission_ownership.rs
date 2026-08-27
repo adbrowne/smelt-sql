@@ -124,3 +124,48 @@ fn every_rewrite_id_is_dispatched() {
         );
     }
 }
+
+/// The printer holds no name-matched, sibling-peeking, or otherwise ad hoc
+/// derivation of a call's SQL position.
+///
+/// `docs/specs/multi_backend.md` §"Emission is scoped to call position":
+/// "Position is decided once, by the compile path, from the source CST, and
+/// handed to the registry. The printer never re-derives it: a printer that
+/// inspected sibling nodes to tell aggregate position from window position
+/// would hold emission knowledge the registry owns." This is what
+/// `print_bigquery_median`'s old `node.next_sibling()` / `WINDOW_SPEC` peek
+/// did before it was replaced by a `Position` argument computed once, via
+/// `position::classify`, in `emit_registered_function`.
+#[test]
+fn the_printer_derives_no_position_itself() {
+    let forbidden = ["next_sibling", "SyntaxKind::WINDOW_SPEC", "WINDOW_SPEC"];
+    let hits: Vec<(usize, &str)> = PRINTER_SRC
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| forbidden.iter().any(|f| l.contains(f)))
+        .map(|(i, l)| (i + 1, l.trim()))
+        .collect();
+    assert!(
+        hits.is_empty(),
+        "printer.rs inspects sibling nodes or a WINDOW_SPEC directly to tell \
+         a call's position — that is `position::classify`'s question to \
+         answer, once, before the printer ever sees the call. Pass the \
+         classified `Position` in instead of re-deriving it here.\n{hits:#?}"
+    );
+}
+
+/// `emit_registered_function` — the one production call site that resolves a
+/// *call's* position (as opposed to `emit_registered_operator`, which always
+/// states `Position::Any` because an operator is never itself a window or
+/// aggregate call) — must obtain it from `position::classify`, never invent
+/// one locally.
+#[test]
+fn the_printer_classifies_position_through_one_function() {
+    assert!(
+        PRINTER_SRC.contains("classify_position(node, &root)")
+            || PRINTER_SRC.contains("classify_position(node, root)"),
+        "emit_registered_function must resolve a call's position via \
+         `position::classify` (re-exported as `classify_position`), not by \
+         deriving it locally"
+    );
+}

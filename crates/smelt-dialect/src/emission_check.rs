@@ -7,14 +7,16 @@
 //! diagnostic that names both the construct and the backend.
 //!
 //! Single ownership holds: the verdict is `BuiltinRegistry` data
-//! (`Signature::emission_for`), never a list restated here.
+//! (`Signature::emission_at`), never a list restated here.
 
 use smelt_parser::ast::BinaryExpr;
 use smelt_parser::syntax_kind::{SyntaxKind, SyntaxNode};
 use smelt_parser::FunctionCall;
 use smelt_parser::{TextRange, TextSize};
+use smelt_types::signatures::Position;
 use smelt_types::{BuiltinRegistry, DialectId, Emission};
 
+use crate::position::classify as classify_position;
 use crate::SqlDialect;
 
 /// One construct the target dialect cannot express.
@@ -54,13 +56,20 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
     let id = dialect.id();
     root.descendants()
         .filter_map(|node| {
-            let name = match node.kind() {
-                SyntaxKind::FUNCTION_CALL => FunctionCall::cast(node.clone())?.name()?,
-                SyntaxKind::BINARY_EXPR => BinaryExpr::cast(node.clone())?.operator()?,
+            let (name, position) = match node.kind() {
+                SyntaxKind::FUNCTION_CALL => (
+                    FunctionCall::cast(node.clone())?.name()?,
+                    classify_position(&node, root),
+                ),
+                // Operators are never a call in window/aggregate position —
+                // their verdicts are stated with `Position::Any`.
+                SyntaxKind::BINARY_EXPR => {
+                    (BinaryExpr::cast(node.clone())?.operator()?, Position::Any)
+                }
                 _ => return None,
             };
             let sig = BuiltinRegistry::resolve(&name)?;
-            match sig.emission_for(id) {
+            match sig.emission_at(id, position) {
                 Emission::Unsupported { reason } => Some(UnsupportedEmission {
                     name: sig.name.as_str(),
                     dialect: id,

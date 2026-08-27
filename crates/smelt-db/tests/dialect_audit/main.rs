@@ -360,7 +360,7 @@ fn is_registered(name: &str, dialect: DialectId, position: Position, leg: ledger
 fn is_declared_unsupported(name: &str, dialect: DialectId) -> bool {
     BuiltinRegistry::resolve(name).is_some_and(|sig| {
         matches!(
-            sig.emission_for(dialect),
+            sig.emission_at(dialect, smelt_types::signatures::Position::Any),
             smelt_types::Emission::Unsupported { .. }
         )
     })

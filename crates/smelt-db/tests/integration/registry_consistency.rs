@@ -224,3 +224,57 @@ fn to_seconds_and_md5_registered() {
         Some(SqlFunction::ToSeconds)
     );
 }
+
+#[test]
+fn no_position_blind_emission_lookup() {
+    // `Signature::emission_for(dialect)` asked a question the registry can no
+    // longer answer honestly — a built-in's support routinely differs between
+    // the positions it can appear in (`docs/specs/multi_backend.md`
+    // §"Emission is scoped to call position"). It was replaced by
+    // `emission_at(dialect, position)`, which forces every caller to name a
+    // position rather than falling back to a dialect-only verdict. This is a
+    // grep, not a type check, because the compiler enforces the new
+    // signature but nothing stops a future call site from re-adding the old
+    // name under a different guise.
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root must resolve");
+
+    let mut hits: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(workspace_root.join("crates"))
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if path.components().any(|c| c.as_os_str() == "target") {
+            continue;
+        }
+        // This test's own source names the removed method in prose and in
+        // the pattern it greps for — not a call site.
+        if path.file_name().and_then(|f| f.to_str()) == Some("registry_consistency.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            // The leading `.` distinguishes an actual method call from a
+            // doc comment or string mentioning the old name.
+            if line.contains(".emission_for(") {
+                hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "no call site may take a dialect without a position — use \
+         `emission_at(dialect, position)` instead of the removed \
+         `emission_for(dialect)`:\n{}",
+        hits.join("\n")
+    );
+}

@@ -2853,13 +2853,15 @@ pub struct Signature {
     /// registry entries for hover/completion but are not part of the
     /// callable-function surface.
     pub syntax_form: SyntaxForm,
-    /// Per-dialect emission verdicts for this entry (Phase 3, #171).
+    /// Per-`(dialect, position)` emission verdicts for this entry.
     ///
-    /// `&[]` means every dialect is `Native`. Use [`Self::with_emission`] to
-    /// populate and [`Self::emission_for`] to query. Populated only for entries
-    /// whose printer treatment differs from plain name-pass-through on at least
-    /// one dialect.
-    pub emission: &'static [(DialectId, Emission)],
+    /// `&[]` means every dialect and position is `Native`. Use
+    /// [`Self::with_emission`] to populate and [`Self::emission_at`] to
+    /// query. Populated only for entries whose printer treatment differs
+    /// from plain name-pass-through on at least one `(dialect, position)`
+    /// pair. A verdict stated with [`Position::Any`] applies to every
+    /// position that has no more specific entry of its own.
+    pub emission: &'static [(DialectId, Position, Emission)],
 }
 
 /// Nullability-propagation policy for a registry-resolved call's result,
@@ -3011,22 +3013,37 @@ impl Signature {
         self
     }
 
-    /// Attach a per-dialect emission table to this signature (Phase 3, #171).
+    /// Attach a per-`(dialect, position)` emission table to this signature.
     ///
-    /// Builder-style — used by the registry seed to declare how each dialect
-    /// must spell or rewrite this entry. Unlisted dialects are implicitly
+    /// Builder-style — used by the registry seed to declare how each
+    /// `(dialect, position)` pair must spell or rewrite this entry. A pair
+    /// with no entry, direct or via [`Position::Any`], is implicitly
     /// [`Emission::Native`].
-    pub fn with_emission(mut self, table: &'static [(DialectId, Emission)]) -> Self {
+    pub fn with_emission(mut self, table: &'static [(DialectId, Position, Emission)]) -> Self {
         self.emission = table;
         self
     }
 
-    /// The emission verdict for `dialect`. Unlisted dialects are `Native`.
-    pub fn emission_for(&self, dialect: DialectId) -> Emission {
+    /// The emission verdict for `dialect` at `position`.
+    ///
+    /// Lookup consults the exact `(dialect, position)` pair first, then
+    /// `(dialect, Position::Any)`, and stops — there is deliberately no
+    /// fallback *between* positions, and in particular none between the two
+    /// window positions (`WholePartitionWindow` and `Window`), because a
+    /// caller that decided a call's actual position is the only one
+    /// entitled to fall back to `Any`; a lookup that fell from one concrete
+    /// position to another would answer a different question than the one
+    /// asked. A pair with no entry at all is `Native`.
+    pub fn emission_at(&self, dialect: DialectId, position: Position) -> Emission {
         self.emission
             .iter()
-            .find(|(d, _)| *d == dialect)
-            .map(|(_, e)| *e)
+            .find(|(d, p, _)| *d == dialect && *p == position)
+            .or_else(|| {
+                self.emission
+                    .iter()
+                    .find(|(d, p, _)| *d == dialect && *p == Position::Any)
+            })
+            .map(|(_, _, e)| *e)
             .unwrap_or(Emission::Native)
     }
 
@@ -4235,7 +4252,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_emission(&[
             // GoogleSQL has no `now()`; verified live 2026-08-24.
-            (DialectId::BigQuery, Emission::Rename("CURRENT_TIMESTAMP")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("CURRENT_TIMESTAMP"),
+            ),
         ]),
     );
     insert(Signature::new(
@@ -4275,7 +4296,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // GoogleSQL spells the separator-taking string aggregate `STRING_AGG`.
             // Verified live 2026-08-24: `STRING_AGG(x, ',')` -> STRING.
-            (DialectId::BigQuery, Emission::Rename("STRING_AGG")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("STRING_AGG"),
+            ),
         ]),
     );
     insert(
@@ -4298,10 +4323,28 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
         )
         .with_kind(ExprKind::Agg)
-        .with_emission(&[(
-            DialectId::BigQuery,
-            Emission::Rewrite(RewriteId::BigQueryMedian),
-        )]),
+        .with_emission(&[
+            // GoogleSQL has no `MEDIAN`; the printer lowers it to an exact
+            // form per position (`printer.rs::print_bigquery_median`). The
+            // aggregate and whole-partition-window forms are both exact
+            // lowerings; a running window is stated the same way for now so
+            // behaviour is unchanged from before position-scoped emission.
+            (
+                DialectId::BigQuery,
+                Position::Aggregate,
+                Emission::Rewrite(RewriteId::BigQueryMedian),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Rewrite(RewriteId::BigQueryMedian),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Rewrite(RewriteId::BigQueryMedian),
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4366,8 +4409,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_kind(ExprKind::Agg)
         .with_emission(&[
-            (DialectId::SparkSql, Emission::Rename("EVERY")),
-            (DialectId::BigQuery, Emission::Rename("LOGICAL_AND")),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("EVERY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_AND"),
+            ),
         ]),
     );
     insert(
@@ -4379,8 +4430,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_kind(ExprKind::Agg)
         .with_emission(&[
-            (DialectId::SparkSql, Emission::Rename("SOME")),
-            (DialectId::BigQuery, Emission::Rename("LOGICAL_OR")),
+            (DialectId::SparkSql, Position::Any, Emission::Rename("SOME")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_OR"),
+            ),
         ]),
     );
     insert(
@@ -4435,8 +4490,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // Both spell it `MAX_BY`. Verified live 2026-08-24 on Spark 4.0.0 and
             // BigQuery: `MAX_BY(x, y)` resolves on each.
-            (DialectId::SparkSql, Emission::Rename("MAX_BY")),
-            (DialectId::BigQuery, Emission::Rename("MAX_BY")),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("MAX_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("MAX_BY"),
+            ),
         ]),
     );
     // arg_min(value, key) → value: the order-monotone-overwrite family's
@@ -4452,8 +4515,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_aliases(&["MIN_BY"])
         .with_emission(&[
             // Both spell it `MIN_BY`. Verified live 2026-08-24.
-            (DialectId::SparkSql, Emission::Rename("MIN_BY")),
-            (DialectId::BigQuery, Emission::Rename("MIN_BY")),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("MIN_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("MIN_BY"),
+            ),
         ]),
     );
     insert(
@@ -4611,7 +4682,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // Spark spells it `INSTR`, with the same (haystack, needle) argument order.
             // Verified live 2026-08-24: `instr('abc','b')` -> 2.
-            (DialectId::SparkSql, Emission::Rename("INSTR")),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("INSTR"),
+            ),
         ]),
     );
     insert(Signature::new(
@@ -4763,7 +4838,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // GoogleSQL's three-argument `DATE(y, m, d)` is the same constructor.
             // Verified live 2026-08-24.
-            (DialectId::BigQuery, Emission::Rename("DATE")),
+            (DialectId::BigQuery, Position::Any, Emission::Rename("DATE")),
         ]),
     );
     insert(
@@ -4784,7 +4859,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_emission(&[
             // GoogleSQL's `DATETIME(y, m, d, h, mi, s)`. Verified live 2026-08-24.
-            (DialectId::BigQuery, Emission::Rename("DATETIME")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("DATETIME"),
+            ),
         ]),
     );
     insert(Signature::new(
@@ -4866,8 +4945,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_kind(ExprKind::Agg)
         .with_emission(&[
-            (DialectId::DuckDb, Emission::Rename("BOOL_AND")),
-            (DialectId::BigQuery, Emission::Rename("LOGICAL_AND")),
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("BOOL_AND"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_AND"),
+            ),
         ]),
     );
     // Text-returning aggregate.
@@ -4881,7 +4968,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_kind(ExprKind::Agg)
         .with_emission(&[
             // GoogleSQL spells it `STRING_AGG`. Verified live 2026-08-24.
-            (DialectId::BigQuery, Emission::Rename("STRING_AGG")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("STRING_AGG"),
+            ),
         ]),
     );
     // First-argument identity aggregates (typing stays in the exception list).
@@ -4907,7 +4998,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
         )
         // GoogleSQL spells it `RAND`.
-        .with_emission(&[(DialectId::BigQuery, Emission::Rename("RAND"))]),
+        .with_emission(&[(DialectId::BigQuery, Position::Any, Emission::Rename("RAND"))]),
     );
     insert(
         Signature::new(
@@ -4919,8 +5010,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         // Neither DuckDB nor GoogleSQL has `truncate`; both spell the numeric
         // truncation `TRUNC`.
         .with_emission(&[
-            (DialectId::DuckDb, Emission::Rename("TRUNC")),
-            (DialectId::BigQuery, Emission::Rename("TRUNC")),
+            (DialectId::DuckDb, Position::Any, Emission::Rename("TRUNC")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("TRUNC"),
+            ),
         ]),
     );
 
@@ -4975,7 +5070,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_emission(&[
             // GoogleSQL's `TIME(h, m, s)`. Verified live 2026-08-24.
-            (DialectId::BigQuery, Emission::Rename("TIME")),
+            (DialectId::BigQuery, Position::Any, Emission::Rename("TIME")),
         ]),
     );
     insert(Signature::new(
@@ -5021,7 +5116,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
         .with_aliases(&["JSON_EXTRACT_PATH"])
-        .with_emission(&[(DialectId::SparkSql, Emission::Rename("GET_JSON_OBJECT"))]),
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Rename("GET_JSON_OBJECT"),
+        )]),
     );
     insert(
         Signature::new(
@@ -5037,9 +5136,21 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             "JSON_VALUE",
         ])
         .with_emission(&[
-            (DialectId::DuckDb, Emission::Rename("JSON_EXTRACT_STRING")),
-            (DialectId::SparkSql, Emission::Rename("GET_JSON_OBJECT")),
-            (DialectId::BigQuery, Emission::Rename("JSON_VALUE")),
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("JSON_EXTRACT_STRING"),
+            ),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("GET_JSON_OBJECT"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("JSON_VALUE"),
+            ),
         ]),
     );
 
@@ -5063,7 +5174,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_emission(&[
             // DuckDB spells it `json_keys` — already carried as an alias on this entry,
             // so resolution and emission now agree. Verified live 2026-08-24.
-            (DialectId::DuckDb, Emission::Rename("JSON_KEYS")),
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("JSON_KEYS"),
+            ),
         ]),
     );
     insert(Signature::new(
@@ -5170,14 +5285,23 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // owner and so the audit enumeration cannot walk past them — `^` is the
     // silent-divergence case issue #171 was filed about.
     for op in ["%", "^", "**"] {
-        let emission: &'static [(DialectId, Emission)] = match op {
+        let emission: &'static [(DialectId, Position, Emission)] = match op {
             "%" => &[(
                 DialectId::BigQuery,
+                Position::Any,
                 Emission::Rewrite(RewriteId::ModuloCall),
             )],
             "^" | "**" => &[
-                (DialectId::SparkSql, Emission::Rewrite(RewriteId::PowerCall)),
-                (DialectId::BigQuery, Emission::Rewrite(RewriteId::PowerCall)),
+                (
+                    DialectId::SparkSql,
+                    Position::Any,
+                    Emission::Rewrite(RewriteId::PowerCall),
+                ),
+                (
+                    DialectId::BigQuery,
+                    Position::Any,
+                    Emission::Rewrite(RewriteId::PowerCall),
+                ),
             ],
             _ => &[],
         };
@@ -5208,18 +5332,21 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             // syntax error into a compile-time diagnostic.
             (
                 DialectId::SparkSql,
+                Position::Any,
                 Emission::Unsupported {
                     reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
                 },
             ),
             (
                 DialectId::PostgreSql,
+                Position::Any,
                 Emission::Unsupported {
                     reason: "PostgreSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
                 },
             ),
             (
                 DialectId::BigQuery,
+                Position::Any,
                 Emission::Unsupported {
                     reason: "GoogleSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
                 },
@@ -5246,9 +5373,17 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_syntax_form(SyntaxForm::TableFn)
         .with_emission(&[
-            (DialectId::DuckDb, Emission::Rename("UNNEST")),
-            (DialectId::PostgreSql, Emission::Rename("UNNEST")),
-            (DialectId::BigQuery, Emission::Rename("UNNEST")),
+            (DialectId::DuckDb, Position::Any, Emission::Rename("UNNEST")),
+            (
+                DialectId::PostgreSql,
+                Position::Any,
+                Emission::Rename("UNNEST"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("UNNEST"),
+            ),
         ]),
     );
     insert(
@@ -5259,7 +5394,11 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Var("T".into()),
         )
         .with_syntax_form(SyntaxForm::TableFn)
-        .with_emission(&[(DialectId::SparkSql, Emission::Rename("EXPLODE"))]),
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Rename("EXPLODE"),
+        )]),
     );
 
     m

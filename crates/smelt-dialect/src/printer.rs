@@ -17,7 +17,9 @@ use smelt_parser::{CastExpr, FunctionCall};
 
 use std::collections::{HashMap, HashSet};
 
+use crate::position::classify as classify_position;
 use crate::{BackendCapabilities, SqlDialect};
+use smelt_types::signatures::Position;
 use smelt_types::{BuiltinRegistry, Emission, RewriteId};
 
 /// Emitter closure type for `smelt.as_struct(alias [EXCEPT cols])`.
@@ -1727,6 +1729,7 @@ fn split_comma_top_level(s: &str) -> Vec<String> {
 fn print_bigquery_median(
     node: &SyntaxNode,
     fc: &FunctionCall,
+    position: Position,
     ctx: &PrintContext,
     out: &mut String,
 ) -> bool {
@@ -1741,11 +1744,10 @@ fn print_bigquery_median(
         return false;
     }
 
-    // `OVER` is parsed as a WINDOW_SPEC sibling of the call, not a child.
-    let windowed = node
-        .next_sibling()
-        .map(|sib| sib.kind() == SyntaxKind::WINDOW_SPEC)
-        .unwrap_or(false);
+    // The call's position is decided once, by the compile path, from the
+    // source CST (`position::classify`) — this function is never handed
+    // anything else to derive it from.
+    let windowed = matches!(position, Position::WholePartitionWindow | Position::Window);
     if windowed {
         out.push_str(&format!("PERCENTILE_CONT({arg_sql}, 0.5)"));
         push_trailing_trivia(node, out);
@@ -1863,7 +1865,13 @@ fn emit_registered_function(
     let Some(sig) = BuiltinRegistry::resolve(name) else {
         return false;
     };
-    match sig.emission_for(ctx.dialect.id()) {
+    // Position is decided once, from the source CST, and handed to the
+    // registry — the printer never re-derives it (`docs/specs/multi_backend.md`
+    // §"Emission is scoped to call position"). The topmost ancestor of `node`
+    // is the root the classifier resolves named `WINDOW` clauses against.
+    let root = node.ancestors().last().unwrap_or_else(|| node.clone());
+    let position = classify_position(node, &root);
+    match sig.emission_at(ctx.dialect.id(), position) {
         // An `Unsupported` entry still prints verbatim; the compile path refuses
         // the model before reaching the printer (see `emission_check`), so a
         // verbatim print here is unreachable in production and harmless in a
@@ -1881,7 +1889,7 @@ fn emit_registered_function(
             print_function_with_renamed(node, ctx, out, new_name);
             true
         }
-        Emission::Rewrite(id) => apply_rewrite(id, node, Some(fc), ctx, out),
+        Emission::Rewrite(id) => apply_rewrite(id, node, Some(fc), position, ctx, out),
     }
 }
 
@@ -1892,8 +1900,10 @@ fn emit_registered_operator(node: &SyntaxNode, ctx: &PrintContext, out: &mut Str
     let Some(sig) = BuiltinRegistry::resolve(&op) else {
         return false;
     };
-    match sig.emission_for(ctx.dialect.id()) {
-        Emission::Rewrite(id) => apply_rewrite(id, node, None, ctx, out),
+    // Operators are never a call in window/aggregate position; their verdicts
+    // are stated with `Position::Any`, so there is no position to classify.
+    match sig.emission_at(ctx.dialect.id(), Position::Any) {
+        Emission::Rewrite(id) => apply_rewrite(id, node, None, Position::Any, ctx, out),
         _ => false,
     }
 }
@@ -1904,11 +1914,14 @@ fn apply_rewrite(
     id: RewriteId,
     node: &SyntaxNode,
     fc: Option<&FunctionCall>,
+    position: Position,
     ctx: &PrintContext,
     out: &mut String,
 ) -> bool {
     match id {
-        RewriteId::BigQueryMedian => fc.is_some_and(|fc| print_bigquery_median(node, fc, ctx, out)),
+        RewriteId::BigQueryMedian => {
+            fc.is_some_and(|fc| print_bigquery_median(node, fc, position, ctx, out))
+        }
         RewriteId::ModuloCall => print_modulo_call(node, ctx, out),
         RewriteId::PowerCall => print_power_call(node, ctx, out),
     }

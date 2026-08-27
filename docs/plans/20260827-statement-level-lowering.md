@@ -72,7 +72,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 650c1760 | 2026-08-27 |
-| 2     | pending  |        |      |
+| 2     | done     |          | 2026-08-27 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -351,6 +351,15 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Interim BigQuery `MEDIAN` verdict at `Position::Window`.** Shipped as `Rewrite(BigQueryMedian)` to keep
+  `median_lowering.rs` behaviour identical, while §"Exact-median lowering" already states the target of
+  `Unsupported`. Phase 6's verdict list flips it. No automated tripwire forces that flip — the plan's own
+  Phase 6 checklist is the only guard, so it must not be skipped.
+- **`representative_emission` collapse in the audit report.** `crates/smelt-db/tests/dialect_audit/report.rs`
+  picks one verdict per `(entry, dialect)` cell for the published coverage table. Verified inert (no gate
+  consumes it) and correct only while an entry's positions agree. Phase 6 replaces it with per-position
+  rendering; it becomes wrong the moment a verdict differs by position.
 
 ## Verification
 

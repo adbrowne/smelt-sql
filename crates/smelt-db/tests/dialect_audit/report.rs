@@ -7,9 +7,40 @@
 //! found. It is not a claim that every cell has been verified; the trailing
 //! verification-tier section says which dialects a live leg actually visits.
 
+use smelt_types::signatures::{Position, Signature};
 use smelt_types::{BuiltinRegistry, DialectId, Emission, SyntaxForm};
 
 use crate::ledger::{self, Verdict};
+
+/// A single display verdict for `(sig, dialect)`, collapsing across call
+/// positions.
+///
+/// The registry now states a verdict per `(dialect, position)`, but this
+/// report still renders one cell per `(entry, dialect)` — the fourth probe
+/// position is what teaches it to render a per-position verdict set instead
+/// of collapsing one. Until then: `Position::Any` first (the common case,
+/// where the verdict does not vary by position), then the first non-`Native`
+/// concrete-position verdict in a fixed order, so an entry stated only at
+/// specific positions (e.g. `MEDIAN` on BigQuery) still surfaces its verdict
+/// rather than reading as `native`.
+fn representative_emission(sig: &Signature, dialect: DialectId) -> Emission {
+    let any = sig.emission_at(dialect, Position::Any);
+    if !matches!(any, Emission::Native) {
+        return any;
+    }
+    for position in [
+        Position::Scalar,
+        Position::Aggregate,
+        Position::WholePartitionWindow,
+        Position::Window,
+    ] {
+        let e = sig.emission_at(dialect, position);
+        if !matches!(e, Emission::Native) {
+            return e;
+        }
+    }
+    Emission::Native
+}
 
 fn form_label(form: SyntaxForm) -> &'static str {
     match form {
@@ -28,7 +59,7 @@ fn form_label(form: SyntaxForm) -> &'static str {
 /// pair can carry both — `LOG` is `native` on Spark and also a recorded gap.
 fn cell(name: &str, dialect: DialectId) -> String {
     let emission = BuiltinRegistry::resolve(name)
-        .map(|sig| sig.emission_for(dialect))
+        .map(|sig| representative_emission(sig, dialect))
         .unwrap_or(Emission::Native);
     let base = match emission {
         Emission::Native => "native".to_string(),

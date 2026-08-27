@@ -77,7 +77,7 @@ fn function_and_operator_refusals_share_one_walk() {
             BuiltinRegistry::resolve(n).is_some_and(|s| {
                 s.syntax_form == SyntaxForm::Call
                     && matches!(
-                        s.emission_for(DialectId::BigQuery),
+                        s.emission_at(DialectId::BigQuery, smelt_types::signatures::Position::Any),
                         Emission::Unsupported { .. }
                     )
             })
