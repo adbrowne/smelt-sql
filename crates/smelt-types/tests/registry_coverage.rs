@@ -1,7 +1,7 @@
 /// Phase 50: registry coverage tests — verify that newly-seeded built-ins
 /// are present and carry the correct `ExprKind`.
 use smelt_types::{
-    signatures::{Emission, ExprKind, RewriteId, SyntaxForm},
+    signatures::{Emission, ExprKind, Position, RewriteId, SyntaxForm},
     BuiltinRegistry, DialectId,
 };
 
@@ -769,5 +769,38 @@ fn every_declared_rewrite_id_is_reachable_from_some_entry() {
             RewriteId::ModuloCall,
             RewriteId::PowerCall
         ],
+    );
+}
+
+// ─── Position ───────────────────────────────────────────────────────────────
+
+/// `Position` has exactly the five documented variants, and `Any` is a
+/// lookup wildcard no classifier ever returns — it exists only so a
+/// registry entry can state one verdict that applies at every call
+/// position. This match is exhaustive: adding or removing a variant is a
+/// compile error here, forcing this test (and its doc comment) to be
+/// updated alongside the enum.
+#[test]
+fn position_variants_are_exhaustive() {
+    let variants = [
+        Position::Any,
+        Position::Scalar,
+        Position::Aggregate,
+        Position::WholePartitionWindow,
+        Position::Window,
+    ];
+    for v in variants {
+        match v {
+            Position::Any
+            | Position::Scalar
+            | Position::Aggregate
+            | Position::WholePartitionWindow
+            | Position::Window => {}
+        }
+    }
+    assert_eq!(
+        variants.len(),
+        5,
+        "Position must have exactly five variants"
     );
 }

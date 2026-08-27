@@ -124,6 +124,42 @@ pub enum Emission {
     Unsupported { reason: &'static str },
 }
 
+/// The SQL call-site context an emission verdict is stated for.
+///
+/// A built-in's support on a backend routinely differs between the positions
+/// it can appear in — GoogleSQL refuses `PERCENTILE_CONT` under a `GROUP BY`
+/// but accepts it with an `OVER` clause, while `MAX_BY` is the exact reverse
+/// — so a verdict is looked up by `(dialect, position)`, never by dialect
+/// alone. `Any` is a lookup wildcard for an entry whose verdict does not vary
+/// by position; it is never returned by a classifier that decides a call's
+/// actual position from its source CST — such a classifier always resolves
+/// to one of the other four variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Position {
+    /// Lookup wildcard, matching any call position. Never returned by a
+    /// position classifier — only ever used as a stated verdict key.
+    Any,
+    /// A row-wise expression: no `OVER` clause, and not itself an aggregate
+    /// call. A scalar call under a `GROUP BY` (e.g. applied to a grouping
+    /// key or in a `WHERE` clause) is still `Scalar` — the enclosing
+    /// statement's `GROUP BY` does not change a call's own position.
+    Scalar,
+    /// The call is itself an aggregate call, with no `OVER` clause.
+    Aggregate,
+    /// An `OVER` clause whose window covers the call's whole partition —
+    /// after resolving any named-window reference, no window `ORDER BY` and
+    /// no frame clause, or an explicit `BETWEEN UNBOUNDED PRECEDING AND
+    /// UNBOUNDED FOLLOWING` frame with no `EXCLUDE` clause.
+    WholePartitionWindow,
+    /// An `OVER` clause whose window is narrower than its whole partition —
+    /// includes the common `ORDER BY` with no explicit frame (whose SQL
+    /// default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+    /// ROW`), any frame carrying `EXCLUDE`, and an unresolvable named-window
+    /// reference (refusing is the safe direction: it costs a diagnostic,
+    /// where guessing costs a wrong number).
+    Window,
+}
+
 /// A structural rewrite the printer implements. Enumerable by construction, so
 /// the set of rewrites is knowable without reading `printer.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

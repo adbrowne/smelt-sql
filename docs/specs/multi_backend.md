@@ -252,7 +252,7 @@ Four positions are probed, and a fifth key, `Any`, is a wildcard used only for l
 | Position | The call's context | Probe shape |
 |---|---|---|
 | `Scalar` | a row-wise expression | `SELECT <expr> AS a FROM fixture` |
-| `Aggregate` | under a `GROUP BY`, or an aggregate with no `OVER` | `SELECT g, <expr> AS a FROM fixture GROUP BY g` |
+| `Aggregate` | the call itself is an aggregate, with no `OVER` | `SELECT g, <expr> AS a FROM fixture GROUP BY g` |
 | `WholePartitionWindow` | `OVER w` where `w` covers its whole partition | `SELECT <expr> OVER (PARTITION BY g) AS a FROM fixture` |
 | `Window` | `OVER w` with any narrower frame | `SELECT <expr> OVER (PARTITION BY g ORDER BY rid) AS a FROM fixture` |
 
