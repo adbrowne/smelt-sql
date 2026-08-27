@@ -72,7 +72,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 650c1760 | 2026-08-27 |
-| 2     | done     |          | 2026-08-27 |
+| 2     | done     | 63533bac | 2026-08-27 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
