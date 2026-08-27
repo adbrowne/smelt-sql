@@ -198,8 +198,17 @@ The types involved:
   (`BigQueryMedian`, `PowerCall`, `ModuloCall`, …). An entry in this set means the rewrite exists; the
   printer's implementation is reached through `RewriteId` dispatch, never through a name-matched
   dialect arm.
-- **`Signature::emission_for(dialect: DialectId) -> Emission`** — returns the emission verdict
-  for one `(entry, dialect)` pair, defaulting to `Native` for dialects not listed.
+- **`Emission::Restructure(RestructureId)`** — a *statement-level* lowering, for a built-in the
+  backend offers only in the opposite call position from the one the author wrote. Unlike a
+  `Rewrite`, it restructures the query block around a synthesised CTE rather than substituting one
+  expression for another, and it is planned before printing rather than during it
+  (`multi_backend.md` §"Statement-level lowering").
+- **`Signature::emission_at(dialect: DialectId, position: Position) -> Emission`** — returns the
+  emission verdict for one `(entry, dialect, position)` triple. Lookup consults the call's own
+  position, then the `Any` wildcard, and stops; an entry listing no verdict for a dialect is
+  `Native` in every position. There is no position-blind form, because a caller that could ask for
+  a dialect's verdict without naming a position could silently receive the wrong one
+  (`multi_backend.md` §"Emission is scoped to call position").
 
 **`Native` is a claim, not a pass.** An untested `(entry, dialect)` pair that carries `Native`
 (by default or by explicit declaration) is reported as *unverified* in the coverage table — not
