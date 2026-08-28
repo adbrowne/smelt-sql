@@ -139,6 +139,25 @@ const fn gap_at(
     }
 }
 
+/// A gap that applies to one position only, reachable only by the value leg:
+/// the engine accepts the probe (including a dry run) and only execution
+/// refuses it.
+const fn value_gap_at(
+    name: &'static str,
+    dialect: DialectId,
+    position: Position,
+    issue: &'static str,
+    detail: &'static str,
+) -> LedgerRow {
+    LedgerRow {
+        name,
+        dialect,
+        position: Some(position),
+        leg: Leg::Value,
+        verdict: Verdict::Gap { issue, detail },
+    }
+}
+
 const fn divergent(name: &'static str, dialect: DialectId, reason: &'static str) -> LedgerRow {
     LedgerRow {
         name,
@@ -451,19 +470,21 @@ static ROWS: &[LedgerRow] = &[
     //
     // Execution-time findings, reachable only by the value leg: the query is
     // accepted, then the warehouse refuses the data.
-    // GoogleSQL's `APPROX_COUNT_DISTINCT` has no analytic form at all — refused
-    // outright, even over a partition-only window (measured live 2026-08-27,
-    // superseding an earlier reading that only execution refused it). A
-    // whole-partition window now restructures around a grouped CTE; only the
-    // running case remains a gap.
-    gap_at(
+    // GoogleSQL's dry run *accepts*
+    // `APPROX_COUNT_DISTINCT(x) OVER (PARTITION BY g)` — the schema leg alone
+    // cannot see this gap — but execution refuses it outright, even over a
+    // partition-only window (measured live 2026-08-27). A whole-partition
+    // window restructures around a grouped CTE; only the running case remains
+    // a gap.
+    value_gap_at(
         "APPROX_COUNT_DISTINCT",
         DialectId::BigQuery,
         Position::Window,
         "#179",
         "GoogleSQL has APPROX_COUNT_DISTINCT as an aggregate but no running-window form \
          of it; only a window covering the whole partition can be restructured around a \
-         grouped CTE",
+         grouped CTE. GoogleSQL's dry run accepts the analytic form; only execution refuses \
+         it.",
     ),
     divergent(
         "POWER",
@@ -512,8 +533,10 @@ static ROWS: &[LedgerRow] = &[
     // so the aggregate position now restructures the other way — the
     // `FROM`/`WHERE` move into a CTE that computes the value as an analytic
     // column over the grouping keys (`RestructureId::AnalyticToCte`) — and a
-    // whole-partition window is native. Only the running case, which
-    // GoogleSQL forbids a window `ORDER BY` on, remains a gap.
+    // whole-partition window is rewritten in place to the two-argument
+    // analytic spelling (`RewriteId::WithinGroupToAnalytic`). Only the
+    // running case, which GoogleSQL forbids a window `ORDER BY` on, remains
+    // a gap.
     gap_at(
         "PERCENTILE_CONT",
         DialectId::BigQuery,

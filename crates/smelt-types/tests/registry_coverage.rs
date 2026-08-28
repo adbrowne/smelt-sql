@@ -793,7 +793,8 @@ fn every_declared_rewrite_id_is_reachable_from_some_entry() {
         vec![
             RewriteId::BigQueryMedian,
             RewriteId::ModuloCall,
-            RewriteId::PowerCall
+            RewriteId::PowerCall,
+            RewriteId::WithinGroupToAnalytic,
         ],
     );
 }

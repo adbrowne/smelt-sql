@@ -77,7 +77,8 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | 4     | done     | c8a64fed | 2026-08-28 |
 | 5     | done     | 750ab24c | 2026-08-28 |
 | 6     | done     | aecbd75e | 2026-08-28 |
-| 7     | done     |          | 2026-08-29 |
+| 7     | done     | c6eec486 | 2026-08-29 |
+| 8     | done     |          | 2026-08-29 |
 
 ---
 
@@ -406,6 +407,28 @@ reproducing on Spark the row loss previously measured on BigQuery. Spark 4.0.0 a
   fails no test, because `is_registered` already consults the real position and masks it. It is correct
   defense-in-depth for an `Unsupported`-without-ledger-row entry, which does not yet exist. Per-PR CI
   cannot distinguish "correct" from "redundant" here.
+
+### Phase 8: BigQuery verdict correction (added after a live sweep)
+
+The live BigQuery sweep run after Phase 6 contradicted the whole-partition verdict for
+`PERCENTILE_CONT`/`PERCENTILE_DISC`. `Emission::Native` prints verbatim, and smelt spells these as
+ordered-set aggregates, so BigQuery received `WITHIN GROUP` and refused it
+(`Syntax error: Expected "(" but got keyword GROUP`). The plan's measured fact was about BigQuery's
+own two-argument analytic spelling, not about smelt's spelling printed verbatim. Shipped as
+`Rewrite(WithinGroupToAnalytic)`, converting the ordered-set form to the analytic form in place —
+no CTE, since the window is already there — reusing the `DESC` fraction inversion and the `NULLS`
+refusal from the restructure planner. Confirmed by a second live sweep.
+
+**A measurement trap, recorded so it is not repeated.** The same sweep appeared to show
+`APPROX_COUNT_DISTINCT` accepted in analytic position, and the verdict was changed on that basis.
+It was wrong: BigQuery's **dry run accepts** the analytic form and only **execution** refuses it
+(`Analytic function APPROX_COUNT_DISTINCT is not supported`). A dry-run probe cannot see this gap;
+only the value leg can. The change was reverted before commit and the entry's ledger row restored to
+its value-leg classification. Never "correct" this verdict on dry-run evidence.
+
+A third bug surfaced while fixing the first: `push_trailing_trivia` filtered to direct-child tokens
+before reversing, splicing two unrelated trivia gaps together when a node had an intervening clause
+child. Fixed to walk in document order.
 
 ## Verification
 

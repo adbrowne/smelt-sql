@@ -139,8 +139,8 @@ the exact reverse.
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
-| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:native; run:unsupported (gap #179) |
-| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:native; run:unsupported (gap #179) |
+| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
+| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:rewrite:WithinGroupToAnalytic; run:unsupported (gap #179) |
 | `PERCENT_RANK` | call | native | native | native | native |
 | `PI` | call | native | native | native | native (gap #179) |
 | `POSITION` | call | native | native | native | native (gap #179) |

@@ -13,10 +13,11 @@ use smelt_parser::ast::BinaryExpr;
 use smelt_parser::syntax_kind::{SyntaxKind, SyntaxNode};
 use smelt_parser::FunctionCall;
 use smelt_parser::{TextRange, TextSize};
-use smelt_types::signatures::Position;
+use smelt_types::signatures::{Position, RewriteId};
 use smelt_types::{BuiltinRegistry, DialectId, Emission};
 
 use crate::position::classify as classify_position;
+use crate::restructure::within_group_sort_key;
 use crate::SqlDialect;
 
 /// One construct the target dialect cannot express.
@@ -76,6 +77,25 @@ pub fn unsupported_emissions(root: &SyntaxNode, dialect: SqlDialect) -> Vec<Unsu
                     reason,
                     range: trimmed_range(&node),
                 }),
+                // `WithinGroupToAnalytic` rewrites a call whose own `OVER`
+                // clause already covers the whole partition — the position
+                // check above already admits it — but the source's own
+                // `WITHIN GROUP` clause shape still has to be readable: a
+                // missing sort key or a `NULLS FIRST`/`LAST` modifier the
+                // analytic form cannot express is refused here, before the
+                // printer ever runs, rather than reaching
+                // `print_within_group_to_analytic`'s verbatim fallback.
+                Emission::Rewrite(RewriteId::WithinGroupToAnalytic) => {
+                    match within_group_sort_key(&node) {
+                        Ok(_) => None,
+                        Err(reason) => Some(UnsupportedEmission {
+                            name: sig.name.as_str(),
+                            dialect: id,
+                            reason,
+                            range: trimmed_range(&node),
+                        }),
+                    }
+                }
                 _ => None,
             }
         })

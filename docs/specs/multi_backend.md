@@ -343,11 +343,32 @@ form cannot express is refused rather than dropped.
 `v` is constant within each `g`, so `ANY_VALUE` reads that constant exactly rather than sampling.
 Sibling aggregates such as `COUNT(*)` are untouched.
 
+**The same built-in over a whole-partition window is not a restructure at all.** GoogleSQL accepts
+`PERCENTILE_CONT`/`PERCENTILE_DISC` with a partition-only `OVER` clause natively, in their
+two-argument analytic spelling — the call is already in the right position, and only its *shape*
+needs to change, from the ordered-set spelling to the analytic one:
+
+```sql
+-- smelt
+SELECT g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) AS med FROM t
+
+-- GoogleSQL
+SELECT g, PERCENTILE_CONT(x, 0.5) OVER (PARTITION BY g) AS med FROM t
+```
+
+Because the window is already in place, this is an in-place expression rewrite planned from the
+source CST like any other `Emission::Rewrite`, not a statement-level `Emission::Restructure`: no CTE
+is synthesised, and the call's own `OVER` clause prints unchanged. The same `DESC`-inverts-the-
+fraction and `NULLS FIRST`/`NULLS LAST`-is-refused rules apply, and are shared with the
+aggregate-position lowering above rather than restated.
+
 **An aggregate-only built-in in window position.** GoogleSQL has `MAX_BY`/`MIN_BY` and
-`APPROX_COUNT_DISTINCT` as aggregates with no analytic form — `MAX_BY` is refused with an `OVER`
+`APPROX_COUNT_DISTINCT` as aggregates with no analytic form at all — refused with an `OVER`
 clause even when the window is partition-only — and DuckDB and Spark have the ordered-set
-`PERCENTILE_CONT`/`PERCENTILE_DISC` with no window form. The lowering binds the source once, groups
-it by the partition keys, and joins the result back:
+`PERCENTILE_CONT`/`PERCENTILE_DISC` with no window form. `APPROX_COUNT_DISTINCT` is the sharp case:
+GoogleSQL's own dry run accepts the analytic spelling over a partition-only window, and only
+execution refuses it, so a schema/dry-run leg alone cannot see this gap. The lowering binds the
+source once, groups it by the partition keys, and joins the result back:
 
 ```sql
 -- smelt
@@ -445,8 +466,9 @@ an entry naming a pair that no longer diverges is an error telling you to delete
 together. Introducing `WholePartitionWindow` alone would newly probe pairs that today carry a
 `Position::Window` ledger row describing an engine with *no* window form — DuckDB's and Spark's
 ordered-set percentiles, BigQuery's `MAX_BY`/`MIN_BY` and `APPROX_COUNT_DISTINCT` — and every one
-would fail the new position as an unregistered mismatch. With the restructure in place they pass it
-instead, and their existing rows narrow to the running-window case rather than being deleted.
+would fail the new position as an unregistered mismatch. With the restructure (or, for BigQuery's
+ordered-set percentiles, the in-place analytic rewrite) in place they pass it instead, and their
+existing rows narrow to the running-window case rather than being deleted.
 
 **Coverage table** — the suite emits a standing table to `docs/reference/dialect-coverage.md`:
 entry × dialect → native / rename / rewrite / restructure / unsupported / divergent / gap. A cell

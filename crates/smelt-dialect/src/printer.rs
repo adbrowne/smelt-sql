@@ -2466,15 +2466,87 @@ fn print_power_call(node: &SyntaxNode, ctx: &PrintContext, out: &mut String) -> 
     true
 }
 
+/// Lower an ordered-set aggregate's `WITHIN GROUP` spelling to GoogleSQL's
+/// two-argument analytic spelling, in place: `PERCENTILE_CONT(0.5) WITHIN
+/// GROUP (ORDER BY x)` → `PERCENTILE_CONT(x, 0.5)`. The call's own `OVER`
+/// clause is a sibling of `node`, not a child of it, and is left untouched —
+/// printed normally by the caller right after this call's replacement text,
+/// exactly like `print_bigquery_median`'s windowed branch.
+///
+/// Returns `true` when the call was printed here, `false` to fall through to
+/// the normal path (leaving the call verbatim so the engine rejects it
+/// loudly rather than smelt guessing) — unreachable in production, since the
+/// compile path refuses a call `within_group_sort_key` cannot read before
+/// the printer is ever invoked (`emission_check`), but still the correct
+/// fallback for a printer unit test that bypasses that check.
+///
+/// A `DESC` sort key inverts the fraction (`docs/specs/multi_backend.md`
+/// §"Statement-level lowering"); a `NULLS FIRST`/`LAST` modifier the
+/// analytic form cannot express is refused upstream rather than reaching
+/// this function at all.
+fn print_within_group_to_analytic(
+    node: &SyntaxNode,
+    fc: &FunctionCall,
+    ctx: &PrintContext,
+    out: &mut String,
+) -> bool {
+    let Some(name) = fc.name() else {
+        return false;
+    };
+    let canonical = BuiltinRegistry::canonical_name(&name)
+        .unwrap_or(name.as_str())
+        .to_string();
+
+    let fraction = fc
+        .arguments()
+        .first()
+        .map(|e| print_trimmed(e.syntax(), ctx))
+        .unwrap_or_default();
+    if fraction.is_empty() {
+        return false;
+    }
+
+    let Ok((sort_expr, fraction_complement)) = crate::restructure::within_group_sort_key(node)
+    else {
+        return false;
+    };
+    let fraction = if fraction_complement {
+        format!("(1 - {fraction})")
+    } else {
+        fraction
+    };
+    let sort_sql = print_trimmed(&sort_expr, ctx);
+
+    out.push_str(&format!("{canonical}({sort_sql}, {fraction})"));
+    push_trailing_trivia(node, out);
+    true
+}
+
 /// Re-emit the trivia tokens trailing a node whose text a rewrite replaced,
 /// so a following sibling (an `OVER` clause, the next select item) does not
 /// end up glued to the rewritten text.
 fn push_trailing_trivia(node: &SyntaxNode, out: &mut String) {
-    let tokens: Vec<_> = node
-        .children_with_tokens()
+    // `take_while` must run over the raw `children_with_tokens()` sequence,
+    // stopping at the first non-trivia element (token *or* node) — not over
+    // a tokens-only view. Filtering nodes out before reversing would erase
+    // the node boundary that ought to stop the walk, silently splicing
+    // together two separate trivia gaps either side of an intervening child
+    // node (e.g. the gap before `WITHIN GROUP (...)` and the gap after it)
+    // into one run of "trailing" trivia neither of which the caller meant.
+    // Trailing trivia is not necessarily a direct child of `node` — it can be
+    // nested inside the last non-trivia child (e.g. an operand expression
+    // absorbs the whitespace that follows it as its own trailing token), so
+    // this walks the full descendant token stream in document order rather
+    // than `node`'s direct children. That also makes it safe when a node has
+    // more than one structural child with a trivia gap either side of an
+    // intervening child node (e.g. a call's `ARG_LIST` and its `WITHIN GROUP`
+    // clause): the reversed walk still stops at the first non-trivia token —
+    // here, that clause's own closing `)` — rather than splicing the two
+    // separate gaps either side of it into one run.
+    let trailing: Vec<_> = node
+        .descendants_with_tokens()
         .filter_map(|e| e.into_token())
-        .collect();
-    let trailing: Vec<_> = tokens
+        .collect::<Vec<_>>()
         .into_iter()
         .rev()
         .take_while(|t| t.kind().is_trivia())
@@ -2575,6 +2647,9 @@ fn apply_rewrite(
         }
         RewriteId::ModuloCall => print_modulo_call(node, ctx, out),
         RewriteId::PowerCall => print_power_call(node, ctx, out),
+        RewriteId::WithinGroupToAnalytic => {
+            fc.is_some_and(|fc| print_within_group_to_analytic(node, fc, ctx, out))
+        }
     }
 }
 

@@ -183,6 +183,17 @@ pub enum RewriteId {
     /// `a ^ b` / `a ** b` → `POWER(a, b)`. Needed wherever infix `^` means
     /// bitwise XOR (GoogleSQL **and** Spark SQL) or `**` is unparseable.
     PowerCall,
+    /// `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY x)` → `PERCENTILE_CONT(x,
+    /// f)` at a whole-partition window position — GoogleSQL's two-argument
+    /// analytic spelling, since `WITHIN GROUP` under an `OVER` clause is a
+    /// syntax error there (measured live 2026-08-27). The window itself is
+    /// left as-is; only the call's own spelling changes. A `DESC` sort key
+    /// inverts the fraction argument; a `NULLS FIRST`/`LAST` modifier the
+    /// analytic form cannot express is refused upstream by
+    /// `emission_check`, never reaching the printer
+    /// (`restructure::within_group_sort_key` is the shared reader for both
+    /// this rewrite and `RestructureId::AnalyticToCte`).
+    WithinGroupToAnalytic,
 }
 
 /// A statement-level restructure shape. Enumerable by construction, mirroring
@@ -4633,11 +4644,14 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_kind(ExprKind::Agg)
         .with_emission(&[
             // BigQuery's `APPROX_COUNT_DISTINCT` is a plain aggregate with no
-            // analytic form (refused even with a partition-only `OVER`
-            // clause, measured live 2026-08-27). Aggregate position is
-            // unaffected — it's already `Native` — a whole-partition window
-            // restructures around a grouped CTE, and a running window is
-            // refused.
+            // analytic form. GoogleSQL's own dry run *accepts* the analytic
+            // spelling — `APPROX_COUNT_DISTINCT(x) OVER (PARTITION BY g)`
+            // parses and dry-runs cleanly — and only execution refuses it
+            // (measured live 2026-08-27); a schema/dry-run probe alone
+            // cannot see this gap, only a leg that actually executes.
+            // Aggregate position is unaffected — it's already `Native` — a
+            // whole-partition window restructures around a grouped CTE, and
+            // a running window is refused.
             (
                 DialectId::BigQuery,
                 Position::WholePartitionWindow,
@@ -5098,15 +5112,17 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                     Position::Aggregate,
                     Emission::Restructure(RestructureId::AnalyticToCte),
                 ),
-                // GoogleSQL accepts a partition-only `OVER` clause natively —
-                // `PERCENTILE_CONT`/`PERCENTILE_DISC` are analytic-only
-                // there — but forbids a window `ORDER BY` on them, so a
-                // running window is refused rather than lowered (measured
-                // live 2026-08-27).
+                // GoogleSQL accepts a partition-only `OVER` clause natively,
+                // but only in its two-argument analytic spelling — `WITHIN
+                // GROUP` under an `OVER` clause is a syntax error there
+                // (measured live 2026-08-27). The whole-partition window is
+                // rewritten to that spelling in place; a running window
+                // still forbids a window `ORDER BY` and is refused rather
+                // than lowered.
                 (
                     DialectId::BigQuery,
                     Position::WholePartitionWindow,
-                    Emission::Native,
+                    Emission::Rewrite(RewriteId::WithinGroupToAnalytic),
                 ),
                 (
                     DialectId::BigQuery,

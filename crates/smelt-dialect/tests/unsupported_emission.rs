@@ -91,3 +91,36 @@ fn function_and_operator_refusals_share_one_walk() {
         );
     }
 }
+
+/// `PERCENTILE_CONT`/`PERCENTILE_DISC` at a whole-partition window position on
+/// BigQuery is `Emission::Rewrite(WithinGroupToAnalytic)`, not
+/// `Emission::Unsupported` — but the rewrite still has an admissibility rule
+/// of its own (`docs/specs/multi_backend.md` §"Statement-level lowering": a
+/// `NULLS FIRST`/`LAST` modifier the analytic form cannot express is refused
+/// rather than silently dropped). This must surface here, before the
+/// printer ever runs, exactly like a static `Unsupported` verdict.
+#[test]
+fn a_nulls_modifier_the_analytic_form_cannot_express_is_refused_at_compile_time() {
+    let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x NULLS LAST) \
+               OVER (PARTITION BY g) AS med FROM t";
+    let found = unsupported_emissions(&tree(sql), SqlDialect::BigQuery);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].name, "PERCENTILE_CONT");
+    assert!(
+        found[0].reason.contains("NULLS"),
+        "the reason must name what cannot be expressed: {}",
+        found[0].reason
+    );
+}
+
+/// The ordinary shape — a plain `ORDER BY` sort key with no `NULLS`
+/// modifier — is admissible and reports nothing.
+#[test]
+fn a_plain_within_group_sort_key_is_not_reported() {
+    let sql = "SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) \
+               OVER (PARTITION BY g) AS med FROM t";
+    assert!(
+        unsupported_emissions(&tree(sql), SqlDialect::BigQuery).is_empty(),
+        "a plain WITHIN GROUP sort key must be admissible"
+    );
+}

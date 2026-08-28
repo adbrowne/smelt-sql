@@ -596,6 +596,52 @@ fn keys_match(a: &[SyntaxNode], b: &[SyntaxNode]) -> bool {
         .all(|(x, y)| x.text().to_string() == y.text().to_string())
 }
 
+/// Read the `WITHIN GROUP (ORDER BY <sort_key> [DESC] [NULLS FIRST|LAST])`
+/// clause off an ordered-set aggregate call, returning the sort key
+/// expression and whether the analytic form's fraction argument must be
+/// complemented (`1 - f`) because the sort was descending
+/// (`docs/specs/multi_backend.md` §"Statement-level lowering": "A `DESC`
+/// sort key inverts the fraction"). A `NULLS FIRST`/`LAST` modifier the
+/// analytic form cannot express is refused rather than silently dropped.
+///
+/// Shared by `plan_analytic_to_cte` (a `GROUP BY` call restructured around an
+/// analytic CTE) and the `WithinGroupToAnalytic` expression rewrite (a
+/// whole-partition-window call rewritten to the analytic spelling in place)
+/// — both read the same clause under the same admissibility rule.
+pub(crate) fn within_group_sort_key(call: &SyntaxNode) -> Result<(SyntaxNode, bool), &'static str> {
+    let within_group = call
+        .children()
+        .find(|n| n.kind() == SyntaxKind::WITHIN_GROUP_CLAUSE)
+        .ok_or(
+            "this analytic-only built-in has no WITHIN GROUP sort key to plant as its \
+             analytic ORDER BY",
+        )?;
+    let order_by = within_group
+        .children()
+        .find(|n| n.kind() == SyntaxKind::ORDER_BY_CLAUSE)
+        .and_then(OrderByClause::cast)
+        .ok_or("this analytic-only built-in's WITHIN GROUP clause has no ORDER BY")?;
+    let sort_item = order_by
+        .items()
+        .next()
+        .ok_or("this analytic-only built-in's WITHIN GROUP ORDER BY has no sort key")?;
+
+    // A NULLS FIRST/LAST modifier the analytic form cannot express is
+    // refused, never dropped.
+    if sort_item.null_ordering().is_some() {
+        return Err(
+            "a NULLS FIRST/LAST modifier on the WITHIN GROUP sort key cannot be expressed \
+             by the analytic form and is refused rather than silently dropped",
+        );
+    }
+
+    let fraction_complement = matches!(sort_item.direction(), Some(SortDirection::Desc));
+    let sort_expr = sort_item
+        .expression()
+        .ok_or("this analytic-only built-in's WITHIN GROUP sort key has no expression")?;
+    Ok((sort_expr.syntax().clone(), fraction_complement))
+}
+
 // ─── AnalyticToCte ──────────────────────────────────────────────────────────
 
 fn plan_analytic_to_cte(
@@ -636,52 +682,13 @@ fn plan_analytic_to_cte(
     let mut replacements = Vec::new();
 
     for (call, _) in calls {
-        let Some(within_group) = call
-            .children()
-            .find(|n| n.kind() == SyntaxKind::WITHIN_GROUP_CLAUSE)
-        else {
-            refusals.push(refusal(
-                call,
-                dialect,
-                "this analytic-only built-in has no WITHIN GROUP sort key to plant as its \
-                 analytic ORDER BY",
-            ));
-            continue;
+        let fraction_complement = match within_group_sort_key(call) {
+            Ok((_sort_expr, fraction_complement)) => fraction_complement,
+            Err(reason) => {
+                refusals.push(refusal(call, dialect, reason));
+                continue;
+            }
         };
-        let Some(order_by) = within_group
-            .children()
-            .find(|n| n.kind() == SyntaxKind::ORDER_BY_CLAUSE)
-            .and_then(OrderByClause::cast)
-        else {
-            refusals.push(refusal(
-                call,
-                dialect,
-                "this analytic-only built-in's WITHIN GROUP clause has no ORDER BY",
-            ));
-            continue;
-        };
-        let Some(sort_item) = order_by.items().next() else {
-            refusals.push(refusal(
-                call,
-                dialect,
-                "this analytic-only built-in's WITHIN GROUP ORDER BY has no sort key",
-            ));
-            continue;
-        };
-
-        // A NULLS FIRST/LAST modifier the analytic form cannot express is
-        // refused, never dropped.
-        if sort_item.null_ordering().is_some() {
-            refusals.push(refusal(
-                call,
-                dialect,
-                "a NULLS FIRST/LAST modifier on the WITHIN GROUP sort key cannot be expressed \
-                 by the analytic form and is refused rather than silently dropped",
-            ));
-            continue;
-        }
-
-        let fraction_complement = matches!(sort_item.direction(), Some(SortDirection::Desc));
 
         replacements.push(AnalyticCallReplacement {
             call: call.clone(),
