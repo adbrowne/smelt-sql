@@ -65,6 +65,7 @@ fn cell(name: &str, dialect: DialectId) -> String {
         Emission::Native => "native".to_string(),
         Emission::Rename(to) => format!("rename:{to}"),
         Emission::Rewrite(id) => format!("rewrite:{id:?}"),
+        Emission::Restructure(id) => format!("restructure:{id:?}"),
         Emission::Unsupported { .. } => "unsupported".to_string(),
     };
     let annotation: Vec<&'static str> = ledger::dialect_divergences()

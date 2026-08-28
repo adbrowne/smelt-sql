@@ -73,7 +73,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 |-------|----------|--------|------|
 | 1     | done     | 650c1760 | 2026-08-27 |
 | 2     | done     | 63533bac | 2026-08-27 |
-| 3     | pending  |        |      |
+| 3     | done     |          | 2026-08-28 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
@@ -360,6 +360,23 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
   picks one verdict per `(entry, dialect)` cell for the published coverage table. Verified inert (no gate
   consumes it) and correct only while an entry's positions agree. Phase 6 replaces it with per-position
   rendering; it becomes wrong the moment a verdict differs by position.
+- **`PERCENTILE_CONT`/`PERCENTILE_DISC` registry verdicts landed early, in Phase 3.** Phase 3 added the
+  `Position::Window → Emission::Unsupported` verdict for these on DuckDB and Spark (no analytic window
+  form exists on either backend) as part of building and testing the restructure planner against a real
+  registry table rather than a synthetic one. This was reviewed and adjudicated to stay — reverting to a
+  test-only registry would leave the planner tested against a fake table, and refusal is the spec-mandated
+  safe direction. Two consequences for whoever executes Phases 5 and 6:
+  - (i) This verdict is **already live in production**: `emission_check::unsupported_emissions` is wired
+    into `crates/smelt-runtime/src/compile.rs` (~line 661), so a running-window `PERCENTILE_CONT`/
+    `PERCENTILE_DISC` now refuses at compile time where it previously reached the warehouse unchecked.
+    Nothing landed in Phase 3 pins this new compile-time refusal with a test — that is what Phase 5's
+    `crates/smelt-runtime/tests/dialect_seam.rs::running_window_refused_at_compile_time` is for. Do not
+    treat that test as pinning a hypothetical; the behaviour it's pinning already shipped in Phase 3.
+  - (ii) `crates/smelt-db/tests/dialect_audit/main.rs::is_declared_unsupported` is **position-blind**: it
+    only checks `Position::Any`, which is why the Phase 3 `Position::Window` `Unsupported` verdicts did not
+    disturb the audit ledger or the exact-match ratchet — the helper simply never saw them. Phase 6 adds
+    the fourth probe position and **must** fix this helper to be position-aware, or the audit will silently
+    exempt verdicts it should be checking.
 
 ## Verification
 

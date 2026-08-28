@@ -1876,7 +1876,15 @@ fn emit_registered_function(
         // the model before reaching the printer (see `emission_check`), so a
         // verbatim print here is unreachable in production and harmless in a
         // printer unit test.
-        Emission::Native | Emission::Unsupported { .. } => false,
+        // A statement-level restructure is not an expression-level
+        // substitution: it rewrites the enclosing query block's `FROM`
+        // around a synthesised CTE, planned before printing ever starts
+        // (`docs/specs/multi_backend.md` §"Statement-level lowering"). This
+        // per-call print path has nothing to substitute in place, so it
+        // prints the call verbatim, exactly like `Unsupported` — the compile
+        // path either applies the restructure plan upstream or refuses the
+        // model before reaching the printer.
+        Emission::Native | Emission::Unsupported { .. } | Emission::Restructure(_) => false,
         Emission::Rename(new_name) => {
             // The author already wrote the target spelling — via an alias, or
             // in different case. Rewriting it would churn the user's own text

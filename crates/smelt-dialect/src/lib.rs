@@ -7,6 +7,7 @@ mod dialect;
 mod emission_check;
 pub mod position;
 mod printer;
+pub mod restructure;
 mod type_conformance;
 
 pub use dialect::{BackendCapabilities, SqlDialect};
@@ -16,4 +17,5 @@ pub use printer::{
     print, AsStructEmitter, PrintContext, SmeltFnExpander, SmeltPathCallExpander,
     SmeltPathRefResolver,
 };
+pub use restructure::{plan as plan_restructure, RestructurePlan};
 pub use type_conformance::{wrap_with_type_casts, TYPE_CAST_WRAP_ALIAS};

@@ -126,8 +126,8 @@ Cell vocabulary:
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
-| `PERCENTILE_CONT` | call | native (gap #177) | native (gap #178) | native | native (gap #179) |
-| `PERCENTILE_DISC` | call | native (gap #177) | native (gap #178) | native | native (gap #179) |
+| `PERCENTILE_CONT` | call | restructure:WindowToCte (gap #177) | restructure:WindowToCte (gap #178) | native | restructure:AnalyticToCte (gap #179) |
+| `PERCENTILE_DISC` | call | restructure:WindowToCte (gap #177) | restructure:WindowToCte (gap #178) | native | restructure:AnalyticToCte (gap #179) |
 | `PERCENT_RANK` | call | native | native | native | native |
 | `PI` | call | native | native | native | native (gap #179) |
 | `POSITION` | call | native | native | native | native (gap #179) |

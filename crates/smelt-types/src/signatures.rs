@@ -120,6 +120,16 @@ pub enum Emission {
     Rename(&'static str),
     /// Structural rewrite: the printer owns the code, the registry owns the claim.
     Rewrite(RewriteId),
+    /// Statement-level restructure: the backend offers this built-in only in
+    /// the opposite position from the one the call occupies, so no
+    /// expression-level substitution exists — the whole query block is
+    /// restructured around a synthesised CTE (`docs/specs/multi_backend.md`
+    /// §"Statement-level lowering"). The registry states *that* the position
+    /// needs restructuring and *which shape*; a pure planner (never the
+    /// printer) turns the claim into data, and admissibility over the
+    /// enclosing query block decides whether the restructure can be taken at
+    /// all.
+    Restructure(RestructureId),
     /// The backend cannot express this. A diagnostic, never a silent pass-through.
     Unsupported { reason: &'static str },
 }
@@ -173,6 +183,27 @@ pub enum RewriteId {
     /// `a ^ b` / `a ** b` → `POWER(a, b)`. Needed wherever infix `^` means
     /// bitwise XOR (GoogleSQL **and** Spark SQL) or `**` is unparseable.
     PowerCall,
+}
+
+/// A statement-level restructure shape. Enumerable by construction, mirroring
+/// [`RewriteId`] — the set of shapes is knowable without reading the planner.
+///
+/// Correctness oracle: `docs/specs/multi_backend.md` §"Statement-level
+/// lowering".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RestructureId {
+    /// An aggregate-only built-in reached with an `OVER` clause (GoogleSQL's
+    /// `MAX_BY`/`MIN_BY`/`APPROX_COUNT_DISTINCT`; DuckDB's and Spark's
+    /// ordered-set `PERCENTILE_CONT`/`PERCENTILE_DISC`). The source is bound
+    /// once, grouped by the call's partition keys, and joined back —
+    /// admissible only at `Position::WholePartitionWindow`.
+    WindowToCte,
+    /// An analytic-only built-in reached under `GROUP BY` (GoogleSQL's
+    /// `PERCENTILE_CONT`/`PERCENTILE_DISC`, which require an `OVER` clause
+    /// and reject `WITHIN GROUP` outright). The query's `FROM`/`WHERE` move
+    /// into a CTE that adds the value as an analytic column over the
+    /// grouping keys, read back through `ANY_VALUE`.
+    AnalyticToCte,
 }
 
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
@@ -4932,7 +4963,55 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 any_args(),
                 TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
             )
-            .with_kind(ExprKind::Agg),
+            .with_kind(ExprKind::Agg)
+            .with_emission(&[
+                // DuckDB and Spark have the ordered-set form only as an
+                // aggregate — no window form — so a whole-partition window
+                // call restructures around a synthesised CTE
+                // (`RestructureId::WindowToCte`); a running window has no
+                // correct CTE form and is refused
+                // (`docs/specs/multi_backend.md` §"Statement-level
+                // lowering"). The two window positions are stated together —
+                // lookup never falls between them.
+                (
+                    DialectId::DuckDb,
+                    Position::WholePartitionWindow,
+                    Emission::Restructure(RestructureId::WindowToCte),
+                ),
+                (
+                    DialectId::DuckDb,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "DuckDB has the ordered-set aggregate but no running-window \
+                                 form of it; only a window covering the whole partition can be \
+                                 restructured around a grouped CTE",
+                    },
+                ),
+                (
+                    DialectId::SparkSql,
+                    Position::WholePartitionWindow,
+                    Emission::Restructure(RestructureId::WindowToCte),
+                ),
+                (
+                    DialectId::SparkSql,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "Spark has the ordered-set aggregate but no running-window \
+                                 form of it; only a window covering the whole partition can be \
+                                 restructured around a grouped CTE",
+                    },
+                ),
+                // GoogleSQL requires an `OVER` clause and rejects `WITHIN
+                // GROUP` outright, so a call under `GROUP BY` restructures
+                // the other way: the `FROM`/`WHERE` move into a CTE that
+                // computes the value as an analytic column over the grouping
+                // keys (`RestructureId::AnalyticToCte`).
+                (
+                    DialectId::BigQuery,
+                    Position::Aggregate,
+                    Emission::Restructure(RestructureId::AnalyticToCte),
+                ),
+            ]),
         );
     }
     // Boolean aggregate.
