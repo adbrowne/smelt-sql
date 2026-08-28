@@ -640,6 +640,7 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: Some(path_ref_resolver),
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -772,6 +773,7 @@ pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
         smelt_fn: Some(fn_expander),
         smelt_path_ref: None,
         smelt_path_call: Some(path_call_expander),
+        restructure_plans: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -1637,6 +1639,7 @@ impl SqlCompiler {
             smelt_fn: fn_expander,
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
         // The projection — output column names and their inferred types — is
         // derived once, here, from the pre-print source CST (`parse`), before
@@ -1798,6 +1801,7 @@ impl SqlCompiler {
             smelt_fn: fn_expander,
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
 
@@ -1881,6 +1885,7 @@ impl SqlCompiler {
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
@@ -2073,6 +2078,7 @@ impl EphemeralResolver {
             smelt_fn: None,
             smelt_path_ref: Some(path_ref_resolver),
             smelt_path_call: None,
+            restructure_plans: &[],
         };
         let compiled = print_checked_for(dialect, &parse.syntax(), &ctx)?;
 
@@ -2453,6 +2459,7 @@ impl SqlCompiler {
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
         let compiled_sql = self.print_checked(&parse.syntax(), &ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.

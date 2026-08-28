@@ -8,7 +8,7 @@
 //!   - `supports_struct_field_ddl` / spark_parquet  — RESOLVED: false (W6·P2 live test)
 //!   - `supports_nested_array_ddl` / spark_delta    — RESOLVED: true (W7·P2 live Delta test)
 
-use smelt_dialect::BackendCapabilities;
+use smelt_dialect::{BackendCapabilities, NullSafeEqualitySpelling};
 
 /// Assert every `BackendCapabilities` flag against the matrix in
 /// `docs/specs/multi_backend.md` §Surface.
@@ -227,6 +227,30 @@ fn every_flag_matches_matrix() {
     cell!(bigquery, supports_pipe_set_drop_rename, false, "BigQuery");
     cell!(bigquery, requires_schema_init, true, "BigQuery");
     cell!(bigquery, supports_column_scoped_merge, true, "BigQuery");
+
+    // null_safe_equality — the synthesised join spelling a statement-level
+    // restructure uses. `IS NOT DISTINCT FROM` on DuckDB, PostgreSQL and
+    // BigQuery; Spark SQL spells the same comparison `<=>`.
+    assert_eq!(
+        duckdb.null_safe_equality,
+        NullSafeEqualitySpelling::IsNotDistinctFrom,
+        "DuckDB"
+    );
+    assert_eq!(
+        delta.null_safe_equality,
+        NullSafeEqualitySpelling::Spaceship,
+        "Spark(Delta)"
+    );
+    assert_eq!(
+        parquet.null_safe_equality,
+        NullSafeEqualitySpelling::Spaceship,
+        "Spark(Parquet)"
+    );
+    assert_eq!(
+        bigquery.null_safe_equality,
+        NullSafeEqualitySpelling::IsNotDistinctFrom,
+        "BigQuery"
+    );
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
@@ -258,6 +282,7 @@ fn all_fields_destructured() {
         supports_column_scoped_merge: _,
         dialect: _,
         supports_pipe_set_drop_rename: _,
+        null_safe_equality: _,
     } = BackendCapabilities::duckdb();
     // Adding a field to BackendCapabilities without listing it here is a compile error.
     // When that happens: add the field above, add it to every_flag_matches_matrix(),

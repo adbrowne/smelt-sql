@@ -40,6 +40,23 @@ impl SqlDialect {
     }
 }
 
+/// How a backend spells a null-safe equality comparison — one where two
+/// `NULL`s compare equal rather than unknown.
+///
+/// A statement-level restructure's synthesised join must be null-safe: `GROUP
+/// BY g` places `NULL` keys in their own group, but a plain `ON b.g = w.g`
+/// never matches `NULL`, silently dropping every row whose partition key is
+/// `NULL` (measured on BigQuery as 3 rows kept out of 5). The spelling
+/// differs per backend, so it is capability data — never a dialect arm in the
+/// printer (`docs/specs/multi_backend.md` §"Statement-level lowering").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullSafeEqualitySpelling {
+    /// `a IS NOT DISTINCT FROM b` — DuckDB, PostgreSQL, GoogleSQL.
+    IsNotDistinctFrom,
+    /// `a <=> b` — Spark SQL's null-safe equality operator.
+    Spaceship,
+}
+
 /// Capabilities of a backend.
 ///
 /// Used to determine what SQL features can be used directly vs. need rewriting.
@@ -155,6 +172,11 @@ pub struct BackendCapabilities {
     /// three stages unlowered rather than emitting SQL it would reject. The gate is
     /// capability-shaped, not dialect-name-shaped.
     pub supports_pipe_set_drop_rename: bool,
+
+    /// How this backend spells a null-safe equality comparison. Selects the
+    /// synthesised join spelling for a statement-level restructure
+    /// (`docs/specs/multi_backend.md` §"Statement-level lowering").
+    pub null_safe_equality: NullSafeEqualitySpelling,
 }
 
 impl BackendCapabilities {
@@ -187,6 +209,7 @@ impl BackendCapabilities {
             dialect: SqlDialect::DuckDB,
             // The only backend accepting `* REPLACE` / `* EXCLUDE` / `* RENAME`.
             supports_pipe_set_drop_rename: true,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 
@@ -227,6 +250,7 @@ impl BackendCapabilities {
             supports_column_scoped_merge: true,
             dialect: SqlDialect::SparkSQL,
             supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::Spaceship,
         }
     }
 
@@ -260,6 +284,7 @@ impl BackendCapabilities {
             supports_column_scoped_merge: false,
             dialect: SqlDialect::SparkSQL,
             supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::Spaceship,
         }
     }
 
@@ -317,6 +342,7 @@ impl BackendCapabilities {
             supports_column_scoped_merge: true,
             dialect: SqlDialect::BigQuery,
             supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 
@@ -349,6 +375,7 @@ impl BackendCapabilities {
             supports_column_scoped_merge: false,
             dialect: SqlDialect::PostgreSQL,
             supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 }

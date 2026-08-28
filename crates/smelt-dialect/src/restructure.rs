@@ -70,6 +70,15 @@ pub struct WindowCallReplacement {
     pub call: SyntaxNode,
     /// The column the grouped CTE computes for this call.
     pub value_column: String,
+    /// The call's own `OVER` clause, if it has one — parsed as a
+    /// wrapper-level sibling of the `FUNCTION_CALL` node rather than a child
+    /// of it. Resolved once here, at plan time, so the printer never
+    /// re-derives a call's structural surroundings itself
+    /// (`docs/specs/multi_backend.md` §"Emission is scoped to call
+    /// position"): it substitutes this node (with an empty replacement,
+    /// swallowing it) wherever the call is nested inside a select item's
+    /// expression, exactly like the call itself.
+    pub over_clause: Option<SyntaxNode>,
 }
 
 /// One grouped CTE — the source bound once, grouped by `partition_keys`,
@@ -482,7 +491,11 @@ fn plan_window_to_cte(
     let mut groups: Vec<GroupBinding> = Vec::new();
 
     for (call, _) in calls {
-        let partition_keys = partition_keys_of(call);
+        let window_spec = window_spec_of(call);
+        let partition_keys = window_spec
+            .as_ref()
+            .map(partition_keys_of)
+            .unwrap_or_default();
 
         if let Some(reason) = nondeterministic_key_reason(&partition_keys) {
             refusals.push(refusal(call, dialect, reason));
@@ -507,6 +520,7 @@ fn plan_window_to_cte(
         groups[idx].calls.push(WindowCallReplacement {
             call: call.clone(),
             value_column,
+            over_clause: window_spec,
         });
     }
 
@@ -521,18 +535,21 @@ fn plan_window_to_cte(
     })
 }
 
-/// The `PARTITION BY` key expressions of `call`'s `OVER` clause. Empty when
-/// the call has no `PARTITION BY` — the degenerate one-row-CTE case.
-fn partition_keys_of(call: &SyntaxNode) -> Vec<SyntaxNode> {
-    let Some(parent) = call.parent() else {
-        return Vec::new();
-    };
-    let Some(spec) = parent
-        .children()
-        .find(|n| n.kind() == SyntaxKind::WINDOW_SPEC)
-    else {
-        return Vec::new();
-    };
+/// `call`'s own `OVER` clause, if it has one — parsed as a wrapper-level
+/// sibling of the `FUNCTION_CALL` node rather than a child of it. The parser
+/// emits `WINDOW_SPEC` (when present) as the node-sibling immediately
+/// following its `FUNCTION_CALL`, so `call.next_sibling()` is *this call's*
+/// `OVER` clause — never a later sibling call's. `None` when the call has no
+/// `OVER` clause at all (the immediate next sibling, if any, is something
+/// else — e.g. another `FUNCTION_CALL` beside it with no `OVER`).
+fn window_spec_of(call: &SyntaxNode) -> Option<SyntaxNode> {
+    let next = call.next_sibling()?;
+    (next.kind() == SyntaxKind::WINDOW_SPEC).then_some(next)
+}
+
+/// The `PARTITION BY` key expressions of an `OVER` clause. Empty when there
+/// is no `PARTITION BY` — the degenerate one-row-CTE case.
+fn partition_keys_of(spec: &SyntaxNode) -> Vec<SyntaxNode> {
     let Some(partition_by) = spec
         .children()
         .find(|n| n.kind() == SyntaxKind::PARTITION_BY_CLAUSE)

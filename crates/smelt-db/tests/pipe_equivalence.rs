@@ -27,6 +27,7 @@ fn lower_pipe_sql(sql: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: None,
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

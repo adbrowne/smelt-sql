@@ -61,6 +61,7 @@ owners: [andrew]
   | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
   | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ |
   | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
+  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,

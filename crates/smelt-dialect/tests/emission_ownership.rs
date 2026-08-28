@@ -113,6 +113,32 @@ fn declared_rewrite_ids() -> Vec<String> {
     ids
 }
 
+/// The `RestructureId` variants declared in `smelt-types`, read from the
+/// source rather than restated here, mirroring `declared_rewrite_ids` — a
+/// hand-copied list would go stale exactly when a new restructure shape is
+/// added, which is the moment this gate has to fire.
+fn declared_restructure_ids() -> Vec<String> {
+    let body = SIGNATURES_SRC
+        .split_once("pub enum RestructureId {")
+        .expect("signatures.rs must declare `pub enum RestructureId`")
+        .1
+        .split_once("\n}")
+        .expect("`enum RestructureId` must be brace-terminated")
+        .0;
+    let ids: Vec<String> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with("//") && !l.starts_with("#["))
+        .filter_map(|l| l.strip_suffix(','))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !ids.is_empty(),
+        "parsed no variants out of `enum RestructureId` — the parser above has gone stale"
+    );
+    ids
+}
+
 #[test]
 fn every_rewrite_id_is_dispatched() {
     // A RewriteId the printer never mentions is a registry claim with no
@@ -121,6 +147,25 @@ fn every_rewrite_id_is_dispatched() {
         assert!(
             PRINTER_SRC.contains(&format!("RewriteId::{id}")),
             "RewriteId::{id} is declared in the registry but never dispatched in printer.rs"
+        );
+    }
+}
+
+/// A `RestructureId` the printer never mentions is a registry claim with no
+/// implementation, exactly like an undispatched `RewriteId`. The printer
+/// never matches on `RestructureId` directly — the plan a call's
+/// `Emission::Restructure(RestructureId)` verdict points at is already turned
+/// into data by `restructure::plan` before printing starts, and
+/// `RestructurePlan`'s variants (`WindowToCte`, `AnalyticToCte`) are named to
+/// match `RestructureId`'s one-for-one — so this checks that each id's name
+/// appears dispatched as a `RestructurePlan` arm instead.
+#[test]
+fn every_restructure_id_is_dispatched() {
+    for id in declared_restructure_ids() {
+        assert!(
+            PRINTER_SRC.contains(&format!("RestructurePlan::{id}")),
+            "RestructureId::{id} is declared in the registry but its RestructurePlan \
+             counterpart is never dispatched in printer.rs"
         );
     }
 }

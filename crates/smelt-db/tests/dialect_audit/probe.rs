@@ -301,6 +301,7 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: None,
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     format!(
         "{}{}",

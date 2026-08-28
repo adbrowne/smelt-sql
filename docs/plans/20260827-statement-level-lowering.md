@@ -74,7 +74,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | 1     | done     | 650c1760 | 2026-08-27 |
 | 2     | done     | 63533bac | 2026-08-27 |
 | 3     | done     | 863cca6d | 2026-08-28 |
-| 4     | pending  |        |      |
+| 4     | done     |          | 2026-08-28 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
@@ -377,6 +377,13 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
     disturb the audit ledger or the exact-match ratchet — the helper simply never saw them. Phase 6 adds
     the fourth probe position and **must** fix this helper to be position-aware, or the audit will silently
     exempt verdicts it should be checking.
+
+### Live-engine measurement (recorded during implementation)
+
+Spark's `<=>` was measured against a live Spark Connect server (Spark 4.0.0) on the decorrelation
+join shape with a NULL-bearing partition key: `<=>` keeps all 5 rows, a plain `=` keeps 3 of 5 —
+reproducing on Spark the row loss previously measured on BigQuery. Spark 4.0.0 also *accepts*
+`IS NOT DISTINCT FROM` (scalar and `JOIN ON`); smelt emits `<=>` per the capability matrix.
 
 ## Verification
 
