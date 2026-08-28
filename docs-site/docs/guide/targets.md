@@ -395,6 +395,91 @@ Where a backend's native return type for an expression differs from smelt's infe
 !!! note
     Not all SQL features are available on all backends. If you use a backend-specific function, smelt will report an error when targeting a backend that does not support it.
 
+### Position-dependent aggregate support
+
+A backend's support for a built-in aggregate can differ by *where* it's called. smelt tracks
+support separately for four call positions:
+
+- **Scalar** — a row-wise expression, not an aggregate at all.
+- **Aggregate** — the call itself is an aggregate, with `GROUP BY` and no `OVER` clause.
+- **Whole-partition window** — `OVER (PARTITION BY g)` with no `ORDER BY` and no frame (or an
+  explicit `BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame), so every row in a
+  partition sees the same value.
+- **Running window** — any narrower frame, including the common `OVER (PARTITION BY g ORDER BY
+  t)` with no explicit frame, where the value can differ from row to row within a partition.
+
+Some aggregates are offered by a target backend in only one of these shapes. GoogleSQL's
+`PERCENTILE_CONT`/`PERCENTILE_DISC`, for example, require an `OVER` clause and cannot appear
+under a `GROUP BY` at all; DuckDB and Spark have the reverse gap — `PERCENTILE_CONT`/
+`PERCENTILE_DISC` are ordered-set aggregates there with no window form. `MAX_BY`/`MIN_BY` and
+`APPROX_COUNT_DISTINCT` are aggregate-only on GoogleSQL, with no analytic form at all.
+
+**A whole-partition window over an aggregate-only built-in — or an aggregate over a
+window-only built-in — lowers transparently.** smelt restructures the statement around a
+synthesised CTE: the source is bound once, grouped by the partition (or `GROUP BY`) keys, and the
+per-partition value is joined back onto every row. Output column names and types are unchanged.
+For example, on DuckDB and Spark a whole-partition `PERCENTILE_CONT` window restructures into a
+grouped CTE joined back to the source:
+
+```sql
+-- as written
+SELECT
+    id,
+    g,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) AS med
+FROM tbl
+```
+
+and on GoogleSQL, the reverse shape — an ordered-set aggregate under `GROUP BY` — restructures
+into an analytic CTE read back with `ANY_VALUE`:
+
+```sql
+-- as written
+SELECT g, COUNT(*) AS n, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS med
+FROM tbl GROUP BY g
+```
+
+Both shapes above are ordinary smelt SQL — no target-specific rewriting is needed in the model
+itself.
+
+**A whole-partition window is required.** The lowering computes one value per partition and joins
+it back, so it is correct only when every row in a partition is meant to see the same value. A
+**running** window over a built-in with no analytic form on the target backend has no correct CTE
+form — a per-row correlated subquery would be a different construct with a different cost profile
+— and is refused at compile time with `UnsupportedOnBackend`, naming the built-in, the backend,
+and the whole-partition requirement (see [Diagnostics reference:
+UnsupportedOnBackend](../reference/diagnostics.md#example-unsupportedonbackend)).
+
+If your window genuinely must be running — the value legitimately differs row to row within a
+partition, such as a running median as of each row's own timestamp — smelt will not synthesize
+that for you, because a correct per-row form is a materially more expensive query than the
+whole-partition case. Write the per-row form yourself, for example as a correlated subquery that
+bounds the aggregate to the rows up to and including the current one:
+
+```sql
+SELECT
+    id,
+    g,
+    t,
+    (
+        SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY inner_.x)
+        FROM tbl AS inner_
+        WHERE inner_.g = outer_.g AND inner_.t <= outer_.t
+    ) AS running_med
+FROM tbl AS outer_
+```
+
+This is the same construct smelt refuses to generate automatically, spelled out explicitly so its
+cost is visible in the model's own SQL rather than hidden behind an `OVER` clause.
+
+A restructure is also refused — with a diagnostic naming the specific rule — when the query block
+around the affected call isn't a shape the restructure can rewrite in place: `ROLLUP`/`CUBE`/
+`GROUPING SETS` grouping, an occurrence in `HAVING`, the query's `ORDER BY`, or `QUALIFY`, a
+`DISTINCT` argument or `FILTER (WHERE …)` clause, an unexpanded `SELECT *`, a non-deterministic
+`PARTITION BY` expression, or a correlated subquery. Each of these needs the same kind of manual
+rewrite: pull the affected aggregate into its own `GROUP BY`/join or correlated-subquery form
+before joining it back into the original query shape.
+
 ## Further reading
 
 - [Materializations](materializations.md) for how tables and views are created in each target

@@ -31,3 +31,41 @@ smelt.define my_fn(t: Expr<Struct<{a: Integer, b: Bogus}>>) -> Expr<Integer> AS 
 ```
 
 **Fix**: Replace the unrecognised type name with a concrete smelt `DataType` such as `Integer`, `Text`, `Float`, `Boolean`, `Timestamp`, or a nested `Struct<{…}>`.
+
+### Example: `UnsupportedOnBackend`
+
+**Severity**: Error
+
+A built-in's backend support can differ by *where* it's called — as a scalar expression, an
+aggregate, a whole-partition window (`OVER (PARTITION BY …)` with no `ORDER BY` or frame), or a
+running window (any narrower frame, including the common `OVER (PARTITION BY … ORDER BY …)`).
+smelt transparently restructures a whole-partition window over an aggregate-only built-in — or an
+aggregate over a window-only built-in — around a synthesised CTE. That restructure has no correct
+form for a **running** window, so a running window over a built-in the target backend offers only
+as an aggregate is refused at compile time. See [Position-dependent aggregate
+support](../guide/targets.md#position-dependent-aggregate-support) for the full picture and the
+rewrite to apply by hand.
+
+**Example** — targeting DuckDB, a running `PERCENTILE_CONT` window emits `UnsupportedOnBackend`:
+
+```sql
+SELECT
+    id,
+    g,
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g ORDER BY t) AS running_med
+FROM tbl
+```
+
+**Fix**: Rewrite the query so the affected aggregate is computed once per partition — for example,
+by grouping into a CTE keyed on the partition column and joining the constant value back onto each
+row of the partition, rather than asking the target backend for a running form it does not have.
+
+The refusal names the construct, the reason it doesn't fit the backend, and the backend itself.
+For the query above, targeting DuckDB, the message reads:
+
+<!-- unsupported-on-backend-refusal-text -->
+```text
+UnsupportedOnBackend: this model uses 2 constructs the DuckDB backend cannot express:
+  `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
+  `PERCENTILE_CONT` — DuckDB has the ordered-set aggregate but no running-window form of it; only a window covering the whole partition can be restructured around a grouped CTE
+```

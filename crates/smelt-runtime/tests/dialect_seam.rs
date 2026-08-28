@@ -235,6 +235,89 @@ fn no_compile_entry_point_prints_without_planning() {
     );
 }
 
+/// BigQuery's `APPROX_COUNT_DISTINCT` has no analytic form at all — GoogleSQL's
+/// own dry run accepts `APPROX_COUNT_DISTINCT(x) OVER (PARTITION BY g ORDER BY
+/// …)`, but execution refuses it (measured live 2026-08-27). This pins the
+/// compile-time behaviour: a running window still refuses with
+/// `UnsupportedOnBackend`.
+#[test]
+fn approx_count_distinct_refused_in_running_window_position_on_bigquery() {
+    let model = make_model(
+        "q",
+        "SELECT id, g, APPROX_COUNT_DISTINCT(id) \
+         OVER (PARTITION BY g ORDER BY id) AS approx_distinct FROM tbl",
+    );
+    let err = registry()
+        .get("bigquery")
+        .compile(&model, "main")
+        .expect_err(
+            "BigQuery's APPROX_COUNT_DISTINCT has no analytic form; a running \
+             window must refuse, not compile",
+        );
+    assert!(
+        format!("{err}").contains("APPROX_COUNT_DISTINCT"),
+        "the refusal must name the built-in: {err}"
+    );
+}
+
+/// The user docs quote the exact `UnsupportedOnBackend` refusal text so a
+/// reader can recognise it verbatim; this pins that quote against what the
+/// compile path actually emits, so the guide cannot drift from the
+/// diagnostic (`docs/plans/20260827-statement-level-lowering.md` Phase 7).
+///
+/// The doc's quoted block (`docs-site/docs/reference/diagnostics.md`, marked
+/// by the `<!-- unsupported-on-backend-refusal-text -->` comment) is
+/// extracted from the markdown rather than hand-copied into this test, and
+/// compared against the live error text from the same running-window model
+/// used above — so editing either the reason string in `signatures.rs` or
+/// the quoted text in the docs, without updating the other, fails this test.
+#[test]
+fn docs_quoted_refusal_text_matches_the_live_diagnostic() {
+    const DOC_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs-site/docs/reference/diagnostics.md"
+    );
+    let doc = std::fs::read_to_string(DOC_PATH)
+        .unwrap_or_else(|e| panic!("failed to read {DOC_PATH}: {e}"));
+
+    const MARKER: &str = "<!-- unsupported-on-backend-refusal-text -->";
+    let after_marker = doc
+        .split_once(MARKER)
+        .unwrap_or_else(|| panic!("docs no longer carry the {MARKER} marker"))
+        .1;
+    let fence_start = after_marker
+        .find("```text")
+        .expect("marker must be immediately followed by a ```text fenced block")
+        + "```text".len();
+    let fenced = &after_marker[fence_start..];
+    let fence_end = fenced
+        .find("```")
+        .expect("the ```text block quoting the refusal must be closed");
+    let quoted = fenced[..fence_end].trim_matches('\n');
+
+    // The same running-window model as `running_window_refused_at_compile_time`.
+    // Its single `PERCENTILE_CONT(...) WITHIN GROUP (...) OVER (...)` call is
+    // flagged twice — once for the ordered-set aggregate, once for the window
+    // it sits under — so the message reads "2 constructs" with two identical
+    // detail lines. That is the live shape the doc's quote must match.
+    let model = make_model(
+        "q",
+        "SELECT id, g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) \
+         OVER (PARTITION BY g ORDER BY t) AS med FROM tbl",
+    );
+    let err = registry()
+        .get("duckdb")
+        .compile(&model, "main")
+        .expect_err("running-window PERCENTILE_CONT must refuse on DuckDB");
+    let live = format!("{err}");
+
+    assert_eq!(
+        live, quoted,
+        "the docs' quoted UnsupportedOnBackend text has drifted from what the \
+         compile path actually emits. Live:\n{live}\n\nDocs (from {DOC_PATH}):\n{quoted}"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // The seam leg.
 //
