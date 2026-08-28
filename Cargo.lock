@@ -4293,6 +4293,7 @@ dependencies = [
  "proptest",
  "serde",
  "serde_yaml",
+ "sha2 0.10.9",
  "smelt-core",
  "smelt-dialect",
  "smelt-parser",

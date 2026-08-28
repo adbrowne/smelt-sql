@@ -287,6 +287,7 @@ pub async fn check_and_migrate(
                 version: deployed_schema.version + 1,
                 deployed_at: Utc::now(),
                 model_hash,
+                model_sql: Some(model_sql.to_string()),
                 columns: inferred_columns.to_vec(),
             };
             file_store
@@ -351,6 +352,7 @@ pub fn save_deployed_schema(
         version: existing_version.map_or(1, |v| v + 1),
         deployed_at: Utc::now(),
         model_hash,
+        model_sql: Some(model_sql.to_string()),
         columns: columns.to_vec(),
     };
     file_store
@@ -449,5 +451,31 @@ mod tests {
             }
             _ => panic!("Expected Spark backend"),
         }
+    }
+
+    #[test]
+    fn save_deployed_schema_records_the_definition_sql() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let file_store = FileStore::new(dir.path(), "dev");
+        let sql = "SELECT id, amount - discount AS net_amount FROM orders";
+
+        save_deployed_schema(
+            &file_store,
+            "net_orders",
+            sql,
+            &[DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            }],
+            None,
+        )
+        .expect("save_deployed_schema");
+
+        let loaded = file_store
+            .load_schema("net_orders")
+            .expect("load_schema")
+            .expect("schema present");
+        assert_eq!(loaded.model_sql, Some(sql.to_string()));
     }
 }

@@ -64,6 +64,8 @@ enum Commands {
     Bakeoff(BakeoffArgs),
     /// Show pending schema changes between model definitions and deployed state
     Diff(DiffArgs),
+    /// Derive and print the definition-delta migration plan for a model (plan-only; --apply lands later)
+    Migrate(MigrateArgs),
     /// Run unit tests for models
     Test(TestArgs),
     /// Run data-quality checks against the configured target
@@ -581,6 +583,21 @@ struct DiffArgs {
 }
 
 #[derive(Parser)]
+struct MigrateArgs {
+    /// Name of the model to derive a definition-delta migration plan for
+    model: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — the recorded definition and
+    /// deployed schema are per-target.
+    #[arg(long, default_value = "dev")]
+    target: String,
+}
+
+#[derive(Parser)]
 struct TestArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -709,6 +726,7 @@ async fn main() -> std::process::ExitCode {
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
         Commands::Bakeoff(args) => commands::bakeoff::bakeoff(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
+        Commands::Migrate(args) => commands::migrate::migrate(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,
         Commands::List(args) => commands::list::list(args, scope).await,

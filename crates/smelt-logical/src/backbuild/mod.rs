@@ -2,20 +2,26 @@
 //! into targeted migration scripts instead of a full rebuild.
 //!
 //! See `docs/research/20260802-backbuild-synthesis.md` for the correctness
-//! oracle this module implements against. This is the diff-foundation phase
-//! (research §6 `diff.rs`): purely syntactic CST-level factoring of two
-//! definitions into a [`DefinitionDiff`]. No admission judgements and no
-//! classification happen here — that is later phases' `classify.rs`. This
-//! module is deliberately unwired: nothing outside `smelt-logical` calls it
-//! yet.
+//! oracle this module implements against. `diff.rs` is purely syntactic
+//! CST-level factoring of two definitions into a [`DefinitionDiff`];
+//! `classify.rs` derives admission judgements and technique options from
+//! that diff; `plan.rs` folds those options into a per-column-group
+//! migration plan. `smelt-cli`'s `migrate` command (`smelt migrate <model>`)
+//! is the one consumer outside this crate today — it derives and prints a
+//! plan but does not yet execute it (`docs/specs/definition_deltas.md`
+//! §"`smelt migrate`").
 
 pub mod classify;
 pub mod diff;
 pub mod emit;
+pub mod plan;
 pub mod requalify;
 
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
+pub use plan::{
+    derive_migration_plan, plan_hash, ColumnGroupPlan, MigrationPlan, MigrationVerdict,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 
