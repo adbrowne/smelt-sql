@@ -1,7 +1,7 @@
 # Outcome: Wire the definition-delta synthesis layer (plan-and-approve migration)
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** active
 **Source:** `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
 `docs/specs/incremental_shapes.md`
@@ -300,8 +300,8 @@ open — not that the excluded bullets themselves are gone.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
-| 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | pending |
-| 3 | Approval store + `--apply`: plan-hash persistence, hash-mismatch/staleness refusal, CI exit codes | pending |
+| 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | planned |
+| 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | pending |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
@@ -370,6 +370,19 @@ open — not that the excluded bullets themselves are gone.
   `20260815-incremental-spec-closure-confirm` retargeted from "confirm zero Open Questions" to
   "confirm every closeable bullet is closed and every excluded bullet is still honestly open."
   `.claude/outcome-backlog` and this section rewritten to match.
+
+- **2026-08-28, phase 2 planning.** Two reshapes, both narrow. (a) `--json` and the CI
+  exit-code contract move from phase 2 into phase 3's row: the exit codes are defined by the
+  approved/unapproved distinction, which does not exist until the approval store does, so
+  splitting them across two phases would ship a `--json` whose contract is unrepresentable.
+  Phase 2 keeps human-readable plan output only. (b) The plan **hash derivation** (a pure
+  function over the plan data structure, per phase 1's decision) lands in phase 2 so the
+  printed plan carries the hash it will later be approved by; phase 3 owns only its
+  *persistence* and matching. Nothing left the outcome. Also noted while planning: the
+  spec's §Detection refusal (`smelt run` must refuse to fold data deltas over a pending
+  non-eclipsed definition delta) is behaviour no current phase row owns; it is not a
+  Success-criteria item, and it is left for the phase 9 validate sweep to raise if
+  `/smelt:validate definition_deltas` flags it as drift.
 
 ## Blocked
 
