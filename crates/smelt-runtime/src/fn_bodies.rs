@@ -93,7 +93,7 @@ fn collect_fn_bodies_from_text(text: &str, out: &mut FnBodyMap) {
 ///
 /// Pure: takes an immutable `&Database` and returns plain data. The
 /// orchestration layer (`smelt-cli`'s `commands/run.rs`,
-/// `commands/backbuild.rs`, and `smelt-ui`'s `run_manager.rs`) is the only
+/// `commands/rebuild.rs`, and `smelt-ui`'s `run_manager.rs`) is the only
 /// place that calls into Salsa to build the inputs for this helper, per the
 /// pure-function rule in CLAUDE.md.
 ///

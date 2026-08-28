@@ -18,15 +18,6 @@ it emits one only when fail-closed structural conditions hold, and every
 technique is verified against a full-rebuild oracle in smelt's conformance
 suite.
 
-!!! note "Naming: two things called “backbuild”"
-
-    [`smelt backbuild`](../reference/cli.md#smelt-backbuild) is the CLI command
-    that re-runs a model (and its upstreams) over a date range — reprocessing
-    *data* under an unchanged definition. **Backbuild synthesis**, this page, is
-    about *definition* changes: deriving a migration script from the diff
-    between two versions of a model's SQL. The two share a goal (avoid
-    recomputing what you don't have to) but operate on different inputs.
-
 !!! warning "Availability"
 
     There is no CLI command for this yet — today you cannot invoke synthesis on
@@ -644,7 +635,7 @@ page cannot drift from what smelt actually emits.
 ## Related pages
 
 - [Incremental Models](incremental-models.md) — maintenance of *data* changes
-  under an unchanged definition, including the `smelt backbuild` range rebuild.
+  under an unchanged definition, including the `smelt rebuild` range rebuild.
 - [Schema Evolution](schema-evolution.md) — physical schema change
   classification and DDL capability per backend.
 - [Incremental Equivalence](../concepts/incremental-equivalence.md) — the same

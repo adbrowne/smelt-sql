@@ -14,13 +14,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::run_setup::*;
-use crate::BackbuildArgs;
+use crate::RebuildArgs;
 
 /// Prefix a plain selector with `+` for upstream-closure unless it already
 /// carries an upstream operator. Graph-operator selectors (those already
 /// starting with `+`, `tag:`, etc.) pass through unchanged.
 ///
-/// Upstream-closure semantics: `smelt backbuild model_name` rebuilds `model_name`
+/// Upstream-closure semantics: `smelt rebuild model_name` rebuilds `model_name`
 /// and every upstream model it depends on. This is achieved by rewriting the
 /// selector to `+model_name` (the `+prefix` graph operator in the selection
 /// DSL means "include all transitive upstreams").
@@ -36,7 +36,7 @@ fn to_upstream_closure(selector: &str) -> String {
     }
 }
 
-pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
+pub async fn rebuild(args: RebuildArgs, scope: Option<&str>) -> Result<()> {
     // 1. Resolve project root + config.
     let project_dir = smelt_cli::find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
@@ -105,7 +105,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
 
     // Resolve the single selector through scope, then apply upstream-closure
-    // rewrite so backbuild always includes all transitive upstreams.
+    // rewrite so rebuild always includes all transitive upstreams.
     let resolved_select = resolve_selector_args(
         &gen_salsa_db,
         gen_salsa_ws,
@@ -140,7 +140,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         &args.target,
     )?;
 
-    // backbuild always passes full_refresh: false — the upstream-closure
+    // rebuild always passes full_refresh: false — the upstream-closure
     // selector rebuilds upstream table models as full-refreshes (their default)
     // while keyed models receive the per-partition merge loop.
     let request = ExecuteRequest {
@@ -213,7 +213,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
     }
 
     info!("{}", "=".repeat(60));
-    info!("Backbuild Summary (run: {})", run_id);
+    info!("Rebuild Summary (run: {})", run_id);
     info!("{}", "=".repeat(60));
     info!("Executed {} models successfully", outcome.models.len());
     Ok(())

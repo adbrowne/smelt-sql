@@ -1,4 +1,3 @@
-pub mod backbuild;
 pub mod bakeoff;
 pub mod build;
 pub mod check;
@@ -10,6 +9,7 @@ pub mod history;
 pub mod init;
 pub mod list;
 pub mod migrate;
+pub mod rebuild;
 pub mod run;
 mod run_setup;
 pub mod seed;

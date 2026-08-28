@@ -1172,7 +1172,7 @@ pub fn render_cell_statements_text(statements: &[CellStatements]) -> String {
 }
 
 /// Render one emitted [`StatementGroup`] as the plain-text block both
-/// `smelt explain <model> --show-sql` and `smelt run`/`smelt backbuild
+/// `smelt explain <model> --show-sql` and `smelt run`/`smelt rebuild
 /// --dry-run` print for a maintenance statement: a transactional group is
 /// bracketed by `BEGIN`/`COMMIT` lines to show its atomicity (the backend
 /// supplies the real transaction mechanics at run time), a single-statement

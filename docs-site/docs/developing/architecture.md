@@ -68,7 +68,7 @@ The `Backend` trait also exposes `load_table(schema, name, arrow_schema, batches
 
 | Crate | Purpose | Key Types | Sync/Async |
 |-------|---------|-----------|------------|
-| `smelt-cli` | Command-line interface (`run`, `explain`, `backbuild`) | -- | async |
+| `smelt-cli` | Command-line interface (`run`, `explain`, `rebuild`) | -- | async |
 | `smelt-backend` | Execution trait and result types | `Backend`, `ExecutionResult` | async |
 | `smelt-backend-duckdb` | DuckDB execution | `DuckDbBackend` | async |
 | `smelt-backend-spark` | Spark/Databricks execution | `SparkBackend` | async |

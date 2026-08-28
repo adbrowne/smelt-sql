@@ -303,7 +303,7 @@ open — not that the excluded bullets themselves are gone.
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | done |
-| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | planned |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
@@ -460,6 +460,12 @@ open — not that the excluded bullets themselves are gone.
   `pure_column_addition` field on `DefinitionDeltaStatus::Pending`; the run gate skips refusal
   when it's `true` (`smelt explain`/`smelt migrate` still report and offer the delta). Recorded
   in `definition_deltas.md` §"Detection" as "Pure column addition is exempt."
+- **2026-08-29 (phase 4 implementation).** Renamed the CLI verb `smelt backbuild` → `smelt
+  rebuild` with no compatibility alias (`smelt backbuild` now exits 2, unrecognised
+  subcommand). The `smelt-logical/src/backbuild/` crate module, the "backbuild synthesis"
+  mechanism name, and the `docs-site/docs/guide/backbuild-synthesis.md` page filename/nav
+  were deliberately left untouched — only the CLI verb renamed, per the plan's scope note.
+  The page's full narrative rewrite around `smelt migrate`/`--apply` remains phase 8's job.
 
 ## Blocked
 

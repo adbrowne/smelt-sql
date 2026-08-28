@@ -1,4 +1,4 @@
-//! `smelt backbuild --dry-run` renders the emitted maintenance statements with
+//! `smelt rebuild --dry-run` renders the emitted maintenance statements with
 //! per-chunk boundaries (`docs/specs/cli.md` §"`--dry-run` prints the
 //! maintenance statements"): when the batch-safety classification splits the
 //! range, statements print once per chunk, each chunk introduced by a boundary
@@ -46,7 +46,7 @@ fn chunked_range_prints_per_chunk_boundaries() {
         .expect("examples/web_analytics exists");
 
     let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
-        .arg("backbuild")
+        .arg("rebuild")
         .arg("silver.sessions")
         .arg("--start")
         .arg("2026-03-01")
@@ -56,11 +56,11 @@ fn chunked_range_prints_per_chunk_boundaries() {
         .arg("--project-dir")
         .arg(&project_dir)
         .output()
-        .expect("spawn smelt backbuild silver.sessions --dry-run");
+        .expect("spawn smelt rebuild silver.sessions --dry-run");
 
     assert!(
         output.status.success(),
-        "backbuild --dry-run failed: stderr={}",
+        "rebuild --dry-run failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -110,5 +110,68 @@ fn chunked_range_prints_per_chunk_boundaries() {
     assert!(
         stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-14'"),
         "expected real chunk window literals in the statements:\n{stdout}"
+    );
+}
+
+/// `smelt backbuild` no longer exists — the verb renamed to `smelt rebuild`
+/// with no compatibility alias (`docs/outcomes/20260815-definition-delta-migrate/`
+/// phase 4). Running the old verb must fail as an unrecognised subcommand,
+/// exiting with clap's standard usage-error code (2).
+#[test]
+fn backbuild_verb_is_gone() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("backbuild")
+        .arg("silver.sessions")
+        .arg("--start")
+        .arg("2026-03-01")
+        .arg("--end")
+        .arg("2026-03-29")
+        .arg("--dry-run")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt backbuild silver.sessions --dry-run");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "smelt backbuild must exit 2 (unrecognised subcommand); stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("backbuild"),
+        "expected clap's unrecognised-subcommand error to name `backbuild`:\n{stderr}"
+    );
+}
+
+/// `smelt --help` must list the `rebuild` subcommand and must not mention the
+/// retired `backbuild` name anywhere in its output.
+#[test]
+fn help_lists_rebuild() {
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("--help")
+        .output()
+        .expect("spawn smelt --help");
+
+    assert!(
+        output.status.success(),
+        "smelt --help failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rebuild"),
+        "expected `rebuild` in --help output:\n{stdout}"
+    );
+    assert!(
+        !stdout.to_lowercase().contains("backbuild"),
+        "expected no mention of retired `backbuild` verb in --help output:\n{stdout}"
     );
 }

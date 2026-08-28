@@ -987,7 +987,7 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 **Current state**: `smelt-cli` with full pipeline:
 
 - `smelt run` — execute models with optional `--start`/`--end` for incremental ranges, `--dry-run`, `--full-refresh`, `--auto` (range from interval store)
-- `smelt backbuild` — target-focused rebuild with DAG-aware range expansion
+- `smelt rebuild` — target-focused rebuild with DAG-aware range expansion
 - `smelt explain` — dependency graph + JSON export
 - `smelt status` — interval coverage and gaps for incremental models
 - `smelt history` — run history with model filtering

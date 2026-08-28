@@ -448,11 +448,6 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **The ranged-rebuild verb still ships under the name `smelt backbuild`** rather than
-  `smelt rebuild`. The live handling of definition changes outside `smelt migrate`'s path is a
-  narrower third mechanism covering **column additions only** (the definition-change trigger in
-  the maintenance driver); a changed column's redefinition falls to a full recompute. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 4.
 - **Resume is approval-marker-based, not frontier-region-scoped**, despite §"Frontier semantics"
   describing a per-region resume: `--apply` records only whether an execution is in progress for
   the approved plan as a whole, not which regions each column group has caught up. A partially

@@ -340,7 +340,7 @@ fn web_analytics_keyed_model_shows_merge() {
 /// outermost projection is a bare `*` by the time `apply_type_casts` runs.
 /// This is a pre-existing characteristic of the live run's own clamped
 /// statement (unrelated to and unchanged by this fix — confirmed via
-/// `smelt backbuild --dry-run` against `examples/web_analytics`, whose real
+/// `smelt rebuild --dry-run` against `examples/web_analytics`, whose real
 /// executed `INSERT` bodies carry no `CAST` either), not a new
 /// explain-vs-run divergence; tracked as a `smelt-runtime` finding
 /// (`apply_type_casts`/`compile.rs`) outside this fix's scope.

@@ -51,7 +51,7 @@ method = model_name
 
 Both flags are repeatable. Each instance adds one selector to the set.
 
-**`smelt backbuild` uses a positional selector.** Unlike the commands above, `backbuild` takes a single positional `<SELECTOR>` argument rather than `--select`/`--exclude` flags, and always expands upstream (the `+` prefix is implicit). There is no `--exclude` support on `backbuild`.
+**`smelt rebuild` uses a positional selector.** Unlike the commands above, `rebuild` takes a single positional `<SELECTOR>` argument rather than `--select`/`--exclude` flags, and always expands upstream (the `+` prefix is implicit). There is no `--exclude` support on `rebuild`.
 
 ## Semantics
 

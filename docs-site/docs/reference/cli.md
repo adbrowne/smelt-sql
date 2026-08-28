@@ -44,7 +44,7 @@ Every `smelt` subcommand follows the same exit-code contract, so orchestrators (
 
 ## State lock errors
 
-Any command that mutates run state (`smelt run`, `smelt build`, `smelt backbuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
+Any command that mutates run state (`smelt run`, `smelt build`, `smelt rebuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
 
 ```
 Error: state locked by PID <n>
@@ -212,7 +212,7 @@ no longer matches its contents. The run exits `3` naming `DefinitionDeltaPending
 
 ### Parallel execution with `--jobs`
 
-The run engine (shared by `smelt run`, `smelt build`, and `smelt backbuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
+The run engine (shared by `smelt run`, `smelt build`, and `smelt rebuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
 
 - Omitted (the default) — resolves to the host's available parallelism (`std::thread::available_parallelism()`), typically the number of logical CPUs.
 - `--jobs 1` — strictly serial: one model at a time, in `execution_order`. This is the pre-`--jobs` behavior and remains available as an explicit opt-out.
@@ -224,7 +224,7 @@ Concurrency helps most when a project's DAG is wide (many independent models per
 
 ### Retrying transient backend failures
 
-`smelt run`, `smelt build`, and `smelt backbuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
+`smelt run`, `smelt build`, and `smelt rebuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
 
 A retry always re-runs the model's *entire* write step for the attempt that failed — the full drop-and-recreate for a table, one incremental batch's complete DELETE+INSERT, a column-scoped MERGE, or a keyed model's create-or-merge partition write — never a partial slice of it, so a retried model never leaves a half-applied write behind. Coverage is uniform across every write technique a model can dispatch to, including the delta-restricted recompute a model-edge creation trigger can take. Retries use exponential backoff between attempts; the delay is derived deterministically from the run and model identity rather than real-clock jitter, so repeated runs behave predictably.
 
@@ -234,7 +234,7 @@ By default, up to 3 attempts are made per write step before the model is reporte
 
 ### Run report and failure summary
 
-Every `smelt run`/`smelt build`/`smelt backbuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
+Every `smelt run`/`smelt build`/`smelt rebuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
 
 When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line and a one-line hint toward the likely next action:
 
@@ -310,9 +310,9 @@ smelt run --auto
 
 ### `--dry-run` — inspect the maintenance statements before they run
 
-`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
+`smelt run --dry-run` and `smelt rebuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
 
-`smelt backbuild --dry-run` additionally reflects the **chunking** a real backbuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real backbuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
+`smelt rebuild --dry-run` additionally reflects the **chunking** a real rebuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real rebuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
 
 Division of labour with [`smelt explain <model> --show-sql`](#smelt-explain): `--show-sql` is the no-window, single-model plan-inspection surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would **this invocation** do" surface — real window, real selection, real chunking.
 
@@ -345,16 +345,16 @@ smelt run --since-upstream \
 
 ---
 
-## smelt backbuild
+## smelt rebuild
 
 Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.
 
-`smelt backbuild` handles both `grain: partition` and `grain: key` incremental models uniformly. For `grain: partition` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: incremental` + `grain: key` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
+`smelt rebuild` handles both `grain: partition` and `grain: key` incremental models uniformly. For `grain: partition` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: incremental` + `grain: key` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
 
 **Usage:**
 
 ```
-smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
+smelt rebuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 ```
 
 **Arguments:**
@@ -382,18 +382,18 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 **Examples:**
 
 ```bash
-# Backbuild a model and all its upstreams for January (canonical path form)
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
+# Rebuild a model and all its upstreams for January (canonical path form)
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
 
 # Same using scope shorthand (equivalent when scope is marts)
-smelt --scope marts backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
+smelt --scope marts rebuild +daily_revenue --start 2026-01-01 --end 2026-02-01
 
 # Preview the maintenance statements — one block per auto-derived chunk —
 # without executing anything
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
 
-# Backbuild with per-partition execution
-smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
+# Rebuild with per-partition execution
+smelt rebuild +marts.daily_revenue --start 2026-01-01 --end 2026-01-08 --per-partition
 ```
 
 ---
