@@ -76,7 +76,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | 3     | done     | 863cca6d | 2026-08-28 |
 | 4     | done     | c8a64fed | 2026-08-28 |
 | 5     | done     | 750ab24c | 2026-08-28 |
-| 6     | pending  |        |      |
+| 6     | done     |          | 2026-08-28 |
 | 7     | pending  |        |      |
 
 ---
@@ -395,6 +395,17 @@ reproducing on Spark the row loss previously measured on BigQuery. Spark 4.0.0 a
   to `=`. It would NOT catch a regression to `LEFT JOIN`, nor a CTE grouped on the wrong key — both can
   still yield 5 rows. Widening it needs a value assertion, which the audit's value leg cannot own because
   `ANY_VALUE` is registered nondeterministic and probed on the schema leg only.
+
+- **The gap ratchet cannot move for this family, by design.** `dialect_gaps_*` counts ledger *rows*,
+  and every affected entry still genuinely refuses the *running* case — a distinct position from
+  whole-partition. Rows narrow rather than disappear, so `.claude/dialect-gaps-baseline.txt` correctly
+  stays at duckdb 12 / spark 27 / bigquery 42. Phase 6's "baseline tightens" wording was loose; the
+  closure this plan delivers shows up as narrowed row scope and per-position coverage cells, not as a
+  smaller count.
+- **`is_declared_unsupported`'s position fix is currently inert.** Reverting it to `Position::Any`
+  fails no test, because `is_registered` already consults the real position and masks it. It is correct
+  defense-in-depth for an `Unsupported`-without-ledger-row entry, which does not yet exist. Per-PR CI
+  cannot distinguish "correct" from "redundant" here.
 
 ## Verification
 

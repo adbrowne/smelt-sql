@@ -16,6 +16,10 @@ Cell vocabulary:
 - `native` — same spelling, same semantics; smelt emits the name unchanged.
 - `rename:X` — same call shape, emitted as `X`.
 - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.
+- `restructure:Id` — the enclosing query block is restructured around a
+  synthesised CTE by the planner's `RestructureId::Id` shape, because the
+  backend offers this built-in only in the opposite position from the one the
+  author wrote.
 - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather
   than emitting SQL the engine would reject or misread.
 - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by
@@ -23,6 +27,15 @@ Cell vocabulary:
   (`.claude/dialect-gaps-baseline.txt`).
 - `(gap divergent)` — an accepted, permanent semantic difference no rename or
   rewrite can close.
+
+A cell holds one verdict when every position the entry can occupy agrees. When they
+differ, the cell renders the set instead, one `position:verdict` term per position,
+separated by `; ` — `agg` (aggregate, no `OVER`), `win` (an `OVER` clause covering the
+whole partition), `run` (a narrower, running `OVER` clause), `scalar` (a row-wise
+call). Collapsing to a single verdict would hide exactly the position-dependent
+asymmetry the position axis exists to record — GoogleSQL's `PERCENTILE_CONT` is
+refused as an aggregate but accepted with a whole-partition `OVER`, while `MAX_BY` is
+the exact reverse.
 
 | Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |
 |---|---|---|---|---|---|
@@ -33,9 +46,9 @@ Cell vocabulary:
 | `ACOS` | call | native | native | native | native |
 | `AGE` | call | native | native (gap #178) | native | native (gap #179) |
 | `ANY_VALUE` | call | native | native | native | native |
-| `APPROX_COUNT_DISTINCT` | call | native | native | native | native (gap #179) |
-| `ARG_MAX` | call | native | rename:MAX_BY | native | rename:MAX_BY (gap #179) |
-| `ARG_MIN` | call | native | rename:MIN_BY | native | rename:MIN_BY (gap #179) |
+| `APPROX_COUNT_DISTINCT` | call | native | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) |
+| `ARG_MAX` | call | native | rename:MAX_BY | native | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
+| `ARG_MIN` | call | native | rename:MIN_BY | native | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) |
 | `ARRAY_AGG` | call | native | native (gap divergent) | native | native (gap divergent) |
 | `ASIN` | call | native | native | native | native |
 | `ATAN` | call | native | native | native | native |
@@ -117,7 +130,7 @@ Cell vocabulary:
 | `MAKE_TIMESTAMPTZ` | call | native | native (gap #178) | native | native (gap #179) |
 | `MAX` | call | native | native | native | native |
 | `MD5` | call | native | native | native | native (gap #179, divergent) |
-| `MEDIAN` | call | native | native (gap #178) | native | rewrite:BigQueryMedian (gap #179) |
+| `MEDIAN` | call | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:rewrite:BigQueryMedian; win:rewrite:BigQueryMedian; run:unsupported (gap #179) |
 | `MIN` | call | native | native | native | native |
 | `MOD` | call | native | native | native | native |
 | `MODE` | call | native | native | native | native (gap #179) |
@@ -126,8 +139,8 @@ Cell vocabulary:
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
-| `PERCENTILE_CONT` | call | restructure:WindowToCte (gap #177) | restructure:WindowToCte (gap #178) | native | restructure:AnalyticToCte (gap #179) |
-| `PERCENTILE_DISC` | call | restructure:WindowToCte (gap #177) | restructure:WindowToCte (gap #178) | native | restructure:AnalyticToCte (gap #179) |
+| `PERCENTILE_CONT` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:native; run:unsupported (gap #179) |
+| `PERCENTILE_DISC` | call | agg:native; win:restructure:WindowToCte; run:unsupported (gap #177) | agg:native; win:restructure:WindowToCte; run:unsupported (gap #178) | native | agg:restructure:AnalyticToCte; win:native; run:unsupported (gap #179) |
 | `PERCENT_RANK` | call | native | native | native | native |
 | `PI` | call | native | native | native | native (gap #179) |
 | `POSITION` | call | native | native | native | native (gap #179) |

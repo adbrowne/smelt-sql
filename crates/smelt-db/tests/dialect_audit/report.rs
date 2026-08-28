@@ -8,38 +8,75 @@
 //! verification-tier section says which dialects a live leg actually visits.
 
 use smelt_types::signatures::{Position, Signature};
-use smelt_types::{BuiltinRegistry, DialectId, Emission, SyntaxForm};
+use smelt_types::{BuiltinRegistry, DialectId, Emission, ExprKind, SyntaxForm};
 
 use crate::ledger::{self, Verdict};
 
-/// A single display verdict for `(sig, dialect)`, collapsing across call
-/// positions.
+/// The concrete positions an entry's own kind can occupy — the same
+/// enumeration `probe.rs::positions` uses to derive probes, so the table
+/// renders exactly the positions the audit actually exercises.
+fn applicable_positions(kind: ExprKind) -> &'static [Position] {
+    match kind {
+        ExprKind::Scalar => &[Position::Scalar],
+        ExprKind::Agg => &[
+            Position::Aggregate,
+            Position::WholePartitionWindow,
+            Position::Window,
+        ],
+        ExprKind::Window => &[Position::Window],
+    }
+}
+
+/// A short label for a concrete position, used only in the per-position
+/// rendering below (never `Position::Any`, which is a lookup wildcard, not a
+/// position a call occupies).
+fn position_label(position: Position) -> &'static str {
+    match position {
+        Position::Any => unreachable!("Position::Any is a lookup wildcard, never rendered"),
+        Position::Scalar => "scalar",
+        Position::Aggregate => "agg",
+        Position::WholePartitionWindow => "win",
+        Position::Window => "run",
+    }
+}
+
+fn emission_label(emission: Emission) -> String {
+    match emission {
+        Emission::Native => "native".to_string(),
+        Emission::Rename(to) => format!("rename:{to}"),
+        Emission::Rewrite(id) => format!("rewrite:{id:?}"),
+        Emission::Restructure(id) => format!("restructure:{id:?}"),
+        Emission::Unsupported { .. } => "unsupported".to_string(),
+    }
+}
+
+/// The base verdict text for `(sig, dialect)`: one verdict when every
+/// position `sig` can occupy agrees, or the full per-position set when they
+/// don't.
 ///
-/// The registry now states a verdict per `(dialect, position)`, but this
-/// report still renders one cell per `(entry, dialect)` — the fourth probe
-/// position is what teaches it to render a per-position verdict set instead
-/// of collapsing one. Until then: `Position::Any` first (the common case,
-/// where the verdict does not vary by position), then the first non-`Native`
-/// concrete-position verdict in a fixed order, so an entry stated only at
-/// specific positions (e.g. `MEDIAN` on BigQuery) still surfaces its verdict
-/// rather than reading as `native`.
-fn representative_emission(sig: &Signature, dialect: DialectId) -> Emission {
-    let any = sig.emission_at(dialect, Position::Any);
-    if !matches!(any, Emission::Native) {
-        return any;
+/// The registry states a verdict per `(dialect, position)`
+/// (`docs/specs/multi_backend.md` §"Emission is scoped to call position"), and
+/// a backend's support for a built-in routinely differs between positions —
+/// GoogleSQL's `PERCENTILE_CONT`/`PERCENTILE_DISC` and `MAX_BY`/`MIN_BY` are
+/// the sharp cases. Collapsing to one verdict per cell would hide exactly
+/// that asymmetry, so a cell renders the set, labelled by position, whenever
+/// the positions disagree.
+fn emission_text(sig: &Signature, dialect: DialectId) -> String {
+    let positions = applicable_positions(sig.kind);
+    let verdicts: Vec<(Position, Emission)> = positions
+        .iter()
+        .map(|&p| (p, sig.emission_at(dialect, p)))
+        .collect();
+    let first = verdicts[0].1;
+    if verdicts.iter().all(|(_, e)| *e == first) {
+        emission_label(first)
+    } else {
+        verdicts
+            .iter()
+            .map(|(p, e)| format!("{}:{}", position_label(*p), emission_label(*e)))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
-    for position in [
-        Position::Scalar,
-        Position::Aggregate,
-        Position::WholePartitionWindow,
-        Position::Window,
-    ] {
-        let e = sig.emission_at(dialect, position);
-        if !matches!(e, Emission::Native) {
-            return e;
-        }
-    }
-    Emission::Native
 }
 
 fn form_label(form: SyntaxForm) -> &'static str {
@@ -58,16 +95,9 @@ fn form_label(form: SyntaxForm) -> &'static str {
 /// ledger annotation is appended because it is what a live engine *found*. A
 /// pair can carry both — `LOG` is `native` on Spark and also a recorded gap.
 fn cell(name: &str, dialect: DialectId) -> String {
-    let emission = BuiltinRegistry::resolve(name)
-        .map(|sig| representative_emission(sig, dialect))
-        .unwrap_or(Emission::Native);
-    let base = match emission {
-        Emission::Native => "native".to_string(),
-        Emission::Rename(to) => format!("rename:{to}"),
-        Emission::Rewrite(id) => format!("rewrite:{id:?}"),
-        Emission::Restructure(id) => format!("restructure:{id:?}"),
-        Emission::Unsupported { .. } => "unsupported".to_string(),
-    };
+    let base = BuiltinRegistry::resolve(name)
+        .map(|sig| emission_text(sig, dialect))
+        .unwrap_or_else(|| emission_label(Emission::Native));
     let annotation: Vec<&'static str> = ledger::dialect_divergences()
         .iter()
         .filter(|r| r.name == name && r.dialect == dialect)
@@ -115,13 +145,25 @@ pub fn render() -> String {
         "- `native` — same spelling, same semantics; smelt emits the name unchanged.\n\
          - `rename:X` — same call shape, emitted as `X`.\n\
          - `rewrite:Id` — structurally rewritten by the printer's `RewriteId::Id` arm.\n\
+         - `restructure:Id` — the enclosing query block is restructured around a\n\
+         \x20 synthesised CTE by the planner's `RestructureId::Id` shape, because the\n\
+         \x20 backend offers this built-in only in the opposite position from the one the\n\
+         \x20 author wrote.\n\
          - `unsupported` — the compiler refuses the model (`UnsupportedOnBackend`) rather\n\
          \x20 than emitting SQL the engine would reject or misread.\n\
          - `(gap #N)` — a live sweep found this pair does not work as claimed, tracked by\n\
          \x20 issue #N. The count ratchets down only\n\
          \x20 (`.claude/dialect-gaps-baseline.txt`).\n\
          - `(gap divergent)` — an accepted, permanent semantic difference no rename or\n\
-         \x20 rewrite can close.\n\n",
+         \x20 rewrite can close.\n\n\
+         A cell holds one verdict when every position the entry can occupy agrees. When they\n\
+         differ, the cell renders the set instead, one `position:verdict` term per position,\n\
+         separated by `; ` — `agg` (aggregate, no `OVER`), `win` (an `OVER` clause covering the\n\
+         whole partition), `run` (a narrower, running `OVER` clause), `scalar` (a row-wise\n\
+         call). Collapsing to a single verdict would hide exactly the position-dependent\n\
+         asymmetry the position axis exists to record — GoogleSQL's `PERCENTILE_CONT` is\n\
+         refused as an aggregate but accepted with a whole-partition `OVER`, while `MAX_BY` is\n\
+         the exact reverse.\n\n",
     );
 
     out.push_str("| Entry | Form | DuckDB | Spark SQL | PostgreSQL | BigQuery |\n");

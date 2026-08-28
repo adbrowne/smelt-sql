@@ -87,24 +87,6 @@ const fn gap(
     }
 }
 
-/// A one-position gap the engine surfaces only at execution: the dry run
-/// accepts the query and running it does not.
-const fn value_gap_at(
-    name: &'static str,
-    dialect: DialectId,
-    position: Position,
-    issue: &'static str,
-    detail: &'static str,
-) -> LedgerRow {
-    LedgerRow {
-        name,
-        dialect,
-        position: Some(position),
-        leg: Leg::Value,
-        verdict: Verdict::Gap { issue, detail },
-    }
-}
-
 /// A gap the engine surfaces in the *type* of the result: it accepts the probe
 /// but reports a different output type than smelt inferred.
 const fn type_gap(
@@ -202,22 +184,28 @@ pub fn find(
 /// Closing one means adding an `Emission::Rename`, an `Emission::Rewrite`, or
 /// an `Emission::Unsupported` row to the entry, and deleting its row here.
 static ROWS: &[LedgerRow] = &[
-    // The ordered-set form has no window form: `PERCENTILE_CONT(f) WITHIN GROUP
-    // (ORDER BY x) OVER (...)` is not a thing on DuckDB. Scoped to the position
-    // that fails, so the aggregate position stays covered.
+    // The ordered-set form has no *running*-window form: `PERCENTILE_CONT(f)
+    // WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g ORDER BY rid)` is not a
+    // thing on DuckDB. Scoped to the position that still fails — the
+    // aggregate position was always covered, and a whole-partition window
+    // now restructures around a grouped CTE
+    // (`RestructureId::WindowToCte`), so only the running case remains a
+    // gap.
     gap_at(
         "PERCENTILE_CONT",
         DialectId::DuckDb,
         Position::Window,
         "#177",
-        "DuckDB has the ordered-set aggregate but no window form of it",
+        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
+         window covering the whole partition can be restructured around a grouped CTE",
     ),
     gap_at(
         "PERCENTILE_DISC",
         DialectId::DuckDb,
         Position::Window,
         "#177",
-        "DuckDB has the ordered-set aggregate but no window form of it",
+        "DuckDB has the ordered-set aggregate but no running-window form of it; only a \
+         window covering the whole partition can be restructured around a grouped CTE",
     ),
     //
     // Type-leg gaps: the engine accepts the probe, but smelt's inferred output
@@ -287,30 +275,36 @@ static ROWS: &[LedgerRow] = &[
     gap("GROUP_CONCAT", DialectId::SparkSql, "#178", "Spark spells it `concat_ws(sep, collect_list(x))`"),
     value_gap("LOG", DialectId::SparkSql, "#174", "Spark's `log(x)` is the natural logarithm; DuckDB's is base 10 - a silently wrong number, closable by a rename to `log10`"),
     value_gap("DAYOFWEEK", DialectId::SparkSql, "#174", "Spark numbers the week from Sunday=1, DuckDB from Sunday=0 - a silently wrong number, closable by a rewrite"),
-    // `MEDIAN` works as an aggregate on Spark but not as a window function, so
-    // the row is scoped to the position that fails rather than the whole entry.
+    // `MEDIAN` works as an aggregate on Spark, and a whole-partition window
+    // now restructures around a grouped CTE; only the running-window case
+    // remains a gap, so the row is scoped to that position.
     gap_at(
         "MEDIAN",
         DialectId::SparkSql,
         Position::Window,
         "#178",
-        "Spark has `median` as an aggregate but not as a window function",
+        "Spark has `median` as an aggregate but no running-window form of it; only a \
+         window covering the whole partition can be restructured around a grouped CTE",
     ),
-    // Spark accepts the ordered-set `WITHIN GROUP` form as an aggregate; only
-    // the window form is missing, so the row is scoped to that position.
+    // Spark accepts the ordered-set `WITHIN GROUP` form as an aggregate, and
+    // a whole-partition window now restructures around a grouped CTE; only
+    // the running-window form is missing, so the row is scoped to that
+    // position.
     gap_at(
         "PERCENTILE_CONT",
         DialectId::SparkSql,
         Position::Window,
         "#178",
-        "Spark has the ordered-set aggregate but no window form of it",
+        "Spark has the ordered-set aggregate but no running-window form of it; only a \
+         window covering the whole partition can be restructured around a grouped CTE",
     ),
     gap_at(
         "PERCENTILE_DISC",
         DialectId::SparkSql,
         Position::Window,
         "#178",
-        "Spark has the ordered-set aggregate but no window form of it",
+        "Spark has the ordered-set aggregate but no running-window form of it; only a \
+         window covering the whole partition can be restructured around a grouped CTE",
     ),
     //
     // Type-leg gaps. The same two inference families DuckDB surfaces, confirmed
@@ -353,15 +347,19 @@ static ROWS: &[LedgerRow] = &[
     gap("REGR_SLOPE", DialectId::BigQuery, "#179", "no regression aggregates in GoogleSQL"),
     gap("FIRST", DialectId::BigQuery, "#179", "GoogleSQL's `FIRST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
     gap("LAST", DialectId::BigQuery, "#179", "GoogleSQL's `LAST` exists only inside a MATCH_RECOGNIZE MEASURES clause"),
-    // `MEDIAN` lowers correctly in aggregate position; the window rewrite emits
-    // `PERCENTILE_CONT ... OVER (... ORDER BY ...)`, and GoogleSQL forbids a
-    // window ORDER BY on that analytic function. Scoped to the failing position.
+    // `MEDIAN` lowers correctly in aggregate position and over a whole-partition
+    // window; a running window has no exact GoogleSQL form at all, because the
+    // `PERCENTILE_CONT` lowering forbids a window `ORDER BY`, and the registry
+    // refuses it rather than emitting a rewrite that would fail at the
+    // warehouse. Scoped to the failing position.
     gap_at(
         "MEDIAN",
         DialectId::BigQuery,
         Position::Window,
         "#179",
-        "the window rewrite emits PERCENTILE_CONT with a window ORDER BY, which GoogleSQL forbids",
+        "the window rewrite would emit PERCENTILE_CONT with a window ORDER BY, which \
+         GoogleSQL forbids; only a window covering the whole partition has an exact \
+         GoogleSQL form",
     ),
     //
     // Type-leg gaps.
@@ -453,14 +451,19 @@ static ROWS: &[LedgerRow] = &[
     //
     // Execution-time findings, reachable only by the value leg: the query is
     // accepted, then the warehouse refuses the data.
-    // Dry-run-invisible: BigQuery plans the analytic form happily and only
-    // refuses it on execution, so this is a value-leg row, not a schema one.
-    value_gap_at(
+    // GoogleSQL's `APPROX_COUNT_DISTINCT` has no analytic form at all — refused
+    // outright, even over a partition-only window (measured live 2026-08-27,
+    // superseding an earlier reading that only execution refused it). A
+    // whole-partition window now restructures around a grouped CTE; only the
+    // running case remains a gap.
+    gap_at(
         "APPROX_COUNT_DISTINCT",
         DialectId::BigQuery,
         Position::Window,
         "#179",
-        "GoogleSQL has APPROX_COUNT_DISTINCT as an aggregate but not as an analytic function",
+        "GoogleSQL has APPROX_COUNT_DISTINCT as an aggregate but no running-window form \
+         of it; only a window covering the whole partition can be restructured around a \
+         grouped CTE",
     ),
     divergent(
         "POWER",
@@ -485,29 +488,45 @@ static ROWS: &[LedgerRow] = &[
     //
     // Renamed correctly, but the *shape* still differs — each found only after
     // the rename landed, because until then the name itself was missing.
+    // GoogleSQL's `MAX_BY`/`MIN_BY` have no analytic form at all — refused
+    // even over a partition-only window (measured live 2026-08-27). A
+    // whole-partition window now restructures around a grouped CTE; only the
+    // running case remains a gap.
     gap_at(
         "ARG_MAX",
         DialectId::BigQuery,
         Position::Window,
         "#179",
-        "GoogleSQL's MAX_BY is an aggregate only; it does not accept an OVER clause",
+        "GoogleSQL's MAX_BY has no analytic form, even over a partition-only window; only \
+         a window covering the whole partition can be restructured around a grouped CTE",
     ),
     gap_at(
         "ARG_MIN",
         DialectId::BigQuery,
         Position::Window,
         "#179",
-        "GoogleSQL's MIN_BY is an aggregate only; it does not accept an OVER clause",
+        "GoogleSQL's MIN_BY has no analytic form, even over a partition-only window; only \
+         a window covering the whole partition can be restructured around a grouped CTE",
     ),
-    gap(
+    // GoogleSQL requires an `OVER` clause and rejects `WITHIN GROUP` outright,
+    // so the aggregate position now restructures the other way — the
+    // `FROM`/`WHERE` move into a CTE that computes the value as an analytic
+    // column over the grouping keys (`RestructureId::AnalyticToCte`) — and a
+    // whole-partition window is native. Only the running case, which
+    // GoogleSQL forbids a window `ORDER BY` on, remains a gap.
+    gap_at(
         "PERCENTILE_CONT",
         DialectId::BigQuery,
-        "#179", "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
+        Position::Window,
+        "#179",
+        "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
     ),
-    gap(
+    gap_at(
         "PERCENTILE_DISC",
         DialectId::BigQuery,
-        "#179", "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
+        Position::Window,
+        "#179",
+        "GoogleSQL has it as an analytic function only, and forbids a window ORDER BY on it",
     ),
     type_gap(
         "TRUNCATE",

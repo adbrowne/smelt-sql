@@ -1636,6 +1636,29 @@ thread_local! {
     /// restructure) shadows correctly rather than leaking a stale table.
     static ACTIVE_SUBSTITUTIONS: RefCell<Vec<Vec<(SyntaxNode, String)>>> =
         const { RefCell::new(Vec::new()) };
+
+    /// Stack of active call-position overrides — the mirror of
+    /// `ACTIVE_SUBSTITUTIONS` for a call whose *position*, not its text, a
+    /// restructure has changed. A `Rowan` `.clone()` of a `FUNCTION_CALL`
+    /// node embedded in a synthesised CTE (`restructure::plan_window_to_cte`,
+    /// `plan_analytic_to_cte`) is a cheap handle into the *original* tree —
+    /// its `.parent()` still resolves to the source query block, still
+    /// carrying whatever `OVER`-clause sibling node (or lack of one) the call had
+    /// there. Re-deriving position from that stale location would answer the
+    /// wrong question: the whole point of a statement-level restructure is
+    /// that the call now occupies a *different* position in the printed SQL
+    /// (aggregate position inside a `WindowToCte` CTE; window position
+    /// inside an `AnalyticToCte` CTE). `restructure::plan` already knows
+    /// which position a call is being moved into — it decided the shape of
+    /// the CTE it's embedding the call in — so that known position is
+    /// pushed here for the duration of printing that one embedded call, and
+    /// `emit_registered_function` consults it before ever calling
+    /// `position::classify`. This still respects "position is decided once,
+    /// by the compile path" (`docs/specs/multi_backend.md` §"Emission is
+    /// scoped to call position") — the compile path's restructure planner is
+    /// the one deciding it, the printer only carries it through.
+    static ACTIVE_POSITION_OVERRIDES: RefCell<Vec<Vec<(SyntaxNode, Position)>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// RAII guard that pops its substitution frame on drop — unconditionally,
@@ -1676,6 +1699,39 @@ fn active_substitution_for(node: &SyntaxNode) -> Option<String> {
                 .find(|(n, _)| n == node)
                 .map(|(_, text)| text.clone())
         })
+    })
+}
+
+/// RAII guard that pops its position-override frame on drop — the mirror of
+/// `SubstitutionFrameGuard`, for the same unconditional-pop reason.
+struct PositionOverrideFrameGuard;
+
+impl Drop for PositionOverrideFrameGuard {
+    fn drop(&mut self) {
+        ACTIVE_POSITION_OVERRIDES.with(|cell| {
+            cell.borrow_mut().pop();
+        });
+    }
+}
+
+/// Runs `f` with `overrides` active as the current call-position table — see
+/// `ACTIVE_POSITION_OVERRIDES`. Used by a restructure's CTE-printing path to
+/// hand a specific embedded call the position it now occupies in the
+/// synthesised SQL, rather than letting `emit_registered_function` re-derive
+/// it from the call's stale original tree location.
+fn with_position_override<F: FnOnce()>(overrides: &[(SyntaxNode, Position)], f: F) {
+    ACTIVE_POSITION_OVERRIDES.with(|cell| cell.borrow_mut().push(overrides.to_vec()));
+    let _guard = PositionOverrideFrameGuard;
+    f();
+}
+
+/// The active position override for `node`, if any — see
+/// `with_position_override`.
+fn active_position_override_for(node: &SyntaxNode) -> Option<Position> {
+    ACTIVE_POSITION_OVERRIDES.with(|cell| {
+        cell.borrow()
+            .last()
+            .and_then(|overrides| overrides.iter().find(|(n, _)| n == node).map(|(_, p)| *p))
     })
 }
 
@@ -1864,8 +1920,14 @@ fn print_window_to_cte(
             // dropped — the OVER clause is a *sibling* of the FUNCTION_CALL
             // node (parsed that way; see `restructure::partition_keys_of`),
             // never a child, so printing the call node alone already omits
-            // it.
-            out.push_str(&print_trimmed(&call.call, ctx));
+            // it. The call now occupies aggregate position in this CTE —
+            // pushed as an override so `emit_registered_function` looks its
+            // emission up there rather than re-deriving `WholePartitionWindow`
+            // from the clone's still-attached original `OVER`-clause sibling
+            // (`ACTIVE_POSITION_OVERRIDES`).
+            with_position_override(&[(call.call.clone(), Position::Aggregate)], || {
+                out.push_str(&print_trimmed(&call.call, ctx));
+            });
             out.push_str(" AS ");
             out.push_str(&call.value_column);
         }
@@ -1999,12 +2061,30 @@ fn analytic_form_text(
     ctx: &PrintContext,
 ) -> String {
     let call = &repl.call;
-    let name = FunctionCall::cast(call.clone())
+    let canonical = FunctionCall::cast(call.clone())
         .and_then(|fc| fc.name())
         .as_deref()
         .and_then(BuiltinRegistry::canonical_name)
         .unwrap_or("")
         .to_string();
+    // The call now occupies whole-partition window position in the
+    // synthesised CTE — a partition-only `OVER` clause with no `ORDER BY` and
+    // no frame (`position::shape_of`'s whole-partition case). Consult the
+    // registry at *that* position for the target spelling rather than
+    // assuming the canonical name still applies once the call has moved —
+    // the mirror-image of `WindowToCte`'s `Position::Aggregate` override
+    // above, for the same reason: a call an `AnalyticToCte` restructure
+    // moves into window position may need a per-dialect rename there, even
+    // though neither of today's registered `AnalyticToCte` entries
+    // (`PERCENTILE_CONT`/`PERCENTILE_DISC`) happens to need one.
+    let name = BuiltinRegistry::resolve(&canonical)
+        .map(
+            |sig| match sig.emission_at(ctx.dialect.id(), Position::WholePartitionWindow) {
+                Emission::Rename(new_name) => new_name.to_string(),
+                _ => canonical.clone(),
+            },
+        )
+        .unwrap_or(canonical);
 
     let fraction = call
         .children()
@@ -2421,10 +2501,19 @@ fn emit_registered_function(
     };
     // Position is decided once, from the source CST, and handed to the
     // registry — the printer never re-derives it (`docs/specs/multi_backend.md`
-    // §"Emission is scoped to call position"). The topmost ancestor of `node`
-    // is the root the classifier resolves named `WINDOW` clauses against.
-    let root = node.ancestors().last().unwrap_or_else(|| node.clone());
-    let position = classify_position(node, &root);
+    // §"Emission is scoped to call position"). A call embedded in a
+    // synthesised restructure CTE carries an override, pushed by the
+    // restructure printing path (`with_position_override`): its position in
+    // the *printed* SQL differs from what `position::classify` would read off
+    // its stale original tree location, because that location's `.clone()`
+    // still resolves to the original parent (see `ACTIVE_POSITION_OVERRIDES`).
+    // Every other call falls through to the ordinary classify-from-source-CST
+    // path, unchanged. The topmost ancestor of `node` is the root the
+    // classifier resolves named `WINDOW` clauses against.
+    let position = active_position_override_for(node).unwrap_or_else(|| {
+        let root = node.ancestors().last().unwrap_or_else(|| node.clone());
+        classify_position(node, &root)
+    });
     match sig.emission_at(ctx.dialect.id(), position) {
         // An `Unsupported` entry still prints verbatim; the compile path refuses
         // the model before reaching the printer (see `emission_check`), so a

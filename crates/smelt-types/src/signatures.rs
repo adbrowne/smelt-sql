@@ -4358,8 +4358,10 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             // GoogleSQL has no `MEDIAN`; the printer lowers it to an exact
             // form per position (`printer.rs::print_bigquery_median`). The
             // aggregate and whole-partition-window forms are both exact
-            // lowerings; a running window is stated the same way for now so
-            // behaviour is unchanged from before position-scoped emission.
+            // lowerings. A running `MEDIAN(x) OVER (PARTITION BY g ORDER BY
+            // t)` has no exact GoogleSQL form — `PERCENTILE_CONT` forbids a
+            // window `ORDER BY` — and is refused
+            // (`docs/specs/multi_backend.md` §"Exact-median lowering").
             (
                 DialectId::BigQuery,
                 Position::Aggregate,
@@ -4373,7 +4375,31 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             (
                 DialectId::BigQuery,
                 Position::Window,
-                Emission::Rewrite(RewriteId::BigQueryMedian),
+                Emission::Unsupported {
+                    reason: "GoogleSQL's PERCENTILE_CONT lowering of MEDIAN forbids a \
+                             window ORDER BY; only a window covering the whole partition \
+                             has an exact GoogleSQL form",
+                },
+            ),
+            // DuckDB has `MEDIAN` natively in every position (no entry
+            // needed — a pair with no entry is `Native`). Spark's `MEDIAN`
+            // is an ordered-set aggregate with no window form, so it follows
+            // `PERCENTILE_CONT`/`PERCENTILE_DISC`: a whole-partition window
+            // restructures around a grouped CTE, and a running window is
+            // refused.
+            (
+                DialectId::SparkSql,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::SparkSql,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "Spark has the ordered-set aggregate but no running-window \
+                             form of it; only a window covering the whole partition can be \
+                             restructured around a grouped CTE",
+                },
             ),
         ]),
     );
@@ -4520,16 +4546,38 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_aliases(&["MAX_BY"])
         .with_emission(&[
             // Both spell it `MAX_BY`. Verified live 2026-08-24 on Spark 4.0.0 and
-            // BigQuery: `MAX_BY(x, y)` resolves on each.
+            // BigQuery: `MAX_BY(x, y)` resolves on each. Spark accepts `MAX_BY`
+            // in every position, so it stays a single `Any` entry.
             (
                 DialectId::SparkSql,
                 Position::Any,
                 Emission::Rename("MAX_BY"),
             ),
+            // BigQuery's `MAX_BY` has no analytic form at all — refused even
+            // with a partition-only `OVER` clause (measured live 2026-08-27).
+            // Aggregate position falls through the `Any` entry below to
+            // `Rename("MAX_BY")`; a whole-partition window restructures
+            // around a grouped CTE, and a running window is refused, because
+            // the lowering computes one value per partition
+            // (`docs/specs/multi_backend.md` §"Statement-level lowering").
             (
                 DialectId::BigQuery,
                 Position::Any,
                 Emission::Rename("MAX_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's MAX_BY has no analytic form, even over a \
+                             partition-only window; only a window covering the whole \
+                             partition can be restructured around a grouped CTE",
+                },
             ),
         ]),
     );
@@ -4545,16 +4593,33 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         .with_kind(ExprKind::Agg)
         .with_aliases(&["MIN_BY"])
         .with_emission(&[
-            // Both spell it `MIN_BY`. Verified live 2026-08-24.
+            // Both spell it `MIN_BY`. Verified live 2026-08-24. Spark accepts
+            // `MIN_BY` in every position, so it stays a single `Any` entry.
             (
                 DialectId::SparkSql,
                 Position::Any,
                 Emission::Rename("MIN_BY"),
             ),
+            // Same asymmetry as `ARG_MAX`/`MAX_BY`: BigQuery's `MIN_BY` has no
+            // analytic form at all.
             (
                 DialectId::BigQuery,
                 Position::Any,
                 Emission::Rename("MIN_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's MIN_BY has no analytic form, even over a \
+                             partition-only window; only a window covering the whole \
+                             partition can be restructured around a grouped CTE",
+                },
             ),
         ]),
     );
@@ -4565,7 +4630,29 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![SigParam::Concrete(TypeConstraint::Any)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // BigQuery's `APPROX_COUNT_DISTINCT` is a plain aggregate with no
+            // analytic form (refused even with a partition-only `OVER`
+            // clause, measured live 2026-08-27). Aggregate position is
+            // unaffected — it's already `Native` — a whole-partition window
+            // restructures around a grouped CTE, and a running window is
+            // refused.
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's APPROX_COUNT_DISTINCT has no analytic form, even \
+                             over a partition-only window; only a window covering the \
+                             whole partition can be restructured around a grouped CTE",
+                },
+            ),
+        ]),
     );
 
     // ─── Phase 50: Extended window functions ─────────────────────────────────
@@ -5010,6 +5097,25 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                     DialectId::BigQuery,
                     Position::Aggregate,
                     Emission::Restructure(RestructureId::AnalyticToCte),
+                ),
+                // GoogleSQL accepts a partition-only `OVER` clause natively —
+                // `PERCENTILE_CONT`/`PERCENTILE_DISC` are analytic-only
+                // there — but forbids a window `ORDER BY` on them, so a
+                // running window is refused rather than lowered (measured
+                // live 2026-08-27).
+                (
+                    DialectId::BigQuery,
+                    Position::WholePartitionWindow,
+                    Emission::Native,
+                ),
+                (
+                    DialectId::BigQuery,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "GoogleSQL's PERCENTILE_CONT/PERCENTILE_DISC forbid a \
+                                 window ORDER BY; only a window covering the whole \
+                                 partition is accepted",
+                    },
                 ),
             ]),
         );

@@ -58,16 +58,89 @@ fn every_registry_entry_yields_a_probe_or_a_recorded_reason() {
 }
 
 #[test]
-fn aggregates_are_probed_in_both_positions() {
-    // MEDIAN proves the lowering differs per position; probing one position
-    // would have missed the BigQuery aggregate form entirely.
+fn aggregates_are_probed_in_all_three_positions() {
+    // MEDIAN proves the lowering differs per position; probing fewer would
+    // have missed the BigQuery aggregate form, or the whole-partition-window
+    // restructure, entirely.
     let probes = probe::derive_probes();
     let median: Vec<_> = probes.iter().filter(|p| p.name == "MEDIAN").collect();
-    assert_eq!(median.len(), 2, "{median:#?}");
+    assert_eq!(median.len(), 3, "{median:#?}");
     assert!(median
         .iter()
         .any(|p| p.position == probe::Position::Aggregate));
+    assert!(median
+        .iter()
+        .any(|p| p.position == probe::Position::WholePartitionWindow));
     assert!(median.iter().any(|p| p.position == probe::Position::Window));
+}
+
+/// The positions `sig.kind` implies a probe at, computed independently of
+/// `probe::positions` — this test's whole point is to catch a regression to
+/// *that* function, so it cannot call it. Mirrors its documented contract:
+/// a scalar is probed once, a window-only entry is probed once, an
+/// aggregate is probed in all three of its positions
+/// (`docs/specs/multi_backend.md` §"Cross-engine emission audit").
+fn expected_positions_for(kind: smelt_types::ExprKind) -> Vec<probe::Position> {
+    use smelt_types::ExprKind;
+    match kind {
+        ExprKind::Scalar => vec![probe::Position::Scalar],
+        ExprKind::Agg => vec![
+            probe::Position::Aggregate,
+            probe::Position::WholePartitionWindow,
+            probe::Position::Window,
+        ],
+        ExprKind::Window => vec![probe::Position::Window],
+    }
+}
+
+/// Genuine per-entry totality: every registry entry that yields a probe at
+/// all is probed at **every** position its `ExprKind` implies — not just
+/// `MEDIAN`. `aggregates_are_probed_in_all_three_positions` above pins one
+/// named entry so a regression is easy to read, but it cannot catch a bug
+/// that drops one position globally except when it happens to land on
+/// `MEDIAN`: removing `Position::WholePartitionWindow` from
+/// `probe::positions`'s `ExprKind::Agg` arm silently drops the
+/// whole-partition-window probe for every OTHER aggregate — `ARG_MAX`,
+/// `PERCENTILE_CONT`, `APPROX_COUNT_DISTINCT`, … — while that one test still
+/// passes only because it happens to check `MEDIAN` by name. This test
+/// checks every entry, and names the dropped one directly, closing that
+/// gap for good.
+#[test]
+fn every_probeable_entry_is_probed_at_every_position_its_kind_implies() {
+    let probes = probe::derive_probes();
+    let mut missing = Vec::new();
+    for name in BuiltinRegistry::names() {
+        let sig = BuiltinRegistry::resolve(name).expect("names() resolves");
+        // An entry with no derivable probe at all is
+        // `every_registry_entry_yields_a_probe_or_a_recorded_reason`'s gap to
+        // catch, not this one's — it has no probes to check positions on.
+        let Ok(entry_probes) = probe::probe_or_reason(sig) else {
+            continue;
+        };
+        let Some(canonical) = entry_probes.first().map(|p| p.name) else {
+            continue;
+        };
+        for position in expected_positions_for(sig.kind) {
+            let present = probes
+                .iter()
+                .any(|p| p.name == canonical && p.position == position);
+            if !present {
+                missing.push(format!("{canonical} at {position:?}"));
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    assert!(
+        missing.is_empty(),
+        "{} (registry entry, position) pairs are missing from the probe \
+         enumeration — the entry's `ExprKind` implies a probe there, but \
+         `probe::derive_probes` produced none. This is a silently narrowed \
+         audit, not a recorded gap: fix `probe::positions` rather than \
+         adding an override.\n{}",
+        missing.len(),
+        missing.join("\n")
+    );
 }
 
 #[test]
@@ -351,25 +424,34 @@ fn is_registered(name: &str, dialect: DialectId, position: Position, leg: ledger
     ledger::find(name, dialect, position, leg).is_some()
 }
 
-/// Whether the registry itself declares this entry unsupported on `dialect`.
+/// Whether the registry itself declares this entry unsupported on `dialect`
+/// at `position`.
 ///
 /// The printer emits such a construct verbatim by design — the compile path
 /// refuses the model before printing (`UnsupportedOnBackend`) — so the engine
 /// rejecting it here is the *declared* outcome, not a finding. Acceptance would
 /// be: it would mean the verdict is wrong.
-fn is_declared_unsupported(name: &str, dialect: DialectId) -> bool {
+///
+/// Position-scoped, not position-blind: `emission_at` is looked up at the
+/// probe's own position (falling back to `Position::Any` internally, never
+/// between two concrete positions — `docs/specs/multi_backend.md` §"Emission
+/// is scoped to call position"). A helper that always asked about
+/// `Position::Any` would never see a verdict declared only at
+/// `Position::Window`, and would silently stop exempting — or start wrongly
+/// exempting — the exact pairs the position axis exists to distinguish.
+fn is_declared_unsupported(name: &str, dialect: DialectId, position: Position) -> bool {
     BuiltinRegistry::resolve(name).is_some_and(|sig| {
         matches!(
-            sig.emission_at(dialect, smelt_types::signatures::Position::Any),
+            sig.emission_at(dialect, position),
             smelt_types::Emission::Unsupported { .. }
         )
     })
 }
 
 /// A pair the legs must not treat as a plain pass/fail: either the registry
-/// declares it unsupported, or the ledger accepts it.
+/// declares it unsupported at this position, or the ledger accepts it.
 fn is_exempt(name: &str, dialect: DialectId, position: Position, leg: ledger::Leg) -> bool {
-    is_declared_unsupported(name, dialect) || is_registered(name, dialect, position, leg)
+    is_declared_unsupported(name, dialect, position) || is_registered(name, dialect, position, leg)
 }
 
 /// One batched query per (position, group of probes), so a sweep is a few
@@ -384,23 +466,34 @@ fn batch_statement(position: Position, probes: &[&Probe]) -> String {
                 "{} OVER (PARTITION BY g ORDER BY rid) AS {}",
                 p.expr, p.alias
             ),
+            Position::WholePartitionWindow => {
+                format!("{} OVER (PARTITION BY g) AS {}", p.expr, p.alias)
+            }
             _ => format!("{} AS {}", p.expr, p.alias),
         })
         .collect();
     match position {
+        Position::Any => unreachable!("Position::Any is a lookup wildcard, never probed"),
         Position::Scalar => format!("SELECT {} FROM fixture ORDER BY rid", items.join(", ")),
         Position::Aggregate => format!(
             "SELECT g, {} FROM fixture GROUP BY g ORDER BY g",
             items.join(", ")
         ),
-        Position::Window => format!("SELECT {} FROM fixture ORDER BY rid", items.join(", ")),
+        Position::WholePartitionWindow | Position::Window => {
+            format!("SELECT {} FROM fixture ORDER BY rid", items.join(", "))
+        }
     }
 }
 
 /// Group probes by position, preserving derivation order within a group.
 fn by_position(probes: &[Probe]) -> Vec<(Position, Vec<&Probe>)> {
     let mut out: Vec<(Position, Vec<&Probe>)> = Vec::new();
-    for position in [Position::Scalar, Position::Aggregate, Position::Window] {
+    for position in [
+        Position::Scalar,
+        Position::Aggregate,
+        Position::WholePartitionWindow,
+        Position::Window,
+    ] {
         let group: Vec<&Probe> = probes.iter().filter(|p| p.position == position).collect();
         if !group.is_empty() {
             out.push((position, group));
@@ -484,7 +577,7 @@ fn probe_schema_once(
     let sql = probe::print_for(dialect, &p.statement());
     match oracle.query_types(&sql) {
         Ok(cols) => {
-            if is_declared_unsupported(p.name, dialect) {
+            if is_declared_unsupported(p.name, dialect, p.position) {
                 outcome.failures.push(format!(
                     "  {} [{:?}] on {}: the registry declares this Unsupported, but the \
                      engine accepts it. Either the verdict is wrong or the printer is \

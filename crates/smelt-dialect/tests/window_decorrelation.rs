@@ -252,3 +252,46 @@ fn ordinary_window_function_beside_a_restructured_call_keeps_its_over_clause() {
         "the restructured call still substitutes to its value column: {out}"
     );
 }
+
+// ─── BUG regression: a call renamed under Restructure(WindowToCte) must
+//     apply the RENAME, not print the original spelling verbatim ──────────
+//
+// `ARG_MAX`/`ARG_MIN` on BigQuery are `Emission::Rename("MAX_BY"/"MIN_BY")`
+// at aggregate position (via the `Any` fallback) but
+// `Emission::Restructure(WindowToCte)` at `WholePartitionWindow`. Once the
+// call is lowered into the synthesised CTE's aggregate position, printing it
+// must consult the registry at *that* position (Aggregate) — not re-derive
+// position from the call's stale original tree location, which still
+// carries the `WINDOW_SPEC` sibling and would misclassify it as
+// `WholePartitionWindow` again, printing the call verbatim instead of
+// applying the rename. BigQuery has no `ARG_MAX`/`ARG_MIN` at all — an
+// unrenamed print is SQL BigQuery rejects at execution.
+#[test]
+fn bigquery_arg_max_under_window_to_cte_applies_rename_inside_cte() {
+    let sql = "SELECT id, g, ARG_MAX(v, k) OVER (PARTITION BY g) AS best FROM tbl WHERE ok";
+    let out = print_restructured(sql, SqlDialect::BigQuery, &BackendCapabilities::bigquery());
+
+    assert!(
+        out.contains("MAX_BY("),
+        "the aggregate form inside the synthesised CTE must be renamed to \
+         MAX_BY (BigQuery has no ARG_MAX): {out}"
+    );
+    assert!(
+        !out.contains("ARG_MAX("),
+        "the unrenamed spelling must not survive — BigQuery rejects it at \
+         execution: {out}"
+    );
+}
+
+#[test]
+fn bigquery_arg_min_under_window_to_cte_applies_rename_inside_cte() {
+    let sql = "SELECT id, g, ARG_MIN(v, k) OVER (PARTITION BY g) AS best FROM tbl WHERE ok";
+    let out = print_restructured(sql, SqlDialect::BigQuery, &BackendCapabilities::bigquery());
+
+    assert!(
+        out.contains("MIN_BY("),
+        "the aggregate form inside the synthesised CTE must be renamed to \
+         MIN_BY (BigQuery has no ARG_MIN): {out}"
+    );
+    assert!(!out.contains("ARG_MIN("), "{out}");
+}

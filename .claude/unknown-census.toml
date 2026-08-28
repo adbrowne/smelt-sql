@@ -526,7 +526,7 @@ classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:5353"]
+["crates/smelt-types/src/signatures.rs:5459"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

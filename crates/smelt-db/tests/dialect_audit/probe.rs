@@ -7,8 +7,9 @@
 //! things.
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
-use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_dialect::{plan_restructure, print, BackendCapabilities, PrintContext, SqlDialect};
 use smelt_parser::ast::File;
+pub use smelt_types::signatures::Position;
 use smelt_types::{
     BuiltinRegistry, DataType, DialectId, ExprKind, SigParam, Signature, SyntaxForm,
     TypeConstraint, TypedColumn,
@@ -18,28 +19,17 @@ use std::collections::{HashMap, HashSet};
 use crate::fixture;
 use crate::overrides;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Position {
-    /// `SELECT <expr> AS a FROM fixture ORDER BY rid`
-    Scalar,
-    /// `SELECT g, <expr> AS a FROM fixture GROUP BY g ORDER BY g`
-    Aggregate,
-    /// `SELECT <expr> OVER (PARTITION BY g ORDER BY rid) AS a FROM fixture ORDER BY rid`
-    ///
-    /// The window's own `ORDER BY` is `rid`, not a data column: a data column
-    /// carries NULLs, and engines disagree on where NULLs sort, which would
-    /// make the frame — and so the result — engine-dependent for reasons that
-    /// have nothing to do with emission.
-    Window,
-}
-
-impl Position {
-    fn suffix(self) -> &'static str {
-        match self {
-            Position::Scalar => "scalar",
-            Position::Aggregate => "agg",
-            Position::Window => "win",
-        }
+/// The alias suffix for a probe at `position`.
+///
+/// `Position::Any` is a lookup wildcard, never an actual probe position — a
+/// probe never carries it, so this is unreachable in practice.
+fn suffix(position: Position) -> &'static str {
+    match position {
+        Position::Any => unreachable!("Position::Any is a lookup wildcard, never probed"),
+        Position::Scalar => "scalar",
+        Position::Aggregate => "agg",
+        Position::WholePartitionWindow => "wpwin",
+        Position::Window => "win",
     }
 }
 
@@ -59,14 +49,29 @@ pub struct Probe {
 impl Probe {
     /// The full smelt-SQL statement for this probe, before dialect lowering
     /// and before the fixture CTE is prefixed.
+    ///
+    /// The four probe shapes are the registry's four call positions exactly
+    /// (`docs/specs/multi_backend.md` §"Cross-engine emission audit") — the
+    /// audit maintains no axis of its own. `WholePartitionWindow`'s `OVER`
+    /// clause carries `PARTITION BY g` with no `ORDER BY` and no frame,
+    /// which is whole-partition by construction (§"Emission is scoped to
+    /// call position"). `Window`'s own `ORDER BY` is `rid`, not a data
+    /// column: a data column carries NULLs, and engines disagree on where
+    /// NULLs sort, which would make the frame — and so the result —
+    /// engine-dependent for reasons that have nothing to do with emission.
     pub fn statement(&self) -> String {
         match self.position {
+            Position::Any => unreachable!("Position::Any is a lookup wildcard, never probed"),
             Position::Scalar => format!(
                 "SELECT {} AS {} FROM fixture ORDER BY rid",
                 self.expr, self.alias
             ),
             Position::Aggregate => format!(
                 "SELECT g, {} AS {} FROM fixture GROUP BY g ORDER BY g",
+                self.expr, self.alias
+            ),
+            Position::WholePartitionWindow => format!(
+                "SELECT {} OVER (PARTITION BY g) AS {} FROM fixture ORDER BY rid",
                 self.expr, self.alias
             ),
             Position::Window => format!(
@@ -193,13 +198,21 @@ fn sanitise(name: &str) -> String {
 
 /// The positions an entry is probed in.
 ///
-/// An aggregate is probed in **both** aggregate and window position: `MEDIAN`
-/// proves the lowering differs between them, and probing one would have missed
-/// the BigQuery aggregate form entirely.
+/// An aggregate is probed in **all three** of its positions — aggregate and
+/// both window positions: `MEDIAN` proves the lowering differs between all
+/// three, and probing fewer would have missed the BigQuery aggregate form,
+/// or the DuckDB/Spark whole-partition-window restructure, entirely. The
+/// probe positions are the registry's four call positions exactly (`Any` is
+/// a lookup wildcard, never a position a call occupies), so this function
+/// maintains no axis of its own.
 fn positions(sig: &Signature) -> Vec<Position> {
     match sig.kind {
         ExprKind::Scalar => vec![Position::Scalar],
-        ExprKind::Agg => vec![Position::Aggregate, Position::Window],
+        ExprKind::Agg => vec![
+            Position::Aggregate,
+            Position::WholePartitionWindow,
+            Position::Window,
+        ],
         ExprKind::Window => vec![Position::Window],
     }
 }
@@ -253,7 +266,7 @@ pub fn probe_or_reason(sig: &Signature) -> Result<Vec<Probe>, NotProbed> {
             name,
             position,
             expr: expr.clone(),
-            alias: format!("p_{}_{}", sanitise(name), position.suffix()),
+            alias: format!("p_{}_{}", sanitise(name), suffix(position)),
             schema_only,
         })
         .collect())
@@ -271,12 +284,20 @@ pub fn derive_probes() -> Vec<Probe> {
         .collect()
 }
 
-/// Parse one smelt-SQL statement, print it for `dialect`, and prefix the
-/// dialect's fixture CTE.
+/// Parse one smelt-SQL statement, plan any statement-level restructure it
+/// needs, print it for `dialect`, and prefix the dialect's fixture CTE.
 ///
 /// The single place a probe becomes engine SQL — both legs and every
 /// hand-written regression test go through it, so no test can accidentally
-/// compare a differently-printed query.
+/// compare a differently-printed query. Mirrors the compile path's
+/// `print_checked_for` (`crates/smelt-runtime/src/compile.rs`): planning
+/// happens against the source CST, before printing, never against printed
+/// SQL. A call whose position the registry declares `Unsupported` — or a
+/// query block an admissibility rule refuses — has nothing to plan; such a
+/// probe is only ever reached here when the caller already knows to expect
+/// a refusal (a declared-unsupported or ledger-registered pair), so printing
+/// it verbatim on a best-effort basis, exactly as the printer does for an
+/// unplanned `Unsupported`/`Restructure` call, is what the caller wants.
 pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
     let sql_dialect = match dialect {
         DialectId::DuckDb => SqlDialect::DuckDB,
@@ -291,6 +312,8 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         DialectId::BigQuery => BackendCapabilities::bigquery(),
     };
     let parsed = smelt_parser::parse(smelt_sql);
+    let root = parsed.syntax();
+    let plans = plan_restructure(&root, sql_dialect).unwrap_or_default();
     let ctx = PrintContext {
         dialect: &sql_dialect,
         capabilities: &capabilities,
@@ -301,13 +324,30 @@ pub fn print_for(dialect: DialectId, smelt_sql: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: None,
         smelt_path_call: None,
-        restructure_plans: &[],
+        restructure_plans: &plans,
     };
-    format!(
-        "{}{}",
-        fixture::fixture_cte(dialect),
-        print(&parsed.syntax(), &ctx)
-    )
+    combine_fixture_and_printed(&fixture::fixture_cte(dialect), &print(&root, &ctx))
+}
+
+/// Join the fixture's own `WITH fixture AS (…) ` prefix to the printed
+/// statement.
+///
+/// A statement-level restructure appends its synthesised CTE to the
+/// statement's *own* `WITH` list (`docs/specs/multi_backend.md`
+/// §"Statement-level lowering"), so a printed probe with no author-written
+/// `WITH` clause of its own gets a brand-new leading `WITH __smelt_r0 AS
+/// (…)` from the printer. Naively concatenating that after the fixture's own
+/// `WITH fixture AS (…) ` would emit two `WITH` keywords back to back — a
+/// syntax error, not a semantic one, so it is worth guarding explicitly
+/// rather than leaving it to surface as a confusing engine refusal. The
+/// fixture is the closest thing a probe has to an author-written CTE, so the
+/// fix is the same rule: fold the printed statement's `WITH` list into the
+/// fixture's.
+fn combine_fixture_and_printed(fixture_cte: &str, printed: &str) -> String {
+    match printed.strip_prefix("WITH ") {
+        Some(rest) => format!("{}, {rest}", fixture_cte.trim_end()),
+        None => format!("{fixture_cte}{printed}"),
+    }
 }
 
 /// smelt's own inferred type for each column of `smelt_sql`, as
