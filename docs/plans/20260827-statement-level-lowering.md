@@ -75,7 +75,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | 2     | done     | 63533bac | 2026-08-27 |
 | 3     | done     | 863cca6d | 2026-08-28 |
 | 4     | done     | c8a64fed | 2026-08-28 |
-| 5     | done     |          | 2026-08-28 |
+| 5     | done     | 750ab24c | 2026-08-28 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 
