@@ -214,3 +214,169 @@ fn output_columns_and_cast_wrap_names_are_byte_identical_across_backends() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Statement-level lowering: the restructure planner
+// (`docs/specs/multi_backend.md` §"Statement-level lowering") rewrites a
+// query block around a synthesised CTE. Its own admissibility rules are
+// unit-tested against the pure planner in `smelt-dialect`; this leg proves
+// the *derived projection* survives that rewrite through the real compile
+// path, for both restructure shapes, exactly the way the leg above proves it
+// survives ordinary dialect lowering.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// `WindowToCte` (an aggregate-only built-in reached with a whole-partition
+/// `OVER`): admissible on DuckDB and Spark, where the ordered-set
+/// `PERCENTILE_CONT` has no window form; native on BigQuery, which accepts
+/// `PERCENTILE_CONT` with an `OVER` clause directly.
+const WINDOW_TO_CTE_SQL: &str = "SELECT id, g, \
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) AS med \
+    FROM tbl";
+const WINDOW_TO_CTE_COLUMNS: &[&str] = &["id", "g", "med"];
+
+/// `AnalyticToCte` (an analytic-only built-in reached under `GROUP BY`):
+/// admissible on BigQuery, which requires an `OVER` clause and rejects
+/// `PERCENTILE_CONT` under `GROUP BY` outright; native on DuckDB and Spark,
+/// which have the ordered-set aggregate directly.
+const ANALYTIC_TO_CTE_SQL: &str = "SELECT g, \
+    PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS med, \
+    COUNT(*) AS n \
+    FROM tbl GROUP BY g";
+const ANALYTIC_TO_CTE_COLUMNS: &[&str] = &["g", "med", "n"];
+
+/// A plain `SELECT *`, admissibility rule 4's positive case: no restructure
+/// call is present, so the wildcard must compile unremarkably on every
+/// backend, with the same (empty — an unexpanded wildcard has no resolvable
+/// per-column name, `output_column_names`'s documented "untrustworthy as a
+/// whole" rule) `output_columns` everywhere.
+const SELECT_STAR_SQL: &str = "SELECT * FROM tbl";
+
+/// A model using both restructure directions and the wildcard admissibility
+/// rule must derive the same, unlowered projection on every backend — the
+/// same invariant `output_columns_and_cast_wrap_names_are_byte_identical_across_backends`
+/// proves for ordinary dialect lowering, extended to statement-level
+/// restructuring.
+#[test]
+fn decorrelated_model_output_columns_are_identical() {
+    let registry = registry();
+
+    for (name, sql, expected) in [
+        ("window_to_cte", WINDOW_TO_CTE_SQL, WINDOW_TO_CTE_COLUMNS),
+        (
+            "analytic_to_cte",
+            ANALYTIC_TO_CTE_SQL,
+            ANALYTIC_TO_CTE_COLUMNS,
+        ),
+        ("select_star", SELECT_STAR_SQL, &[]),
+    ] {
+        let model = make_model(name, sql);
+        let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+
+        let duckdb = registry
+            .get("duckdb")
+            .compile(&model, "main")
+            .unwrap_or_else(|e| panic!("{name}: duckdb compile should succeed: {e}"));
+        let spark = registry
+            .get("spark")
+            .compile(&model, "main")
+            .unwrap_or_else(|e| panic!("{name}: spark compile should succeed: {e}"));
+        let bigquery = registry
+            .get("bigquery")
+            .compile(&model, "main")
+            .unwrap_or_else(|e| panic!("{name}: bigquery compile should succeed: {e}"));
+
+        assert_eq!(
+            duckdb.output_columns, expected,
+            "{name}: duckdb output_columns diverged from the source select list: sql = {}",
+            duckdb.sql
+        );
+        assert_eq!(
+            duckdb.output_columns, spark.output_columns,
+            "{name}: duckdb vs spark output_columns: {:?} vs {:?}\nduckdb sql = {}\nspark sql = {}",
+            duckdb.output_columns, spark.output_columns, duckdb.sql, spark.sql
+        );
+        assert_eq!(
+            duckdb.output_columns, bigquery.output_columns,
+            "{name}: duckdb vs bigquery output_columns: {:?} vs {:?}\nduckdb sql = {}\nbigquery sql = {}",
+            duckdb.output_columns, bigquery.output_columns, duckdb.sql, bigquery.sql
+        );
+
+        for compiled in [&duckdb, &spark, &bigquery] {
+            if compiled.sql.contains("_smelt_typed") {
+                for col in &expected {
+                    assert!(
+                        compiled.sql.contains(col.as_str()),
+                        "{name}: cast wrap must name every projection column identically \
+                         across backends; missing {col:?} in: {}",
+                        compiled.sql
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The restructure actually fires where it must: a leg that only compared
+/// projections would pass just as well if no backend ever restructured
+/// anything.
+#[test]
+fn each_direction_actually_restructures_on_the_backend_that_needs_it() {
+    let registry = registry();
+
+    let window_model = make_model("window_to_cte", WINDOW_TO_CTE_SQL);
+    let duckdb = registry
+        .get("duckdb")
+        .compile(&window_model, "main")
+        .expect("compile");
+    assert!(
+        duckdb.sql.contains("__smelt_base") && duckdb.sql.contains("IS NOT DISTINCT FROM"),
+        "DuckDB has no window form of the ordered-set aggregate; it must restructure: {}",
+        duckdb.sql
+    );
+
+    let analytic_model = make_model("analytic_to_cte", ANALYTIC_TO_CTE_SQL);
+    let bigquery = registry
+        .get("bigquery")
+        .compile(&analytic_model, "main")
+        .expect("compile");
+    assert!(
+        bigquery.sql.contains("ANY_VALUE") && bigquery.sql.contains("OVER"),
+        "GoogleSQL rejects PERCENTILE_CONT under GROUP BY; it must restructure: {}",
+        bigquery.sql
+    );
+    let duckdb_analytic = registry
+        .get("duckdb")
+        .compile(&analytic_model, "main")
+        .expect("compile");
+    assert!(
+        !duckdb_analytic.sql.contains("__smelt_r0"),
+        "DuckDB has the ordered-set aggregate natively; restructuring it would be a \
+         needless rewrite: {}",
+        duckdb_analytic.sql
+    );
+}
+
+/// Admissibility rule 4 — no unexpanded wildcard — proven through the real
+/// compile path, not just the pure planner: a `SELECT *` sharing a query
+/// block with a call that would otherwise restructure must refuse rather
+/// than restructure, because the wildcard would expand against the
+/// *restructured* `FROM` and pick up the synthesised columns.
+#[test]
+fn wildcard_alongside_a_restructure_candidate_is_refused() {
+    let model = make_model(
+        "wildcard_with_restructure_candidate",
+        "SELECT *, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS med FROM tbl GROUP BY g",
+    );
+    let err = registry()
+        .get("bigquery")
+        .compile(&model, "main")
+        .expect_err(
+            "a wildcard sharing the block with an aggregate-position PERCENTILE_CONT on \
+             BigQuery must refuse rather than restructure",
+        );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code: {msg}"
+    );
+}

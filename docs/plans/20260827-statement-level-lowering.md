@@ -75,7 +75,7 @@ smelt's emission verdicts are keyed on dialect alone, so a built-in that a backe
 | 2     | done     | 63533bac | 2026-08-27 |
 | 3     | done     | 863cca6d | 2026-08-28 |
 | 4     | done     | c8a64fed | 2026-08-28 |
-| 5     | pending  |        |      |
+| 5     | done     |          | 2026-08-28 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 
@@ -384,6 +384,17 @@ Spark's `<=>` was measured against a live Spark Connect server (Spark 4.0.0) on 
 join shape with a NULL-bearing partition key: `<=>` keeps all 5 rows, a plain `=` keeps 3 of 5 —
 reproducing on Spark the row loss previously measured on BigQuery. Spark 4.0.0 also *accepts*
 `IS NOT DISTINCT FROM` (scalar and `JOIN ON`); smelt emits `<=>` per the capability matrix.
+
+- **The planner has no independent running-window guard.** `restructure::plan` trusts the registry
+  verdict completely: asked to restructure a call at `Position::Window`, it produces a whole-partition
+  CTE and silently drops the running semantics. That is correct under registry single ownership — the
+  verdict is the single source of truth — but it means `dialect_seam::running_window_refused_at_compile_time`
+  is the ONLY tripwire. Verified during review by flipping the DuckDB verdict and watching the compile
+  succeed with wrong semantics.
+- **The multiplicity gate's blast radius.** `restructure_multiplicity` catches a join-spelling regression
+  to `=`. It would NOT catch a regression to `LEFT JOIN`, nor a CTE grouped on the wrong key — both can
+  still yield 5 rows. Widening it needs a value assertion, which the audit's value leg cannot own because
+  `ANY_VALUE` is registered nondeterministic and probed on the schema leg only.
 
 ## Verification
 

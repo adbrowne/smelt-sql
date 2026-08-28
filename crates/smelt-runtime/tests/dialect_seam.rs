@@ -162,7 +162,10 @@ fn every_compile_path_is_emission_checked() {
     const COMPILE_SRC: &str = include_str!("../src/compile.rs");
     // The two hardwired-DuckDB helpers (`resolve_refs_in_sql` and the
     // function-body expander) are exempt: they take no dialect, return no
-    // `Result`, and DuckDB declares nothing unsupported.
+    // `Result`, and sit on no path that produces an executed `CompiledModel`.
+    // Not because DuckDB is free of unsupported constructs — it declares
+    // `PERCENTILE_CONT`/`PERCENTILE_DISC` unsupported in running-window
+    // position.
     const EXEMPT: usize = 2;
     let direct = COMPILE_SRC.matches("smelt_dialect::print(").count();
     assert_eq!(
@@ -172,6 +175,63 @@ fn every_compile_path_is_emission_checked() {
          `print_checked_for` plus the {EXEMPT} hardwired-DuckDB helpers may. A new \
          compile path must print through `print_checked`, or it skips the \
          `UnsupportedOnBackend` refusal."
+    );
+}
+
+/// A running window over a built-in with no analytic form on the target has
+/// no correct CTE form (`docs/specs/multi_backend.md` §"Statement-level
+/// lowering": "A running-frame window ... has no correct CTE form and is
+/// refused with `UnsupportedOnBackend`"). This refusal is registry data that
+/// already ships as registry data (`Position::Window` →
+/// `Emission::Unsupported` for the ordered-set `PERCENTILE_CONT`/
+/// `PERCENTILE_DISC` family on DuckDB and Spark) — this test pins that it
+/// reaches the user as a compile-time `UnsupportedOnBackend` diagnostic
+/// rather than a warehouse-side parse error, and that it keeps doing so as
+/// the restructure planner is wired into the same compile path.
+#[test]
+fn running_window_refused_at_compile_time() {
+    let model = make_model(
+        "q",
+        "SELECT id, g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) \
+         OVER (PARTITION BY g ORDER BY t) AS med FROM tbl",
+    );
+    let err = registry().get("duckdb").compile(&model, "main").expect_err(
+        "DuckDB has the ordered-set aggregate but no running-window form; \
+             this must refuse at compile time",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("UnsupportedOnBackend"),
+        "must carry its diagnostic code so the CLI output is greppable: {msg}"
+    );
+    assert!(
+        msg.contains("PERCENTILE_CONT"),
+        "must name the construct: {msg}"
+    );
+    assert!(
+        !msg.to_lowercase().contains("syntax error")
+            && !msg.to_lowercase().contains("binder error"),
+        "must be smelt's own diagnostic, not a warehouse-shaped error: {msg}"
+    );
+}
+
+/// Structural, mirroring `every_compile_path_is_emission_checked`: no compile
+/// entry point may plan a statement-level restructure and then print without
+/// going through `print_checked_for` — the same seam that refuses an
+/// `Unsupported` construct is where a `Restructure` verdict gets planned, so
+/// a new print call bypassing it would silently skip both the refusal and
+/// the planning.
+#[test]
+fn no_compile_entry_point_prints_without_planning() {
+    const COMPILE_SRC: &str = include_str!("../src/compile.rs");
+    let plan_calls = COMPILE_SRC
+        .matches("smelt_dialect::plan_restructure(")
+        .count();
+    assert_eq!(
+        plan_calls, 1,
+        "compile.rs calls `smelt_dialect::plan_restructure` {plan_calls} times; only \
+         `print_checked_for` may call it. A new compile path constructing its own plan \
+         (or none) would drift from the single planning site."
     );
 }
 

@@ -771,11 +771,12 @@ resolves nested widening to a table rewrite.
   A synthesised CTE join must not add or drop rows: the grouped branch is derived from the bound
   source on the same keys, and the comparison is null-safe, so the join is total and one-to-one.
   An equi-join on a nullable partition key is the failure this rules out — it type-checks, runs,
-  and silently drops rows. Gate: `cargo test -p smelt-dialect --test emission_ownership` for the
-  dispatch half; a dedicated row-count assertion over a NULL-bearing partition key for the
-  multiplicity half. The audit's value leg does **not** discharge this on its own: `ANY_VALUE` is a
-  registered nondeterministic entry, probed on the schema leg only, so a lowering that routes
-  through it is never value-compared by the audit. The multiplicity gate is what covers it.
+  and silently drops rows. Gates: `cargo test -p smelt-dialect --test emission_ownership` for the
+  dispatch half; `cargo test -p smelt-runtime --test restructure_multiplicity` — a row-count
+  assertion over a NULL-bearing partition key, against a real DuckDB — for the multiplicity half.
+  The audit's value leg does **not** discharge this on its own: `ANY_VALUE` is a registered
+  nondeterministic entry, probed on the schema leg only, so a lowering that routes through it is
+  never value-compared by the audit. The multiplicity gate is what covers it.
 - **Each admissibility rule in §"Statement-level lowering" has a refusal test.** The rules exist
   because each corresponds to a query the lowering would otherwise mis-answer silently — a `ROLLUP`
   super-aggregate row, an occurrence in `HAVING`, a `FILTER (WHERE …)`, a `SELECT *`, an `EXCLUDE`
