@@ -302,7 +302,7 @@ open — not that the excluded bullets themselves are gone.
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
-| 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | pending |
+| 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | planned |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
@@ -418,6 +418,20 @@ open — not that the excluded bullets themselves are gone.
   normatively). Hardening baseline updated (`smelt-cli` expect 41→42, println 169→171: one
   `serde_json` `.expect` and two `println!` in the new JSON/apply rendering paths, same pattern
   as `commands::diff.rs`'s existing `print_json`).
+
+- **2026-08-29 (phase 3b planning).** The phase-3 summary flagged one untested `--apply`
+  leg (an `in_progress` approval that is also `all_rerun_safe()` — should resume, not refuse).
+  It serves success criterion 2 and the phase-3b gate reads the same `in_progress` flag, so it is
+  folded into phase 3b as a test rather than becoming its own row. No other reshape: the summary
+  surfaced nothing else outside an existing row.
+- **2026-08-29 (phase 3b planning).** Single-owner call: the definition-delta derivation moves out
+  of `commands/migrate.rs` into `smelt-runtime`'s new `definition_delta.rs`, so the run gate,
+  `smelt explain`, and `smelt migrate` all read one derivation. Putting it in `smelt-runtime`
+  (not `smelt-cli`) keeps the run-pipeline-parity rule intact — the UI gets the same refusal
+  through `execute_project` without a CLI-only pre-flight check.
+- **2026-08-29 (phase 3b planning).** The run refusal exits `3`, not `1`: per `cli.md`
+  §"Exit codes", `3` means "a correctly-derived state a human has not yet reviewed", which is
+  exactly a pending migration. A `--full-refresh` run is not a fold and is not gated.
 
 ## Blocked
 
