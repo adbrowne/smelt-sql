@@ -301,7 +301,8 @@ open — not that the excluded bullets themselves are gone.
 |---|-------|--------|
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
-| 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | pending |
+| 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | planned |
+| 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | pending |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
@@ -383,6 +384,21 @@ open — not that the excluded bullets themselves are gone.
   non-eclipsed definition delta) is behaviour no current phase row owns; it is not a
   Success-criteria item, and it is left for the phase 9 validate sweep to raise if
   `/smelt:validate definition_deltas` flags it as drift.
+
+- **2026-08-29, phase 3 planning.** One reshape and two decisions. (a) Added row **3b**: the
+  spec's §Detection rule — `smelt run` must refuse to fold data deltas over a pending
+  non-eclipsed definition delta — is normative surface no phase row owned; phase 2's summary
+  flagged it and `definition_deltas.md` §Known Divergences names phase 3 as its tracker. It
+  serves success criterion 8 (`/smelt:validate definition_deltas` clean), so it gets a row
+  rather than leaving the outcome. It is split out of phase 3 because it lands in the run loop,
+  not the migrate verb. (b) **Exit-code contract**: a derived-but-unapproved non-trivial
+  migration (and a stale/mismatched approval on `--apply`) exits **3** — a new code in
+  `cli.md` §"Exit codes" meaning "the command ran correctly and found a state requiring human
+  approval", deliberately distinct from `1` (found a problem in data/models) and `2` (bad
+  invocation). (c) **Resume** is marker-based in this phase: the approval record carries an
+  in-progress marker, and re-invoking `--apply` re-runs the identical (unchanged-hash) script;
+  frontier-region-scoped resume per §"Frontier semantics" stays a stated divergence rather than
+  being silently claimed.
 
 ## Blocked
 
