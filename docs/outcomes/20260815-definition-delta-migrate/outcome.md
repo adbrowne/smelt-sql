@@ -303,7 +303,7 @@ open — not that the excluded bullets themselves are gone.
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | planned |
-| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
+| 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | planned |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
@@ -432,6 +432,17 @@ open — not that the excluded bullets themselves are gone.
 - **2026-08-29 (phase 3b planning).** The run refusal exits `3`, not `1`: per `cli.md`
   §"Exit codes", `3` means "a correctly-derived state a human has not yet reviewed", which is
   exactly a pending migration. A `--full-refresh` run is not a fold and is not gated.
+
+- **2026-08-29 (phase 4 planning).** No reshape — the phase-3 summary's open items were
+  already folded into rows 3b and 8. Two scoping calls recorded here: (a) **no compatibility
+  alias** for `smelt backbuild` — it is removed outright rather than kept as a hidden or
+  deprecated alias, since an alias preserves the exact naming collision the rename exists to
+  end, and the project carries no back-compat constraint; (b) the rename is a **per-mention
+  pass, not a blanket replace** — `crates/smelt-logical/src/backbuild/`, "backbuild option
+  catalogue", "backbuild synthesis" and the docs-site page filename all name the
+  *definition-delta mechanism*, not the verb, and stay. Only
+  `docs-site/docs/guide/backbuild-synthesis.md`'s now-false "two things called 'backbuild'"
+  callout is removed in phase 4; that page's narrative rewrite remains phase 8's.
 
 ## Blocked
 
