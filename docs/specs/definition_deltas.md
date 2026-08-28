@@ -81,11 +81,26 @@ reformatted the SQL, the plan would be empty ("eclipsed — nothing to do") and 
 smelt records, per model, the definition it last maintained the stored table under. A mismatch
 between that recorded definition and the model's current SQL is a **definition delta**. Detection
 is passive — editing a model never triggers work by itself; the delta is reported the next time
-the model is planned, explained, or run. Between detection and approval, `smelt run` on a model
-with a pending non-eclipsed definition delta **refuses to fold data deltas** rather than
-silently maintaining a table whose definition no longer matches its contents; once a migration
-plan is approved and applying, data deltas fold under the rules of §"Mid-migration data
-folds".
+the model is planned, explained, or run.
+
+The refusal rule: a **maintained (incremental) model whose stored table already exists and
+carries a recorded `model_sql`**, run without `--full-refresh`, refuses to fold a data delta over
+a pending non-eclipsed definition delta rather than silently maintaining a table whose definition
+no longer matches its contents. "Pending" means no approval is on record whose `plan_hash` equals
+the freshly re-derived plan hash (§"`smelt migrate`"); an approval marked `in_progress` folds
+under §"Mid-migration data folds" instead of refusing. The refusal fires `DefinitionDeltaPending`
+(§Diagnostics) and exits `3` (`cli.md` §"Exit codes"). A `--full-refresh` run is not a fold — it
+proceeds under the new definition regardless of any pending delta.
+
+**Pure column addition is exempt.** A definition delta that only adds one or more SELECT-list
+columns — no dropped or changed column, no `WHERE`/skeleton/set-op change — never refuses, even
+though `smelt migrate`/`smelt explain` still report it as a pending, reviewable delta. This shape
+has its own live, narrower mechanism (the maintenance driver's `Trigger::ColumnAdded` →
+`Technique::InPlaceUpdate` dispatch, §"The verdict per column group") that already backfills it
+safely and atomically as part of an ordinary run, predating and coexisting with `smelt migrate`
+(§Known Divergences). `smelt explain <model>` reports
+a pending definition delta and its whole-plan verdict ahead of a run, without deriving or executing
+anything beyond the plan derivation itself.
 
 ### `smelt migrate`
 
@@ -131,6 +146,7 @@ Catalogued in `diagnostics.md`; semantics owned here.
 | Code | Fires when |
 |---|---|
 | `MaintenanceSkeletonChanged` | A definition delta adds or changes a field in a skeleton position — identity, grouping, dedup, or ordering — so the change alters which rows exist or the model's grain. Refused as an in-place migration; the honest plan is a rebuild (§"Skeleton changes are a new relation"). |
+| `DefinitionDeltaPending` | `smelt run` (without `--full-refresh`) would fold a data delta over a pending, non-eclipsed, unapproved definition delta (§"Detection"). Fix: `smelt migrate <model>` to review, then `--apply`; or run with `--full-refresh`. |
 
 ## Semantics
 
@@ -432,10 +448,6 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **Run-time refusal is unwired.** `smelt migrate <model>` derives, prints, approves, and (via
-  `--apply`) executes a migration plan, but `smelt run` does not yet refuse to fold data deltas
-  over a pending non-eclipsed definition delta (§"Detection"). Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3b.
 - **The ranged-rebuild verb still ships under the name `smelt backbuild`** rather than
   `smelt rebuild`. The live handling of definition changes outside `smelt migrate`'s path is a
   narrower third mechanism covering **column additions only** (the definition-change trigger in

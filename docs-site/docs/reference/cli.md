@@ -195,12 +195,20 @@ smelt run [OPTIONS]
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
+| `--full-refresh` | | bool | `false` | Drop and rebuild every selected incremental model rather than applying batches. Not a fold, so it is never refused by the definition-delta gate below — it runs under the model's current definition regardless of any pending migration. |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 | `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
 | `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#--resume--continue-after-a-partial-failure). |
+
+A maintained (incremental) model whose stored table already exists refuses to fold a data delta
+over a pending, non-eclipsed, unapproved definition delta — a redefined column or added field
+`smelt migrate` hasn't reviewed yet — rather than silently maintaining a table whose definition
+no longer matches its contents. The run exits `3` naming `DefinitionDeltaPending` and the fix:
+`smelt migrate <model>` to review the plan, then `--apply`, or run with `--full-refresh`. See
+[Backbuild synthesis](../guide/backbuild-synthesis.md).
 
 ### Parallel execution with `--jobs`
 

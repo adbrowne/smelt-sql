@@ -508,6 +508,33 @@ async fn explain_maintenance_plan(
         .map(backend_type_to_maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
 
+    // Definition-delta status (`docs/specs/definition_deltas.md`
+    // §"Detection"): read from the same single-owner derivation the run
+    // gate and `smelt migrate` use, via `FileStore`'s local target state —
+    // never a live backend connection, matching this command's offline
+    // posture. Only a `Pending` verdict is reported; every other status is
+    // unremarkable.
+    let definition_delta_file_store =
+        smelt_state::file_store::FileStore::new(&project_dir, &target);
+    let pending_definition_delta = match smelt_runtime::definition_delta::detect_definition_delta(
+        &definition_delta_file_store,
+        model,
+        &models,
+        sources.as_ref(),
+        &db,
+    ) {
+        Ok(smelt_runtime::definition_delta::DefinitionDeltaStatus::Pending {
+            verdict,
+            plan_hash,
+            ..
+        }) => Some((verdict, plan_hash)),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!("Definition-delta detection failed for '{canonical}': {e}. Omitting.");
+            None
+        }
+    };
+
     // The declared-fact probe plan (`docs/specs/model_properties.md`
     // §"Probe obligation"): built pure/offline by the shared
     // `smelt_runtime::probe_plan` owner, never re-derived here
@@ -539,6 +566,7 @@ async fn explain_maintenance_plan(
         &probe_entries,
         config.probes.cadence,
         &edge_delta_types,
+        pending_definition_delta.as_ref(),
     )
     .with_context(|| {
         format!(
@@ -731,6 +759,7 @@ async fn explain_maintenance_plan(
             config.probes.cadence,
             &result.column_groups,
             contract_cfg,
+            pending_definition_delta.as_ref(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

@@ -130,6 +130,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &edge_delta_types,
+            None,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -723,6 +724,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
     )
     .expect("build_maintenance_plan_report");
 

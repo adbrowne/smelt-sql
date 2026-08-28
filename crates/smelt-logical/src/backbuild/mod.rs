@@ -61,6 +61,31 @@ impl DefinitionDiff {
             DefinitionDiff::Opaque { .. } => false,
         }
     }
+
+    /// Whether this diff adds one or more SELECT-list columns and changes
+    /// nothing else — no dropped or changed columns, no `WHERE`/skeleton/
+    /// set-op change. This is exactly the shape the maintenance driver's
+    /// own live `Trigger::ColumnAdded` → `Technique::InPlaceUpdate`
+    /// dispatch already handles safely and atomically as part of an
+    /// ordinary run (`docs/specs/definition_deltas.md` §"Detection" —
+    /// pure column addition is exempt from the run gate for exactly this
+    /// reason). `false` for `Opaque` — an unfactored diff is never assumed
+    /// to be a pure addition.
+    pub fn is_pure_column_addition(&self) -> bool {
+        match self {
+            DefinitionDiff::Comparable(c) => {
+                c.where_clause.is_noop()
+                    && c.skeleton.is_noop()
+                    && c.set_ops.is_noop()
+                    && matches!(
+                        &c.select_list,
+                        SelectListDiff::Diffed { added, dropped, changed, .. }
+                            if !added.is_empty() && dropped.is_empty() && changed.is_empty()
+                    )
+            }
+            DefinitionDiff::Opaque { .. } => false,
+        }
+    }
 }
 
 /// The clause-by-clause factoring of a comparable (non-opaque-CTE) pair of

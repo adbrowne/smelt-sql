@@ -44,6 +44,14 @@ SELECT id, amount, discount, amount - discount AS net_amount FROM (VALUES (1, 10
 const MODEL_V1_REFORMATTED: &str = "---\nmaterialization: table\n---\n\
 SELECT\n  id,\n  amount,\n  discount\nFROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)\n";
 
+// Redefines the existing `discount` column as a function of the unchanged
+// `amount` column — a D1 stored-derivable expression change
+// (`Technique::SelfDerivedColumnRewrite`, a plain `UPDATE` with no `ALTER`)
+// and therefore `rerun_safe: true`, unlike `MODEL_V2_SELF_DERIVED`'s
+// `SelfDerivedColumnAdd`.
+const MODEL_V4_RERUN_SAFE_REWRITE: &str = "---\nmaterialization: table\n---\n\
+SELECT id, amount, amount * 0.1 AS discount FROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)\n";
+
 /// A grain-changing edit — no admissible in-place technique (skeleton
 /// change).
 const MODEL_V3_SKELETON_CHANGE: &str = "---\nmaterialization: table\n---\n\
@@ -354,5 +362,55 @@ fn interrupted_non_rerun_safe_apply_refuses_on_reinvocation() {
         stderr.to_lowercase().contains("full refresh")
             || stderr.to_lowercase().contains("full-refresh"),
         "expected the refusal to point at a full refresh:\n{stderr}"
+    );
+}
+
+/// The leg the phase-3 summary flagged as untested: an `in_progress`
+/// approval whose plan IS `all_rerun_safe()` (unlike the test above) must
+/// resume — re-execute the identical script — rather than refuse.
+#[test]
+fn apply_resumes_rerun_safe_in_progress_plan() {
+    if skip_without_duckdb_lib() {
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let project_dir = scaffold(&tmp);
+    build(&project_dir);
+    write_model(&project_dir, MODEL_V4_RERUN_SAFE_REWRITE);
+
+    let plan_out = run(&project_dir, &["migrate", "net_orders"]);
+    assert_eq!(plan_out.status.code(), Some(3));
+
+    // Simulate an interrupted apply the same way
+    // `interrupted_non_rerun_safe_apply_refuses_on_reinvocation` does.
+    let path = approvals_path(&project_dir);
+    let content = std::fs::read_to_string(&path).expect("read approvals file");
+    let mut json: serde_json::Value = serde_json::from_str(&content).expect("valid JSON");
+    for (_, entry) in json.as_object_mut().expect("object").iter_mut() {
+        entry["in_progress"] = serde_json::Value::Bool(true);
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&json).unwrap())
+        .expect("write approvals file");
+
+    let apply_out = run(&project_dir, &["migrate", "net_orders", "--apply"]);
+    assert!(
+        apply_out.status.success(),
+        "an interrupted, rerun-safe apply should resume and exit 0.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&apply_out.stdout),
+        String::from_utf8_lossy(&apply_out.stderr)
+    );
+
+    let db_path = project_dir.join("dev.duckdb");
+    let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+    let discount: f64 = conn
+        .query_row(
+            "SELECT discount FROM main.net_orders WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query discount");
+    assert!(
+        (discount - 10.0).abs() < 1e-9,
+        "expected discount to be rewritten to amount * 0.1 = 10.0, got {discount}"
     );
 }

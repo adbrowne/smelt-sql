@@ -1094,6 +1094,13 @@ pub async fn execute_project(
 
     let file_store = FileStore::new(project_dir, &request.target);
 
+    // Legacy `sources.yml` — best-effort input to the definition-delta gate's
+    // upstream-facts map (`docs/specs/definition_deltas.md` §"The migration
+    // plan"), same posture as `smelt migrate`'s own load: a missing or
+    // unparseable file just means fewer admitted techniques, never a
+    // hard failure.
+    let legacy_sources_config = smelt_core::sources::SourcesConfig::load(project_dir).ok();
+
     // Models declaring `contract.deferral` at model granularity
     // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
     // below to widen the `upstream_map` build condition, since a deferral
@@ -1372,6 +1379,8 @@ pub async fn execute_project(
     let source_key_recurrence = &source_key_recurrence;
     let upstream_schemas_for_bootstrap = &upstream_schemas_for_bootstrap;
     let db = &db;
+    let legacy_sources_config = &legacy_sources_config;
+    let all_models = &all_models;
     let state_io_lock = &state_io_lock;
     let model_plans = &model_plans;
     let resume_skip_set = &resume_skip_set;
@@ -1591,6 +1600,67 @@ pub async fn execute_project(
         } else {
             None
         };
+
+        // ── Definition-delta gate (`docs/specs/definition_deltas.md` §"Detection") ──
+        // A maintained (incremental) model whose stored table already exists
+        // refuses to fold a data delta over a pending, non-eclipsed,
+        // unapproved definition delta rather than silently maintaining a
+        // table whose definition no longer matches its contents.
+        // `--full-refresh` is not a fold and is never gated; `--dry-run`
+        // executes nothing to gate. Detection failures degrade to a warning
+        // and the run proceeds — never break a run on a diff this module
+        // cannot factor.
+        if plan.incremental.is_some() && !request.full_refresh && !request.dry_run {
+            if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                let status = {
+                    let db_guard = db.lock().await;
+                    crate::definition_delta::detect_definition_delta(
+                        file_store,
+                        &plan.model_file,
+                        all_models,
+                        legacy_sources_config.as_ref(),
+                        &db_guard,
+                    )
+                };
+                match status {
+                    // A pure column addition is exempt: the maintenance
+                    // driver's own live `Trigger::ColumnAdded` dispatch
+                    // (below, the "Definition-change trigger" fallback)
+                    // already handles this shape safely and atomically as
+                    // part of an ordinary run — this is the documented
+                    // narrower third mechanism (`docs/specs/
+                    // definition_deltas.md` §"Detection") that predates and
+                    // coexists with `smelt migrate`.
+                    Ok(crate::definition_delta::DefinitionDeltaStatus::Pending {
+                        pure_column_addition: true,
+                        ..
+                    }) => {}
+                    Ok(crate::definition_delta::DefinitionDeltaStatus::Pending {
+                        verdict,
+                        plan_hash,
+                        ..
+                    }) => {
+                        return Err(crate::definition_delta::DefinitionDeltaPendingError {
+                            model: plan.name.clone(),
+                            verdict,
+                            plan_hash,
+                        }
+                        .into());
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Definition-delta detection failed for '{}': {}. Continuing.",
+                            plan.name,
+                            e
+                        );
+                    }
+                }
+            }
+        }
 
         // ── Schema evolution gate (incremental models only) ──────────────
         // For incremental models that have a deployed schema, check whether

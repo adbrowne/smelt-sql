@@ -174,6 +174,14 @@ struct RunArgs {
     #[arg(long = "allow-full-refresh")]
     allow_full_refresh: bool,
 
+    /// Drop and rebuild every selected incremental model rather than
+    /// applying batches. Not a fold, so it is never refused by the
+    /// definition-delta gate (`docs/specs/definition_deltas.md`
+    /// §"Detection") — it runs under the model's current definition
+    /// regardless of any pending migration.
+    #[arg(long = "full-refresh")]
+    full_refresh: bool,
+
     /// Allow incremental models that fail the safety classifier to fall back to
     /// full-table refresh instead of being refused at planning time.
     /// Use this only as a temporary escape hatch while fixing the model SQL.
@@ -729,6 +737,10 @@ async fn main() -> std::process::ExitCode {
     // above. See `docs/specs/cli.md` §"Exit codes" — `smelt migrate`
     // specifics.
     let is_migrate = matches!(cli.command, Commands::Migrate(_));
+    // `smelt run` classifies a `DefinitionDeltaPendingError` refusal to exit
+    // `3` via `commands::run::exit_code_for` — same pattern as `migrate`
+    // above. See `docs/specs/cli.md` §"Exit codes" — `smelt run` specifics.
+    let is_run = matches!(cli.command, Commands::Run(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
@@ -767,6 +779,8 @@ async fn main() -> std::process::ExitCode {
                 commands::list::exit_code_for(&err)
             } else if is_migrate {
                 commands::migrate::exit_code_for(&err)
+            } else if is_run {
+                commands::run::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };

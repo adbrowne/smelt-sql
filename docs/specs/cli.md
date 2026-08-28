@@ -102,6 +102,8 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 
 **`smelt migrate` specifics:** the plan step (no `--apply`) exits `0` when the derived migration is eclipsed (nothing to do) or already matches a previously-recorded, human-reviewed plan; exits `3` when it derives a new, non-eclipsed plan that has not yet been reviewed. `--apply` exits `0` on a successful execution, `1` when the plan requires a full refresh (a skeleton change, or an interrupted apply whose chosen technique is not safely re-runnable), and `3` when it refuses because no approval is on record or the approval on record does not match the freshly re-derived plan (the model changed since the plan was last seen).
 
+**`smelt run` specifics:** exits `3`, not `1`, when a selected model refuses to fold a data delta over a pending, non-eclipsed, unapproved definition delta (`DefinitionDeltaPending` — `definition_deltas.md` §"Detection"); this is a correctly-derived state awaiting review (`smelt migrate <model>`), not a failure in the data or models. `--full-refresh` is not a fold and is never gated by this rule.
+
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.

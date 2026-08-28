@@ -17,6 +17,22 @@ use tracing::info;
 use super::run_setup::*;
 use crate::RunArgs;
 
+/// Classify a `smelt run` error for its exit code (`docs/specs/cli.md`
+/// §"Exit codes" — "`smelt run` specifics"): `3` for a
+/// [`smelt_runtime::definition_delta::DefinitionDeltaPendingError`] refusal
+/// (a correctly-derived state awaiting review, not a data/model failure),
+/// else the shared classifier. Same pattern as `commands::migrate::exit_code_for`.
+pub fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if err
+        .downcast_ref::<smelt_runtime::definition_delta::DefinitionDeltaPendingError>()
+        .is_some()
+    {
+        3
+    } else {
+        smelt_cli::exit_code_for(err)
+    }
+}
+
 pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let run_start = Utc::now();
 
@@ -205,7 +221,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         end: end_val,
         batch_size_days: args.batch_size,
         per_partition: args.per_partition,
-        full_refresh: false,
+        full_refresh: args.full_refresh,
         dry_run: args.dry_run,
         enforce_safety: !args.allow_downgrade,
         allow_column_removal: args.allow_column_removal,
@@ -406,7 +422,7 @@ async fn run_since_upstream(
             end: run.end.clone(),
             batch_size_days: args.batch_size,
             per_partition: args.per_partition,
-            full_refresh: false,
+            full_refresh: args.full_refresh,
             dry_run: args.dry_run,
             enforce_safety: !args.allow_downgrade,
             allow_column_removal: args.allow_column_removal,

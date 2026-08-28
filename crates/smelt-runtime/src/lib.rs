@@ -22,6 +22,7 @@ pub mod combined_loop;
 pub mod compile;
 pub mod contract_probes;
 pub mod cumulative;
+pub mod definition_delta;
 pub mod diagnostics;
 pub mod dimension_horizon_merge;
 pub mod execute;

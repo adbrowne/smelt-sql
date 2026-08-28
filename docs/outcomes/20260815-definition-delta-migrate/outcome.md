@@ -302,7 +302,7 @@ open — not that the excluded bullets themselves are gone.
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
-| 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | planned |
+| 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | planned |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
@@ -443,6 +443,23 @@ open — not that the excluded bullets themselves are gone.
   *definition-delta mechanism*, not the verb, and stay. Only
   `docs-site/docs/guide/backbuild-synthesis.md`'s now-false "two things called 'backbuild'"
   callout is removed in phase 4; that page's narrative rewrite remains phase 8's.
+
+- **2026-08-29 (phase 3b implementation).** Two discoveries, both resolved in-phase. (a) `smelt
+  run` had no `--full-refresh` flag at all — `ExecuteRequest::full_refresh` was already wired
+  from `smelt-ui` and doc-commented "CLI as `--full-refresh`" but no `RunArgs` field or mapping
+  existed; this phase's own gate needs it to be exemptable, so the flag was added to `RunArgs`
+  and threaded through both `ExecuteRequest` construction sites in `commands/run.rs`, matching
+  the pre-existing doc comment's stated intent rather than inventing new behavior. (b) The
+  generative `maintenance_conformance` suite's `pure_backfill_column_add_executes_in_place_update`
+  failed red against the new gate: it drives the maintenance driver's own live
+  `Trigger::ColumnAdded` → `Technique::InPlaceUpdate` dispatch (the "narrower third mechanism"
+  `definition_deltas.md` §Known Divergences already documents as coexisting with `smelt migrate`)
+  through an ordinary windowed run with no `smelt migrate` step — exactly the shape the gate would
+  otherwise block. Rather than forcing every column addition through `smelt migrate` and breaking
+  that mechanism's ergonomics, added `DefinitionDiff::is_pure_column_addition` and a
+  `pure_column_addition` field on `DefinitionDeltaStatus::Pending`; the run gate skips refusal
+  when it's `true` (`smelt explain`/`smelt migrate` still report and offer the delta). Recorded
+  in `definition_deltas.md` §"Detection" as "Pure column addition is exempt."
 
 ## Blocked
 

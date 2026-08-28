@@ -5,6 +5,7 @@ use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::sources::SourceInfo;
 use smelt_core::{Granularity, Materialization, ModelOriginKind, PartitionGrainConfig};
+use smelt_logical::backbuild::MigrationVerdict;
 use smelt_logical::maintenance::choice::{resolve_cell_choice, ChosenTechnique};
 use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
@@ -271,6 +272,7 @@ pub fn build_maintenance_plan_report(
     probes: &[smelt_runtime::probe_plan::ProbePlanEntry],
     cadence: smelt_core::config::ProbeCadence,
     edge_delta_types: &[(String, smelt_logical::analysis::output_delta::OutputDelta)],
+    pending_definition_delta: Option<&(MigrationVerdict, String)>,
 ) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -278,6 +280,19 @@ pub fn build_maintenance_plan_report(
     let mut out = String::new();
     let _ = writeln!(out, "Maintenance plan: {}", model_name);
     let _ = writeln!(out);
+
+    // Pending definition delta (`docs/specs/definition_deltas.md`
+    // §"Detection"): reported ahead of a run, without deriving or executing
+    // anything beyond the plan derivation itself.
+    if let Some((verdict, plan_hash)) = pending_definition_delta {
+        let _ = writeln!(
+            out,
+            "Definition delta: PENDING (verdict: {:?}, plan hash {}) — review with `smelt \
+             migrate {}`, then `--apply`, or run with `--full-refresh`.",
+            verdict, plan_hash, model_name
+        );
+        let _ = writeln!(out);
+    }
 
     // Whole-model collapse: a column's provenance couldn't be resolved and
     // the derivation fell back to the whole-model group. `degenerate` is the
@@ -1372,6 +1387,21 @@ pub struct ExplainMaintenanceJson {
     /// append-stable addition to this JSON shape (`docs/specs/cli.md`
     /// §Constraints item 5).
     pub probes: Vec<ExplainProbeJson>,
+    /// A pending, non-eclipsed, unapproved definition delta
+    /// (`docs/specs/definition_deltas.md` §"Detection"), absent when there
+    /// is none — an append-stable addition to this JSON shape
+    /// (`docs/specs/cli.md` §Constraints item 5).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub definition_delta: Option<ExplainDefinitionDeltaJson>,
+}
+
+/// A pending definition delta, as reported by `smelt explain --json`
+/// (`docs/specs/definition_deltas.md` §"Detection").
+#[derive(Debug, Serialize)]
+pub struct ExplainDefinitionDeltaJson {
+    pub status: String,
+    pub verdict: String,
+    pub plan_hash: String,
 }
 
 /// One entry of a model's declared-fact probe set
@@ -1410,6 +1440,7 @@ pub fn build_maintenance_plan_json(
     cadence: smelt_core::config::ProbeCadence,
     column_groups: &[smelt_logical::maintenance::ColumnGroup],
     contract_cfg: Option<&smelt_core::config::ContractConfig>,
+    pending_definition_delta: Option<&(MigrationVerdict, String)>,
 ) -> ExplainMaintenanceJson {
     let cadence_label = format_probe_cadence(cadence);
     let probes = probe_entries
@@ -1470,6 +1501,12 @@ pub fn build_maintenance_plan_json(
             }
         })
         .collect();
+    let definition_delta =
+        pending_definition_delta.map(|(verdict, plan_hash)| ExplainDefinitionDeltaJson {
+            status: "pending".to_string(),
+            verdict: format!("{:?}", verdict),
+            plan_hash: plan_hash.clone(),
+        });
     ExplainMaintenanceJson {
         model: model_name.to_string(),
         contract: own_contract,
@@ -1478,6 +1515,7 @@ pub fn build_maintenance_plan_json(
         properties,
         state_columns,
         probes,
+        definition_delta,
     }
 }
 

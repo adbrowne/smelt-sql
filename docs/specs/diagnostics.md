@@ -512,6 +512,7 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model's derived grain (from its clock, identity, and `partition_column ∈ key?` facts) is one maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
 | `MaintenanceRepairKeysNotDiscoverable` | Error | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set (`incremental_models.md` §"The repair family" obligation (c)). Names the changed input and why the delta yields no key set. |
 | `MaintenanceRepairSliceUnbounded` | Error | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked (`incremental_models.md` §"The repair family" obligation (b)). Names the source and the unbounded reach. |
+| `DefinitionDeltaPending` | Error | `smelt run` (without `--full-refresh`) would fold a data delta over a pending, non-eclipsed, unapproved definition delta. Owned by `definition_deltas.md` §"Detection". |
 
 Declaring `grain: key_per_partition` in frontmatter is refused outright at config parse —
 `YamlParseError` (no dedicated code) — since the label has no writable spelling; the message

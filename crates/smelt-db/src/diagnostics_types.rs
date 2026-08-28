@@ -919,6 +919,14 @@ pub enum DiagnosticCode {
     /// pattern; the pin never silently resolves to a substituted
     /// technique. Anchored at the model SQL body start.
     MaintenanceWriteAddressingRefused,
+    /// Emitted (Error) when `smelt run` would fold a data delta over an
+    /// unapproved, non-eclipsed definition delta — the recorded and current
+    /// definitions diverge and no matching plan-hash approval is on record
+    /// (`definition_deltas.md` §Detection). The fix is `smelt migrate
+    /// <model>` (review) then `--apply`, or `--full-refresh`. Never fires
+    /// for a `--full-refresh` run, which is not a fold. Anchored at the
+    /// model SQL body start.
+    DefinitionDeltaPending,
 
     // ── Contract lattice diagnostic codes ────────────────────────────────────
     /// A `contract.frozen_horizon` is unparseable or declared on a

@@ -125,6 +125,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &edge_delta_types,
+            None,
         )
         .expect("build_maintenance_plan_report"),
     )
@@ -966,6 +967,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1089,6 +1091,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         &[],
         smelt_core::config::ProbeCadence::PerRun,
         &[],
+        None,
     )
     .expect("build_maintenance_plan_report");
 
@@ -1277,6 +1280,7 @@ mod write_variant_explain_surface {
             &[],
             smelt_core::config::ProbeCadence::PerRun,
             &[],
+            None,
         )
     }
 
