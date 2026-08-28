@@ -97,19 +97,24 @@ smelt migrate <model> --json     # machine-readable plan + exit-code contract (C
 
 - **Plan.** `smelt migrate <model>` derives the migration plan (§"The migration plan") and prints
   it: per column group, the verdict, the chosen technique, the regions touched, and a cost class
-  — or "eclipsed: nothing to do". The plan carries a **plan hash** over its content.
+  — or "eclipsed: nothing to do". The plan carries a **plan hash** over its content, which the
+  plan step records to a per-target approval store (one entry per model) — this is what "seeing
+  the plan printed" means for approval purposes.
 - **Approve and apply.** `--apply` executes the plan whose hash was recorded by the most recent
   plan step. If the model's SQL, its inputs' declared facts, or anything else that feeds the plan
   has changed since — so the freshly derived plan's hash no longer matches the recorded one —
   `--apply` refuses and prints the new plan instead. Approval is therefore always approval of the
   exact statements that will run, never of a stale description.
-- **Resume.** An interrupted `--apply` resumes on re-invocation: the frontier records which
-  regions each affected column group has caught up (§"Frontier semantics"), and re-applying the
-  same approved plan continues from there.
+- **Resume.** Resume is by re-invocation of the same approved plan: identical hash implies
+  identical script, so re-running `--apply` against an unchanged, still-approved plan re-executes
+  it. §"Frontier semantics" describes the region-scoped resume this mechanism is defined against;
+  today's resume is coarser than that (§Known Divergences).
 - **CI mode.** `--json` plus the exit-code contract makes the pending-migration state visible to
-  CI: exit 0 when there is no definition delta or the delta is eclipsed-only; a distinct non-zero
-  exit when a non-trivial migration is derived but unapproved. "The deploy changes what this
-  table means" becomes a checkable pipeline state; formatting-only changes pass silently.
+  CI: exit `0` when there is no definition delta, the delta is eclipsed-only, or the derived plan
+  already matches a previously-approved one; exit `3` when a non-trivial migration is derived but
+  not yet approved, or when `--apply` refuses on a stale or absent approval (`cli.md` §"Exit
+  codes"). "The deploy changes what this table means" becomes a checkable pipeline state;
+  formatting-only changes pass silently.
 
 ### `smelt rebuild`
 
@@ -427,16 +432,23 @@ that changes which rows exist. Refusing with the rebuild named keeps the fail-lo
 
 Live gaps between this spec and the implementation as of `last_reviewed`.
 
-- **Execution and run-time refusal are unwired.** `smelt migrate <model>` now reaches the
-  classification and emission machinery (`crates/smelt-logical/src/backbuild/`) and prints a
-  derived migration plan, but `--apply` does not execute it yet, and `smelt run` does not yet
-  refuse to fold data deltas over a pending non-eclipsed definition delta (§"Detection"). Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
-- **`smelt migrate --apply` and `--json` do not exist yet**, and the ranged-rebuild verb still
-  ships under the name `smelt backbuild` rather than `smelt rebuild`. The live handling of
-  definition changes outside `smelt migrate`'s plan path is a narrower third mechanism covering
-  **column additions only** (the definition-change trigger in the maintenance driver); a changed
-  column's redefinition falls to a full recompute. Same tracking as above.
+- **Run-time refusal is unwired.** `smelt migrate <model>` derives, prints, approves, and (via
+  `--apply`) executes a migration plan, but `smelt run` does not yet refuse to fold data deltas
+  over a pending non-eclipsed definition delta (§"Detection"). Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3b.
+- **The ranged-rebuild verb still ships under the name `smelt backbuild`** rather than
+  `smelt rebuild`. The live handling of definition changes outside `smelt migrate`'s path is a
+  narrower third mechanism covering **column additions only** (the definition-change trigger in
+  the maintenance driver); a changed column's redefinition falls to a full recompute. Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 4.
+- **Resume is approval-marker-based, not frontier-region-scoped**, despite §"Frontier semantics"
+  describing a per-region resume: `--apply` records only whether an execution is in progress for
+  the approved plan as a whole, not which regions each column group has caught up. A partially
+  applied script whose chosen technique is not rerun-safe (the `BackbuildOption::rerun_safe` flag
+  `crates/smelt-logical/src/backbuild/` classifiers already carry) therefore refuses on the next
+  `--apply` rather than resuming — the honest route is a full refresh. Tracked:
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 11 ("Per-cell frontier
+  addressing").
 - **The atomicity rule is conditional in practice.** A model whose
   `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
   a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
@@ -447,10 +459,6 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `schema_evolution.md`" names; the unification should subsume it, not inherit it.
 - **The conformance harness has no definition-edit step kind yet** — the oracle extension in
   §"The oracle" is specified ahead of the harness work.
-- **No approval store exists.** The plan-hash persistence §Surface requires, hashing the plan
-  data structure per §Design "The plan hash covers the plan data structure, not only rendered
-  SQL", is unbuilt. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 3.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's

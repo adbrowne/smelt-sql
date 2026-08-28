@@ -36,8 +36,9 @@ Every `smelt` subcommand follows the same exit-code contract, so orchestrators (
 | `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection — a build that ran nothing because there was nothing to do is not a failure. |
 | `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or a check referencing a model not built in the target. |
 | `2` | Usage error. Malformed CLI arguments, a malformed or missing `smelt.yml`, or an unresolvable project root. |
+| `3` | The command ran correctly and found a state requiring human approval. Today only `smelt migrate`: a derived, non-eclipsed migration plan that has not yet been approved, or `smelt migrate --apply` refusing on a stale or absent approval. |
 
-`1` means the command ran correctly and found a problem in the data or models — investigate the pipeline. `2` means the command could not run at all because its own inputs were invalid — fix the invocation. Retrying a `2` without changing the command is never useful.
+`1` means the command ran correctly and found a problem in the data or models — investigate the pipeline. `2` means the command could not run at all because its own inputs were invalid — fix the invocation. `3` means the command produced a correct result that a human still needs to review and approve. Retrying a `2` or `3` without changing anything is never useful.
 
 ---
 
@@ -809,6 +810,58 @@ smelt diff --json || echo "Schema changes detected!"
   "summary": { "changed": 1, "new": 1, "removed": 0, "unchanged": 5 }
 }
 ```
+
+---
+
+## smelt migrate
+
+Derive, approve, and apply a **definition-delta** migration plan: a targeted script that
+migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
+the migration guide for the full walkthrough of when each verdict (eclipsed, backfill in place,
+re-derive, skeleton change) applies.
+
+**Usage:**
+
+```
+smelt migrate <model> [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | Target environment from `smelt.yml`. The recorded definition, deployed schema, and migration approval are all per-target. |
+| `--apply` | bool | `false` | Execute the most recently printed (approved) migration plan. Refuses if no plan is on record, or if the freshly re-derived plan no longer matches the recorded one (the model changed since it was approved). |
+| `--json` | bool | `false` | Machine-readable plan output (CI mode). Same exit-code contract as the human-readable path. |
+
+**Exit codes:**
+
+- `0` — no definition delta, the delta is eclipsed-only, or the derived plan already matches a previously-approved one
+- `1` — the plan (or an interrupted `--apply`'s resume) requires a full refresh
+- `3` — a non-trivial migration was derived but is not yet approved, or `--apply` refused because no matching approval is on record
+
+**Workflow:**
+
+```
+$ smelt migrate order_facts
+definition delta for order_facts (1 column group affected):
+
+  discount          backfill in place    SelfDerivedColumnAdd (2 statements)
+
+plan hash: sha256:4f2a91c6…   approve and execute with: smelt migrate order_facts --apply
+$ echo $?
+3
+
+$ smelt migrate order_facts --apply
+smelt migrate order_facts: applied 2 statements — the definition delta is cleared.
+$ echo $?
+0
+```
+
+Running the plan step again after approving (with no further edits) reports the same plan as
+already approved and exits `0` — this is what makes `smelt migrate --json` usable as a CI gate:
+a pipeline blocks on exit `3` until a human has reviewed and re-run the plan step locally.
 
 ---
 

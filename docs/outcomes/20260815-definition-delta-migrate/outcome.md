@@ -301,7 +301,7 @@ open — not that the excluded bullets themselves are gone.
 |---|-------|--------|
 | 1 | Resolve the two open design questions (plan-hash scope, diagnostic rename/split) and land the decisions in `definition_deltas.md` before wiring against them | done |
 | 2 | Wire `smelt migrate` (plan-only): CLI verb invokes the backbuild synthesis layer end to end and prints the per-group verdict/technique plan | done |
-| 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | planned |
+| 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | pending |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | pending |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
@@ -399,6 +399,25 @@ open — not that the excluded bullets themselves are gone.
   in-progress marker, and re-invoking `--apply` re-runs the identical (unchanged-hash) script;
   frontier-region-scoped resume per §"Frontier semantics" stays a stated divergence rather than
   being silently claimed.
+
+- **2026-08-29, phase 3 implementation.** "Approved" is defined operationally: the plan step
+  records `{plan_hash, in_progress: false}` unconditionally on every invocation, and the exit
+  code reflects whether the store *already held this exact hash before this call* — so a second
+  identical plan-step invocation (human review having happened out of band) exits `0`, while the
+  first sighting of a given plan always exits `3`. This makes "the human ran `smelt migrate
+  <model>` and it printed this exact plan" the approval act itself, with no separate confirmation
+  step. `--apply` never writes an approval on refusal (absent/stale hash) — only a plan-step
+  invocation can move the recorded hash forward, so a stale `--apply` cannot accidentally
+  self-approve by retrying. `MigrationPlan::statements` (task 3) is assembled once via the
+  existing `assemble(&BackbuildOptions, Selection::Targeted{atom_choices: all-zero})` — no new
+  statement authoring. `MigrationPlan::all_rerun_safe()` was added (not in the original task
+  list) to answer test 14's "chosen option not rerun_safe" check without re-deriving
+  `BackbuildOptions` a second time in the CLI. Updated `migrate_plan.rs`'s two existing
+  success-exit assertions to the new exit-`3`-for-unapproved contract (a legitimate contract
+  change, not a definition-of-done drift — `docs/specs/cli.md` §"Exit codes" states it
+  normatively). Hardening baseline updated (`smelt-cli` expect 41→42, println 169→171: one
+  `serde_json` `.expect` and two `println!` in the new JSON/apply rendering paths, same pattern
+  as `commands::diff.rs`'s existing `print_json`).
 
 ## Blocked
 

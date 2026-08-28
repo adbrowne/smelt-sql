@@ -164,6 +164,10 @@ impl FileStore {
         self.target_dir.join("source_postures.json")
     }
 
+    fn migration_approvals_path(&self) -> PathBuf {
+        self.target_dir.join("migration_approvals.json")
+    }
+
     fn frozen_band_baselines_path(&self) -> PathBuf {
         self.target_dir.join("frozen_band_baselines.json")
     }
@@ -533,6 +537,38 @@ impl FileStore {
         let path = self.source_postures_path();
         write_json_atomic(&path, store)
             .with_context(|| format!("Failed to write source-posture store: {:?}", path))
+    }
+
+    // --- Migration approval store ---
+
+    /// Load the per-model migration-plan approval store from disk
+    /// (`docs/specs/definition_deltas.md` §"`smelt migrate`"). Returns
+    /// default if the file doesn't exist — a model with no entry has never
+    /// had a migration plan derived and printed for approval.
+    pub fn load_migration_approvals(
+        &self,
+    ) -> Result<crate::migration_approvals::MigrationApprovalStore> {
+        self.check_version()?;
+        let path = self.migration_approvals_path();
+        if !path.exists() {
+            return Ok(crate::migration_approvals::MigrationApprovalStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read migration-approval store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse migration-approval store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-model migration-plan approval store to disk.
+    pub fn save_migration_approvals(
+        &self,
+        store: &crate::migration_approvals::MigrationApprovalStore,
+    ) -> Result<()> {
+        self.init()?;
+        let path = self.migration_approvals_path();
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write migration-approval store: {:?}", path))
     }
 
     // --- Contract-lattice frozen-band baseline store ---

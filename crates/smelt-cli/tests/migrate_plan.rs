@@ -104,9 +104,12 @@ fn migrate_prints_per_group_verdict_and_technique() {
     let out = run(&project_dir, &["migrate", "net_orders"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success(),
-        "smelt migrate should exit 0.\nstdout: {stdout}\nstderr: {stderr}"
+    // A newly-derived, non-eclipsed plan is unapproved on its first
+    // printing — exit 3 (`docs/specs/cli.md` §"Exit codes").
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "smelt migrate should exit 3 for an unapproved plan.\nstdout: {stdout}\nstderr: {stderr}"
     );
 
     assert!(
@@ -186,9 +189,12 @@ fn migrate_executes_nothing() {
     let (schema_before, rows_before) = snapshot_table(&db_path);
 
     let out = run(&project_dir, &["migrate", "net_orders"]);
-    assert!(
-        out.status.success(),
-        "smelt migrate should exit 0.\nstderr: {}",
+    // An unapproved non-eclipsed plan exits 3, not 0 — see
+    // `migrate_prints_per_group_verdict_and_technique`.
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "smelt migrate should exit 3.\nstderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 

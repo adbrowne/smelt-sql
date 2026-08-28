@@ -1,16 +1,18 @@
-//! `smelt migrate <model>` — plan-only definition-delta migration verb.
+//! `smelt migrate <model>` — plan-and-approve definition-delta migration verb
+//! (`docs/specs/definition_deltas.md` §"`smelt migrate`").
 //!
-//! Derives a [`smelt_logical::backbuild::DefinitionDiff`] between the model's
-//! last-deployed SQL (`DeployedSchema::model_sql`) and its current SQL,
-//! classifies it via `smelt_logical::backbuild`, and prints a per-column-group
-//! migration plan (verdict + technique + plan hash). Executes nothing — no
-//! backend connection is opened beyond the schema-snapshot file read.
-//! `--apply` is not yet a flag (a later phase); see
-//! `docs/specs/definition_deltas.md` §"`smelt migrate`".
+//! The plan step derives a [`smelt_logical::backbuild::DefinitionDiff`]
+//! between the model's last-deployed SQL (`DeployedSchema::model_sql`) and
+//! its current SQL, classifies it via `smelt_logical::backbuild`, prints a
+//! per-column-group migration plan (verdict + technique + plan hash), and
+//! records the plan hash to a per-target approval store — this is what
+//! "seeing the plan printed" means for approval purposes. `--apply` executes
+//! only a plan whose freshly re-derived hash matches the recorded one.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 
 use smelt_cli::{find_project_root, Config, ModelDiscovery, SourcesConfig};
 use smelt_logical::backbuild::{
@@ -18,9 +20,40 @@ use smelt_logical::backbuild::{
     MigrationPlan, MigrationVerdict, SourceRef,
 };
 use smelt_state::file_store::FileStore;
+use smelt_state::migration_approvals::MigrationApprovalStore;
 
 use crate::helpers::infer_deployed_columns;
 use crate::MigrateArgs;
+
+/// `smelt migrate`'s own exit-code classification
+/// (`docs/specs/cli.md` §"Exit codes" — "`smelt migrate` specifics"). See
+/// [`exit_code_for`].
+#[derive(Debug, Error)]
+enum MigrateError {
+    /// The plan step derived a non-eclipsed plan that has not previously
+    /// been recorded as approved. Exit `3`.
+    #[error("{0}")]
+    PendingApproval(String),
+    /// `--apply` found no matching approval on record. Exit `3`.
+    #[error("{0}")]
+    ApplyRefused(String),
+    /// The plan (or its interrupted resume) requires a full refresh. Exit
+    /// `1`.
+    #[error("{0}")]
+    FullRefreshRequired(String),
+}
+
+/// Classify a top-level command error for `smelt migrate`'s exit code: `3`
+/// for a pending-approval or apply-refusal state, `1` for a
+/// full-refresh-required state, else the shared classifier. Same pattern as
+/// `commands::list::exit_code_for`.
+pub fn exit_code_for(err: &anyhow::Error) -> u8 {
+    match err.downcast_ref::<MigrateError>() {
+        Some(MigrateError::PendingApproval(_)) | Some(MigrateError::ApplyRefused(_)) => 3,
+        Some(MigrateError::FullRefreshRequired(_)) => 1,
+        None => smelt_cli::exit_code_for(err),
+    }
+}
 
 pub async fn migrate(args: MigrateArgs, _scope: Option<&str>) -> Result<()> {
     // 1. Resolve project root + config + target.
@@ -28,8 +61,8 @@ pub async fn migrate(args: MigrateArgs, _scope: Option<&str>) -> Result<()> {
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
-    if !config.targets.contains_key(&args.target) {
-        return Err(anyhow::anyhow!(
+    let target_config = config.targets.get(&args.target).ok_or_else(|| {
+        anyhow::anyhow!(
             "Target '{}' not found in smelt.yml. Available targets: {}",
             args.target,
             config
@@ -38,8 +71,8 @@ pub async fn migrate(args: MigrateArgs, _scope: Option<&str>) -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>()
                 .join(", ")
-        ));
-    }
+        )
+    })?;
 
     // 2. Load legacy sources.yml (best-effort; no unique_key/nullability
     // facts exist in this format — populated fail-closed below).
@@ -197,11 +230,179 @@ pub async fn migrate(args: MigrateArgs, _scope: Option<&str>) -> Result<()> {
         sources: sources_map,
     };
 
-    // 7. Derive and render the plan. No execution happens anywhere below.
+    // 7. Derive the plan. No execution happens below unless `--apply` is set.
     let plan = derive_migration_plan(&model_name, &diff, &inputs);
     let hash = plan_hash(&plan, &inputs);
 
-    render_plan(&model_name, &plan, &hash);
+    let mut approvals = file_store
+        .load_migration_approvals()
+        .with_context(|| "Failed to load migration-approval store")?;
+
+    if args.apply {
+        apply_plan(
+            &project_dir,
+            &file_store,
+            target_config,
+            &db,
+            model,
+            &db_name,
+            &model_name,
+            &after_clean,
+            deployed.version,
+            &inferred,
+            &plan,
+            &hash,
+            &mut approvals,
+            args.json,
+        )
+        .await
+    } else {
+        let approved_before = plan_step(&model_name, &plan, &hash, &mut approvals, args.json);
+        file_store
+            .save_migration_approvals(&approvals)
+            .with_context(|| "Failed to save migration-approval store")?;
+
+        if plan.groups.is_empty() || approved_before {
+            return Ok(());
+        }
+        Err(MigrateError::PendingApproval(format!(
+            "smelt migrate: '{model_name}' has a new, unapproved migration plan (printed \
+             above). Review it, then run `smelt migrate {model_name} --apply` to execute it."
+        ))
+        .into())
+    }
+}
+
+/// Whether `model`'s recorded approval, if any, already matches `hash` —
+/// computed before the caller's own record-and-save, so it reflects a
+/// *previous* invocation having seen this exact plan.
+fn already_approved(approvals: &MigrationApprovalStore, model: &str, hash: &str) -> bool {
+    approvals.get(model).is_some_and(|a| a.plan_hash == hash)
+}
+
+/// The plan-only path: render the plan (human or JSON), record the hash
+/// unconditionally, and return whether this exact plan was already on
+/// record *before* this call (used for the exit-code decision).
+fn plan_step(
+    model_name: &str,
+    plan: &MigrationPlan,
+    hash: &str,
+    approvals: &mut MigrationApprovalStore,
+    json: bool,
+) -> bool {
+    let approved_before = already_approved(approvals, model_name, hash);
+
+    if json {
+        render_json(model_name, plan, hash, approved_before);
+    } else {
+        render_plan(model_name, plan, hash);
+    }
+
+    approvals.record(model_name, hash.to_string(), false);
+    approved_before
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn apply_plan(
+    project_dir: &std::path::Path,
+    file_store: &FileStore,
+    target_config: &smelt_cli::config::Target,
+    db: &smelt_db::Database,
+    model: &smelt_cli::ModelFile,
+    db_name: &str,
+    model_name: &str,
+    after_sql: &str,
+    deployed_version: u32,
+    inferred: &[smelt_state::schema_tracking::DeployedColumn],
+    plan: &MigrationPlan,
+    hash: &str,
+    approvals: &mut MigrationApprovalStore,
+    json: bool,
+) -> Result<()> {
+    let _ = db;
+    let _ = model;
+
+    let recorded = approvals.get(model_name).cloned();
+
+    let Some(recorded) = recorded else {
+        render_plan(model_name, plan, hash);
+        return Err(MigrateError::ApplyRefused(format!(
+            "smelt migrate --apply: no approved plan is on record for '{model_name}' — run \
+             `smelt migrate {model_name}` first to derive and approve one."
+        ))
+        .into());
+    };
+
+    if recorded.plan_hash != *hash {
+        render_plan(model_name, plan, hash);
+        return Err(MigrateError::ApplyRefused(format!(
+            "smelt migrate --apply: the approved plan for '{model_name}' is stale — the \
+             definition or its inputs changed since it was approved. The freshly derived plan \
+             is printed above; review it and run `smelt migrate {model_name}` again to approve \
+             it before applying."
+        ))
+        .into());
+    }
+
+    if recorded.in_progress && !plan.all_rerun_safe() {
+        return Err(MigrateError::FullRefreshRequired(format!(
+            "smelt migrate --apply: an earlier apply of '{model_name}' was interrupted \
+             mid-execution, and this plan's chosen technique is not safely re-runnable from the \
+             start — resuming could re-apply a non-idempotent statement. Use a full refresh \
+             instead: `smelt run --allow-full-refresh {model_name}`."
+        ))
+        .into());
+    }
+
+    if plan.statements.is_empty() {
+        return Err(MigrateError::FullRefreshRequired(format!(
+            "smelt migrate --apply: '{model_name}' has no admissible in-place technique for \
+             this migration — a full refresh is the only route: \
+             `smelt run --allow-full-refresh {model_name}`."
+        ))
+        .into());
+    }
+
+    approvals.record(model_name, hash.to_string(), true);
+    file_store
+        .save_migration_approvals(approvals)
+        .with_context(|| "Failed to save migration-approval store")?;
+
+    let backend = crate::helpers::create_backend(target_config, project_dir, None)
+        .await
+        .with_context(|| "Failed to connect to target backend")?;
+
+    for statement in &plan.statements {
+        backend
+            .execute_sql(statement)
+            .await
+            .with_context(|| format!("Migration statement failed: {statement}"))?;
+    }
+
+    smelt_runtime::schema_evolution::save_deployed_schema(
+        file_store,
+        db_name,
+        after_sql,
+        inferred,
+        Some(deployed_version),
+    )
+    .with_context(|| format!("Failed to record the migrated schema for {model_name}"))?;
+
+    approvals.clear(model_name);
+    file_store
+        .save_migration_approvals(approvals)
+        .with_context(|| "Failed to save migration-approval store")?;
+
+    if json {
+        render_json(model_name, plan, hash, true);
+    } else {
+        println!(
+            "smelt migrate {model_name}: applied {} statement{} — the definition delta is \
+             cleared.",
+            plan.statements.len(),
+            if plan.statements.len() == 1 { "" } else { "s" }
+        );
+    }
 
     Ok(())
 }
@@ -259,4 +460,51 @@ fn render_group(group: &ColumnGroupPlan) {
         println!("                    refused: {}", refusal.reason);
     }
     println!();
+}
+
+fn render_json(model_name: &str, plan: &MigrationPlan, hash: &str, approved: bool) {
+    use serde_json::json;
+
+    let verdict_label = |v: MigrationVerdict| match v {
+        MigrationVerdict::Eclipsed => "eclipsed",
+        MigrationVerdict::BackfillInPlace => "backfill_in_place",
+        MigrationVerdict::Rederive => "rederive",
+        MigrationVerdict::SkeletonChange => "skeleton_change",
+    };
+
+    let groups: Vec<_> = plan
+        .groups
+        .iter()
+        .map(|group| {
+            let (technique, statement_count) = match group.options.first() {
+                Some(option) => (
+                    Some(format!("{:?}", option.technique)),
+                    option.statement_count(),
+                ),
+                None => (None, 0),
+            };
+            json!({
+                "columns": group.columns,
+                "verdict": verdict_label(group.verdict),
+                "technique": technique,
+                "statement_count": statement_count,
+                "refusals": group.refusals.iter().map(|r| r.reason.clone()).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let output = json!({
+        "model": format!("smelt.{model_name}"),
+        "table": plan.table,
+        "verdict": verdict_label(plan.verdict()),
+        "plan_hash": hash,
+        "approved": approved,
+        "groups": groups,
+        "statements": plan.statements,
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&output).expect("JSON serialization should not fail")
+    );
 }

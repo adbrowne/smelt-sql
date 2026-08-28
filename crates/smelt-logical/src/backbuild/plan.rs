@@ -17,7 +17,7 @@ use super::{
     AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption, BackbuildRefusal, DefinitionDiff,
     SourceRef,
 };
-use crate::backbuild::classify::derive_backbuild_options;
+use crate::backbuild::classify::{assemble, derive_backbuild_options, Selection};
 
 /// The whole-plan (or per-group) migration verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +62,24 @@ pub struct MigrationPlan {
     pub table: String,
     pub groups: Vec<ColumnGroupPlan>,
     pub full_refresh: BackbuildOption,
+    /// The targeted script `assemble` composes from the first admitted
+    /// option per group (`Selection::Targeted` with an all-zero choice
+    /// vector) — empty when any group admits no option (a skeleton change),
+    /// since partial application is never offered.
+    pub statements: Vec<String>,
+}
+
+impl MigrationPlan {
+    /// Whether every group's chosen (first-admitted) option is
+    /// [`BackbuildOption::rerun_safe`] — `true` for a plan with no groups
+    /// (nothing to re-run). An interrupted apply of a plan that is *not*
+    /// fully rerun-safe cannot simply be resumed by re-running `statements`
+    /// from the start.
+    pub fn all_rerun_safe(&self) -> bool {
+        self.groups
+            .iter()
+            .all(|g| g.options.first().is_some_and(|o| o.rerun_safe))
+    }
 }
 
 impl MigrationPlan {
@@ -130,7 +148,7 @@ pub fn derive_migration_plan(
     inputs: &BackbuildInputs,
 ) -> MigrationPlan {
     let options = derive_backbuild_options(diff, inputs);
-    let groups = options
+    let groups: Vec<ColumnGroupPlan> = options
         .atoms
         .iter()
         .map(|atom| ColumnGroupPlan {
@@ -141,11 +159,18 @@ pub fn derive_migration_plan(
         })
         .collect();
 
+    // Compose the targeted script from the first admitted option per group
+    // (`assemble` returns an empty script if any group admits none —
+    // partial application is never offered).
+    let atom_choices = vec![0; options.atoms.len()];
+    let statements = assemble(&options, &Selection::Targeted { atom_choices });
+
     MigrationPlan {
         model: model.to_string(),
         table: inputs.table.clone(),
         groups,
         full_refresh: options.full_refresh,
+        statements,
     }
 }
 
@@ -175,6 +200,8 @@ pub fn plan_hash(plan: &MigrationPlan, inputs: &BackbuildInputs) -> String {
     }
 
     write_option(&mut s, &plan.full_refresh);
+
+    let _ = writeln!(s, "statements={}", plan.statements.join("\n---\n"));
 
     // Input facts.
     let _ = writeln!(s, "inputs.table={}", inputs.table);

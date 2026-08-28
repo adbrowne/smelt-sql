@@ -239,3 +239,60 @@ fn plan_hash_ignores_region_enumeration() {
 
     assert_eq!(hash_a, hash_b);
 }
+
+#[test]
+fn plan_carries_assembled_statements() {
+    let before_sql = "SELECT id, amount, discount FROM orders";
+    let after_sql = "SELECT id, amount, discount, amount - discount AS net_amount FROM orders";
+    let built = inputs(after_sql, &[("net_amount", "DOUBLE")]);
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    let plan = derive_migration_plan("test_model", &diff, &built);
+
+    assert!(
+        !plan.statements.is_empty(),
+        "expected the assembled targeted script to be non-empty for a backfill-in-place plan"
+    );
+    // The statements are exactly the first admitted option's own statements
+    // (no new authoring anywhere in the plan/assemble path).
+    let group = &plan.groups[0];
+    let expected = &group.options[0].statements;
+    assert_eq!(&plan.statements, expected);
+}
+
+#[test]
+fn skeleton_change_plan_has_no_statements() {
+    let before_sql = "SELECT status, count(*) AS n FROM orders GROUP BY status";
+    let after_sql = "SELECT status, amount, count(*) AS n FROM orders GROUP BY status, amount";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    let plan = derive_migration_plan("test_model", &diff, &inputs(after_sql, &[]));
+
+    assert!(
+        plan.statements.is_empty(),
+        "a skeleton-change group admits no option, so the assembled script must be empty \
+         (partial application is never offered), got {:?}",
+        plan.statements
+    );
+}
+
+#[test]
+fn plan_hash_covers_statements() {
+    let before_sql = "SELECT id, amount, discount FROM orders";
+    let after_sql = "SELECT id, amount, discount, amount - discount AS net_amount FROM orders";
+    let built = inputs(after_sql, &[("net_amount", "DOUBLE")]);
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    let mut plan = derive_migration_plan("test_model", &diff, &built);
+    let hash_original = plan_hash(&plan, &built);
+
+    // Re-deriving the same plan hashes identically.
+    let plan_again = derive_migration_plan("test_model", &diff, &built);
+    let hash_again = plan_hash(&plan_again, &built);
+    assert_eq!(hash_original, hash_again);
+
+    // Two plans differing only in assembled statements hash differently.
+    plan.statements.push("-- an extra statement".to_string());
+    let hash_mutated = plan_hash(&plan, &built);
+    assert_ne!(hash_original, hash_mutated);
+}

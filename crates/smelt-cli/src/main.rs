@@ -595,6 +595,18 @@ struct MigrateArgs {
     /// deployed schema are per-target.
     #[arg(long, default_value = "dev")]
     target: String,
+
+    /// Execute the most recently printed (approved) migration plan. Refuses
+    /// (exit 3) if no plan is on record or the freshly re-derived plan no
+    /// longer matches it, and refuses (exit 1) if the plan requires a full
+    /// refresh.
+    #[arg(long)]
+    apply: bool,
+
+    /// Machine-readable plan output (CI mode). Same exit-code contract as
+    /// the human-readable path.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Parser)]
@@ -711,6 +723,12 @@ async fn main() -> std::process::ExitCode {
     // exit 2 (usage error) per `docs/specs/cli.md` §"Exit codes" — a distinct
     // classifier from the generic one, same pattern as `init` above.
     let is_list = matches!(cli.command, Commands::List(_));
+    // `smelt migrate` classifies its own exit codes (3 for a pending or
+    // stale-approval refusal, 1 for a full-refresh-required refusal) via
+    // `commands::migrate::exit_code_for` — same pattern as `init`/`list`
+    // above. See `docs/specs/cli.md` §"Exit codes" — `smelt migrate`
+    // specifics.
+    let is_migrate = matches!(cli.command, Commands::Migrate(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
@@ -747,6 +765,8 @@ async fn main() -> std::process::ExitCode {
                 commands::init::exit_code_for(&err)
             } else if is_list {
                 commands::list::exit_code_for(&err)
+            } else if is_migrate {
+                commands::migrate::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };
