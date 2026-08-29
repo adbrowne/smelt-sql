@@ -349,3 +349,25 @@ fn test_round_trip_single_spread_in_select() {
     let sql = "SELECT ...foo";
     assert_round_trip(sql);
 }
+
+// Regression: fuzz crash where a fully-parenthesized select-item expression
+// lost its parentheses on print. `Expr::cast` deliberately unwraps `( … )`
+// wrappers so semantic callers see the inner expression; the printer followed
+// it there and emitted `SELECT * AS hD`, which no dialect accepts.
+#[test]
+fn test_round_trip_fuzz_crash_parenthesized_star_with_alias() {
+    let sql = "SELECT(     *  )hD";
+    assert_round_trip(sql);
+}
+
+// The parentheses themselves must survive the print, not merely re-parse.
+#[test]
+fn test_round_trip_preserves_select_item_parens() {
+    let parsed = parse("SELECT (1+2) AS x");
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let printed = File::cast(parsed.syntax()).expect("FILE node").to_string();
+    assert!(
+        printed.contains("(1+2)"),
+        "printer dropped the parentheses: {printed:?}"
+    );
+}
