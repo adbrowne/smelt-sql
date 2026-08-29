@@ -27,7 +27,7 @@ use proptest::prelude::*;
 
 use smelt_logical::analysis::join_shape::{fan_out, Cardinality, JoinContext};
 
-use crate::prop_helpers::duckdb_oracle::DuckDbOracle;
+use smelt_oracle_testkit::DuckDbOracle;
 
 const JOIN_SQL: &str = "SELECT * FROM facts f JOIN dims d ON f.user_id = d.user_id AND f.dt = d.dt";
 

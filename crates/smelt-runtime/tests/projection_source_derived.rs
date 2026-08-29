@@ -450,10 +450,12 @@ fn ephemeral_cte_prepend_does_not_disturb_output_columns() {
     let model = make_model("final_model", sql);
 
     let bigquery_compiler = registry.get("bigquery");
-    let resolver = bigquery_compiler.build_ephemeral_resolver(
-        &[("staging_users".to_string(), ephemeral_sql.to_string())],
-        "main",
-    );
+    let resolver = bigquery_compiler
+        .build_ephemeral_resolver(
+            &[("staging_users".to_string(), ephemeral_sql.to_string())],
+            "main",
+        )
+        .expect("the ephemeral model uses nothing BigQuery refuses");
 
     let compiled = bigquery_compiler
         .compile_with_sql_and_ephemerals(&model, "main", sql, &resolver)
@@ -481,10 +483,12 @@ fn ephemeral_cte_prepend_does_not_disturb_output_columns_via_compile_with_epheme
     let model = make_model("final_model", sql);
 
     let bigquery_compiler = registry.get("bigquery");
-    let resolver = bigquery_compiler.build_ephemeral_resolver(
-        &[("staging_users".to_string(), ephemeral_sql.to_string())],
-        "main",
-    );
+    let resolver = bigquery_compiler
+        .build_ephemeral_resolver(
+            &[("staging_users".to_string(), ephemeral_sql.to_string())],
+            "main",
+        )
+        .expect("the ephemeral model uses nothing BigQuery refuses");
 
     let compiled = bigquery_compiler
         .compile_with_ephemerals(&model, "main", &resolver)

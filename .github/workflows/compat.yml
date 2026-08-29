@@ -41,6 +41,9 @@ jobs:
               - 'crates/smelt-runtime/**'
               - 'crates/smelt-cli/tests/*parity*'
               - 'crates/smelt-types/src/signatures.rs'
+              - 'crates/smelt-dialect/**'
+              - 'crates/smelt-oracle-testkit/**'
+              - 'crates/smelt-db/tests/dialect_audit/**'
               - 'crates/smelt-db/src/type_inference*/**'
               - 'crates/smelt-parser/src/**'
               - 'python/**'
@@ -303,6 +306,56 @@ jobs:
       - name: Cleanup Spark container
         if: always()
         run: docker rm -f spark-type-test
+
+  dialect-audit-spark:
+    name: Dialect Emission Audit (Spark legs)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Same gate as type-property-spark: nightly, explicitly labelled, or a
+    # push/PR touching the registry, the printer, or the audit itself.
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
+
+    env:
+      DUCKDB_LIB_DIR: /usr/local/lib
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-dialect-audit-spark-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Pull Spark Docker image (apache/spark:4.0.0)
+        run: docker pull apache/spark:4.0.0
+
+      - name: Start Spark container
+        run: |
+          docker run -d --name spark-dialect-audit apache/spark:4.0.0 tail -f /dev/null
+          echo "SPARK_CONTAINER_ID=spark-dialect-audit" >> $GITHUB_ENV
+
+      - name: Build smelt-db
+        run: cargo build -p smelt-db
+
+      - name: Run the dialect audit (DuckDB + Spark legs)
+        run: cargo test -p smelt-db --no-default-features --test dialect_audit
+        env:
+          SPARK_CONTAINER_ID: spark-dialect-audit
+
+      - name: Cleanup Spark container
+        if: always()
+        run: docker rm -f spark-dialect-audit
 
   spark-parity:
     name: Spark Parity Tests (Delta, Docker)

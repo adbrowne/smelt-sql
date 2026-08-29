@@ -392,7 +392,7 @@ pub fn build_model_diagnostics_response(
         .collect();
     let resolver = registry
         .get(&target)
-        .build_ephemeral_resolver(&ephemeral_models, &schema);
+        .build_ephemeral_resolver(&ephemeral_models, &schema)?;
 
     let unique_key: Vec<String> = config
         .get_incremental_with_metadata(name, model.metadata.as_deref())

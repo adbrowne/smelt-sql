@@ -18,7 +18,7 @@
 //! commonly-used SQL built-ins. Non-`Expr` sorts (TableExpr, AggExpr, …) remain
 //! deferred to later phases of the smelt-functions plan.
 
-use crate::{parse_type, DataType};
+use crate::{parse_type, DataType, DialectId};
 use smelt_parser::ast::{File as AstFile, Param as AstParam, SmeltDefine, SmeltExtern, TypeRef};
 use smelt_parser::TextRange;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -85,6 +85,136 @@ pub fn kind_ceiling(items: &[ExprKind]) -> ExprKind {
         }
     }
     max
+}
+
+/// How a built-in is spelled at a call site. Required so operators can be
+/// registry entries at all, and what lets the audit harness derive a probe from
+/// a signature instead of a hand-written table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum SyntaxForm {
+    /// `NAME(a, b)` — the default, and the only form on the callable-function surface.
+    #[default]
+    Call,
+    /// `a OP b` — `%`, `^`, `**`, `||`, `//`, `LIKE`, `ILIKE`, `GLOB`.
+    Infix,
+    /// `a OP` — `IS NULL`, `IS NOT NULL`.
+    Postfix,
+    /// `FROM UNNEST(a)` — a table function; not a scalar call position.
+    TableFn,
+    /// Dedicated syntax with no uniform shape — `CAST(x AS T)`, `a BETWEEN b AND c`,
+    /// `a IN (…)`, `EXISTS (…)`, interval add/sub.
+    Special,
+}
+
+/// The per-dialect verdict for one registry entry: how the built-in must be
+/// spelled so the backend computes what smelt's semantics say it computes.
+///
+/// `Native` is a **claim, not an assumption**. The audit's value leg exists to
+/// test it, and an untested `Native` is reported as *unverified* rather than as
+/// *passing*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Emission {
+    /// Same spelling, same semantics.
+    Native,
+    /// Same call shape, different name.
+    Rename(&'static str),
+    /// Structural rewrite: the printer owns the code, the registry owns the claim.
+    Rewrite(RewriteId),
+    /// Statement-level restructure: the backend offers this built-in only in
+    /// the opposite position from the one the call occupies, so no
+    /// expression-level substitution exists — the whole query block is
+    /// restructured around a synthesised CTE (`docs/specs/multi_backend.md`
+    /// §"Statement-level lowering"). The registry states *that* the position
+    /// needs restructuring and *which shape*; a pure planner (never the
+    /// printer) turns the claim into data, and admissibility over the
+    /// enclosing query block decides whether the restructure can be taken at
+    /// all.
+    Restructure(RestructureId),
+    /// The backend cannot express this. A diagnostic, never a silent pass-through.
+    Unsupported { reason: &'static str },
+}
+
+/// The SQL call-site context an emission verdict is stated for.
+///
+/// A built-in's support on a backend routinely differs between the positions
+/// it can appear in — GoogleSQL refuses `PERCENTILE_CONT` under a `GROUP BY`
+/// but accepts it with an `OVER` clause, while `MAX_BY` is the exact reverse
+/// — so a verdict is looked up by `(dialect, position)`, never by dialect
+/// alone. `Any` is a lookup wildcard for an entry whose verdict does not vary
+/// by position; it is never returned by a classifier that decides a call's
+/// actual position from its source CST — such a classifier always resolves
+/// to one of the other four variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Position {
+    /// Lookup wildcard, matching any call position. Never returned by a
+    /// position classifier — only ever used as a stated verdict key.
+    Any,
+    /// A row-wise expression: no `OVER` clause, and not itself an aggregate
+    /// call. A scalar call under a `GROUP BY` (e.g. applied to a grouping
+    /// key or in a `WHERE` clause) is still `Scalar` — the enclosing
+    /// statement's `GROUP BY` does not change a call's own position.
+    Scalar,
+    /// The call is itself an aggregate call, with no `OVER` clause.
+    Aggregate,
+    /// An `OVER` clause whose window covers the call's whole partition —
+    /// after resolving any named-window reference, no window `ORDER BY` and
+    /// no frame clause, or an explicit `BETWEEN UNBOUNDED PRECEDING AND
+    /// UNBOUNDED FOLLOWING` frame with no `EXCLUDE` clause.
+    WholePartitionWindow,
+    /// An `OVER` clause whose window is narrower than its whole partition —
+    /// includes the common `ORDER BY` with no explicit frame (whose SQL
+    /// default frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+    /// ROW`), any frame carrying `EXCLUDE`, and an unresolvable named-window
+    /// reference (refusing is the safe direction: it costs a diagnostic,
+    /// where guessing costs a wrong number).
+    Window,
+}
+
+/// A structural rewrite the printer implements. Enumerable by construction, so
+/// the set of rewrites is knowable without reading `printer.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RewriteId {
+    /// `MEDIAN(x)` → `PERCENTILE_CONT(x, 0.5)` in window position, an
+    /// `ARRAY_AGG`-indexing `CASE` in aggregate position. Position-dependent;
+    /// the registry says *that* it needs rewriting, the printer says *how*.
+    BigQueryMedian,
+    /// `a % b` → `MOD(a, b)`.
+    ModuloCall,
+    /// `a ^ b` / `a ** b` → `POWER(a, b)`. Needed wherever infix `^` means
+    /// bitwise XOR (GoogleSQL **and** Spark SQL) or `**` is unparseable.
+    PowerCall,
+    /// `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY x)` → `PERCENTILE_CONT(x,
+    /// f)` at a whole-partition window position — GoogleSQL's two-argument
+    /// analytic spelling, since `WITHIN GROUP` under an `OVER` clause is a
+    /// syntax error there (measured live 2026-08-27). The window itself is
+    /// left as-is; only the call's own spelling changes. A `DESC` sort key
+    /// inverts the fraction argument; a `NULLS FIRST`/`LAST` modifier the
+    /// analytic form cannot express is refused upstream by
+    /// `emission_check`, never reaching the printer
+    /// (`restructure::within_group_sort_key` is the shared reader for both
+    /// this rewrite and `RestructureId::AnalyticToCte`).
+    WithinGroupToAnalytic,
+}
+
+/// A statement-level restructure shape. Enumerable by construction, mirroring
+/// [`RewriteId`] — the set of shapes is knowable without reading the planner.
+///
+/// Correctness oracle: `docs/specs/multi_backend.md` §"Statement-level
+/// lowering".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum RestructureId {
+    /// An aggregate-only built-in reached with an `OVER` clause (GoogleSQL's
+    /// `MAX_BY`/`MIN_BY`/`APPROX_COUNT_DISTINCT`; DuckDB's and Spark's
+    /// ordered-set `PERCENTILE_CONT`/`PERCENTILE_DISC`). The source is bound
+    /// once, grouped by the call's partition keys, and joined back —
+    /// admissible only at `Position::WholePartitionWindow`.
+    WindowToCte,
+    /// An analytic-only built-in reached under `GROUP BY` (GoogleSQL's
+    /// `PERCENTILE_CONT`/`PERCENTILE_DISC`, which require an `OVER` clause
+    /// and reject `WITHIN GROUP` outright). The query's `FROM`/`WHERE` move
+    /// into a CTE that adds the value as an analytic column over the
+    /// grouping keys, read back through `ANY_VALUE`.
+    AnalyticToCte,
 }
 
 /// Constraint placed on the type parameter of a fragment sort (e.g. `Expr<T>`).
@@ -2722,19 +2852,17 @@ pub struct Signature {
     /// "derive from [`Signature::return_type`] at call time" — the common
     /// case for monomorphic signatures.
     ///
-    /// Phase 12: recording-only. Step 7+ will consume this via a CAST
-    /// emitter when `needs_cast_for(engine)` returns `true`.
+    /// emitter when `needs_cast_for` returns `true`.
     pub canonical_return: Option<DataType>,
-    /// Per-backend native return-type overrides. Keyed on lowercase
-    /// backend id (e.g. `"duckdb"`, `"spark"`). An entry here means
-    /// "this backend natively returns a type that differs from
-    /// [`Self::canonical_return`]" — Step 7+ emits a CAST at emit-time
+    /// Per-backend native return-type overrides. Keyed on [`DialectId`].
+    /// An entry here means "this backend natively returns a type that differs
+    /// from [`Self::canonical_return`]" — Step 7+ emits a CAST at emit-time
     /// to preserve the canonical type.
     ///
     /// Phase 12: recording-only. `HashMap::default()` on entries that
     /// need no override (the canonical type is also the native type on
     /// every backend).
-    pub engine_native: HashMap<String, DataType>,
+    pub engine_native: HashMap<DialectId, DataType>,
     /// Default [`ExprKind`] for a call to this signature when no `OVER (…)`
     /// clause is present (Phase 14, §16 #24).
     ///
@@ -2760,6 +2888,22 @@ pub struct Signature {
     /// on top of the generic "always nullable" default a registry-resolved
     /// call otherwise gets. See [`NullabilityPropagation`].
     pub nullability: NullabilityPropagation,
+    /// How this built-in is spelled at a call site (Phase 2, #171).
+    ///
+    /// Defaults to [`SyntaxForm::Call`]. Non-`Call` entries are operators,
+    /// predicates, table functions, and dedicated-syntax forms that have
+    /// registry entries for hover/completion but are not part of the
+    /// callable-function surface.
+    pub syntax_form: SyntaxForm,
+    /// Per-`(dialect, position)` emission verdicts for this entry.
+    ///
+    /// `&[]` means every dialect and position is `Native`. Use
+    /// [`Self::with_emission`] to populate and [`Self::emission_at`] to
+    /// query. Populated only for entries whose printer treatment differs
+    /// from plain name-pass-through on at least one `(dialect, position)`
+    /// pair. A verdict stated with [`Position::Any`] applies to every
+    /// position that has no more specific entry of its own.
+    pub emission: &'static [(DialectId, Position, Emission)],
 }
 
 /// Nullability-propagation policy for a registry-resolved call's result,
@@ -2847,6 +2991,8 @@ impl Signature {
             kind: ExprKind::Scalar,
             aliases: &[],
             nullability: NullabilityPropagation::None,
+            syntax_form: SyntaxForm::Call,
+            emission: &[],
         })
     }
 
@@ -2882,11 +3028,10 @@ impl Signature {
 
     /// Declare a per-backend native return-type override (Phase 12).
     ///
-    /// The `engine` key is lowercased on insert. Calling this multiple
-    /// times with different engines builds up the full override table.
-    pub fn with_engine_native(mut self, engine: &str, dt: DataType) -> Self {
-        self.engine_native
-            .insert(engine.trim().to_ascii_lowercase(), dt);
+    /// Calling this multiple times with different dialects builds up the full
+    /// override table.
+    pub fn with_engine_native(mut self, dialect: DialectId, dt: DataType) -> Self {
+        self.engine_native.insert(dialect, dt);
         self
     }
 
@@ -2900,22 +3045,65 @@ impl Signature {
         self
     }
 
+    /// Set the [`SyntaxForm`] for this signature (Phase 2, #171).
+    ///
+    /// Builder-style — used by the registry seed to mark operators, predicates,
+    /// table functions, and dedicated-syntax forms. Defaults to
+    /// [`SyntaxForm::Call`] if never called.
+    pub fn with_syntax_form(mut self, form: SyntaxForm) -> Self {
+        self.syntax_form = form;
+        self
+    }
+
+    /// Attach a per-`(dialect, position)` emission table to this signature.
+    ///
+    /// Builder-style — used by the registry seed to declare how each
+    /// `(dialect, position)` pair must spell or rewrite this entry. A pair
+    /// with no entry, direct or via [`Position::Any`], is implicitly
+    /// [`Emission::Native`].
+    pub fn with_emission(mut self, table: &'static [(DialectId, Position, Emission)]) -> Self {
+        self.emission = table;
+        self
+    }
+
+    /// The emission verdict for `dialect` at `position`.
+    ///
+    /// Lookup consults the exact `(dialect, position)` pair first, then
+    /// `(dialect, Position::Any)`, and stops — there is deliberately no
+    /// fallback *between* positions, and in particular none between the two
+    /// window positions (`WholePartitionWindow` and `Window`), because a
+    /// caller that decided a call's actual position is the only one
+    /// entitled to fall back to `Any`; a lookup that fell from one concrete
+    /// position to another would answer a different question than the one
+    /// asked. A pair with no entry at all is `Native`.
+    pub fn emission_at(&self, dialect: DialectId, position: Position) -> Emission {
+        self.emission
+            .iter()
+            .find(|(d, p, _)| *d == dialect && *p == position)
+            .or_else(|| {
+                self.emission
+                    .iter()
+                    .find(|(d, p, _)| *d == dialect && *p == Position::Any)
+            })
+            .map(|(_, _, e)| *e)
+            .unwrap_or(Emission::Native)
+    }
+
     /// Does the signature require a CAST back to the canonical return
-    /// type when executed on `engine`? (§16 #9 / Phase 12, recording
+    /// type when executed on `dialect`? (§16 #9 / Phase 12, recording
     /// only — Step 7+ consumes this.)
     ///
     /// Returns `false` when no canonical type is declared (the common
     /// case — the signature's own [`Self::return_type`] is already
-    /// canonical) or when the engine's native type equals the canonical
-    /// type. Returns `true` when the engine is listed in
+    /// canonical) or when the dialect's native type equals the canonical
+    /// type. Returns `true` when the dialect is listed in
     /// [`Self::engine_native`] with a type that differs from
     /// [`Self::canonical_return`].
-    pub fn needs_cast_for(&self, engine: &str) -> bool {
+    pub fn needs_cast_for(&self, dialect: DialectId) -> bool {
         let Some(canonical) = &self.canonical_return else {
             return false;
         };
-        let key = engine.trim().to_ascii_lowercase();
-        match self.engine_native.get(&key) {
+        match self.engine_native.get(&dialect) {
             Some(native) => native != canonical,
             None => false,
         }
@@ -3824,7 +4012,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         )
         .with_canonical_return(DataType::BigInt)
         .with_engine_native(
-            "duckdb",
+            DialectId::DuckDb,
             DataType::Decimal {
                 precision: 38,
                 scale: 0,
@@ -4095,14 +4283,24 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         })],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
     ));
-    insert(Signature::new(
-        "NOW",
-        vec![],
-        vec![],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: true,
-        })),
-    ));
+    insert(
+        Signature::new(
+            "NOW",
+            vec![],
+            vec![],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: true,
+            })),
+        )
+        .with_emission(&[
+            // GoogleSQL has no `now()`; verified live 2026-08-24.
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("CURRENT_TIMESTAMP"),
+            ),
+        ]),
+    );
     insert(Signature::new(
         "CURRENT_DATE",
         vec![],
@@ -4136,7 +4334,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T"), concrete(DataType::Text)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // GoogleSQL spells the separator-taking string aggregate `STRING_AGG`.
+            // Verified live 2026-08-24: `STRING_AGG(x, ',')` -> STRING.
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("STRING_AGG"),
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4157,7 +4364,55 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T")],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // GoogleSQL has no `MEDIAN`; the printer lowers it to an exact
+            // form per position (`printer.rs::print_bigquery_median`). The
+            // aggregate and whole-partition-window forms are both exact
+            // lowerings. A running `MEDIAN(x) OVER (PARTITION BY g ORDER BY
+            // t)` has no exact GoogleSQL form — `PERCENTILE_CONT` forbids a
+            // window `ORDER BY` — and is refused
+            // (`docs/specs/multi_backend.md` §"Exact-median lowering").
+            (
+                DialectId::BigQuery,
+                Position::Aggregate,
+                Emission::Rewrite(RewriteId::BigQueryMedian),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Rewrite(RewriteId::BigQueryMedian),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "GoogleSQL's PERCENTILE_CONT lowering of MEDIAN forbids a \
+                             window ORDER BY; only a window covering the whole partition \
+                             has an exact GoogleSQL form",
+                },
+            ),
+            // DuckDB has `MEDIAN` natively in every position (no entry
+            // needed — a pair with no entry is `Native`). Spark's `MEDIAN`
+            // is an ordered-set aggregate with no window form, so it follows
+            // `PERCENTILE_CONT`/`PERCENTILE_DISC`: a whole-partition window
+            // restructures around a grouped CTE, and a running window is
+            // refused.
+            (
+                DialectId::SparkSql,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::SparkSql,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "Spark has the ordered-set aggregate but no running-window \
+                             form of it; only a window covering the whole partition can be \
+                             restructured around a grouped CTE",
+                },
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4220,7 +4475,19 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![concrete(DataType::Boolean)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("EVERY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_AND"),
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4229,7 +4496,15 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![concrete(DataType::Boolean)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (DialectId::SparkSql, Position::Any, Emission::Rename("SOME")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_OR"),
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4279,7 +4554,43 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Var("T".into()),
         )
         .with_kind(ExprKind::Agg)
-        .with_aliases(&["MAX_BY"]),
+        .with_aliases(&["MAX_BY"])
+        .with_emission(&[
+            // Both spell it `MAX_BY`. Verified live 2026-08-24 on Spark 4.0.0 and
+            // BigQuery: `MAX_BY(x, y)` resolves on each. Spark accepts `MAX_BY`
+            // in every position, so it stays a single `Any` entry.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("MAX_BY"),
+            ),
+            // BigQuery's `MAX_BY` has no analytic form at all — refused even
+            // with a partition-only `OVER` clause (measured live 2026-08-27).
+            // Aggregate position falls through the `Any` entry below to
+            // `Rename("MAX_BY")`; a whole-partition window restructures
+            // around a grouped CTE, and a running window is refused, because
+            // the lowering computes one value per partition
+            // (`docs/specs/multi_backend.md` §"Statement-level lowering").
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("MAX_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's MAX_BY has no analytic form, even over a \
+                             partition-only window; only a window covering the whole \
+                             partition can be restructured around a grouped CTE",
+                },
+            ),
+        ]),
     );
     // arg_min(value, key) → value: the order-monotone-overwrite family's
     // minimum-ordering counterpart to `ARG_MAX`, aliased `MIN_BY`.
@@ -4291,7 +4602,37 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             TypeExpr::Var("T".into()),
         )
         .with_kind(ExprKind::Agg)
-        .with_aliases(&["MIN_BY"]),
+        .with_aliases(&["MIN_BY"])
+        .with_emission(&[
+            // Both spell it `MIN_BY`. Verified live 2026-08-24. Spark accepts
+            // `MIN_BY` in every position, so it stays a single `Any` entry.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("MIN_BY"),
+            ),
+            // Same asymmetry as `ARG_MAX`/`MAX_BY`: BigQuery's `MIN_BY` has no
+            // analytic form at all.
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("MIN_BY"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's MIN_BY has no analytic form, even over a \
+                             partition-only window; only a window covering the whole \
+                             partition can be restructured around a grouped CTE",
+                },
+            ),
+        ]),
     );
     insert(
         Signature::new(
@@ -4300,7 +4641,32 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![SigParam::Concrete(TypeConstraint::Any)],
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // BigQuery's `APPROX_COUNT_DISTINCT` is a plain aggregate with no
+            // analytic form. GoogleSQL's own dry run *accepts* the analytic
+            // spelling — `APPROX_COUNT_DISTINCT(x) OVER (PARTITION BY g)`
+            // parses and dry-runs cleanly — and only execution refuses it
+            // (measured live 2026-08-27); a schema/dry-run probe alone
+            // cannot see this gap, only a leg that actually executes.
+            // Aggregate position is unaffected — it's already `Native` — a
+            // whole-partition window restructures around a grouped CTE, and
+            // a running window is refused.
+            (
+                DialectId::BigQuery,
+                Position::WholePartitionWindow,
+                Emission::Restructure(RestructureId::WindowToCte),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Window,
+                Emission::Unsupported {
+                    reason: "BigQuery's APPROX_COUNT_DISTINCT has no analytic form, even \
+                             over a partition-only window; only a window covering the \
+                             whole partition can be restructured around a grouped CTE",
+                },
+            ),
+        ]),
     );
 
     // ─── Phase 50: Extended window functions ─────────────────────────────────
@@ -4438,12 +4804,23 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
     ));
-    insert(Signature::new(
-        "STRPOS",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
-    ));
+    insert(
+        Signature::new(
+            "STRPOS",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        )
+        .with_emission(&[
+            // Spark spells it `INSTR`, with the same (haystack, needle) argument order.
+            // Verified live 2026-08-24: `instr('abc','b')` -> 2.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("INSTR"),
+            ),
+        ]),
+    );
     insert(Signature::new(
         "LEFT",
         vec![],
@@ -4561,43 +4938,66 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         // family — YEAR/MONTH/DAY/… — all return BigInt).
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
-    insert(Signature::new(
-        "DATE_ADD",
-        vec![],
-        vec![concrete(DataType::Date), concrete(DataType::Interval)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
-    insert(Signature::new(
-        "DATE_SUB",
-        vec![],
-        vec![concrete(DataType::Date), concrete(DataType::Interval)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
-    insert(Signature::new(
-        "MAKE_DATE",
-        vec![],
-        vec![
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-        ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
-    ));
-    insert(Signature::new(
-        "MAKE_TIMESTAMP",
-        vec![],
-        vec![
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::BigInt),
-            concrete(DataType::Double),
-        ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
-            with_timezone: false,
-        })),
-    ));
+    insert(
+        Signature::new(
+            "DATE_ADD",
+            vec![],
+            vec![concrete(DataType::Date), concrete(DataType::Interval)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "DATE_SUB",
+            vec![],
+            vec![concrete(DataType::Date), concrete(DataType::Interval)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "MAKE_DATE",
+            vec![],
+            vec![
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Date)),
+        )
+        .with_emission(&[
+            // GoogleSQL's three-argument `DATE(y, m, d)` is the same constructor.
+            // Verified live 2026-08-24.
+            (DialectId::BigQuery, Position::Any, Emission::Rename("DATE")),
+        ]),
+    );
+    insert(
+        Signature::new(
+            "MAKE_TIMESTAMP",
+            vec![],
+            vec![
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::BigInt),
+                concrete(DataType::Double),
+            ],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+                with_timezone: false,
+            })),
+        )
+        .with_emission(&[
+            // GoogleSQL's `DATETIME(y, m, d, h, mi, s)`. Verified live 2026-08-24.
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("DATETIME"),
+            ),
+        ]),
+    );
     insert(Signature::new(
         "AGE",
         vec![],
@@ -4636,14 +5036,7 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     };
 
     // Extended statistical / distribution aggregates → Double.
-    for name in [
-        "CORR",
-        "COVAR_POP",
-        "COVAR_SAMP",
-        "REGR_SLOPE",
-        "PERCENTILE_CONT",
-        "PERCENTILE_DISC",
-    ] {
+    for name in ["CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE"] {
         insert(
             Signature::new(
                 name,
@@ -4654,6 +5047,95 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             .with_kind(ExprKind::Agg),
         );
     }
+
+    // Deliberately NOT renamed to DuckDB's `quantile_cont`/`quantile_disc`.
+    // DuckDB has both spellings with *different shapes*: `percentile_disc(f)
+    // WITHIN GROUP (ORDER BY x)` is the ordered-set aggregate, and
+    // `quantile_disc(x, f)` is a plain two-argument aggregate. A blanket rename
+    // turns the first into a parser error ("Unknown ordered aggregate
+    // QUANTILE_DISC") — caught by `proptests::type_conformance_tests`, which
+    // generates the WITHIN GROUP form. Closing the BigQuery gap here needs a
+    // shape-aware rewrite, not a rename.
+    for name in ["PERCENTILE_CONT", "PERCENTILE_DISC"] {
+        insert(
+            Signature::new(
+                name,
+                vec![],
+                any_args(),
+                TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+            )
+            .with_kind(ExprKind::Agg)
+            .with_emission(&[
+                // DuckDB and Spark have the ordered-set form only as an
+                // aggregate — no window form — so a whole-partition window
+                // call restructures around a synthesised CTE
+                // (`RestructureId::WindowToCte`); a running window has no
+                // correct CTE form and is refused
+                // (`docs/specs/multi_backend.md` §"Statement-level
+                // lowering"). The two window positions are stated together —
+                // lookup never falls between them.
+                (
+                    DialectId::DuckDb,
+                    Position::WholePartitionWindow,
+                    Emission::Restructure(RestructureId::WindowToCte),
+                ),
+                (
+                    DialectId::DuckDb,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "DuckDB has the ordered-set aggregate but no running-window \
+                                 form of it; only a window covering the whole partition can be \
+                                 restructured around a grouped CTE",
+                    },
+                ),
+                (
+                    DialectId::SparkSql,
+                    Position::WholePartitionWindow,
+                    Emission::Restructure(RestructureId::WindowToCte),
+                ),
+                (
+                    DialectId::SparkSql,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "Spark has the ordered-set aggregate but no running-window \
+                                 form of it; only a window covering the whole partition can be \
+                                 restructured around a grouped CTE",
+                    },
+                ),
+                // GoogleSQL requires an `OVER` clause and rejects `WITHIN
+                // GROUP` outright, so a call under `GROUP BY` restructures
+                // the other way: the `FROM`/`WHERE` move into a CTE that
+                // computes the value as an analytic column over the grouping
+                // keys (`RestructureId::AnalyticToCte`).
+                (
+                    DialectId::BigQuery,
+                    Position::Aggregate,
+                    Emission::Restructure(RestructureId::AnalyticToCte),
+                ),
+                // GoogleSQL accepts a partition-only `OVER` clause natively,
+                // but only in its two-argument analytic spelling — `WITHIN
+                // GROUP` under an `OVER` clause is a syntax error there
+                // (measured live 2026-08-27). The whole-partition window is
+                // rewritten to that spelling in place; a running window
+                // still forbids a window `ORDER BY` and is refused rather
+                // than lowered.
+                (
+                    DialectId::BigQuery,
+                    Position::WholePartitionWindow,
+                    Emission::Rewrite(RewriteId::WithinGroupToAnalytic),
+                ),
+                (
+                    DialectId::BigQuery,
+                    Position::Window,
+                    Emission::Unsupported {
+                        reason: "GoogleSQL's PERCENTILE_CONT/PERCENTILE_DISC forbid a \
+                                 window ORDER BY; only a window covering the whole \
+                                 partition is accepted",
+                    },
+                ),
+            ]),
+        );
+    }
     // Boolean aggregate.
     insert(
         Signature::new(
@@ -4662,7 +5144,19 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("BOOL_AND"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("LOGICAL_AND"),
+            ),
+        ]),
     );
     // Text-returning aggregate.
     insert(
@@ -4672,7 +5166,15 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             any_args(),
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_emission(&[
+            // GoogleSQL spells it `STRING_AGG`. Verified live 2026-08-24.
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("STRING_AGG"),
+            ),
+        ]),
     );
     // First-argument identity aggregates (typing stays in the exception list).
     for name in ["FIRST", "LAST", "MODE"] {
@@ -4687,10 +5189,39 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         );
     }
 
+    // Lifted out of the loop below so each can carry its own emission verdict,
+    // both verified live on 2026-08-24.
+    insert(
+        Signature::new(
+            "RANDOM",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        // GoogleSQL spells it `RAND`.
+        .with_emission(&[(DialectId::BigQuery, Position::Any, Emission::Rename("RAND"))]),
+    );
+    insert(
+        Signature::new(
+            "TRUNCATE",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        )
+        // Neither DuckDB nor GoogleSQL has `truncate`; both spell the numeric
+        // truncation `TRUNC`.
+        .with_emission(&[
+            (DialectId::DuckDb, Position::Any, Emission::Rename("TRUNC")),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("TRUNC"),
+            ),
+        ]),
+    );
+
     // Extended math / trig scalars → Double.
-    for name in [
-        "ACOS", "ASIN", "POW", "CEILING", "RANDOM", "TRUNC", "TRUNCATE",
-    ] {
+    for name in ["ACOS", "ASIN", "POW", "CEILING", "TRUNC"] {
         insert(Signature::new(
             name,
             vec![],
@@ -4731,12 +5262,18 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ));
     }
     // Temporal constructors.
-    insert(Signature::new(
-        "MAKE_TIME",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Time)),
-    ));
+    insert(
+        Signature::new(
+            "MAKE_TIME",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Time)),
+        )
+        .with_emission(&[
+            // GoogleSQL's `TIME(h, m, s)`. Verified live 2026-08-24.
+            (DialectId::BigQuery, Position::Any, Emission::Rename("TIME")),
+        ]),
+    );
     insert(Signature::new(
         "MAKE_TIMESTAMPTZ",
         vec![],
@@ -4756,16 +5293,6 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ("JSON_OBJECT", &["JSON_BUILD_OBJECT"]),
         ("JSON_ARRAY", &["JSON_BUILD_ARRAY"]),
         ("TO_JSON", &["TO_JSONB", "ROW_TO_JSON"]),
-        ("JSON_EXTRACT", &["JSON_EXTRACT_PATH"]),
-        (
-            "JSON_EXTRACT_TEXT",
-            &[
-                "JSON_EXTRACT_STRING",
-                "JSON_EXTRACT_PATH_TEXT",
-                "GET_JSON_OBJECT",
-                "JSON_VALUE",
-            ],
-        ),
     ];
     for (name, aliases) in json_text_aliases {
         insert(
@@ -4778,6 +5305,56 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             .with_aliases(aliases),
         );
     }
+    // Lifted out of the alias loop above so each can carry its own emission
+    // verdict. The alias lists already record what the other engines *call*
+    // these; the emission rows are what smelt now *emits*, so resolution and
+    // emission finally agree. All verified live on 2026-08-24.
+    insert(
+        Signature::new(
+            "JSON_EXTRACT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&["JSON_EXTRACT_PATH"])
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Rename("GET_JSON_OBJECT"),
+        )]),
+    );
+    insert(
+        Signature::new(
+            "JSON_EXTRACT_TEXT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_aliases(&[
+            "JSON_EXTRACT_STRING",
+            "JSON_EXTRACT_PATH_TEXT",
+            "GET_JSON_OBJECT",
+            "JSON_VALUE",
+        ])
+        .with_emission(&[
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("JSON_EXTRACT_STRING"),
+            ),
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Rename("GET_JSON_OBJECT"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("JSON_VALUE"),
+            ),
+        ]),
+    );
+
     insert(Signature::new(
         "JSON_ARRAY_LENGTH",
         vec![],
@@ -4794,7 +5371,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             )))),
         )
         // DuckDB alias.
-        .with_aliases(&["JSON_KEYS"]),
+        .with_aliases(&["JSON_KEYS"])
+        .with_emission(&[
+            // DuckDB spells it `json_keys` — already carried as an alias on this entry,
+            // so resolution and emission now agree. Verified live 2026-08-24.
+            (
+                DialectId::DuckDb,
+                Position::Any,
+                Emission::Rename("JSON_KEYS"),
+            ),
+        ]),
     );
     insert(Signature::new(
         "JSON_CONTAINS",
@@ -4809,62 +5395,212 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
     // (they use dedicated SQL syntax), but having registry entries enables
     // hover, completion, and future lint rules.
 
-    insert(Signature::new(
-        "LIKE",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "ILIKE",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "GLOB",
-        vec![],
-        vec![concrete(DataType::Text), concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IS_NULL",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IS_NOT_NULL",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "BETWEEN",
-        vec![tp("T", TypeConstraint::Ordered)],
-        vec![var("T"), var("T"), var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "IN",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T"), var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "EXISTS",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
-    ));
-    insert(Signature::new(
-        "CAST",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T")],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
-            crate::UnknownReason::Dynamic,
-        ))),
-    ));
+    insert(
+        Signature::new(
+            "LIKE",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "ILIKE",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "GLOB",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+    insert(
+        Signature::new(
+            "IS_NULL",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Postfix),
+    );
+    insert(
+        Signature::new(
+            "IS_NOT_NULL",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Postfix),
+    );
+    insert(
+        Signature::new(
+            "BETWEEN",
+            vec![tp("T", TypeConstraint::Ordered)],
+            vec![var("T"), var("T"), var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "IN",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T"), var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "EXISTS",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+    insert(
+        Signature::new(
+            "CAST",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Unknown(
+                crate::UnknownReason::Dynamic,
+            ))),
+        )
+        .with_syntax_form(SyntaxForm::Special),
+    );
+
+    // ─── Infix operators.
+    //
+    // These are BINARY_EXPR in the CST, not FUNCTION_CALL, and were absent from
+    // the registry entirely. They are registered so per-dialect emission has one
+    // owner and so the audit enumeration cannot walk past them — `^` is the
+    // silent-divergence case issue #171 was filed about.
+    for op in ["%", "^", "**"] {
+        let emission: &'static [(DialectId, Position, Emission)] = match op {
+            "%" => &[(
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rewrite(RewriteId::ModuloCall),
+            )],
+            "^" | "**" => &[
+                (
+                    DialectId::SparkSql,
+                    Position::Any,
+                    Emission::Rewrite(RewriteId::PowerCall),
+                ),
+                (
+                    DialectId::BigQuery,
+                    Position::Any,
+                    Emission::Rewrite(RewriteId::PowerCall),
+                ),
+            ],
+            _ => &[],
+        };
+        insert(
+            Signature::new(
+                op,
+                vec![tp("T", TypeConstraint::Numeric)],
+                vec![var("T"), var("T")],
+                TypeExpr::Var("T".into()),
+            )
+            .with_syntax_form(SyntaxForm::Infix)
+            .with_emission(emission),
+        );
+    }
+    insert(
+        Signature::new(
+            "//",
+            vec![tp("T", TypeConstraint::Numeric)],
+            vec![var("T"), var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::Infix)
+        .with_emission(&[
+            // DuckDB's `//` truncates toward zero for integer operands and
+            // degrades to plain division for floats; the printer carries no
+            // operand types with which to tell those cases apart, so no
+            // substitution is safe. Declaring it unsupported turns an engine-side
+            // syntax error into a compile-time diagnostic.
+            (
+                DialectId::SparkSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "Spark SQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+            (
+                DialectId::PostgreSql,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "PostgreSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Unsupported {
+                    reason: "GoogleSQL has no infix `//`; use a typed FLOOR(a / b) or DIV(a, b)",
+                },
+            ),
+        ]),
+    );
+    insert(
+        Signature::new(
+            "||",
+            vec![],
+            vec![concrete(DataType::Text), concrete(DataType::Text)],
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_syntax_form(SyntaxForm::Infix),
+    );
+
+    // ─── Table functions.
+    insert(
+        Signature::new(
+            "EXPLODE",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::TableFn)
+        .with_emission(&[
+            (DialectId::DuckDb, Position::Any, Emission::Rename("UNNEST")),
+            (
+                DialectId::PostgreSql,
+                Position::Any,
+                Emission::Rename("UNNEST"),
+            ),
+            (
+                DialectId::BigQuery,
+                Position::Any,
+                Emission::Rename("UNNEST"),
+            ),
+        ]),
+    );
+    insert(
+        Signature::new(
+            "UNNEST",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        .with_syntax_form(SyntaxForm::TableFn)
+        .with_emission(&[(
+            DialectId::SparkSql,
+            Position::Any,
+            Emission::Rename("EXPLODE"),
+        )]),
+    );
 
     m
 });
@@ -5780,31 +6516,29 @@ mod tests {
     #[test]
     fn cast_flag_set_when_canonical_differs_from_engine() {
         // Phase 12 TDD test 3 (§16 #9): `SUM` is seeded with
-        // canonical = BigInt and engine_native[duckdb] = DECIMAL(38,0)
+        // canonical = BigInt and engine_native[DuckDb] = DECIMAL(38,0)
         // — the smelt stand-in for DuckDB's HUGEINT return. The
-        // `needs_cast_for("duckdb")` hook must flag divergence so
+        // `needs_cast_for(DialectId::DuckDb)` hook must flag divergence so
         // Step 7+ can emit a CAST back to BigInt.
         let sum = BuiltinRegistry::resolve("SUM").expect("SUM seeded");
         assert_eq!(sum.canonical_return, Some(DataType::BigInt));
         assert_eq!(
-            sum.engine_native.get("duckdb"),
+            sum.engine_native.get(&DialectId::DuckDb),
             Some(&DataType::Decimal {
                 precision: 38,
                 scale: 0,
             })
         );
         assert!(
-            sum.needs_cast_for("duckdb"),
+            sum.needs_cast_for(DialectId::DuckDb),
             "SUM on DuckDB returns HUGEINT (DECIMAL(38,0)) but canonical is BigInt \
              — needs_cast_for must flag the divergence"
         );
-        // Engines that aren't listed default to "native == canonical".
+        // Dialects that aren't listed default to "native == canonical".
         assert!(
-            !sum.needs_cast_for("spark"),
-            "No override for spark → canonical matches native → no cast needed"
+            !sum.needs_cast_for(DialectId::SparkSql),
+            "No override for SparkSql → canonical matches native → no cast needed"
         );
-        // Key lookup is case-insensitive / trimmed.
-        assert!(sum.needs_cast_for("  DuckDB  "));
     }
 
     #[test]
@@ -5814,9 +6548,9 @@ mod tests {
         // return `false` unconditionally for those.
         let lower = BuiltinRegistry::resolve("LOWER").expect("LOWER seeded");
         assert!(lower.canonical_return.is_none());
-        assert!(!lower.needs_cast_for("duckdb"));
-        assert!(!lower.needs_cast_for("spark"));
-        assert!(!lower.needs_cast_for(""));
+        assert!(!lower.needs_cast_for(DialectId::DuckDb));
+        assert!(!lower.needs_cast_for(DialectId::SparkSql));
+        assert!(!lower.needs_cast_for(DialectId::PostgreSql));
     }
 
     #[test]
@@ -5832,8 +6566,8 @@ mod tests {
             TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
         )
         .with_canonical_return(DataType::Integer)
-        .with_engine_native("duckdb", DataType::Integer);
-        assert!(!sig.needs_cast_for("duckdb"));
+        .with_engine_native(DialectId::DuckDb, DataType::Integer);
+        assert!(!sig.needs_cast_for(DialectId::DuckDb));
     }
 
     #[test]

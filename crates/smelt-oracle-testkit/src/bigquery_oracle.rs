@@ -15,7 +15,8 @@
 
 #![allow(dead_code)]
 
-use super::duckdb_oracle::TypeOracle;
+use crate::duckdb_oracle::TypeOracle;
+use crate::value::{Cell, ValueOracle};
 use serde::Deserialize;
 use smelt_types::DataType;
 use std::io::{BufRead, BufReader, Write};
@@ -42,6 +43,26 @@ pub struct BqField {
 struct BqReply {
     #[serde(default)]
     columns: Option<Vec<BqField>>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+/// One tagged cell of an `exec` reply.
+///
+/// Every value crosses the protocol as a *string*: a JSON number would round
+/// an INT64 past 2^53 and any NUMERIC, and a silently rounded value read as
+/// agreement is the failure the value leg exists to catch.
+#[derive(Debug, Deserialize)]
+struct BqCell {
+    t: String,
+    #[serde(default)]
+    v: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BqRowsReply {
+    #[serde(default)]
+    rows: Option<Vec<Vec<BqCell>>>,
     #[serde(default)]
     error: Option<String>,
 }
@@ -116,21 +137,102 @@ impl Drop for BigQueryOracle {
 
 impl TypeOracle for BigQueryOracle {
     fn query_types(&self, sql: &str) -> Result<Vec<(String, DataType)>, String> {
-        let mut process = self.inner.lock().map_err(|e| format!("lock: {e}"))?;
-
+        // No lock here: `round_trip` takes it. Taking it twice would deadlock.
         let request = serde_json::json!({ "sql": sql }).to_string();
+        parse_reply(&self.round_trip(&request)?)
+    }
+}
+
+impl BigQueryOracle {
+    /// Send one protocol request line and read back the single reply line.
+    fn round_trip(&self, request: &str) -> Result<String, String> {
+        let mut process = self.inner.lock().map_err(|e| format!("lock: {e}"))?;
         writeln!(process.stdin, "{request}").map_err(|e| format!("write request: {e}"))?;
         process.stdin.flush().map_err(|e| format!("flush: {e}"))?;
 
         let mut line = String::new();
         match process.reader.read_line(&mut line) {
-            Ok(0) => return Err("bigquery type oracle exited".into()),
-            Ok(_) => {}
-            Err(e) => return Err(format!("read reply: {e}")),
+            Ok(0) => Err("bigquery type oracle exited".into()),
+            Ok(_) => Ok(line),
+            Err(e) => Err(format!("read reply: {e}")),
         }
-
-        parse_reply(&line)
     }
+}
+
+impl ValueOracle for BigQueryOracle {
+    /// Really execute `sql` — this bills the warehouse, unlike `query_types`'s
+    /// dry run. Only the value leg of the audit calls it.
+    fn execute_rows(&self, sql: &str) -> Result<Vec<Vec<Cell>>, String> {
+        let request = serde_json::json!({ "exec": sql }).to_string();
+        let line = self.round_trip(&request)?;
+        parse_rows_reply(&line)
+    }
+}
+
+/// Decode one `exec` reply line into typed cells.
+fn parse_rows_reply(line: &str) -> Result<Vec<Vec<Cell>>, String> {
+    let reply: BqRowsReply =
+        serde_json::from_str(line.trim()).map_err(|e| format!("bad reply {line:?}: {e}"))?;
+    if let Some(error) = reply.error {
+        return Err(error);
+    }
+    let rows = reply
+        .rows
+        .ok_or_else(|| format!("reply had neither rows nor error: {line:?}"))?;
+    rows.iter()
+        .map(|row| row.iter().map(decode_tagged_cell).collect())
+        .collect()
+}
+
+/// Decode one `{"t": …, "v": …}` pair.
+///
+/// An unrecognised tag is an error, not a `Text` fallback: the protocol is
+/// ours on both ends, so a tag we do not know means the two halves have
+/// drifted, and quietly stringifying it would hide that behind a value
+/// divergence report.
+fn decode_tagged_cell(cell: &BqCell) -> Result<Cell, String> {
+    if cell.t == "null" {
+        return Ok(Cell::Null);
+    }
+    let v = cell
+        .v
+        .as_deref()
+        .ok_or_else(|| format!("tagged cell `{}` carried no value", cell.t))?;
+    let parsed = |e: &str| format!("cell tagged `{}` holds {v:?}, which is not {e}", cell.t);
+    match cell.t.as_str() {
+        "int" => v
+            .parse::<i128>()
+            .map(Cell::Int)
+            .map_err(|_| parsed("an integer")),
+        "float" => v
+            .parse::<f64>()
+            .map(Cell::Float)
+            .map_err(|_| parsed("a float")),
+        "bool" => match v {
+            "true" => Ok(Cell::Bool(true)),
+            "false" => Ok(Cell::Bool(false)),
+            _ => Err(parsed("a boolean")),
+        },
+        "text" => Ok(Cell::Text(v.to_string())),
+        "decimal" => decode_decimal(v).ok_or_else(|| parsed("a decimal")),
+        "date" => Ok(Cell::Date(v.to_string())),
+        "timestamp" => Ok(Cell::Timestamp(v.to_string())),
+        other => Err(format!(
+            "unknown cell tag `{other}` — the Rust and Python halves of the protocol have drifted"
+        )),
+    }
+}
+
+/// Parse a plain decimal rendering into an unscaled/scale pair.
+fn decode_decimal(text: &str) -> Option<Cell> {
+    let (int_part, frac_part) = text.split_once('.').unwrap_or((text, ""));
+    if frac_part.chars().any(|c| !c.is_ascii_digit()) {
+        return None;
+    }
+    Some(Cell::Decimal {
+        unscaled: format!("{int_part}{frac_part}").parse::<i128>().ok()?,
+        scale: frac_part.len() as u32,
+    })
 }
 
 /// Turn one protocol reply line into columns, or into the warehouse's refusal.
@@ -373,5 +475,65 @@ mod tests {
         let line = r#"{"error":"400 Function not found: nosuchfunction"}"#;
         let err = parse_reply(line).unwrap_err();
         assert!(err.contains("nosuchfunction"));
+    }
+
+    #[test]
+    fn tagged_cells_decode_to_typed_cells() {
+        let reply = r#"{"rows": [[{"t":"int","v":"5"},{"t":"null"},{"t":"decimal","v":"1.50"},{"t":"bool","v":"true"},{"t":"text","v":"hi"}]]}"#;
+        let rows = parse_rows_reply(reply).expect("decode");
+        assert_eq!(
+            rows,
+            vec![vec![
+                Cell::Int(5),
+                Cell::Null,
+                Cell::Decimal {
+                    unscaled: 150,
+                    scale: 2
+                },
+                Cell::Bool(true),
+                Cell::Text("hi".into()),
+            ]]
+        );
+    }
+
+    /// The whole reason values cross as strings: a JSON number would round
+    /// this to 9007199254740992.
+    #[test]
+    fn an_int64_past_the_double_range_survives_the_protocol() {
+        let reply = r#"{"rows": [[{"t":"int","v":"9007199254740993"}]]}"#;
+        let rows = parse_rows_reply(reply).expect("decode");
+        assert_eq!(rows[0][0], Cell::Int(9_007_199_254_740_993));
+    }
+
+    #[test]
+    fn a_refusal_is_an_error_not_zero_rows() {
+        let err = parse_rows_reply(r#"{"error": "400 POST ... Syntax error"}"#)
+            .expect_err("a refusal must not read as an empty result set");
+        assert!(err.contains("Syntax error"));
+    }
+
+    /// An unknown tag means the Rust and Python halves have drifted. Falling
+    /// back to `Text` would surface that as a value divergence on some
+    /// unrelated function instead.
+    #[test]
+    fn an_unknown_tag_is_a_protocol_error() {
+        let err = parse_rows_reply(r#"{"rows": [[{"t":"geography","v":"POINT(0 0)"}]]}"#)
+            .expect_err("unknown tags must fail loud");
+        assert!(err.contains("drifted"), "{err}");
+    }
+
+    /// Live leg. Skips green when no BigQuery token is exported.
+    #[test]
+    fn the_bigquery_value_oracle_round_trips_against_a_live_warehouse() {
+        let Some(oracle) = BigQueryOracle::from_env() else {
+            eprintln!("BigQuery not configured — skipping live BigQuery value leg");
+            return;
+        };
+        let rows = oracle.execute_rows("SELECT 2 + 3 AS s").expect("execute");
+        assert_eq!(rows, vec![vec![Cell::Int(5)]]);
+        let rows = oracle
+            .execute_rows("SELECT CAST(NULL AS INT64) AS n")
+            .expect("execute");
+        assert_eq!(rows, vec![vec![Cell::Null]]);
     }
 }

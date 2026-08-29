@@ -38,10 +38,15 @@ These rules constrain how the codebase evolves; the spec is the authoritative so
   - **External corpus ledger** (`cargo test -p smelt-parser-compat --test external_corpus`) — a vendored DuckDB/PostgreSQL SELECT corpus runs the same parse-or-registered check against a shrink-only failure ledger.
   - **Type-oracle strictness** (`cargo test -p smelt-db --test type_property_tests`) — inferred types are compared to the engine's schema exactly (integer width and Decimal precision/scale included). The only blanket compatibility rule is the named `text_varchar_compat` string-family leniency; every other tolerated difference is an explicit `divergences.rs` entry, and every `Unknown` inference must match a `known_unknowns.rs` entry rather than being silently skipped. Cast-wrapped decimal correctness is separately asserted with zero divergence by `cargo test -p smelt-db --test proptests` (`type_conformance_tests`).
   Authoritative spec: [`docs/specs/architecture.md` §"Constraints & Invariants"](docs/specs/architecture.md#constraints--invariants) item 13.
-- **Function-registry single ownership** — a built-in SQL function's name, classification (aggregate/window/scalar), and registry-driven type all derive from one table (`BuiltinRegistry` in `crates/smelt-types/src/signatures.rs`), never lowered without a reviewer sign-off note:
+- **Function-registry single ownership** — a built-in SQL function's name, classification (aggregate/window/scalar), registry-driven type, **and per-dialect, per-position emission** all derive from one table (`BuiltinRegistry` in `crates/smelt-types/src/signatures.rs`), never lowered without a reviewer sign-off note. Emission verdicts are keyed on `(DialectId, Position)` — `Any`/`Scalar`/`Aggregate`/`WholePartitionWindow`/`Window` — because a backend's support for a built-in routinely differs between positions; there is no position-blind lookup:
   - **Consistency gate** (`cargo test -p smelt-db --test integration registry_consistency::every_recognized_function_is_registry_backed`) — every name `SqlFunction` recognises resolves in the registry with a matching classification, and every non-operator registry entry is a recognised function; a name in one list but not the other fails with the missing side named.
   - **Migration ratchet** (`cargo test -p smelt-db --test integration registry_consistency::legacy_match_ratchet`) — the count of functions still typed by the hand-written `match` in `type_inference/function_call.rs` (not registry-first via `try_registry_inference`) ratchets down only (`.claude/registry-migration-baseline.txt`).
-  Authoritative spec: [`docs/specs/architecture.md` §"Constraints & Invariants"](docs/specs/architecture.md#constraints--invariants) item 14.
+  - **Emission-ownership gate** (`cargo test -p smelt-dialect --test emission_ownership`) — `printer.rs` holds no name-matched function spelling, no branch on a concrete `SqlDialect` variant, and no derivation of a call's *position* (that is the compile path's question to the registry, not the printer's to infer). A per-dialect spelling is `Signature::emission` data; a capability-shaped difference is a `BackendCapabilities` flag. Every `RewriteId` **and** `RestructureId` variant (parsed out of `signatures.rs`, not restated) must be dispatched.
+  - **Statement-level lowering** — where a backend offers a built-in only in the opposite position from the one the author wrote, the lowering restructures the statement around a synthesised CTE (`Emission::Restructure`), planned as a pure function of the **source** CST before printing and never recovered from printed SQL. A running-frame window over a built-in with no analytic form on the target has no correct CTE form and is refused with `UnsupportedOnBackend`. The synthesised join is null-safe (`IS NOT DISTINCT FROM`, `<=>` on Spark) so a NULL partition key cannot silently drop rows. Authoritative spec: [`docs/specs/multi_backend.md` §"Statement-level lowering"](docs/specs/multi_backend.md#statement-level-lowering).
+  - **Cross-engine emission audit** (`cargo test -p smelt-db --test dialect_audit`) — probes derived from the registry, not authored against it, run against live engines in two legs: schema (does the printed SQL run?) and value (does it compute the same thing? — the leg that catches `^`, which is bitwise XOR on Spark and GoogleSQL but power in smelt). Gated four ways: coverage totality (an entry with no probe is named, never dropped), the two-sided `ledger.rs` (an unregistered mismatch fails; so does a row the engine now accepts, or one naming a pair that is never probed), the `Gap` ratchet in `.claude/dialect-gaps-baseline.txt`, and the doc-sync gate on the generated `docs/reference/dialect-coverage.md`. DuckDB's legs run per-PR in-process; Spark's run nightly or on a `run-docker-tests` PR; BigQuery stays a manual sweep (`scripts/bigquery-dialect-audit.sh`) because its value leg executes rather than dry-runs.
+  - **Compile-path refusal** (`cargo test -p smelt-runtime --test dialect_seam`) — a construct the registry declares `Emission::Unsupported` on the target's dialect fails at compile time with `UnsupportedOnBackend`, and no compile entry point may reach the printer without that check. The same suite guards the printer → cast-wrap → projection seam, where the `MEDIAN` re-parse bug lived.
+
+  Authoritative spec: [`docs/specs/architecture.md` §"Constraints & Invariants"](docs/specs/architecture.md#constraints--invariants) item 14, [`docs/specs/multi_backend.md` §"Operator lowering"](docs/specs/multi_backend.md#operator-lowering) and §"Cross-engine emission audit". Published coverage table: [`docs/reference/dialect-coverage.md`](docs/reference/dialect-coverage.md).
 - **Source-derived projection** — a model's projection (its output column names and their inferred types) is derived once from the model's **source** select list, before dialect lowering; no compile entry point may recover it by re-parsing the dialect-printed SQL, since a backend's own lowering (`MEDIAN`, `%`, `QUALIFY`, …) does not parse back as smelt SQL. Standing gate: `cargo test -p smelt-runtime --test projection_dialect_invariance` — compiles one model exercising every construct the printer lowers for DuckDB, Spark and BigQuery and asserts `output_columns` and the cast-wrap column names are byte-identical across all three; it needs no live warehouse and runs per-PR. Authoritative spec: [`docs/specs/multi_backend.md` §"Output-schema type conformance"](docs/specs/multi_backend.md#output-schema-type-conformance).
 
 ## Key Documentation
@@ -93,10 +98,18 @@ sudo cp libduckdb.so /usr/local/lib/ && sudo ldconfig
 # Or for user-local install:
 mkdir -p ~/.local/lib/duckdb && cp libduckdb.so ~/.local/lib/duckdb/
 
-# Set env var (add to ~/.bashrc or ~/.zshrc)
-export DUCKDB_LIB_DIR=/usr/local/lib          # system install
-# or: export DUCKDB_LIB_DIR=~/.local/lib/duckdb  # user-local install
+# Set env var (add to ~/.bashrc or ~/.zshrc) — point it at whichever install
+# you actually have. Guessing wrong fails at link time with a confusing
+# "cannot find -lduckdb", so detect rather than assume:
+for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do
+  [ -e "$d/libduckdb.so" ] && export DUCKDB_LIB_DIR="$d" && break
+done
+export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
+echo "DUCKDB_LIB_DIR=${DUCKDB_LIB_DIR:-<not found — install it above>}"
 ```
+
+`DUCKDB_LIB_DIR` is not set in any shell profile in this repo's environments, so
+every new shell (and every agent session) must export it before building.
 
 **Commands (system DuckDB is now the default):**
 ```bash

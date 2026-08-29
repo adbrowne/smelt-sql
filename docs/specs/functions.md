@@ -176,6 +176,46 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 
 Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
 
+### Registry emission surface
+
+Every `Signature` in `BuiltinRegistry` carries per-dialect emission data alongside its type data.
+The types involved:
+
+- **`DialectId`** — `DuckDb | SparkSql | PostgreSql | BigQuery`. Replaces stringly-keyed engine
+  identifiers; a misspelled key silently meant "no override" under the old convention, which is a
+  fail-loud violation.
+- **`SyntaxForm`** — `Call | Infix | Prefix | Postfix | Special`. Required so infix operators
+  (`^`, `**`, `%`, `||`) can be registry entries, which in turn lets the audit harness derive a
+  probe from a signature rather than a hand-written table.
+- **`Emission`** — the per-dialect verdict for one entry:
+  - `Native` — same spelling, same semantics on the target dialect.
+  - `Rename(&'static str)` — same call shape, different name.
+  - `Rewrite(RewriteId)` — structural; the printer owns the rewrite code, the registry owns the
+    claim that a rewrite is needed and which one.
+  - `Unsupported { reason }` — the compiler emits `UnsupportedOnBackend` and refuses to compile
+    rather than passing invalid SQL to the engine at runtime.
+- **`RewriteId`** — the closed set of structural rewrites the printer implements
+  (`BigQueryMedian`, `PowerCall`, `ModuloCall`, …). An entry in this set means the rewrite exists; the
+  printer's implementation is reached through `RewriteId` dispatch, never through a name-matched
+  dialect arm.
+- **`Emission::Restructure(RestructureId)`** — a *statement-level* lowering, for a built-in the
+  backend offers only in the opposite call position from the one the author wrote. Unlike a
+  `Rewrite`, it restructures the query block around a synthesised CTE rather than substituting one
+  expression for another, and it is planned before printing rather than during it
+  (`multi_backend.md` §"Statement-level lowering").
+- **`Signature::emission_at(dialect: DialectId, position: Position) -> Emission`** — returns the
+  emission verdict for one `(entry, dialect, position)` triple. Lookup consults the call's own
+  position, then the `Any` wildcard, and stops; an entry listing no verdict for a dialect is
+  `Native` in every position. There is no position-blind form, because a caller that could ask for
+  a dialect's verdict without naming a position could silently receive the wrong one
+  (`multi_backend.md` §"Emission is scoped to call position").
+
+**`Native` is a claim, not a pass.** An untested `(entry, dialect)` pair that carries `Native`
+(by default or by explicit declaration) is reported as *unverified* in the coverage table — not
+as *passing*. The value leg of the audit suite exists to test the claim. This keeps authoring
+cheap — roughly ten entries are non-`Native` today — without recreating the silent hole that a
+default-passing assumption would open.
+
 ### Diagnostic codes
 
 User-visible codes anchored to the surface above. Full descriptions live alongside `DiagnosticCode` in `crates/smelt-db/src/lib.rs`.

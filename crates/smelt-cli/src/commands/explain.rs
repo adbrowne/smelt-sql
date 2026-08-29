@@ -606,7 +606,7 @@ async fn explain_maintenance_plan(
         .collect();
     let resolver = registry
         .get(&target)
-        .build_ephemeral_resolver(&ephemeral_models, &schema);
+        .build_ephemeral_resolver(&ephemeral_models, &schema)?;
 
     // `Config::get_incremental_with_metadata` is the single merge point for
     // the effective `batched:` config (frontmatter wins wholesale over the

@@ -3,7 +3,8 @@
 //! The `TypeOracle` trait enables future PostgreSQL/Spark backends without changing
 //! the property test harness.
 
-use super::arrow_mapping::arrow_to_smelt;
+use crate::arrow_mapping::arrow_to_smelt;
+use crate::value::{cell_from_arrow, Cell, ValueOracle};
 use duckdb::Connection;
 use smelt_types::DataType;
 
@@ -18,7 +19,14 @@ pub struct DuckDbOracle {
     conn: Connection,
 }
 
+impl Default for DuckDbOracle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DuckDbOracle {
+    /// Open a fresh in-memory DuckDB.
     pub fn new() -> Self {
         Self {
             conn: Connection::open_in_memory().expect("failed to open in-memory DuckDB"),
@@ -137,6 +145,33 @@ impl TypeOracle for DuckDbOracle {
     }
 }
 
+impl ValueOracle for DuckDbOracle {
+    fn execute_rows(&self, sql: &str) -> Result<Vec<Vec<Cell>>, String> {
+        let mut stmt = self
+            .conn
+            .prepare(sql)
+            .map_err(|e| format!("prepare: {e}"))?;
+        let batches: Vec<_> = stmt
+            .query_arrow([])
+            .map_err(|e| format!("query: {e}"))?
+            .collect();
+
+        let mut rows = Vec::new();
+        for batch in &batches {
+            for row in 0..batch.num_rows() {
+                rows.push(
+                    batch
+                        .columns()
+                        .iter()
+                        .map(|col| cell_from_arrow(col.as_ref(), row))
+                        .collect(),
+                );
+            }
+        }
+        Ok(rows)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +206,55 @@ mod tests {
             .query_types("SELECT json_object('a', 1) AS j")
             .unwrap();
         assert_eq!(types[0].1, DataType::Varchar { max_length: None });
+    }
+
+    #[test]
+    fn the_duckdb_value_oracle_returns_typed_cells() {
+        use crate::{compare_cells, ValueMatch};
+        let oracle = DuckDbOracle::new();
+        let rows = oracle
+            .execute_rows("SELECT 2 ^ 3 AS p, CAST(NULL AS INTEGER) AS n, 1.50::DECIMAL(4,2) AS d")
+            .expect("execute");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Cell::Null);
+        assert_eq!(
+            rows[0][2],
+            Cell::Decimal {
+                unscaled: 150,
+                scale: 2
+            }
+        );
+        // DuckDB's `^` is power, not XOR — the reference semantics the audit
+        // compares every other engine against.
+        assert_eq!(
+            compare_cells(&Cell::Float(8.0), &rows[0][0]),
+            ValueMatch::Equal
+        );
+    }
+
+    #[test]
+    fn the_value_oracle_returns_every_row_not_just_the_first() {
+        let oracle = DuckDbOracle::new();
+        let rows = oracle
+            .execute_rows("SELECT * FROM (VALUES (1), (2), (3)) AS t(x) ORDER BY x")
+            .expect("execute");
+        assert_eq!(
+            rows,
+            vec![vec![Cell::Int(1)], vec![Cell::Int(2)], vec![Cell::Int(3)]]
+        );
+    }
+
+    #[test]
+    fn temporal_cells_come_back_as_iso_strings() {
+        let oracle = DuckDbOracle::new();
+        let rows = oracle
+            .execute_rows("SELECT DATE '2026-08-24' AS d, TIMESTAMP '2026-08-24 01:02:03' AS ts")
+            .expect("execute");
+        assert_eq!(rows[0][0], Cell::Date("2026-08-24".into()));
+        assert!(
+            matches!(&rows[0][1], Cell::Timestamp(t) if t.starts_with("2026-08-24")),
+            "{:?}",
+            rows[0][1]
+        );
     }
 }

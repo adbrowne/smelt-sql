@@ -12,10 +12,10 @@
 //!    correctly against the live DuckDB oracle, and that no `NonPortableCollation`
 //!    diagnostic fires in the presence of binary collation.
 
-use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
-use crate::prop_helpers::type_comparison::{compare_types, TypeMatch};
 use smelt_db::diagnostics_types::DiagnosticCode;
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_oracle_testkit::{compare_types, TypeMatch};
+use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 

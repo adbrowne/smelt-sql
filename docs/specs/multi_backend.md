@@ -59,13 +59,24 @@ owners: [andrew]
   | `supports_merge_schema_write` | ✗ | ✓ | ✓ | ✗ |
   | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ |
   | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
+  | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ |
   | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
+  | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` |
 
   This table is the **honest** matrix — `smelt:validate` / the conformance tests assert the code
   constructors (`BackendCapabilities::duckdb()`, `::spark_delta()`, `::spark_parquet()`,
   `::bigquery()`) match it. When a flag changes, this table changes in the same commit. A
   backend's column is established by executing the statement each flag names against a live
   instance of that backend, never by reading its documentation.
+
+  Two flags in the table describe pipe-query emission. `supports_pipe_syntax` decides whether a
+  `|>` query is emitted natively or lowered to standard SQL. `supports_pipe_set_drop_rename`
+  qualifies the lowering: the lowered forms of `|> SET`, `|> DROP` and `|> RENAME` are built from
+  the star-modifier trio `SELECT * REPLACE (…)` / `* EXCLUDE (…)` / `* RENAME (…)`, which only
+  DuckDB accepts. A backend that lowers pipes but does not accept that trio (both Spark profiles)
+  leaves those three stages unlowered rather than emitting SQL it would reject. BigQuery reads
+  `✗` because GoogleSQL has `* EXCEPT` and `* REPLACE` but neither `* EXCLUDE` nor `* RENAME`;
+  the value is not reached in practice, since BigQuery emits pipes natively.
 - **`SPARK_CONNECT_URL`.** Spark integration tests connect to a Spark Connect server at this
   URL. When it is unset, Spark-targeted tests **skip** (not fail). The runtime backend reads
   `connect_url` from the target config (see `smelt_yml.md`).
@@ -185,7 +196,9 @@ lowers it, and both lowerings are exact because an approximate substitute would 
 equivalence oracle report divergences that are artefacts of the substitution — or hide real ones.
 In window position (`MEDIAN(x) OVER w`) the lowering is `PERCENTILE_CONT(x, 0.5) OVER w`, which
 interpolates as DuckDB does; `PERCENTILE_DISC` picks a stored value instead and is therefore not
-the equivalent. In aggregate position (`GROUP BY`) `PERCENTILE_CONT` cannot be used at all —
+the equivalent. That lowering holds only where `w` is a whole-partition window, because GoogleSQL
+forbids a window `ORDER BY` on `PERCENTILE_CONT`: a running `MEDIAN(x) OVER (PARTITION BY g ORDER
+BY t)` has no exact GoogleSQL form and is refused (§"Statement-level lowering"). In aggregate position (`GROUP BY`) `PERCENTILE_CONT` cannot be used at all —
 GoogleSQL makes it analytic-only — and `APPROX_QUANTILES`, the one aggregate offered, is
 approximate. The lowering there sorts the argument into an array with `ARRAY_AGG(x IGNORE NULLS
 ORDER BY x)` and indexes its middle element, averaging the two middle elements at even counts;
@@ -194,26 +207,290 @@ aggregate inside `UNNEST`. The aggregate form casts to `FLOAT64`, matching the n
 type; a temporal argument, which DuckDB's `MEDIAN` accepts, is refused by the backend rather than
 silently coerced.
 
+The *decision* that `MEDIAN` needs rewriting on BigQuery is registry data, stated once per
+position: `MEDIAN`'s `BuiltinRegistry` entry carries `Emission::Rewrite(RewriteId::BigQueryMedian)`
+at both `Position::Aggregate` and `Position::WholePartitionWindow`, and
+`Emission::Unsupported` at `Position::Window`. The *shape* each rewrite emits stays printer code;
+the registry names the rewrite and the position it applies to, the printer holds its logic. The
+printer never infers position from the CST itself — position is the question the compile path asks
+the registry, not an answer the printer derives (§"Statement-level lowering").
+
 ### Operator lowering
 An infix operator smelt's grammar accepts but a backend's SQL does not is lowered by the dialect
-printer, never emitted verbatim and left to the engine. Two operators need this on GoogleSQL, and
-they need it for opposite reasons. `%` (modulo) has no infix form there at all, so an unlowered
-`a % b` is a syntax error; it lowers to `MOD(a, b)`. `^` is worse: GoogleSQL *does* define infix
-`^`, as bitwise XOR, while smelt's grammar reads it as DuckDB does — a synonym for `**`, power.
-An unlowered `^` therefore does not fail on BigQuery, it silently returns a different number, so
-`^` and `**` both lower to `POWER(a, b)`. Every other dialect prints all three unchanged. The
-lowerings are exact: DuckDB's power operator returns a double for every operand type, negative
-base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They diverge only
-at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure, not a wrong
-answer.
+printer, never emitted verbatim and left to the engine. Emission ownership for every operator is
+data in `BuiltinRegistry` — the printer reads the `Emission` verdict for the active dialect and
+dispatches on it; no name-matched dialect arm lives in `printer.rs`.
 
-`//` (floor division) is deliberately **not** lowered. DuckDB's `//` truncates toward zero when
-both operands are integers, but degrades to plain division the moment either is floating point,
-and the printer carries no operand types with which to tell those cases apart. GoogleSQL's `DIV`
-matches only the integer case, so substituting it unconditionally would silently floor a result
-that should not have been floored. GoogleSQL has no infix `//` either, so leaving it alone makes
-it a loud syntax error instead — the correct outcome under fail-loud discipline until the printer
-can see operand types.
+`^` is the critical case. In smelt's grammar, and in DuckDB and PostgreSQL, `^` means power —
+a synonym for `**`. But **both GoogleSQL and Spark SQL** define infix `^` as **bitwise XOR**, so
+emitting `^` verbatim against either backend silently returns a different number from what smelt's
+semantics say. Both GoogleSQL and Spark therefore lower `^` (and `**`) to `POWER(a, b)`.
+
+`%` (modulo) has no infix form in GoogleSQL at all, so an unlowered `a % b` is a syntax error
+there; it lowers to `MOD(a, b)`.
+
+`//` (floor division) is not lowered anywhere. DuckDB's `//` truncates toward zero when both
+operands are integers but degrades to plain division the moment either is floating point, and the
+printer carries no operand types with which to tell those cases apart. GoogleSQL has no infix `//`
+and no safe universal substitute, so `//` is declared `Unsupported` on Spark, PostgreSQL, and
+BigQuery — the compiler refuses it rather than emitting SQL the engine will reject or
+misinterpret at runtime.
+
+The `POWER` lowerings are exact: DuckDB's power operator returns a double for every operand type,
+negative base, negative exponent, and `0 ^ 0 = 1` included, and `POWER` agrees on each. They
+diverge only at `0 ^ -1`, where DuckDB yields infinity and GoogleSQL raises — a loud failure,
+not a wrong answer.
+
+### Emission is scoped to call position
+A built-in's emission verdict is stated per `(dialect, position)`, not per dialect alone, because a
+backend's support for a built-in routinely differs between the positions it can appear in. GoogleSQL
+is the sharp case in both directions: `PERCENTILE_CONT` is refused under a `GROUP BY`
+(`percentile_cont aggregate function is not supported`) but accepted with an `OVER` clause, while
+`MAX_BY` is the exact reverse (`Aggregate function MAX_BY does not support an OVER clause`).
+
+Four positions are probed, and a fifth key, `Any`, is a wildcard used only for lookup:
+
+| Position | The call's context | Probe shape |
+|---|---|---|
+| `Scalar` | a row-wise expression | `SELECT <expr> AS a FROM fixture` |
+| `Aggregate` | the call itself is an aggregate, with no `OVER` | `SELECT g, <expr> AS a FROM fixture GROUP BY g` |
+| `WholePartitionWindow` | `OVER w` where `w` covers its whole partition | `SELECT <expr> OVER (PARTITION BY g) AS a FROM fixture` |
+| `Window` | `OVER w` with any narrower frame | `SELECT <expr> OVER (PARTITION BY g ORDER BY rid) AS a FROM fixture` |
+
+**Lookup consults the call's own position, then `Any`, and stops.** There is deliberately no
+fallback *between* positions, and in particular none between the two window keys, because such a
+fallback is wrong in both directions. Falling from `WholePartitionWindow` to `Window` would refuse
+`MEDIAN(x) OVER (PARTITION BY g)` on Spark — the very call the restructure exists to serve — on the
+strength of a verdict about running windows. Falling from `Window` to `Any` would let a running
+`MAX_BY(x, t) OVER (PARTITION BY g ORDER BY t)` reach BigQuery as `Native` and fail at the
+warehouse, which is what §"Compile-path refusal" promises can never happen.
+
+Because there is no fallback, an entry that declares a verdict at one window position **must**
+declare one at the other. That obligation is checked, not assumed: the coverage-totality gate fails
+an entry carrying a `WholePartitionWindow` verdict and no `Window` verdict, naming the entry and
+the dialect. An entry listing no verdict at all for a dialect is `Native` everywhere, so the
+majority of the registry states one row and means it in every position.
+
+Position is decided once, by the compile path, from the source CST, and handed to the registry. The
+printer never re-derives it: a printer that inspected sibling nodes to tell aggregate position from
+window position would hold emission knowledge the registry owns.
+
+**Deciding whether a window is whole-partition.** A window is whole-partition when, *after resolving
+any named-window reference*, it has no window `ORDER BY` and no frame clause, or carries an explicit
+`BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING` frame **with no `EXCLUDE` clause**. Every other
+window is running, including the common `ORDER BY` with no explicit frame, whose SQL default frame is
+`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`.
+
+Two spellings make this decision impossible to take at the call site, and both are real:
+
+- **`EXCLUDE` changes the answer per row.** `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+  EXCLUDE CURRENT ROW` matches the unbounded-frame wording but is not whole-partition: on DuckDB,
+  `SUM(x)` over rows `1,2,3` returns `5, 4, 3` — a distinct value per row. A classifier that ignored
+  `EXCLUDE` would collapse three answers into one, silently.
+- **A named window hides the frame.** `AGG(x) OVER w` carries no `ORDER BY` and no frame at its own
+  site, so a purely local rule classifies every such call as whole-partition. With
+  `WINDOW w AS (PARTITION BY g ORDER BY t)` DuckDB returns `1, 3` — running. Classification therefore
+  resolves the `WINDOW` clause first, and a reference that cannot be resolved (or a window-spec
+  inheritance such as `OVER (w ORDER BY t)` whose base is unresolved) is treated as running, never as
+  whole-partition. Refusing is the safe direction: it costs a diagnostic, where guessing costs a
+  wrong number.
+
+### Statement-level lowering
+Some built-ins cannot be lowered by substituting one expression for another, because the backend
+offers the operation only in the *other* position from the one the author wrote. Two shapes recur,
+and both are lowered by restructuring the statement around a synthesised CTE.
+
+**Admissible shapes are enumerated, and everything else is refused.** A statement-level lowering
+rewrites a whole query block, so — unlike an expression rewrite — it can be defeated by parts of the
+block it does not touch. The restructure therefore applies only to a query block where all of the
+following hold, and refuses with `UnsupportedOnBackend` otherwise:
+
+1. The grouping is a plain `GROUP BY` over column references or expressions — not `ROLLUP`, `CUBE`,
+   or `GROUPING SETS`. Those compute super-aggregate rows that no `PARTITION BY` produces: for
+   `t = {(g=1,x=1),(g=2,x=100)}`, `GROUP BY ROLLUP(g)` owes a total row of `50.5`, where the
+   partitioned form yields whichever single group's value `ANY_VALUE` reaches.
+2. Every occurrence of the affected built-in is in the select list. An occurrence in `HAVING`,
+   the query's `ORDER BY`, or `QUALIFY` is refused, because leaving it in place would ship a
+   statement still containing the construct the lowering exists to remove.
+3. The call carries no `DISTINCT` and no `FILTER (WHERE …)`. Neither has an analytic form on any
+   supported backend, so neither survives a move into window position.
+4. The select list has no unexpanded wildcard. `SELECT *` would otherwise expand against the
+   *restructured* `FROM` and pick up the synthesised columns.
+
+**An analytic-only built-in in aggregate position.** GoogleSQL's `PERCENTILE_CONT` and
+`PERCENTILE_DISC` require an `OVER` clause and cannot appear under a `GROUP BY` at all. smelt spells
+these as ordered-set aggregates, so the lowering is a change of *call shape* as well as of position —
+GoogleSQL rejects `WITHIN GROUP` outright. The query's `FROM` and `WHERE` move into a CTE that adds
+the value as an analytic column over the grouping keys, and the outer query reads it back:
+
+```sql
+-- smelt
+SELECT g, COUNT(*) AS n, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) AS med
+FROM t WHERE ok GROUP BY g
+
+-- GoogleSQL
+WITH __smelt_r0 AS (
+  SELECT g, PERCENTILE_CONT(x, 0.5) OVER (PARTITION BY g) AS v FROM t WHERE ok
+)
+SELECT g, COUNT(*) AS n, ANY_VALUE(v) AS med FROM __smelt_r0 GROUP BY g
+```
+
+The `WITHIN GROUP (ORDER BY …)` sort key becomes the analytic form's first argument. A `DESC` sort
+key inverts the fraction — `PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x DESC)` is
+`PERCENTILE_CONT(x, 1 - 0.5)` — and a `NULLS FIRST`/`NULLS LAST` modifier that the target's analytic
+form cannot express is refused rather than dropped.
+
+`v` is constant within each `g`, so `ANY_VALUE` reads that constant exactly rather than sampling.
+Sibling aggregates such as `COUNT(*)` are untouched.
+
+**The same built-in over a whole-partition window is not a restructure at all.** GoogleSQL accepts
+`PERCENTILE_CONT`/`PERCENTILE_DISC` with a partition-only `OVER` clause natively, in their
+two-argument analytic spelling — the call is already in the right position, and only its *shape*
+needs to change, from the ordered-set spelling to the analytic one:
+
+```sql
+-- smelt
+SELECT g, PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY x) OVER (PARTITION BY g) AS med FROM t
+
+-- GoogleSQL
+SELECT g, PERCENTILE_CONT(x, 0.5) OVER (PARTITION BY g) AS med FROM t
+```
+
+Because the window is already in place, this is an in-place expression rewrite planned from the
+source CST like any other `Emission::Rewrite`, not a statement-level `Emission::Restructure`: no CTE
+is synthesised, and the call's own `OVER` clause prints unchanged. The same `DESC`-inverts-the-
+fraction and `NULLS FIRST`/`NULLS LAST`-is-refused rules apply, and are shared with the
+aggregate-position lowering above rather than restated.
+
+**An aggregate-only built-in in window position.** GoogleSQL has `MAX_BY`/`MIN_BY` and
+`APPROX_COUNT_DISTINCT` as aggregates with no analytic form at all — refused with an `OVER`
+clause even when the window is partition-only — and DuckDB and Spark have the ordered-set
+`PERCENTILE_CONT`/`PERCENTILE_DISC` with no window form. `APPROX_COUNT_DISTINCT` is the sharp case:
+GoogleSQL's own dry run accepts the analytic spelling over a partition-only window, and only
+execution refuses it, so a schema/dry-run leg alone cannot see this gap. The lowering binds the
+source once, groups it by the partition keys, and joins the result back:
+
+```sql
+-- smelt
+SELECT id, g, ARG_MAX(x, t) OVER (PARTITION BY g) AS best FROM tbl WHERE ok
+
+-- GoogleSQL
+WITH __smelt_base AS (SELECT id, g, x, t FROM tbl WHERE ok),
+     __smelt_w0   AS (SELECT g, MAX_BY(x, t) AS v FROM __smelt_base GROUP BY g)
+SELECT b.id, b.g, w.v AS best
+FROM __smelt_base b JOIN __smelt_w0 w ON b.g IS NOT DISTINCT FROM w.g
+```
+
+Four details are load-bearing:
+
+- **`WHERE` goes inside the bound source, never on the join.** Window functions are evaluated after
+  `WHERE`, so a predicate left outside would let `__smelt_w0` aggregate rows the original query had
+  already discarded — returning the `x` of a filtered-out row that happened to hold the maximum `t`.
+- **The source is bound once.** Repeating the `FROM` in both branches would evaluate it twice, which
+  is wrong for any non-deterministic source and wasteful for every other one. A `PARTITION BY` over
+  an *expression* is grouped and joined on that expression, so a non-deterministic partition key is
+  refused rather than evaluated twice.
+- **The join is null-safe.** `GROUP BY g` places NULL keys in their own group, but `ON b.g = w.g`
+  never matches NULL, so a plain equi-join silently drops every row whose partition key is NULL —
+  measured on BigQuery as 3 rows kept out of 5. The null-safe comparison is spelled
+  `IS NOT DISTINCT FROM` on DuckDB, PostgreSQL and GoogleSQL and `<=>` on Spark SQL; the difference
+  is a `BackendCapabilities` spelling, never a dialect arm in the printer.
+- **The join is total, so it is an inner join.** `__smelt_w0` is `__smelt_base` grouped on the same
+  keys, so every base row has exactly one match by construction. Floating-point keys do not break
+  this: GoogleSQL groups NaN keys together *and* treats two NaNs as not-distinct, so the two halves
+  agree. A window with no `PARTITION BY` degenerates to a one-row CTE and a `CROSS JOIN`.
+
+This lowering computes one value per partition, so it is admissible **only** at
+`Position::WholePartitionWindow`. A running window over a built-in with no analytic form on the
+target has no correct CTE form — a per-row correlated subquery would be a different construct with
+different cost — and is refused at compile time with `UnsupportedOnBackend`, naming the built-in, the
+backend, and the requirement that the window be whole-partition. The registry states that refusal as
+an ordinary `Position::Window` verdict; nothing about it is special-cased.
+
+**Mechanics that the shapes above depend on.** A synthesised CTE is *appended to the author's `WITH`
+list* rather than prefixed to the statement, so a model that already begins `WITH a AS (…)` stays
+valid and the synthesised body may reference the author's bindings. Synthesised names carry the
+`__smelt_` prefix that is reserved from author identifiers. Base-table references in the outer select
+are qualified to the bound source's alias. Several decorrelated windows with different `PARTITION BY`
+keys yield one grouped CTE and one join each, over the same single bound source. The restructure
+applies to one query block: an affected call inside an author-written CTE or a `FROM` subquery
+restructures *that* block, and a correlated subquery whose block would need a hoisted CTE is refused.
+
+Restructuring happens on the source CST, before printing, and rewrites only the expression behind a
+select item and the query's `FROM` — never a select item's name. A model's output column names and
+types are therefore unchanged by it, as §"Output-schema type conformance" requires; admissibility
+rule 4 is what makes that claim hold in the presence of `SELECT *`.
+
+### Cross-engine emission audit
+
+Two complementary legs verify what the registry declares:
+
+- **Schema leg** — for each `(entry, dialect)` pair, the probe is compiled and sent to the
+  dialect's oracle (DuckDB prepare, Spark `DESCRIBE QUERY`, BigQuery dry run). The oracle returns
+  the output schema; the leg asserts acceptance and compares smelt's inferred type against the
+  oracle's report using the existing `compare_types`/`divergences` machinery. Acceptance alone
+  catches every missing lowering and every `Unsupported` entry.
+- **Value leg** — the same probe is executed on the target dialect and on DuckDB (the reference);
+  rows are compared using a typed comparator (exact for integers, strings, booleans; relative
+  tolerance for floats; scale-normalised for decimals; NULL equals NULL; deterministic `ORDER BY`).
+  This is the leg that catches the `^` class of silent semantic divergence.
+
+**Probes are derived from registry data, not authored by hand.** `SyntaxForm` determines the
+spelling (`a % b` versus `MOD(a, b)`); `kind` determines which positions apply. A small override
+table covers the minority where a type-correct argument is not a meaningful one — regex patterns,
+date-part strings, JSON paths. Aggregates are probed in every position they can occupy — including
+both window positions separately — because the emission verdict is scoped to position
+(§"Emission is scoped to call position") and a suite that probed only one of them would leave the
+other's claim untested. The probe positions are the registry's four call positions exactly
+(`Any` is a lookup wildcard, never a position a call occupies), so the audit maintains no axis of
+its own.
+
+**The fixture** is a single inline `VALUES` CTE — approximately eight rows, one typed column per
+`TypeConstraint` family — with NULL-bearing rows. No DDL, no cleanup, no materialised objects.
+The same fixture serves a BigQuery dry run and a real execution.
+
+**Ledger verdicts** — `dialect_divergences.rs` records one row per `(entry, dialect)` when a pair
+does not pass both legs cleanly:
+
+| Verdict | Meaning | Fails? |
+|---|---|---|
+| `Divergent { reason }` | Accepted and permanent (e.g. Spark integer-division semantics) | No — reported as a semantic difference users must know about |
+| `Gap { issue }` | A lowering we owe, with a tracking issue | No — but the count ratchets down only |
+| `SchemaOnly { reason }` | Nondeterministic entry (`RANDOM`, `NOW`, `CURRENT_DATE`, `UUID`) | No — value leg skipped, reason recorded |
+| absent | Must pass both legs | Yes |
+
+The ledger is two-sided: an unregistered mismatch fails loudly, and so does an unreachable row —
+an entry naming a pair that no longer diverges is an error telling you to delete it.
+
+**A position split is a joint change.** Adding a probe position and the lowering that serves it land
+together. Introducing `WholePartitionWindow` alone would newly probe pairs that today carry a
+`Position::Window` ledger row describing an engine with *no* window form — DuckDB's and Spark's
+ordered-set percentiles, BigQuery's `MAX_BY`/`MIN_BY` and `APPROX_COUNT_DISTINCT` — and every one
+would fail the new position as an unregistered mismatch. With the restructure (or, for BigQuery's
+ordered-set percentiles, the in-place analytic rewrite) in place they pass it instead, and their
+existing rows narrow to the running-window case rather than being deleted.
+
+**Coverage table** — the suite emits a standing table to `docs/reference/dialect-coverage.md`:
+entry × dialect → native / rename / rewrite / restructure / unsupported / divergent / gap. A cell
+holds one verdict per position where an entry's positions differ, rendered as the set rather than
+collapsed to a single value, because collapsing would hide exactly the aggregate/window asymmetry
+the position axis exists to record. The table is derived
+from registry data and ledger verdicts alone, so it is deterministic and gateable per-PR. The legs
+*test the claims the table makes* rather than producing it — a mismatch between a registry verdict
+and what the oracle observes fails the suite. A doc-sync gate fails when the generated table
+diverges from the checked-in file.
+
+**Gates, by tier:**
+
+| Gate | Needs a warehouse? | Tier |
+|---|---|---|
+| Coverage totality — every entry × dialect has a verdict; every probe derivable or overridden | no | per-PR |
+| Printer/registry consistency — no name-matched dialect arms remain in `printer.rs` | no | per-PR |
+| Schema + value legs, DuckDB | no (in-memory) | per-PR |
+| Schema + value legs, Spark | Spark Connect | labeled PR + nightly |
+| Schema + value legs, BigQuery | live BigQuery | manual sweep, `scripts/bigquery-dialect-audit.sh`, gated on `SMELT_BQ_PROJECT` |
+
+BigQuery remains manual, consistent with §"BigQuery has no CI tier, by decision, not by omission".
 
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
@@ -495,6 +772,38 @@ resolves nested widening to a table rewrite.
   their `UPDATE SET *` needs no list. Making every model's output schema knowable (ROADMAP
   "Total Output-Schema Resolution") would narrow this to genuinely unresolvable upstreams, not
   retire it.
+- **A built-in's per-dialect spelling derives from `BuiltinRegistry`; `printer.rs` holds no
+  name-matched dialect arm.** Recognition, lowering decision, rewrite dispatch and restructure
+  dispatch all flow from `BuiltinRegistry::emission_at(dialect, position)`. A dialect arm keyed on
+  a function name is a violation of single ownership (§"Function-registry single ownership" in
+  `architecture.md` §Constraints #14), and so is a printer that derives a call's position for
+  itself. There is deliberately no position-blind lookup: a caller that could ask for a dialect's
+  verdict without naming a position could silently get the wrong one for the position it is in.
+  Gate: `cargo test -p smelt-dialect --test emission_ownership`.
+- **A statement-level lowering is planned before printing and never re-parses printed SQL.**
+  The restructure plan is a pure function of the source CST and the registry; the printer consumes
+  it. Recovering the plan — or a model's projection — from the dialect-printed string is forbidden,
+  because a backend's own lowering does not parse back as smelt SQL
+  (§"Output-schema type conformance"). Gates: `cargo test -p smelt-runtime --test
+  projection_dialect_invariance` pins that a decorrelated model's output columns are byte-identical
+  across every dialect; `cargo test -p smelt-runtime --test dialect_seam` pins that a running
+  window over a built-in with no analytic form on the target is refused at compile time rather than
+  emitted.
+- **Every `RestructureId` is dispatched, and every restructure preserves row multiplicity.**
+  A synthesised CTE join must not add or drop rows: the grouped branch is derived from the bound
+  source on the same keys, and the comparison is null-safe, so the join is total and one-to-one.
+  An equi-join on a nullable partition key is the failure this rules out — it type-checks, runs,
+  and silently drops rows. Gates: `cargo test -p smelt-dialect --test emission_ownership` for the
+  dispatch half; `cargo test -p smelt-runtime --test restructure_multiplicity` — a row-count
+  assertion over a NULL-bearing partition key, against a real DuckDB — for the multiplicity half.
+  The audit's value leg does **not** discharge this on its own: `ANY_VALUE` is a registered
+  nondeterministic entry, probed on the schema leg only, so a lowering that routes through it is
+  never value-compared by the audit. The multiplicity gate is what covers it.
+- **Each admissibility rule in §"Statement-level lowering" has a refusal test.** The rules exist
+  because each corresponds to a query the lowering would otherwise mis-answer silently — a `ROLLUP`
+  super-aggregate row, an occurrence in `HAVING`, a `FILTER (WHERE …)`, a `SELECT *`, an `EXCLUDE`
+  frame, an unresolved named window. A rule with no test asserting the refusal is a rule that will
+  regress into a silent wrong answer, so the suite carries one case per rule.
 
 ## Known Divergences / Open Questions
 

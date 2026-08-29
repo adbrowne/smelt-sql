@@ -264,7 +264,7 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
     }
 
     let compiler = compilers.get(target);
-    let ephemeral_resolver = compiler.build_ephemeral_resolver(&ephemeral_models, schema);
+    let ephemeral_resolver = compiler.build_ephemeral_resolver(&ephemeral_models, schema)?;
     let ephemeral_names: HashSet<String> = ephemeral_resolver.ephemeral_names.clone();
 
     // 7. Create backend.

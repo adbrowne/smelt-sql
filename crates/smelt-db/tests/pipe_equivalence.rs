@@ -8,8 +8,8 @@ mod prop_helpers;
 
 use std::collections::{HashMap, HashSet};
 
-use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 use smelt_parser::parse;
 
 /// Lower a pipe query to standard SQL using the DuckDB dialect printer.
@@ -27,6 +27,7 @@ fn lower_pipe_sql(sql: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: None,
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

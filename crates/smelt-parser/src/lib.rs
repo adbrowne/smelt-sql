@@ -23,7 +23,7 @@ pub use symbol::is_valid_sql_identifier;
 pub use syntax_kind::SyntaxKind;
 
 /// Re-export Rowan types for convenience
-pub use rowan::TextRange;
+pub use rowan::{TextRange, TextSize};
 
 /// A single `---` / `---` frontmatter block located in a source file.
 ///

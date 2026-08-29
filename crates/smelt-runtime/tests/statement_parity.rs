@@ -1162,7 +1162,10 @@ async fn keyed_fold_preview_matches_executed_statement_for_state_bearing_model()
         .expect("device_avg_amount must admit a KeyedFold cell");
 
     let registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
-    let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+    let resolver = registry
+        .get("dev")
+        .build_ephemeral_resolver(&[], "main")
+        .expect("no ephemerals");
     let graph_locked = graph.lock().await;
     let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph_locked, &[]);
     drop(graph_locked);

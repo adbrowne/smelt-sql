@@ -13,6 +13,18 @@ Protocol — one JSON object per line in, exactly one JSON object per line out:
                        "fields": []}]}
     out  {"error": "<message>"}     (the warehouse refused this SQL)
 
+    in   {"exec": "SELECT 2 + 3 AS s"}
+    out  {"rows": [[{"t": "int", "v": "5"}]]}
+    out  {"error": "<message>"}     (the warehouse refused this SQL)
+
+The `sql` verb dry-runs and bills nothing; the `exec` verb really executes and
+therefore really costs money. Every cell of an `exec` reply is a
+`{"t": <tag>, "v": <string>}` pair — never a bare JSON number, because JSON's
+double would silently round an INT64 or a NUMERIC. Tags are `null`, `int`,
+`float`, `bool`, `text`, `decimal`, `date`, `timestamp`; anything else the
+warehouse returns is tagged `text` with its canonical rendering, so the Rust
+side never has to guess.
+
 A refusal is an ordinary reply, not a crash: the harness generates SQL that
 BigQuery is entitled to reject, and those cases are skipped rather than scored.
 
@@ -57,6 +69,46 @@ def _build_adapter():
     )
 
 
+def _tag_cell(value):
+    """Render one Python/pyarrow value as a `{"t", "v"}` tagged cell.
+
+    Every value is carried as a *string*. A JSON number would lose precision on
+    exactly the two types this audit cares most about — INT64 beyond 2^53 and
+    NUMERIC — and a silently rounded value read as agreement is the failure
+    mode the value leg exists to catch.
+    """
+    import datetime
+    import decimal
+
+    if value is None:
+        return {"t": "null"}
+    # bool before int: bool is a subclass of int in Python.
+    if isinstance(value, bool):
+        return {"t": "bool", "v": "true" if value else "false"}
+    if isinstance(value, int):
+        return {"t": "int", "v": str(value)}
+    if isinstance(value, decimal.Decimal):
+        return {"t": "decimal", "v": format(value, "f")}
+    if isinstance(value, float):
+        return {"t": "float", "v": repr(value)}
+    if isinstance(value, datetime.datetime):
+        return {"t": "timestamp", "v": value.isoformat()}
+    if isinstance(value, datetime.date):
+        return {"t": "date", "v": value.isoformat()}
+    if isinstance(value, str):
+        return {"t": "text", "v": value}
+    return {"t": "text", "v": str(value)}
+
+
+def _tagged_rows(table):
+    """Convert a pyarrow.Table into tagged rows, in column order."""
+    columns = table.column_names
+    return [
+        [_tag_cell(row[name]) for name in columns]
+        for row in table.to_pylist()
+    ]
+
+
 def main():
     try:
         adapter = _build_adapter()
@@ -70,13 +122,19 @@ def main():
             continue
         try:
             request = json.loads(line)
-            sql = request["sql"]
+            if "exec" in request:
+                verb, sql = "exec", request["exec"]
+            else:
+                verb, sql = "sql", request["sql"]
         except Exception as exc:  # noqa: BLE001
             _emit({"error": f"malformed request: {exc}"})
             continue
 
         try:
-            _emit({"columns": adapter.dry_run_schema(sql)})
+            if verb == "exec":
+                _emit({"rows": _tagged_rows(adapter.execute_sql(sql))})
+            else:
+                _emit({"columns": adapter.dry_run_schema(sql)})
         except Exception as exc:  # noqa: BLE001 — a refusal is an expected reply
             _emit({"error": str(exc)})
 

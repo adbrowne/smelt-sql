@@ -3,8 +3,8 @@
 //! These tests execute struct-related SQL against DuckDB and compare the
 //! result types with smelt's type inference.
 
-use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 use smelt_parser::ast::File;
 use smelt_types::DataType;
 

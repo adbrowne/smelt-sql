@@ -11,8 +11,8 @@
 //! Each expected type is verified against DuckDB via the `DuckDbOracle`
 //! (canonical oracle for "what type does this expression actually have").
 
-use crate::prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
+use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 use smelt_parser::ast::File;
 use smelt_types::{DataType, TypedColumn};
 

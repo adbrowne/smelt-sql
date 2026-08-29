@@ -1114,7 +1114,10 @@ mod tests {
             ),
         );
         registry.set_function_bodies_all(fn_bodies);
-        let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+        let resolver = registry
+            .get("dev")
+            .build_ephemeral_resolver(&[], "main")
+            .expect("no ephemerals");
 
         let source_timeseries = SourceTimeseriesMap::new();
 
