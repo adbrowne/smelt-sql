@@ -98,10 +98,18 @@ sudo cp libduckdb.so /usr/local/lib/ && sudo ldconfig
 # Or for user-local install:
 mkdir -p ~/.local/lib/duckdb && cp libduckdb.so ~/.local/lib/duckdb/
 
-# Set env var (add to ~/.bashrc or ~/.zshrc)
-export DUCKDB_LIB_DIR=/usr/local/lib          # system install
-# or: export DUCKDB_LIB_DIR=~/.local/lib/duckdb  # user-local install
+# Set env var (add to ~/.bashrc or ~/.zshrc) — point it at whichever install
+# you actually have. Guessing wrong fails at link time with a confusing
+# "cannot find -lduckdb", so detect rather than assume:
+for d in /usr/local/lib "$HOME/.local/lib/duckdb"; do
+  [ -e "$d/libduckdb.so" ] && export DUCKDB_LIB_DIR="$d" && break
+done
+export LD_LIBRARY_PATH="$DUCKDB_LIB_DIR:$LD_LIBRARY_PATH"
+echo "DUCKDB_LIB_DIR=${DUCKDB_LIB_DIR:-<not found — install it above>}"
 ```
+
+`DUCKDB_LIB_DIR` is not set in any shell profile in this repo's environments, so
+every new shell (and every agent session) must export it before building.
 
 **Commands (system DuckDB is now the default):**
 ```bash
