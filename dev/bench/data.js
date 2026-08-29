@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787991367373,
+  "lastUpdate": 1787991370458,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.28513124905289,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ba3b120f557c846ba8682b57193bff815f22f8e9",
+          "message": "fix(parser): the printer must not drop a select item's parentheses\n\nThe `round_trip` fuzz target crashed on `SELECT(     *  )hD`: it parses\ncleanly, but printed back as `SELECT * AS hD`, which no dialect accepts.\n\n`Expr::cast` descends through single-child `EXPRESSION` wrappers so that\nsemantic callers (type inference, ref resolution) see the operative\nexpression rather than a parenthesis wrapper. A wrapper's LPAREN/RPAREN\nare tokens of the *outer* node, so a caller that prints the unwrapped\nnode loses them. `Display for SelectItem` was such a caller.\n\nAdd `SelectItem::expression_source_text`, which takes the text of the\ndirect expression child before the cast unwraps it, and print that. The\nunwrapping stays intact for every semantic caller.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BHyvrLA8qKR2GJVmgx8v8u",
+          "timestamp": "2026-08-29T18:10:24+10:00",
+          "tree_id": "62e0b04ad9755904facd111aa89feff3da36d7f8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ba3b120f557c846ba8682b57193bff815f22f8e9"
+        },
+        "date": 1787991369508,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.23709882664761,
             "unit": "MB/s"
           }
         ]
