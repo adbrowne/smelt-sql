@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787986437252,
+  "lastUpdate": 1787991367373,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -93,6 +93,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.633546,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ba3b120f557c846ba8682b57193bff815f22f8e9",
+          "message": "fix(parser): the printer must not drop a select item's parentheses\n\nThe `round_trip` fuzz target crashed on `SELECT(     *  )hD`: it parses\ncleanly, but printed back as `SELECT * AS hD`, which no dialect accepts.\n\n`Expr::cast` descends through single-child `EXPRESSION` wrappers so that\nsemantic callers (type inference, ref resolution) see the operative\nexpression rather than a parenthesis wrapper. A wrapper's LPAREN/RPAREN\nare tokens of the *outer* node, so a caller that prints the unwrapped\nnode loses them. `Display for SelectItem` was such a caller.\n\nAdd `SelectItem::expression_source_text`, which takes the text of the\ndirect expression child before the cast unwraps it, and print that. The\nunwrapping stays intact for every semantic caller.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01BHyvrLA8qKR2GJVmgx8v8u",
+          "timestamp": "2026-08-29T18:10:24+10:00",
+          "tree_id": "62e0b04ad9755904facd111aa89feff3da36d7f8",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ba3b120f557c846ba8682b57193bff815f22f8e9"
+        },
+        "date": 1787991365580,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 58.50945,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 56.314248,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.88192,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.632931,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.392169,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1088.313825,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.162471,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.118757,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.130499,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.654973,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 891.3839770000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.98013,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.86202,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.659494,
             "unit": "ms"
           }
         ]
