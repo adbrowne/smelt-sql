@@ -36,10 +36,10 @@ use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed,
     emit_count_preservation_probe_from_body, emit_create_table_as, emit_delete_insert,
     emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
-    emit_fingerprint_sidecar_diff, emit_in_place_update, emit_per_group_recompute,
-    emit_repair_group_digest_select, emit_repair_group_sidecar_diff,
-    emit_staged_candidate_conditional_recompute, widened_scan_predicate, MaintenanceDialect,
-    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
+    emit_fingerprint_sidecar_diff, emit_per_group_recompute, emit_repair_group_digest_select,
+    emit_repair_group_sidecar_diff, emit_staged_candidate_conditional_recompute,
+    widened_scan_predicate, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+    TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
@@ -1064,48 +1064,6 @@ pub fn resolve_live_in_place_update_cell(
         assignments.push((col.clone(), def.expr.syntax().text().to_string()));
     }
     Some((cell, assignments))
-}
-
-/// Execute the `Technique::InPlaceUpdate` cell [`resolve_live_in_place_update_cell`]
-/// resolved: an unconditional (whole-table) `UPDATE` backfilling every
-/// added column's own defining expression over every currently-stored row.
-/// Unconditional (not partition-scoped) because a definition-change
-/// backfill is a one-time migration over the model's *existing* rows — the
-/// same posture `schema_evolution`'s own `ALTER TABLE ... ADD COLUMN`
-/// (which must already have run first, physically creating the column) —
-/// not a windowed catch-up over a moving horizon (`docs/specs/
-/// definition_deltas.md` §"The verdict per column group": "instantiating
-/// their ledger entries at `S = ∅`").
-///
-/// The statement is built and executed exactly once via
-/// [`emit_in_place_update`] — the single-owner emitter — never
-/// re-authored here (`CLAUDE.md` §"Maintenance-plan purity").
-pub async fn execute_in_place_update(
-    backend: &dyn Backend,
-    schema: &str,
-    table: &str,
-    assignments: &[(String, String)],
-    retry: &crate::execute::RetryPolicy<'_>,
-) -> Result<ExecutionResult> {
-    let start = Instant::now();
-    let full_table = format!("{schema}.{table}");
-    let group = StatementGroup {
-        statements: emit_in_place_update(&full_table, assignments, None)
-            .into_iter()
-            .map(|sql| MaintenanceStatement { sql })
-            .collect(),
-        transactional: false,
-    };
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
-        .await
-        .map_err(|e| anyhow::anyhow!("in-place UPDATE failed for '{full_table}': {e}"))?;
-    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
-    Ok(ExecutionResult {
-        model_name: table.to_string(),
-        duration: start.elapsed(),
-        row_count,
-        preview: None,
-    })
 }
 
 /// Find the first `explicitly_mutable` source whose `Trigger::

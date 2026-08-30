@@ -394,3 +394,93 @@ async fn failing_backfill_expression_rolls_back_the_whole_group_no_orphan_column
          physical column being real: {saved:?}"
     );
 }
+
+/// GREEN: a migration group that partially applied on a prior run — the
+/// `ADD COLUMN` committed but the group failed before the backfill (or a
+/// non-transactional-DDL backend applied statements one at a time) — is
+/// repaired by the NEXT `check_and_migrate` call rather than failing with
+/// "column already exists". `reconcile_add_columns` drops the now-redundant
+/// `ADD COLUMN` against the target's real physical columns and keeps the
+/// backfill `UPDATE`, so the retry completes the group instead of refusing.
+#[tokio::test]
+async fn partially_applied_migration_group_is_repaired_on_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("test.duckdb");
+    let backend = setup_backend(&db_path).await;
+    let file_store = FileStore::new(dir.path(), "dev");
+    save_old_schema(&file_store);
+
+    // Simulate a partial application: the physical column was already
+    // added by a prior (failed) run, but the saved schema snapshot was
+    // never advanced (only `save_schema`, called AFTER the group commits,
+    // would have advanced it) — so `check_and_migrate`'s diff still sees
+    // `val_doubled` as missing and re-derives the same `ADD COLUMN` +
+    // backfill group.
+    backend
+        .execute_sql("ALTER TABLE main.events_enriched ADD COLUMN val_doubled BIGINT")
+        .await
+        .expect("simulate partially-applied ADD COLUMN");
+
+    let mut backfill_exprs: HashMap<String, String> = HashMap::new();
+    for (col, expr) in derived_assignments() {
+        backfill_exprs.insert(col, expr);
+    }
+    let column_defaults: HashMap<String, String> = HashMap::new();
+
+    let ddl_backend = ddl_backend_for_dialect(backend.dialect(), None, None);
+    let retry = no_retry_policy();
+    let result = check_and_migrate(
+        &backend,
+        &file_store,
+        "events_enriched",
+        SQL,
+        "main",
+        &inferred_columns(),
+        false,
+        false,
+        false,
+        &column_defaults,
+        &backfill_exprs,
+        Some(&ddl_backend),
+        &retry,
+    )
+    .await
+    .expect("retry over a partially-applied migration must succeed, not fail with 'column already exists'");
+
+    match &result {
+        smelt_runtime::schema_evolution::SchemaEvolutionResult::Migrated {
+            backfilled_columns,
+            ..
+        } => {
+            assert_eq!(
+                backfilled_columns,
+                &vec!["val_doubled".to_string()],
+                "the retried group must still report the column backfilled: {result:?}"
+            );
+        }
+        other => panic!("expected Migrated, got {other:?}"),
+    }
+
+    let mismatched = extract_i64(
+        &backend
+            .execute_sql(
+                "SELECT COUNT(*) FROM main.events_enriched \
+                 WHERE val_doubled IS NULL OR val_doubled != val * 2",
+            )
+            .await
+            .expect("count mismatched"),
+    );
+    assert_eq!(
+        mismatched, 0,
+        "every row must be correctly backfilled after the repaired retry"
+    );
+
+    let saved = file_store
+        .load_schema("events_enriched")
+        .expect("load schema")
+        .expect("schema present");
+    assert!(
+        saved.columns.iter().any(|c| c.name == "val_doubled"),
+        "the repaired migration must advance the saved schema snapshot: {saved:?}"
+    );
+}

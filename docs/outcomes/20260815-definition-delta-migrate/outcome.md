@@ -305,7 +305,7 @@ open — not that the excluded bullets themselves are gone.
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
-| 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | planned |
+| 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
@@ -492,6 +492,19 @@ open — not that the excluded bullets themselves are gone.
   criteria already require the migrate plan to be genuinely executable, not just derivable.
   The spec bullet "The conformance harness has no definition-edit step kind yet" is removed
   from `definition_deltas.md`. Full detail in `phases/05-summary.md`.
+
+- **2026-08-30 (phase 6 implementation).** The atomicity rule is now unconditional: a
+  `schema_evolution: strategy: full_refresh` model rebuilds when its schema changes
+  (`schema_evolution::full_refresh_escape_requires_rebuild`), and a migration group is made
+  rerun-safe on any backend by reconciling its `ADD COLUMN` statements against the target's
+  physical columns before executing (`schema_evolution::reconcile_add_columns`), reading them
+  via `information_schema.columns` rather than the plan's originally-suggested `SELECT * ...
+  LIMIT 0` — DuckDB's Arrow bridge returns zero record batches for a zero-row result, so that
+  probe shape cannot report a schema on an empty table. The standalone
+  `maintenance_driver::execute_in_place_update` fallback dispatch is deleted; a not-yet-folded
+  backfill assignment now forces a full refresh instead. `definition_deltas.md` §"The atomicity
+  rule" and §"Boundary with schema_evolution.md" updated; the "conditional in practice" Known
+  Divergences bullet removed. Full detail in `phases/06-summary.md`.
 
 ## Blocked
 

@@ -19,6 +19,7 @@ mod events_deduped_redelivery_equivalence;
 mod example_builds;
 mod fn_body_wiring;
 mod fn_incremental_ts_e2e;
+mod full_refresh_escape_rebuild;
 mod functions_e2e;
 mod incremental_idempotency;
 mod incremental_nondeterministic_columns_e2e;

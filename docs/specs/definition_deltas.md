@@ -333,10 +333,18 @@ never to revisit. The plan-and-approve gate is where that conflict is resolved, 
 
 A backfill-in-place group's physical column and its backfilled values are created by the **same
 statement group** as the schema migration adding the column — never a separately-dispatched
-write that could observe the column added but not yet backfilled. On a backend with
-transactional DDL, a group failure leaves neither the column nor the values, and the next apply
-retries the whole group. There is no window in which the deployed schema outruns the column's
-real values.
+write that could observe the column added but not yet backfilled. This holds unconditionally: a
+model that opts out of `ALTER`-based evolution (`schema_evolution: strategy: full_refresh`)
+rebuilds the table under its new definition instead of taking a two-step ADD-then-UPDATE, so
+there is no code path left that dispatches a backfill-in-place `UPDATE` outside a migration's own
+statement group. On a backend with transactional DDL, a group failure leaves neither the column
+nor the values, and the next apply retries the whole group. On a backend without transactional
+DDL, a migration group is made rerun-safe by reconciling its `ADD COLUMN` statements against the
+target's physical columns before executing: a column already physically present (from a prior
+partial application) has its `ADD COLUMN` dropped and its backfill `UPDATE` kept, so a group that
+applied its DDL but failed before backfilling completes on the next apply instead of refusing
+with "column already exists". There is no window in which the deployed schema outruns the
+column's real values.
 
 ### Downstream of a migration
 
@@ -356,8 +364,9 @@ strategy, and the stored-schema format for *declared-schema* changes. This spec 
 migration of a **maintained model's stored data** across a change in its defining SQL. Where
 both apply — an added column on an incremental model is both a schema change and a definition
 delta — the definition-delta path governs, because only it carries the frontier bookkeeping and
-the plan-and-approve gate. (`schema_evolution.md`'s `strategy: full_refresh` escape currently
-bypasses that gate — a recorded divergence, §Known Divergences.)
+the plan-and-approve gate. `schema_evolution.md`'s `strategy: full_refresh` escape does not
+bypass that gate: a definition change against a `full_refresh`-strategy model routes to a
+rebuild under the definition-delta path's own admission, rather than a separate DDL step.
 
 ### What stays data-side
 
@@ -456,14 +465,6 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `--apply` rather than resuming — the honest route is a full refresh. Tracked:
   `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 11 ("Per-cell frontier
   addressing").
-- **The atomicity rule is conditional in practice.** A model whose
-  `schema_evolution: strategy: full_refresh` frontmatter skips the migration gate falls back to
-  a standalone `UPDATE` for backfill-in-place fields — the non-atomic two-step §"The atomicity
-  rule" forbids — and that path is also the only one exercised on a backend without
-  transactional DDL. Neither case has a repair path today. Tracked:
-  `docs/plans/20260809-sensitivity-precision.md`. The
-  `schema_evolution.md` full-refresh escape bypassing the gate is the divergence §"Boundary with
-  `schema_evolution.md`" names; the unification should subsume it, not inherit it.
 - **The diagnostic code is not yet renamed in the implementation.** §Diagnostics and §Design name
   `MaintenanceSkeletonChanged`; the shipped `DiagnosticCode` variant, its `smelt-db` mapping, and
   the LSP code string still read `MaintenanceSkeletonColumnAdded`, reflecting the live mechanism's

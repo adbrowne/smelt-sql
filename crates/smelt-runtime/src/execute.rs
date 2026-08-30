@@ -40,8 +40,8 @@ use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
 use crate::safety::{build_model_graph, check_bound_derivation, check_planner_safety};
 use crate::schema_evolution::{
-    check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
-    SchemaEvolutionResult,
+    check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps,
+    full_refresh_escape_requires_rebuild, infer_deployed_columns, SchemaEvolutionResult,
 };
 use crate::select::{select_executable_models, SelectionRequest};
 use crate::transformer::{
@@ -1780,28 +1780,61 @@ pub async fn execute_project(
                         }
                     }
                 }
+            } else if let Ok(true) = backend
+                .table_exists(schema, &plan.model_file.db_name_owned())
+                .await
+            {
+                // `schema_evolution: strategy: full_refresh` opts out of
+                // `ALTER`-based evolution — it has no migration path of its
+                // own, so a schema change forces a rebuild under the new
+                // definition instead of silently taking neither route
+                // (`docs/specs/definition_deltas.md` §"The atomicity rule").
+                let inferred_columns = {
+                    let db_guard = db.lock().await;
+                    infer_deployed_columns(&db_guard, &plan.model_file)
+                };
+                if !inferred_columns.is_empty() {
+                    if let Ok(Some(deployed_schema)) =
+                        file_store.load_schema(&plan.model_file.db_name_owned())
+                    {
+                        if full_refresh_escape_requires_rebuild(
+                            evolution_strategy,
+                            &deployed_schema.columns,
+                            &inferred_columns,
+                        ) {
+                            tracing::warn!(
+                                "Schema changed for '{}' under schema_evolution: strategy: \
+                                 full_refresh — rebuilding under the new definition instead of \
+                                 an ALTER migration.",
+                                plan.name
+                            );
+                            force_full_refresh = true;
+                        }
+                    }
+                }
             }
         }
 
         // ── Definition-change trigger (Trigger::ColumnAdded → Technique::
-        // InPlaceUpdate), FALLBACK dispatch ───────────────────────────────
+        // InPlaceUpdate) ───────────────────────────────────────────────────
         // Runs once per incremental model per run, common to both the keyed
         // and non-keyed branches below — a one-time migration-style
         // backfill over the model's existing rows, orthogonal to whichever
         // window/creation/mutation technique the rest of this run
-        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per column group"). The cell was already resolved once,
-        // above, before the migration gate ran — reused here, never
-        // re-derived. Any column the migration gate already folded into
-        // its own `StatementGroup` (`migration_backfilled_columns`) is
-        // skipped — dispatching it again here would be a redundant,
-        // non-atomic re-run of a backfill that already committed
-        // atomically with its `ADD COLUMN`
-        // (`docs/plans/20260809-sensitivity-precision.md` Phase 6). This
-        // standalone path remains the ONLY route when the migration gate
-        // did not run at all this run (e.g. `schema_evolution: strategy:
-        // full_refresh` on the model, or the target table not yet
-        // existing) — see `docs/specs/incremental_models.md` §"Known
-        // Divergences" for that residual non-atomicity.
+        // dispatches (`docs/specs/definition_deltas.md` §"The verdict per
+        // column group"). The cell was already resolved once, above, before
+        // the migration gate ran — reused here, never re-derived. Any
+        // column the migration gate already folded into its own
+        // `StatementGroup` (`migration_backfilled_columns`) is skipped —
+        // re-dispatching it here would be a redundant, non-atomic re-run of
+        // a backfill that already committed atomically with its `ADD
+        // COLUMN`. A column that was NOT folded (the migration gate didn't
+        // run this run — e.g. `schema_evolution: strategy: full_refresh`,
+        // or a column the gate couldn't fold) is never backfilled by a
+        // standalone `UPDATE` against a schema that may not carry it: the
+        // model force-full-refreshes instead, which is always correct and
+        // always atomic (`docs/specs/definition_deltas.md` §"The atomicity
+        // rule").
         let mut used_in_place_update = false;
         if let Some((_cell, assignments)) = &in_place_update_cell {
             let remaining: Vec<(String, String)> = assignments
@@ -1813,18 +1846,20 @@ pub async fn execute_project(
                 used_in_place_update = true; // some/all columns already backfilled atomically above
             }
             if !remaining.is_empty() {
-                let retry_policy =
-                    RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                crate::maintenance_driver::execute_in_place_update(
-                    backend,
-                    schema,
-                    &plan.model_file.db_name_owned(),
-                    &remaining,
-                    &retry_policy,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-                used_in_place_update = true;
+                if let Ok(true) = backend
+                    .table_exists(schema, &plan.model_file.db_name_owned())
+                    .await
+                {
+                    tracing::warn!(
+                        "Definition-change backfill for '{}' (columns: {:?}) could not be \
+                         folded into an atomic migration this run — forcing a full refresh \
+                         instead of a non-atomic standalone UPDATE.",
+                        plan.name,
+                        remaining.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>()
+                    );
+                    force_full_refresh = true;
+                }
+                // Table absent: no rows to backfill, nothing to dispatch.
             }
         }
 
