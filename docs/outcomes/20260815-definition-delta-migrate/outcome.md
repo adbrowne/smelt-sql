@@ -199,7 +199,7 @@ accurately described as open.
     on a key-addressed model is not a hard error"). Both bullets are removed from
     `incremental_shapes.md` §Known Divergences.
 20. `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` are run and
-    every Known Divergences bullet this outcome's phases 10–19 close is actually removed from the
+    every Known Divergences bullet this outcome's phases 11–20 close is actually removed from the
     respective spec (not just addressed in code) — the same discipline success criterion 8
     already applies to `definition_deltas.md`. Bullets this outcome deliberately does not close
     (the "Out of scope" list) stay, worded accurately rather than pointing at a done outcome as if
@@ -307,20 +307,20 @@ open — not that the excluded bullets themselves are gone.
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
-| 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
-| 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
-| 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
-| 11 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
-| 12 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
-| 13 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
-| 14 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity | pending |
-| 15 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping | pending |
-| 16 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 17 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
-| 18 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
-| 19 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
-| 20 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 10–19 close, alongside the existing `definition_deltas` validate in phase 9 | pending |
+| 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
+| 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
+| 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
+| 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
+| 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
+| 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
+| 15 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity | pending |
+| 16 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping | pending |
+| 17 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 18 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 19 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 20 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 21 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–20 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
 
@@ -564,6 +564,24 @@ open — not that the excluded bullets themselves are gone.
   the guide (phase 4's rename removed it), so phase 8 only verifies its absence; and criterion 18's
   docs-site CLI-surface coverage audit lands as a checklist in phase 8's summary, per that
   criterion's own "folds into phase 8's docs-site pass" wording.
+
+- **2026-08-30 (phase 9 planning) — reshape: letter-suffixed rows renumbered.** Phase `7b`
+  (surface the definition-change diagnostic ahead of a run) was planned on 2026-08-30 but never
+  implemented: `.claude/scripts/outcome-loop.sh`'s `next_step()` scanner skips any row whose
+  number is not purely numeric (`if (n !~ /^[0-9]+$/) next`), so rows `3b`/`7b` are invisible to
+  the wrapper and the loop advanced straight to phase 8. Since success criterion 6 depends on that
+  work — and the close-out validate must not run before it — row `7b` is renumbered to **9** (its
+  plan file renamed `phases/07b-plan.md` → `phases/09-plan.md`, unchanged in substance) and the
+  former rows 9–20 shift to 10–21. Row `3b` is `done` and left alone. The loop-script bug itself is
+  *not* patched here: editing a bash script while the loop process is executing it risks corrupting
+  the running interpreter's read offset. A human should change that regex to `/^[0-9]+[a-z]?$/`
+  between runs; until then, never use letter-suffixed phase numbers.
+- **2026-08-30 (phase 9 planning) — residue routed to phase 10.** Phase 8's summary flagged one
+  unchecked item: whether `docs-site/docs/models.md` / `docs-site/docs/seeds.md` (distinct from
+  `docs/specs/`) still carry stale "no `smelt migrate` command" wording — phase 8's grep gate
+  scoped only `docs/specs/`. That is a success-criterion-8 close-out check, so it belongs to phase
+  10's validate sweep rather than a new row. Phase 8 also recorded criterion 18's docs-site
+  CLI-surface audit as complete with no gap found; phase 19 need only note that.
 
 ## Blocked
 

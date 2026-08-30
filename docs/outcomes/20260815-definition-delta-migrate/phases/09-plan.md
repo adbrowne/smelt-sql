@@ -1,4 +1,4 @@
-# Phase 7b — surface the definition-change diagnostic ahead of a run
+# Phase 9 — surface the definition-change diagnostic ahead of a run
 
 ## Objective
 
@@ -25,7 +25,7 @@ The spec edits land first (spec-first rule):
   bullet (line ~363).
 - `docs/specs/incremental_models.md` §Known Divergences, "Locality and diagnostic residues" —
   drop the surfacing clause and its "The surfacing gap is tracked: … phase 7b" sentence; the
-  rest of that bullet stays open (phase 16 owns it).
+  rest of that bullet stays open (phase 17 owns it).
 - `docs/specs/architecture.md` §"Workspace loading parity rule (CLI ↔ LSP)" — add the
   deployed-schema registration to the list of inputs both consumers register at load.
 
