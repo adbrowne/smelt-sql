@@ -304,7 +304,7 @@ open — not that the excluded bullets themselves are gone.
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
-| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | pending |
+| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | planned |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
@@ -460,6 +460,17 @@ open — not that the excluded bullets themselves are gone.
   `pure_column_addition` field on `DefinitionDeltaStatus::Pending`; the run gate skips refusal
   when it's `true` (`smelt explain`/`smelt migrate` still report and offer the delta). Recorded
   in `definition_deltas.md` §"Detection" as "Pure column addition is exempt."
+- **2026-08-30 (phase 5 planning).** No reshape — phase 4's summary left nothing outside an
+  existing row. Two scoping calls. (a) The new `MigrateModel` step is added *alongside*
+  `RewriteModel`, not in place of it: `RewriteModel` asserts the pre-migrate contract (a later
+  run compiles whatever is on disk) and that behaviour is still real and still worth covering;
+  `MigrateModel` asserts the spec's own oracle — the new definition holds immediately after the
+  migration. (b) Generation goes into a NEW `arb_schedule_with_definition_edit`, leaving
+  `arb_schedule_for` byte-identical, because the Spark and BigQuery conformance twins consume the
+  same generator and changing it would silently reshape their (nightly/manual) samples inside a
+  per-PR phase. The cross-engine `families/gate.rs` still gets a real arm for the new variant, via
+  the same shared driver helper — not a skip.
+
 - **2026-08-29 (phase 4 implementation).** Renamed the CLI verb `smelt backbuild` → `smelt
   rebuild` with no compatibility alias (`smelt backbuild` now exits 2, unrecognised
   subcommand). The `smelt-logical/src/backbuild/` crate module, the "backbuild synthesis"
