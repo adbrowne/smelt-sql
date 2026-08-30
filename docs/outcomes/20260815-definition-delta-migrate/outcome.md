@@ -306,7 +306,7 @@ open — not that the excluded bullets themselves are gone.
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
-| 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | planned |
+| 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
 | 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | pending |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
@@ -521,6 +521,22 @@ open — not that the excluded bullets themselves are gone.
   `backbuild::definition_diff`'s existing skeleton-clause diff — which is what the renamed code
   name promises. The two "not yet surfaced ahead of a run" divergence bullets
   (`model_properties.md`, `incremental_models.md`) stay open through phase 7 and close in 7b.
+
+- **2026-08-30 (phase 7 implementation).** `Refusal::SkeletonColumnAdded` /
+  `MaintenanceRefusal::SkeletonColumnAdded` / `DiagnosticCode::MaintenanceSkeletonColumnAdded` /
+  the LSP `"maintenance-skeleton-column-added"` wire string all renamed to
+  `SkeletonChanged`/`MaintenanceSkeletonChanged`/`"maintenance-skeleton-changed"`. The
+  ~220-arm `DbCode → &str` match inline in `Backend::to_lsp_diagnostic` (using no `self`) was
+  extracted to a standalone `pub(crate) fn diagnostic_code_str` so the rename's LSP leg is
+  directly unit-testable without constructing a `Backend`/`Client` — the only code-shape change
+  beyond the mechanical rename. The new grep gate's needle is built via string concatenation
+  (`["Skeleton", "Column", "Added"].concat()`) rather than a literal, since the plan's own
+  verification step requires zero matches for the stale spelling across `crates/` and
+  `docs/specs/` with no carve-out for the guard test's own source. `definition_deltas.md`'s
+  "one code, not a split pair" design paragraph was reworded to describe the decision without
+  naming the retired identifier, both for the grep gate and because `docs/specs/CLAUDE.md`'s
+  timeless-oracle rule already forbids historical/pre-rename identifiers in spec prose. Full
+  detail in `phases/07-summary.md`.
 
 ## Blocked
 

@@ -54,8 +54,8 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
-| Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonColumnAdded`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
-| Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonColumnAdded`) in a skeleton position for the same reason | unbuilt |
+| Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonChanged`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
+| Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonChanged`) in a skeleton position for the same reason | unbuilt |
 | Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + a **derived** horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact. Licensed by a *derived* `H` only — a *declared*-on-source `H` no longer licenses this transform (an under-declared source lateness would silently truncate the recompute); where `H` is not derivable the transform is simply not licensed and the enrichment evaluates via the ordinary widened scan | **built** |
 | Horizon settled-delay / tail-rewrite | maintained-window / **derived** horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value. Batched-side forward-reach machinery, confirmed derived-only (never licensed by a declared horizon) | unbuilt |
 | Reconciliation-ledger fold | additive column-group algebra | consult the `(output-region × column-group)` ledger entry before merging: refuse (never fold) a delta already in its processed set, otherwise combine and extend it; required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
@@ -228,7 +228,7 @@ upstream read), admitted only under the additive-only model-diff proof; a
 payload field that *re-derives from upstream* backfills as the **generic
 column-scoped merge**, keyed where the source is keyed, inheriting that
 source's partition-locality verdict unchanged. Both members of the pair are
-**refused** with `MaintenanceSkeletonColumnAdded` — never applied — when the
+**refused** with `MaintenanceSkeletonChanged` — never applied — when the
 added field lands in a **skeleton** position (identity/grouping/dedup/ordering):
 that is a grain change, not a backfill, and the honest plan is a recompute
 (effectively a new model). Fields added together factor by shared
@@ -398,7 +398,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   field-backfill (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`),
   which builds the `UPDATE ... FROM (...) AS src` statement licensed by an
   additive-only model diff and a non-empty `unique_key` (the keyed
-  column-scoped-`MERGE` half, and the `MaintenanceSkeletonColumnAdded` refusal,
+  column-scoped-`MERGE` half, and the `MaintenanceSkeletonChanged` refusal,
   are unbuilt); dimension-driven horizon-bounded MERGE
   (`crates/smelt-runtime/src/dimension_horizon_merge.rs::dimension_horizon_merge`),
   which clamps a dimension batch's recompute `SELECT` to `[conv_ts − H,
@@ -500,7 +500,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   fold/recompute-reset pair (no `(output-region × column-group)` ledger
   storage exists yet — every technique today behaves as if it always folds
   cleanly); the keyed column-scoped-`MERGE` half of definition-change
-  field-backfill and its `MaintenanceSkeletonColumnAdded` refusal. Generic
+  field-backfill and its `MaintenanceSkeletonChanged` refusal. Generic
   column-scoped merge has a standalone, admission-gated entry point today
   (`maintenance_driver::resolve_cell_technique`/`decide_column_merge_dispatch`
   + `maintenance_driver::execute_column_scoped_merge`, `incremental_models.md`

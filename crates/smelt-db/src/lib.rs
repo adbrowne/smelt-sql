@@ -2523,16 +2523,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
-                crate::queries::maintenance::MaintenanceRefusal::SkeletonColumnAdded { column } => {
-                    (
-                        DiagnosticCode::MaintenanceSkeletonColumnAdded,
-                        format!(
-                            "column '{column}' occupies a row-membership/identity (skeleton) \
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonChanged { column } => (
+                    DiagnosticCode::MaintenanceSkeletonChanged,
+                    format!(
+                        "column '{column}' occupies a row-membership/identity (skeleton) \
                          position — a grain change, never a column backfill (EX-39, \
                          docs/specs/incremental_models.md §\"The definition-change trigger\")",
-                        ),
-                    )
-                }
+                    ),
+                ),
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
                     grain,
                     tracking_plan,

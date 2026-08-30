@@ -538,7 +538,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 | `MaintenanceRepairKeysNotDiscoverable` | The repair family's affected-key-discovery obligation fails: a changed input's delta cannot be resolved to a finite output key set; names the changed input and why the delta yields no key set (§"The repair family"). |
 | `MaintenanceRepairSliceUnbounded` | The repair family's bounded-per-group-read-footprint obligation fails: the key→input-slice reach is neither derived nor declared-and-checked; names the source and the unbounded reach (§"The repair family"). |
 
-`MaintenanceSkeletonColumnAdded` — a definition delta adding or changing a field in a skeleton
+`MaintenanceSkeletonChanged` — a definition delta adding or changing a field in a skeleton
 position — is owned by `definition_deltas.md` §Surface.
 
 **Contract-lattice codes.**
@@ -1862,7 +1862,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
   poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
   assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonColumnAdded` is reachable (unit coverage, and via `smelt-runtime`'s
+  `MaintenanceSkeletonChanged` is reachable (unit coverage, and via `smelt-runtime`'s
   maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
   but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
   diagnostics/`smelt explain` path always derives an empty trigger set);
@@ -1870,7 +1870,8 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   is declared surface but propagation is day-ordinal; the built grain-alignment check
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
-  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
+  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`. The surfacing gap is
+  tracked: `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7b.
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the

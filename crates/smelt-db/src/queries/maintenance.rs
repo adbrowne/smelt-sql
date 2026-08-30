@@ -830,10 +830,10 @@ pub enum MaintenanceRefusal {
     LocalityNotEstablished {
         message: String,
     },
-    /// `MaintenanceSkeletonColumnAdded` — an added column occupies a
+    /// `MaintenanceSkeletonChanged` — an added or changed column occupies a
     /// row-membership/identity (skeleton) position, a grain change rather
     /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
-    SkeletonColumnAdded {
+    SkeletonChanged {
         column: String,
     },
 }
@@ -1147,8 +1147,8 @@ pub fn maintenance_plan_diagnostics(
                     why: why.clone(),
                 })
             }
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column } => {
-                Some(MaintenanceRefusal::SkeletonColumnAdded {
+            smelt_logical::maintenance::Refusal::SkeletonChanged { column } => {
+                Some(MaintenanceRefusal::SkeletonChanged {
                     column: column.clone(),
                 })
             }
@@ -1157,7 +1157,7 @@ pub fn maintenance_plan_diagnostics(
             // folded into `file_diagnostics()` — `MaintenanceReachNotDerivable`
             // has no `DiagnosticCode` variant yet (`diagnostics.md` §Known
             // divergences). Leave unmapped so a future phase's own diagnostic
-            // lands it, exactly as `SkeletonColumnAdded` above.
+            // lands it, exactly as `SkeletonChanged` above.
             smelt_logical::maintenance::Refusal::ReachNotDerivable { .. } => None,
             smelt_logical::maintenance::Refusal::UnsupportedGrain {
                 grain,

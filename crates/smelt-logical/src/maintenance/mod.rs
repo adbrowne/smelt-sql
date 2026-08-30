@@ -353,9 +353,9 @@ pub struct KeyScope {
 /// one would be dishonest (`01-framework.md` §10; `06-proof-obligations.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// A field was added in a skeleton position — a grain change, not a
-    /// column backfill (EX-39).
-    SkeletonColumnAdded { column: String },
+    /// A field was added or changed in a skeleton position — a grain
+    /// change, not a column backfill (EX-39).
+    SkeletonChanged { column: String },
     /// The derived scan/footprint cannot be partition-bounded and the K8
     /// guardrail (`require: partition_local`, the ratified default) refuses
     /// rather than shipping a silent full-table operation.

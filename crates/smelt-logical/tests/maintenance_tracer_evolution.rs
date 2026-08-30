@@ -465,6 +465,6 @@ fn v4_and_v5_adds_are_payload_but_a_dedup_key_add_refuses() {
         }],
     );
     assert!(
-        matches!(&plan.refusals[..], [Refusal::SkeletonColumnAdded { column }] if column == "device_id")
+        matches!(&plan.refusals[..], [Refusal::SkeletonChanged { column }] if column == "device_id")
     );
 }

@@ -422,8 +422,8 @@ fn column_added_trigger_derived_from_deployed_schema() {
 /// The skeleton-add direction of the same production derivation: an added
 /// column that occupies a `GROUP BY` key position is a grain change, never
 /// a column backfill (EX-39) — the plan refuses with
-/// `Refusal::SkeletonColumnAdded`, which `smelt-db`'s refusal→diagnostic
-/// mapping surfaces as `MaintenanceSkeletonColumnAdded`
+/// `Refusal::SkeletonChanged`, which `smelt-db`'s refusal→diagnostic
+/// mapping surfaces as `MaintenanceSkeletonChanged`
 /// (`crates/smelt-db/src/lib.rs`'s `file_diagnostics` match arm).
 #[test]
 fn column_added_trigger_skeleton_position_refuses() {
@@ -466,9 +466,9 @@ fn column_added_trigger_skeleton_position_refuses() {
     assert!(
         result.plan.refusals.iter().any(|r| matches!(
             r,
-            Refusal::SkeletonColumnAdded { column } if column == "user_id"
+            Refusal::SkeletonChanged { column } if column == "user_id"
         )),
-        "expected a SkeletonColumnAdded refusal naming 'user_id'; got refusals {:?}, cells {:?}",
+        "expected a SkeletonChanged refusal naming 'user_id'; got refusals {:?}, cells {:?}",
         result.plan.refusals,
         result.plan.cells
     );
@@ -565,4 +565,69 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
         result.plan.cells,
         result.plan.refusals
     );
+}
+
+/// Guards the pre-rename skeleton-diagnostic spelling
+/// (`docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7):
+/// a half-done rename cannot pass green. The needle is built from parts so
+/// this guard's own source does not itself trip the check it performs.
+#[test]
+fn no_stale_skeleton_column_added_spelling() {
+    use std::path::Path;
+
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+
+    let excluded_dirs = [
+        "docs/plans",
+        "docs/handoffs",
+        "docs/research",
+        "docs/outcomes",
+        "target",
+    ];
+    let stale_needle = ["Skeleton", "Column", "Added"].concat();
+
+    let mut hits = Vec::new();
+    for root in ["crates", "docs/specs"] {
+        for entry in walk_files(&workspace_root.join(root)) {
+            let rel = entry
+                .strip_prefix(&workspace_root)
+                .expect("entry under workspace root");
+            let rel_str = rel.to_string_lossy();
+            if excluded_dirs.iter().any(|d| rel_str.starts_with(d))
+                || rel.components().any(|c| c.as_os_str() == "target")
+            {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(&entry) else {
+                continue;
+            };
+            if content.contains(&stale_needle) {
+                hits.push(rel_str.into_owned());
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "stale skeleton-column-added spelling found in: {hits:?} — rename to the changed spelling"
+    );
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk_files(&path));
+        } else if path.is_file() {
+            out.push(path);
+        }
+    }
+    out
 }

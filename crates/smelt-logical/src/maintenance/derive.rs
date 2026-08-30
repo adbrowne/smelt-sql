@@ -1566,7 +1566,7 @@ fn derive_column_added(
     );
     for col in columns {
         if inputs.output.skeleton_columns.contains(col) {
-            plan.refusals.push(Refusal::SkeletonColumnAdded {
+            plan.refusals.push(Refusal::SkeletonChanged {
                 column: col.clone(),
             });
             return;
@@ -1577,7 +1577,7 @@ fn derive_column_added(
             .map(|(_, role)| *role)
         {
             if role.is_skeleton() {
-                plan.refusals.push(Refusal::SkeletonColumnAdded {
+                plan.refusals.push(Refusal::SkeletonChanged {
                     column: col.clone(),
                 });
                 return;
@@ -1633,7 +1633,7 @@ fn derive_column_added(
                 };
                 match classify_definition_change(&def, inputs.sql, &ctx) {
                     Ok(DefinitionChangeClass::SkeletonAdd { .. }) => {
-                        plan.refusals.push(Refusal::SkeletonColumnAdded {
+                        plan.refusals.push(Refusal::SkeletonChanged {
                             column: (*c).clone(),
                         });
                         return;

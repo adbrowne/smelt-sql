@@ -4453,7 +4453,7 @@ async fn rt_insert_and_run(
 /// (`docs/plans/20260809-sensitivity-precision.md` Phase 6): widening the
 /// `GROUP BY` (`ModelEdit::AddGroupingColumn`) is a grain change, never a
 /// column backfill (EX-39) — the plan derived with the REAL deployed-schema
-/// snapshot must carry `Refusal::SkeletonColumnAdded`, never a
+/// snapshot must carry `Refusal::SkeletonChanged`, never a
 /// `Trigger::ColumnAdded` cell.
 #[test]
 fn skeleton_position_add_derives_skeleton_column_added_refusal() {
@@ -4498,10 +4498,10 @@ fn skeleton_position_add_derives_skeleton_column_added_refusal() {
     assert!(
         plan.refusals.iter().any(|r| matches!(
             r,
-            smelt_logical::maintenance::Refusal::SkeletonColumnAdded { column }
+            smelt_logical::maintenance::Refusal::SkeletonChanged { column }
                 if column == &recipe.source.key_column
         )),
-        "a GROUP BY widening add must refuse SkeletonColumnAdded naming {:?}: {plan:#?}",
+        "a GROUP BY widening add must refuse SkeletonChanged naming {:?}: {plan:#?}",
         recipe.source.key_column
     );
     assert!(

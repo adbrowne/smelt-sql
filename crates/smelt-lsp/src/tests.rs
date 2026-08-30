@@ -2741,3 +2741,14 @@ fn completion_if_snippet_function_returns_correct_snippet() {
         "if completion must have SNIPPET insert text format"
     );
 }
+
+/// `MaintenanceSkeletonChanged` renders as the wire-visible code string a
+/// CI/editor consumer matches on, post-rename
+/// (`docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7).
+#[test]
+fn skeleton_changed_maps_to_stable_code_string() {
+    assert_eq!(
+        crate::backend::diagnostic_code_str(smelt_db::DiagnosticCode::MaintenanceSkeletonChanged),
+        "maintenance-skeleton-changed"
+    );
+}
