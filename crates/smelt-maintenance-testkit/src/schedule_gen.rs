@@ -100,13 +100,29 @@ pub enum ConformanceStep {
     /// invalidates the interval store's coverage bookkeeping for this
     /// model — the run pipeline itself always uses the CURRENT on-disk SQL
     /// regardless, so a full DELETE+INSERT recompute of whichever window a
-    /// later step names always reflects the rewritten body. This is
-    /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
-    /// `UpstreamRederive` definition-change classification
-    /// (`definition_deltas.md` §"The verdict per column group") — that
-    /// classification is unbuilt (no `derive_model_maintenance_plan` caller
-    /// reads a prior definition to classify an added column against it).
+    /// later step names always reflects the rewritten body. `RewriteModel`
+    /// asserts this pre-migrate contract only ("whatever's on disk compiles
+    /// and runs on the next ordinary run step") — it never routes through
+    /// `smelt migrate`'s own derive→classify→apply-or-refuse machinery.
+    /// [`ConformanceStep::MigrateModel`] is its migrated counterpart: the
+    /// same rewrite, but staged through the shipped backbuild classification
+    /// (`docs/specs/definition_deltas.md` §"The verdict per column group").
     RewriteModel { edit: ModelEdit },
+    /// A definition-change step routed through the *shipped* `smelt
+    /// migrate` derive→apply path (`smelt_logical::backbuild`, consumed via
+    /// `smelt_runtime::definition_delta::derive_plan` +
+    /// [`crate::migrate_step::run_migrate_step`]) — the migrated counterpart
+    /// of [`ConformanceStep::RewriteModel`]
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`):
+    /// rewrite `models/<name>.sql` on disk with `edit` applied, derive the
+    /// migration plan against the model's last-deployed definition, and
+    /// either execute the derived in-place statements (when the plan admits
+    /// one) or fall back to an ordinary full-refresh run (when it does
+    /// not) — never re-deriving admission, only executing what the shared
+    /// backbuild derivation already classified. Unlike `RewriteModel`, the
+    /// new-definition oracle must hold IMMEDIATELY after this step, with no
+    /// intervening catch-up run.
+    MigrateModel { edit: ModelEdit },
 }
 
 /// Whether every window in `schedule` is mutually independent under
@@ -215,6 +231,110 @@ fn build_schedule(
             })
             .collect();
         steps.push(ConformanceStep::RunWindow { start, end, rows });
+    }
+
+    for (i, &(start, _end)) in windows.iter().enumerate() {
+        if gets_late.get(i).copied().unwrap_or(false) {
+            let late_row = GenRow {
+                d: start,
+                id: next_id,
+                val: 7,
+            };
+            next_id += 1;
+            steps.push(ConformanceStep::AppendLateRow(late_row));
+            late_windows.push(windows[i]);
+        }
+    }
+
+    // Catch-up: re-run every window that received a late row, so a settled
+    // point always exists (design §5).
+    for (start, end) in late_windows {
+        steps.push(ConformanceStep::RunWindow {
+            start,
+            end,
+            rows: Vec::new(),
+        });
+    }
+
+    ConformanceSchedule(steps)
+}
+
+/// [`arb_schedule_for`] with a [`ConformanceStep::MigrateModel`] step
+/// inserted after the FIRST window's `RunWindow` step
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`
+/// task 4): the migration edit is drawn from `recipe.evolution`, which
+/// callers must have already restricted to non-empty (e.g. filtering
+/// `RecipePool::partition_append_only()` recipes on
+/// `!recipe.evolution.is_empty()`) — panics loudly on an empty `evolution`
+/// rather than silently generating a schedule with no migration step.
+/// Deliberately independent of [`arb_schedule_for`]/`build_schedule` (never
+/// touched by this function) so every existing pool consuming
+/// `arb_schedule_for`, including the Spark/BigQuery twins, keeps generating
+/// byte-identical schedules.
+pub fn arb_schedule_with_definition_edit(
+    recipe: &ModelRecipe,
+) -> impl Strategy<Value = ConformanceSchedule> {
+    assert!(
+        !recipe.evolution.is_empty(),
+        "arb_schedule_with_definition_edit requires a recipe with a non-empty evolution: \
+         {recipe:?}"
+    );
+    let base = base_date();
+    let evolution = recipe.evolution.clone();
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        let evolution = evolution.clone();
+        (
+            proptest::collection::vec(
+                proptest::collection::vec(arb_payload_value(), 1..=2),
+                n_windows,
+            ),
+            proptest::collection::vec(any::<bool>(), n_windows),
+            proptest::sample::select(evolution),
+        )
+            .prop_map(move |(window_vals, gets_late, edit)| {
+                build_schedule_with_definition_edit(base, &window_vals, &gets_late, edit)
+            })
+    })
+}
+
+/// [`build_schedule`], with a [`ConformanceStep::MigrateModel { edit }`]
+/// step inserted immediately after the FIRST window's `RunWindow` step — the
+/// remaining windows (2nd, optionally 3rd) run as ordinary `RunWindow` steps
+/// under the migrated definition, so equivalence is checked both
+/// immediately after the migration and after subsequent windowed runs.
+fn build_schedule_with_definition_edit(
+    base: NaiveDate,
+    window_vals: &[Vec<i64>],
+    gets_late: &[bool],
+    edit: ModelEdit,
+) -> ConformanceSchedule {
+    let mut steps = Vec::new();
+    let mut next_id = 1_i64;
+    let mut late_windows: Vec<(NaiveDate, NaiveDate)> = Vec::new();
+    let mut windows = Vec::new();
+
+    for (i, vals) in window_vals.iter().enumerate() {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+        windows.push((start, end));
+
+        let rows = vals
+            .iter()
+            .map(|val| {
+                let row = GenRow {
+                    d: start,
+                    id: next_id,
+                    val: *val,
+                };
+                next_id += 1;
+                row
+            })
+            .collect();
+        steps.push(ConformanceStep::RunWindow { start, end, rows });
+
+        if i == 0 {
+            steps.push(ConformanceStep::MigrateModel { edit });
+        }
     }
 
     for (i, &(start, _end)) in windows.iter().enumerate() {
@@ -610,11 +730,13 @@ mod tests {
                     // Phase 6/9 hazard steps never appear in `arb_schedule_for`'s
                     // own generated output (see that fn's doc comment) — this
                     // self-check is scoped to the generator, not hand-written
-                    // schedules.
+                    // schedules. `MigrateModel` is `arb_schedule_with_definition_edit`'s
+                    // own step kind, not `arb_schedule_for`'s.
                     ConformanceStep::RerunWindow { .. }
                     | ConformanceStep::FullRefreshRun
                     | ConformanceStep::BackfillRegion { .. }
-                    | ConformanceStep::RewriteModel { .. } => {}
+                    | ConformanceStep::RewriteModel { .. }
+                    | ConformanceStep::MigrateModel { .. } => {}
                 }
             }
             assert!(

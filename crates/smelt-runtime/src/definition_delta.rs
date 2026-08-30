@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use thiserror::Error;
 
+use smelt_backend::Backend;
 use smelt_core::sources::SourcesConfig;
 use smelt_core::ModelFile;
 use smelt_logical::backbuild::{
@@ -162,6 +163,24 @@ pub fn derive_plan(
     })
 }
 
+/// Execute `plan.statements`, in order, against `backend` — the statement-
+/// execution half of `smelt migrate --apply`
+/// (`docs/specs/definition_deltas.md` §"`smelt migrate`"), extracted out of
+/// `smelt-cli::commands::migrate::apply_plan` so the CLI contributes only
+/// approval gating, schema recording, and rendering. Authors no SQL of its
+/// own — every statement already came from `smelt_logical::backbuild`'s
+/// emitters (maintenance-plan purity, root `CLAUDE.md` §"Maintenance-plan
+/// purity").
+pub async fn apply_migration(backend: &dyn Backend, plan: &MigrationPlan) -> Result<()> {
+    for statement in &plan.statements {
+        backend
+            .execute_sql(statement)
+            .await
+            .with_context(|| format!("Migration statement failed: {statement}"))?;
+    }
+    Ok(())
+}
+
 /// Derive `model`'s [`DefinitionDeltaStatus`] against its last-deployed
 /// definition on `file_store`'s target — the single derivation the run
 /// gate, `smelt explain`, and `smelt migrate` all read
@@ -298,7 +317,36 @@ fn build_sources_map(
                     not_null_columns: upstream_not_null,
                 },
             );
+            continue;
         }
+
+        // Neither a legacy `sources.yml` entry nor a discovered upstream
+        // model matched — fall back to the SAME default materialization
+        // name mapping the compile path's own path-ref resolver uses for
+        // every `smelt.<path>` reference (`docs/specs/architecture.md`
+        // §"Default materialization name mapping": path segments joined by
+        // `_`, e.g. `smelt.sources.events` → `sources_events`,
+        // `ModelFile::db_name_owned`'s own formula). This is the common
+        // case for a source declared via a per-entity source YAML
+        // (`models/sources/<name>.yml`) rather than a legacy aggregate
+        // `sources.yml` — the format `smelt-core::check_aggregate_sources_yml`
+        // now requires build-path projects to use. No `unique_key`/
+        // `not_null_columns` facts are known for this fallback (fail-closed,
+        // only ever costing an admitted technique that needs them — B3's
+        // own `unique_key` requirement, never a wrong admission), but the
+        // physical name itself is not a "fact" that can be missing: it is
+        // the one mapping every backend-compiled statement already commits
+        // to, so leaving it unresolved here would let B5's re-aggregation
+        // subquery splice unresolved `smelt.<path>` DSL syntax into
+        // executed SQL instead.
+        sources_map.insert(
+            leaf,
+            SourceRef {
+                physical_name: path.join("_"),
+                unique_key: None,
+                not_null_columns: BTreeSet::new(),
+            },
+        );
     }
     sources_map
 }
@@ -489,5 +537,78 @@ mod tests {
         let status =
             detect_definition_delta(&file_store, &model, &[], None, &db).expect("should not error");
         assert!(matches!(status, DefinitionDeltaStatus::Approved));
+    }
+
+    /// `apply_migration_executes_plan_statements_in_order`
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/05-plan.md`
+    /// test 1): [`apply_migration`] executes exactly `plan.statements`, in
+    /// order, against the passed backend, and authors nothing of its own —
+    /// a table created by statement 1 and populated by statements 2/3 ends
+    /// up with exactly the rows those statements describe, in the order
+    /// they were given.
+    #[tokio::test]
+    async fn apply_migration_executes_plan_statements_in_order() {
+        use smelt_backend::Backend;
+        use smelt_logical::backbuild::{BackbuildOption, MigrationPlan, Technique, WriteScope};
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("db.duckdb");
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb backend");
+
+        let full_refresh = BackbuildOption {
+            technique: Technique::FullRefresh,
+            slot: None,
+            statements: vec!["CREATE OR REPLACE TABLE main.t AS SELECT 1".to_string()],
+            write_scope: WriteScope::FullWrite,
+            reads_upstream: false,
+            rerun_safe: true,
+        };
+        let plan = MigrationPlan {
+            model: "t".to_string(),
+            table: "main.t".to_string(),
+            groups: vec![],
+            full_refresh,
+            statements: vec![
+                "CREATE TABLE main.t (id INTEGER, val INTEGER)".to_string(),
+                "INSERT INTO main.t VALUES (1, 10)".to_string(),
+                "INSERT INTO main.t VALUES (2, 20)".to_string(),
+            ],
+        };
+
+        apply_migration(&backend, &plan)
+            .await
+            .expect("apply_migration should execute every statement in order");
+
+        let batches = backend
+            .execute_sql("SELECT id, val FROM main.t ORDER BY id")
+            .await
+            .expect("read back applied table");
+        let rows: Vec<(i64, i64)> = batches
+            .iter()
+            .flat_map(|batch| {
+                let ids = batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .expect("id column is Int32");
+                let vals = batch
+                    .column(1)
+                    .as_any()
+                    .downcast_ref::<arrow::array::Int32Array>()
+                    .expect("val column is Int32");
+                (0..batch.num_rows())
+                    .map(|i| (ids.value(i) as i64, vals.value(i) as i64))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        assert_eq!(
+            rows,
+            vec![(1, 10), (2, 20)],
+            "apply_migration must have executed the CREATE then both INSERTs, in order, and \
+             authored no statements of its own"
+        );
     }
 }

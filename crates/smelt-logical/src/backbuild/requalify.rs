@@ -16,10 +16,12 @@
 //! `analysis::walk::own_region_text_excluding_self_relations` already uses
 //! elsewhere in this crate (replacement here rather than exclusion).
 
-use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{ColumnRef, Expr, SyntaxKind, TextRange};
+use std::collections::BTreeMap;
 
-use super::{resolve_representative, RepresentativeSource};
+use smelt_parser::syntax_kind::SyntaxNode;
+use smelt_parser::{ColumnRef, Expr, SmeltPathRef, SyntaxKind, TextRange};
+
+use super::{resolve_representative, RepresentativeSource, SourceRef};
 
 /// Requalify every column reference inside `expr` against
 /// `representative_sources` (the stored 1:1 representative set — bare
@@ -266,6 +268,45 @@ fn splice(node: &SyntaxNode, spans: &[(TextRange, String)]) -> String {
     }
     out.push_str(&full_text[(cursor - node_start) as usize..(content_end - node_start) as usize]);
     out
+}
+
+/// Requalify every `smelt.<path>` reference (source or upstream model,
+/// [`smelt_parser::SmeltPathRef`]) found anywhere inside `node`'s syntax
+/// subtree to its resolved physical table name from `sources` — keyed the
+/// same best-effort, leaf-name way `BackbuildInputs::sources` itself is
+/// built (`smelt-runtime::definition_delta::build_sources_map`'s doc
+/// comment). The FROM/WHERE-clause counterpart of [`requalify`]'s
+/// column-reference rewrite: B5's re-aggregation subquery (research §4 B5)
+/// splices the model's WHOLE FROM/WHERE tree verbatim rather than a single
+/// self-contained expression, so — unlike B1/B3, which only ever touch
+/// already-proven column dependencies — it still carries the model's own
+/// unresolved `smelt.<path>` DSL ref syntax, which only the compiler's own
+/// printer normally resolves. Fails closed (named reason, not a silent
+/// pass-through of DSL syntax into an executed statement) when a reference
+/// has no resolved entry in `sources`.
+pub fn requalify_source_refs(
+    node: &SyntaxNode,
+    sources: &BTreeMap<String, SourceRef>,
+) -> Result<String, String> {
+    let mut spans: Vec<(TextRange, String)> = Vec::new();
+    for path_ref in node.descendants().filter_map(SmeltPathRef::cast) {
+        let path = path_ref.path().ok_or_else(|| {
+            "a smelt path reference has no resolvable SMELT_PATH child".to_string()
+        })?;
+        let segments = path.segments();
+        let leaf = segments.last().cloned().unwrap_or_default();
+        let physical = sources.get(&leaf).map(|s| s.physical_name.clone());
+        let Some(physical) = physical else {
+            return Err(format!(
+                "reference 'smelt.{}' has no resolved physical name in \
+                 BackbuildInputs::sources",
+                segments.join(".")
+            ));
+        };
+        spans.push((trimmed_range(path_ref.syntax()), physical));
+    }
+    spans.sort_by_key(|(range, _)| range.start());
+    Ok(splice(node, &spans))
 }
 
 #[cfg(test)]

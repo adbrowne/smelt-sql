@@ -13,6 +13,7 @@ use smelt_backend::Backend;
 
 use crate::families::ConformanceBackend;
 use crate::link_c_harness::{base_request, LinkCProject};
+use crate::migrate_step::{run_migrate_step, MigrateStepOutcome};
 use crate::oracle::multiset_equal_via_backend_with_diff;
 use crate::recipe::{arb_recipe, ConstructKind, ModelEdit, ModelRecipe, RecipePool};
 use crate::render;
@@ -312,6 +313,74 @@ pub async fn drive_and_assert_for(
                     render::render_model_file_with_edit(recipe, *edit),
                 )?;
                 current_edit = Some(*edit);
+            }
+            ConformanceStep::MigrateModel { edit } => {
+                // Definition change routed through the shipped `smelt
+                // migrate` derive→apply path (the same shared helper
+                // `maintenance_conformance/gate.rs::drive_and_assert`
+                // consumes) — the new-definition oracle must hold
+                // IMMEDIATELY after this step, with no intervening
+                // catch-up run.
+                let outcome = run_migrate_step(
+                    &project.project_dir,
+                    b.engine_name(),
+                    backend.as_ref(),
+                    recipe,
+                    *edit,
+                    || async {
+                        let snapshot_target = target.clone();
+                        let mut request = base_request(b.engine_name());
+                        request.full_refresh = true;
+                        request.start = None;
+                        request.end = None;
+                        project
+                            .run_with_target(
+                                snapshot_target,
+                                &format!("{}-run-{i}-full-refresh", b.engine_name()),
+                                request,
+                                &smelt_runtime::NoOpReporter,
+                            )
+                            .await?;
+                        Ok(())
+                    },
+                )
+                .await?;
+                current_edit = Some(*edit);
+
+                match outcome {
+                    MigrateStepOutcome::Applied => {
+                        // No new source data was read — the S-tracker's
+                        // existing last `k` (from the prior RunWindow) is
+                        // still the right point to assert against.
+                    }
+                    MigrateStepOutcome::FullRefreshed => {
+                        let snapshot = read_source_snapshot_via_backend(
+                            backend.as_ref(),
+                            &schema,
+                            &recipe.source,
+                        )
+                        .await?;
+                        let k = tracker.record_full_refresh(snapshot);
+                        last_k = Some(k);
+                    }
+                }
+
+                let k = last_k.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "MigrateModel step at index {i} had no prior RunWindow to assert \
+                         against: {schedule:?}"
+                    )
+                })?;
+                assert_equivalence_for_with_edit(
+                    b,
+                    &schema,
+                    recipe,
+                    backend.as_ref(),
+                    &tracker,
+                    k,
+                    current_edit,
+                )
+                .await?;
             }
         }
     }

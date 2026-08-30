@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use smelt_cli::{find_project_root, Config, ModelDiscovery, SourcesConfig};
 use smelt_logical::backbuild::{ColumnGroupPlan, MigrationPlan, MigrationVerdict};
-use smelt_runtime::definition_delta::derive_plan;
+use smelt_runtime::definition_delta::{apply_migration, derive_plan};
 use smelt_state::file_store::FileStore;
 use smelt_state::migration_approvals::MigrationApprovalStore;
 
@@ -269,12 +269,7 @@ async fn apply_plan(
         .await
         .with_context(|| "Failed to connect to target backend")?;
 
-    for statement in &plan.statements {
-        backend
-            .execute_sql(statement)
-            .await
-            .with_context(|| format!("Migration statement failed: {statement}"))?;
-    }
+    apply_migration(backend.as_ref(), plan).await?;
 
     smelt_runtime::schema_evolution::save_deployed_schema(
         file_store,

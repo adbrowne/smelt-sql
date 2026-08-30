@@ -304,7 +304,7 @@ open — not that the excluded bullets themselves are gone.
 | 3 | Approval store + `--apply` + `--json`: plan-hash persistence, hash-mismatch/staleness refusal, machine-readable plan and the CI exit-code contract | done |
 | 3b | `smelt run` refuses to fold data deltas over a pending non-eclipsed definition delta (spec §Detection), and the delta is reported by `smelt explain`/plan paths | done |
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
-| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | planned |
+| 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | pending |
 | 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
@@ -477,6 +477,21 @@ open — not that the excluded bullets themselves are gone.
   mechanism name, and the `docs-site/docs/guide/backbuild-synthesis.md` page filename/nav
   were deliberately left untouched — only the CLI verb renamed, per the plan's scope note.
   The page's full narrative rewrite around `smelt migrate`/`--apply` remains phase 8's job.
+
+- **2026-08-30 (phase 5 implementation).** `ConformanceStep::MigrateModel` drives the real
+  `smelt migrate` backbuild path (`derive_plan` → `apply_migration`-or-full-refresh) via a
+  new shared driver (`smelt-maintenance-testkit/src/migrate_step.rs`), consumed identically
+  by both `maintenance_conformance/gate.rs` and its target-parametrized `families/gate.rs`
+  twin — deliberately distinct from the pre-existing `RewriteModel` step, which still
+  exercises the live `Trigger::ColumnAdded` maintenance-driver path (`definition_deltas.md`'s
+  "narrower third mechanism"). The generative gate (`definition_edit_pool_upholds_new_
+  definition_equivalence`) surfaced two real `smelt_logical::backbuild` bugs — an
+  aggregate-shaped column-add wrongly admitted `SelfDerivedColumnAdd`, and `try_b5`'s
+  re-aggregation subquery spliced unresolved `smelt.<path>` ref syntax — both fixed in-phase
+  (`classify.rs`, new `requalify::requalify_source_refs`) since the outcome's own success
+  criteria already require the migrate plan to be genuinely executable, not just derivable.
+  The spec bullet "The conformance harness has no definition-edit step kind yet" is removed
+  from `definition_deltas.md`. Full detail in `phases/05-summary.md`.
 
 ## Blocked
 

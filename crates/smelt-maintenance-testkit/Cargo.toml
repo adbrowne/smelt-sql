@@ -14,6 +14,11 @@ smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-runtime = { path = "../smelt-runtime" }
+# `migrate_step.rs`'s shared derive→apply-or-refuse driver reads/writes the
+# same `FileStore`-backed deployed-schema + migration-approval state
+# `smelt_runtime::definition_delta`/`schema_evolution` consume — the library
+# (not just the test target) needs this dependency directly.
+smelt-state = { path = "../smelt-state" }
 # `s_tracker.rs`'s S-restricted oracle SQL is rendered through smelt's own
 # dialect-aware printer (`smelt_dialect::print`) rather than re-deriving any
 # backend-specific rewrite (e.g. GoogleSQL's exact-`MEDIAN` lowering) by hand
@@ -62,16 +67,3 @@ spark = ["dep:smelt-backend-spark"]
 # -i smelt-backend-bigquery` finds no edge) — the BigQuery arm on the
 # `ConformanceTarget` seam (`docs/plans/20260817-bigquery-generative-conformance.md`).
 bigquery = ["dep:smelt-backend-bigquery"]
-
-[dev-dependencies]
-# Dev-only, test-target-only dependency (`schedule_gen.rs`'s
-# `rewrite_model_step_changes_the_hash`, Phase 9 of
-# `docs/plans/20260712-generative-maintenance-conformance.md`): the
-# `RewriteModel` step's TDD test asserts against the REAL
-# `smelt_state::intervals::compute_model_hash` the interval store keys
-# coverage on, rather than a harness-local reimplementation. `smelt-runtime`
-# (already a normal dependency above) itself depends on `smelt-state`, but
-# Rust's extern prelude only exposes a crate's own direct dependencies, so
-# this crate needs its own entry — mirrors the same class of addition
-# `smelt-cli/Cargo.toml` already made for `smelt-state` in Phase 5.
-smelt-state = { path = "../smelt-state" }
