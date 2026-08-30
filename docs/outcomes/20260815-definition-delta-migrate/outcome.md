@@ -307,7 +307,7 @@ open — not that the excluded bullets themselves are gone.
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
-| 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | pending |
+| 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
 | 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
@@ -537,6 +537,20 @@ open — not that the excluded bullets themselves are gone.
   naming the retired identifier, both for the grep gate and because `docs/specs/CLAUDE.md`'s
   timeless-oracle rule already forbids historical/pre-rename identifiers in spec prose. Full
   detail in `phases/07-summary.md`.
+
+- **2026-08-30 (phase 7b planning).** No reshape — phase 7's summary surfaced nothing outside an
+  existing row. Three scoping calls recorded so the implementer does not re-litigate them.
+  (a) The deployed-schema reader lives in `smelt-db`'s `workspace_ingest` (adding a `smelt-state`
+  dependency, acyclic) rather than being written twice in the CLI and the LSP — the
+  workspace-loading-parity rule's single-owner shape, mirroring
+  `register_loader_files_from_disk`. (b) A skeleton *clause* change (changed `GROUP BY`/FROM,
+  no column add) is surfaced too, via the snapshot's `model_sql` and `backbuild::definition_diff`,
+  as a new `Refusal::SkeletonClauseChanged` mapped to the **same**
+  `DiagnosticCode::MaintenanceSkeletonChanged` — phase 1's "one code, not a split pair" decision
+  constrains the diagnostic code, not the number of refusal shapes feeding it. (c) The effective
+  target for the schemas directory is the `smelt.yml` `target:` else `"dev"` (the CLI's own
+  `--target` default); a command carrying an explicit `--target` re-registers with the shared
+  reader rather than getting its own.
 
 ## Blocked
 
