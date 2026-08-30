@@ -306,7 +306,8 @@ open — not that the excluded bullets themselves are gone.
 | 4 | Rename `smelt backbuild` → `smelt rebuild` across CLI, docs-site, examples, tests, and the spec sweep (`cli.md`, `model_selection.md`, `architecture.md` prose) named in success criterion 8 | done |
 | 5 | Conformance harness gains a definition-edit step kind; wire into the generative equivalence suite | done |
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
-| 7 | Diagnostic rename/split lands in code; surface ahead of a run via LSP and `smelt explain` | pending |
+| 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | planned |
+| 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | pending |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
 | 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
@@ -505,6 +506,21 @@ open — not that the excluded bullets themselves are gone.
   backfill assignment now forces a full refresh instead. `definition_deltas.md` §"The atomicity
   rule" and §"Boundary with schema_evolution.md" updated; the "conditional in practice" Known
   Divergences bullet removed. Full detail in `phases/06-summary.md`.
+
+- **2026-08-30 (phase 7 planning).** One reshape: row 7 is split into **7** (the diagnostic
+  rename in code + the sibling-spec sweep) and **7b** (surfacing it ahead of a run). Nothing left
+  the outcome — both halves of success criterion 6 keep a row. The split is because the two halves
+  are unlike work: the rename is a mechanical cross-crate API sweep whose oracle is the existing
+  diagnostics-catalogue gate, whereas surfacing requires a genuinely architectural change —
+  `smelt-db`'s maintenance query derives an empty trigger set because it has no deployed-schema
+  snapshot and does no I/O (Salsa purity), so 7b must add a deployed-schema world-fact Salsa input
+  fed by `workspace_ingest` (the `register_loader_files_from_disk` precedent) from **both** the CLI's
+  `init_db` and the LSP's `initialize`, under the workspace-loading-parity rule. Scoping note
+  recorded now so 7b's planner does not rediscover it: the deployed snapshot carries `model_sql`
+  as well as column names, so 7b can surface a skeleton *change* (not only a skeleton *add*) via
+  `backbuild::definition_diff`'s existing skeleton-clause diff — which is what the renamed code
+  name promises. The two "not yet surfaced ahead of a run" divergence bullets
+  (`model_properties.md`, `incremental_models.md`) stay open through phase 7 and close in 7b.
 
 ## Blocked
 
