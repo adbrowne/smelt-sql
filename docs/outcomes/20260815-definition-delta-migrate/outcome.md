@@ -308,7 +308,7 @@ open — not that the excluded bullets themselves are gone.
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
 | 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
-| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | pending |
+| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | planned |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
 | 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
 | 11 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
@@ -551,6 +551,13 @@ open — not that the excluded bullets themselves are gone.
   target for the schemas directory is the `smelt.yml` `target:` else `"dev"` (the CLI's own
   `--target` default); a command carrying an explicit `--target` re-registers with the shared
   reader rather than getting its own.
+
+- **2026-08-30 (phase 8 planning).** No reshape needed: phase 7's summary surfaced nothing
+  outside its own scope. Two clarifications folded into the phase-8 plan rather than the table:
+  the "two things called 'backbuild'" callout named in success criterion 7 is already absent from
+  the guide (phase 4's rename removed it), so phase 8 only verifies its absence; and criterion 18's
+  docs-site CLI-surface coverage audit lands as a checklist in phase 8's summary, per that
+  criterion's own "folds into phase 8's docs-site pass" wording.
 
 ## Blocked
 
