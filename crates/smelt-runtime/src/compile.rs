@@ -640,8 +640,82 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: Some(path_ref_resolver),
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
+}
+
+/// Print `syntax` for `dialect`, refusing first any construct the registry
+/// declares [`smelt_types::Emission::Unsupported`] there, and planning any
+/// statement-level restructure ([`smelt_types::Emission::Restructure`],
+/// `docs/specs/multi_backend.md` §"Statement-level lowering") a call needs
+/// before printing.
+///
+/// The printer itself has no diagnostic channel (`print` returns a `String`),
+/// which is why the refusal is a pre-pass rather than part of printing. Every
+/// dialect-parameterised print in this module goes through here; the two
+/// hardwired-DuckDB helpers above (`resolve_refs_in_sql`, the function-body
+/// expander) do not, because they take no dialect, have no error channel to
+/// report a refusal on, and sit on no path that produces an executed
+/// `CompiledModel`. Their exemption rests on those three facts, not on DuckDB
+/// being free of unsupported constructs — it is not: DuckDB declares
+/// `PERCENTILE_CONT`/`PERCENTILE_DISC` unsupported in running-window position.
+/// Wiring a real dialect through either helper would require routing it here.
+///
+/// Planning happens against `syntax` — the *source* CST, before any dialect
+/// lowering — never against the printed SQL (`docs/specs/architecture.md`
+/// §"Source-derived projection"; the `plan_restructure` output threads
+/// straight into the same `ctx` that prints once, below). The restructure
+/// planner's own refusals (an inadmissible query block: `ROLLUP`, an
+/// occurrence in `HAVING`, an unexpanded wildcard, …) merge into the same
+/// refusal list as the plain `Unsupported` verdicts, so a user fixing
+/// several sites in one model pays one compile round trip rather than one
+/// per site.
+///
+/// `ctx` is taken by value (not `&PrintContext`) because the planned
+/// [`smelt_dialect::RestructurePlan`]s are computed here, live only for the
+/// rest of this call, and must be threaded into `ctx.restructure_plans`
+/// before the single `smelt_dialect::print` call below — which requires
+/// rebuilding the context with a plan-scoped lifetime, moving the caller's
+/// closures into the rebuilt value rather than cloning them.
+fn print_checked_for(
+    dialect: &SqlDialect,
+    syntax: &smelt_parser::syntax_kind::SyntaxNode,
+    ctx: PrintContext,
+) -> Result<String> {
+    let mut refused = smelt_dialect::unsupported_emissions(syntax, *dialect);
+
+    let plans = match smelt_dialect::plan_restructure(syntax, *dialect) {
+        Ok(plans) => plans,
+        Err(mut restructure_refusals) => {
+            refused.append(&mut restructure_refusals);
+            Vec::new()
+        }
+    };
+
+    if !refused.is_empty() {
+        // Every occurrence, not just the first: a user fixing one at a time
+        // would otherwise pay a compile round trip per site.
+        let detail = refused
+            .iter()
+            .map(|u| format!("  `{}` — {}", u.name, u.reason))
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!(
+            "{:?}: this model uses {} construct{} the {} backend cannot express:\n{}",
+            smelt_db::DiagnosticCode::UnsupportedOnBackend,
+            refused.len(),
+            if refused.len() == 1 { "" } else { "s" },
+            dialect.name(),
+            detail
+        );
+    }
+
+    let ctx = PrintContext {
+        restructure_plans: &plans,
+        ..ctx
+    };
+    Ok(smelt_dialect::print(syntax, &ctx))
 }
 
 /// Whether `model` is **self-referential** — it reads its own prior output
@@ -737,6 +811,7 @@ pub fn expand_function_calls(sql: &str, fn_bodies: &FnBodyMap) -> String {
         smelt_fn: Some(fn_expander),
         smelt_path_ref: None,
         smelt_path_call: Some(path_call_expander),
+        restructure_plans: &[],
     };
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
@@ -1551,6 +1626,21 @@ impl SqlCompiler {
         Ok(())
     }
 
+    /// Print `syntax` for this compiler's dialect, refusing first any construct
+    /// the registry declares [`smelt_types::Emission::Unsupported`] there.
+    ///
+    /// Every `SqlCompiler` print goes through here, so a new compile entry point
+    /// cannot quietly skip the refusal — `dialect_seam::every_compile_path_is_emission_checked`
+    /// asserts no direct `smelt_dialect::print` call survives in this module
+    /// outside `print_checked_for`.
+    fn print_checked(
+        &self,
+        syntax: &smelt_parser::syntax_kind::SyntaxNode,
+        ctx: PrintContext,
+    ) -> Result<String> {
+        print_checked_for(&self.dialect, syntax, ctx)
+    }
+
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
         self.check_native_ivm_gate(model)?;
@@ -1587,6 +1677,7 @@ impl SqlCompiler {
             smelt_fn: fn_expander,
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
         // The projection — output column names and their inferred types — is
         // derived once, here, from the pre-print source CST (`parse`), before
@@ -1596,7 +1687,7 @@ impl SqlCompiler {
         // §"Output-schema type conformance".
         let projection = self.derive_projection_for(&parse.syntax());
 
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
 
@@ -1748,8 +1839,9 @@ impl SqlCompiler {
             smelt_fn: fn_expander,
             smelt_path_ref: Some(self.make_path_ref_resolver(schema)),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
 
         // Get materialization: SQL metadata > smelt.yml > default
         let materialization = self.config.get_materialization_with_metadata(
@@ -1773,7 +1865,7 @@ impl SqlCompiler {
         &self,
         ephemeral_models: &[(String, String)],
         schema: &str,
-    ) -> EphemeralResolver {
+    ) -> Result<EphemeralResolver> {
         EphemeralResolver::new(
             ephemeral_models,
             &self.dialect,
@@ -1831,8 +1923,9 @@ impl SqlCompiler {
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
@@ -1938,7 +2031,7 @@ impl EphemeralResolver {
         capabilities: &BackendCapabilities,
         schema: &str,
         vars: &std::collections::BTreeMap<String, String>,
-    ) -> Self {
+    ) -> Result<Self> {
         let ephemeral_names: HashSet<String> =
             ephemeral_models.iter().map(|(n, _)| n.clone()).collect();
 
@@ -1956,14 +2049,14 @@ impl EphemeralResolver {
                 schema,
                 vars,
             );
-            cte_fragments.insert(model_name.clone(), fragments);
+            cte_fragments.insert(model_name.clone(), fragments?);
         }
 
-        Self {
+        Ok(Self {
             order,
             cte_fragments,
             ephemeral_names,
-        }
+        })
     }
 
     /// Compile a single ephemeral model's SQL into CTE fragments.
@@ -1979,7 +2072,7 @@ impl EphemeralResolver {
         capabilities: &BackendCapabilities,
         schema: &str,
         vars: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<(String, String)> {
+    ) -> Result<Vec<(String, String)>> {
         let ephemeral_refs: HashSet<&str> = ephemeral_names.iter().map(|s| s.as_str()).collect();
         let clean_sql = smelt_parser::strip_frontmatter(raw_sql);
         let clean_sql = crate::meta_eval::expand_in_model_meta(
@@ -2023,8 +2116,9 @@ impl EphemeralResolver {
             smelt_fn: None,
             smelt_path_ref: Some(path_ref_resolver),
             smelt_path_call: None,
+            restructure_plans: &[],
         };
-        let compiled = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled = print_checked_for(dialect, &parse.syntax(), ctx)?;
 
         // Check for internal CTEs by parsing the compiled output
         let file = File::cast(parse.syntax());
@@ -2034,7 +2128,7 @@ impl EphemeralResolver {
         if !has_with {
             // Simple case — no internal CTEs
             let alias = format!("__smelt_{}", model_name);
-            return vec![(alias, compiled)];
+            return Ok(vec![(alias, compiled)]);
         }
 
         // Has internal CTEs — extract CTE names, namespace them, and hoist
@@ -2067,7 +2161,7 @@ impl EphemeralResolver {
         let alias = format!("__smelt_{}", model_name);
         fragments.push((alias, parts.main_body));
 
-        fragments
+        Ok(fragments)
     }
 
     /// Add pre-built CTE fragments for ephemeral seeds.
@@ -2403,8 +2497,9 @@ impl SqlCompiler {
                 self.make_path_ref_resolver_with_ephemerals(schema, &resolver.ephemeral_names),
             ),
             smelt_path_call: path_call_expander,
+            restructure_plans: &[],
         };
-        let compiled_sql = smelt_dialect::print(&parse.syntax(), &ctx);
+        let compiled_sql = self.print_checked(&parse.syntax(), ctx)?;
         // Captured before the cast wrap below — see `CompiledModel::body_sql`.
         let body_sql = compiled_sql.clone();
         let compiled_sql = self.apply_type_casts(&compiled_sql, &projection);
@@ -3020,7 +3115,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3065,7 +3161,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3109,7 +3206,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3149,7 +3247,8 @@ WHERE event_type = 'click'
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)
@@ -3557,7 +3656,8 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             &caps,
             "main",
             &std::collections::BTreeMap::new(),
-        );
+        )
+        .expect("test ephemerals compile");
 
         let compiled = compiler
             .compile_with_ephemerals(&model, "main", &resolver)

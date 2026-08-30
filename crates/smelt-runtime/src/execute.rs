@@ -755,7 +755,7 @@ pub async fn execute_project(
                 let compiler = compilers_dry.get(target_name);
                 ephemeral_resolvers_dry.insert(
                     target_name.clone(),
-                    compiler.build_ephemeral_resolver(models_slice, schema),
+                    compiler.build_ephemeral_resolver(models_slice, schema)?,
                 );
             }
             // Inject seed CTEs.
@@ -1049,7 +1049,7 @@ pub async fn execute_project(
         let compiler = compilers.get(target_name);
         ephemeral_resolvers.insert(
             target_name.clone(),
-            compiler.build_ephemeral_resolver(models, schema),
+            compiler.build_ephemeral_resolver(models, schema)?,
         );
     }
 

@@ -17,7 +17,6 @@
 #[allow(dead_code)]
 mod prop_helpers;
 
-use prop_helpers::duckdb_oracle::DuckDbOracle;
 use prop_helpers::generators::{
     assemble_cte_query, column_pool_strategy, generate_expr, test_scenario_strategy, QueryShape,
     TypedExpr, TypedSource,
@@ -28,6 +27,7 @@ use prop_helpers::null_data::{
     check_nullability_soundness, smoke_coalesce_non_nullable_setup,
     smoke_nullable_passthrough_setup, JoinKind,
 };
+use smelt_oracle_testkit::DuckDbOracle;
 
 use smelt_db::apply_outer_join_nullability;
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};

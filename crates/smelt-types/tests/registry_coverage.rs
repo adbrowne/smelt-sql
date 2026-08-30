@@ -1,6 +1,20 @@
 /// Phase 50: registry coverage tests — verify that newly-seeded built-ins
 /// are present and carry the correct `ExprKind`.
-use smelt_types::{signatures::ExprKind, BuiltinRegistry};
+use smelt_types::{
+    signatures::{Emission, ExprKind, Position, RewriteId, Signature, SyntaxForm},
+    BuiltinRegistry, DataType, DialectId, TypeConstraint, TypeExpr,
+};
+
+/// A bare test signature with no parameters — only its `emission` table
+/// matters to the tests below.
+fn test_signature(name: &str) -> Signature {
+    Signature::new(
+        name,
+        vec![],
+        vec![],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+    )
+}
 
 // ─── Operators ──────────────────────────────────────────────────────────────
 
@@ -598,4 +612,351 @@ fn window_kinds_correct() {
             sig.kind
         );
     }
+}
+
+// ─── Syntax forms and the operator surface
+
+#[test]
+fn infix_operators_are_registered_with_the_infix_form() {
+    for op in ["%", "^", "**", "//", "||"] {
+        let sig =
+            BuiltinRegistry::resolve(op).unwrap_or_else(|| panic!("operator {op} not in registry"));
+        assert_eq!(
+            sig.syntax_form,
+            SyntaxForm::Infix,
+            "{op} must be Infix so the audit enumerates it as an operator"
+        );
+    }
+}
+
+#[test]
+fn table_functions_are_registered_with_the_tablefn_form() {
+    for name in ["EXPLODE", "UNNEST"] {
+        let sig =
+            BuiltinRegistry::resolve(name).unwrap_or_else(|| panic!("{name} not in registry"));
+        assert_eq!(sig.syntax_form, SyntaxForm::TableFn);
+    }
+}
+
+#[test]
+fn ordinary_functions_default_to_the_call_form() {
+    for name in ["SUM", "LOWER", "ROW_NUMBER", "DATE_TRUNC"] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(sig.syntax_form, SyntaxForm::Call);
+    }
+}
+
+#[test]
+fn dedicated_syntax_entries_are_not_call_form() {
+    // The exemption the registry-consistency gate derives. Each of these is a
+    // registry entry for hover/completion but not a callable function.
+    for name in [
+        "LIKE",
+        "ILIKE",
+        "GLOB",
+        "IS_NULL",
+        "IS_NOT_NULL",
+        "BETWEEN",
+        "IN",
+        "EXISTS",
+        "CAST",
+        "DATE_ADD",
+        "DATE_SUB",
+    ] {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_ne!(
+            sig.syntax_form,
+            SyntaxForm::Call,
+            "{name} is dedicated syntax; leaving it Call re-enters it into the \
+             callable-function consistency gate"
+        );
+    }
+}
+
+// ─── Emission
+
+#[test]
+fn the_rename_matrix_matches_the_printer_it_replaces() {
+    // These rows were transcribed from the printer's hand-written rename chain
+    // before that chain was deleted, so the registry is provably a faithful
+    // replacement for it rather than a re-derivation.
+    let expected: &[(&str, DialectId, &str)] = &[
+        ("EXPLODE", DialectId::DuckDb, "UNNEST"),
+        ("EXPLODE", DialectId::PostgreSql, "UNNEST"),
+        ("EXPLODE", DialectId::BigQuery, "UNNEST"),
+        ("UNNEST", DialectId::SparkSql, "EXPLODE"),
+        ("EVERY", DialectId::DuckDb, "BOOL_AND"),
+        ("EVERY", DialectId::BigQuery, "LOGICAL_AND"),
+        ("BOOL_AND", DialectId::SparkSql, "EVERY"),
+        ("BOOL_AND", DialectId::BigQuery, "LOGICAL_AND"),
+        ("BOOL_OR", DialectId::SparkSql, "SOME"),
+        ("BOOL_OR", DialectId::BigQuery, "LOGICAL_OR"),
+    ];
+    for (name, dialect, renamed) in expected {
+        let sig = BuiltinRegistry::resolve(name).expect(name);
+        assert_eq!(
+            sig.emission_at(*dialect, Position::Any),
+            Emission::Rename(renamed),
+            "{name} on {}",
+            dialect.slug()
+        );
+    }
+}
+
+#[test]
+fn every_is_native_on_postgresql() {
+    // PostgreSQL has `EVERY` natively; DuckDB does not and renames it to
+    // `BOOL_AND`. The printer's old rename chain carried the same asymmetry, and
+    // `smelt-dialect`'s `snapshots.rs` pins both halves of it.
+    let sig = BuiltinRegistry::resolve("EVERY").expect("EVERY");
+    assert_eq!(
+        sig.emission_at(DialectId::PostgreSql, Position::Any),
+        Emission::Native
+    );
+}
+
+#[test]
+fn caret_is_rewritten_wherever_infix_caret_means_xor() {
+    // GoogleSQL and Spark SQL both define infix `^` as bitwise XOR while smelt's
+    // grammar reads it as power. Emitting it verbatim returns a different number
+    // rather than failing — the silent-divergence class this work exists to close.
+    for dialect in [DialectId::SparkSql, DialectId::BigQuery] {
+        for op in ["^", "**"] {
+            let sig = BuiltinRegistry::resolve(op).expect(op);
+            assert_eq!(
+                sig.emission_at(dialect, Position::Any),
+                Emission::Rewrite(RewriteId::PowerCall),
+                "{op} on {}",
+                dialect.slug()
+            );
+        }
+    }
+    for op in ["^", "**"] {
+        let sig = BuiltinRegistry::resolve(op).expect(op);
+        assert_eq!(
+            sig.emission_at(DialectId::DuckDb, Position::Any),
+            Emission::Native
+        );
+        assert_eq!(
+            sig.emission_at(DialectId::PostgreSql, Position::Any),
+            Emission::Native
+        );
+    }
+}
+
+#[test]
+fn floor_divide_is_unsupported_everywhere_it_has_no_safe_lowering() {
+    let sig = BuiltinRegistry::resolve("//").expect("//");
+    assert_eq!(
+        sig.emission_at(DialectId::DuckDb, Position::Any),
+        Emission::Native
+    );
+    for dialect in [
+        DialectId::SparkSql,
+        DialectId::PostgreSql,
+        DialectId::BigQuery,
+    ] {
+        assert!(
+            matches!(
+                sig.emission_at(dialect, Position::Any),
+                Emission::Unsupported { .. }
+            ),
+            "// on {} must be a declared refusal, not a pass-through",
+            dialect.slug()
+        );
+    }
+}
+
+#[test]
+fn an_unlisted_dialect_defaults_to_native() {
+    let sig = BuiltinRegistry::resolve("LOWER").expect("LOWER");
+    for d in DialectId::ALL {
+        assert_eq!(sig.emission_at(*d, Position::Any), Emission::Native);
+    }
+}
+
+#[test]
+fn every_declared_rewrite_id_is_reachable_from_some_entry() {
+    // A RewriteId with no registry row is printer code nothing can call.
+    let mut seen: Vec<RewriteId> = BuiltinRegistry::names()
+        .filter_map(BuiltinRegistry::resolve)
+        .flat_map(|sig| sig.emission.iter())
+        .filter_map(|(_, _, e)| match e {
+            Emission::Rewrite(id) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(
+        seen,
+        vec![
+            RewriteId::BigQueryMedian,
+            RewriteId::ModuloCall,
+            RewriteId::PowerCall,
+            RewriteId::WithinGroupToAnalytic,
+        ],
+    );
+}
+
+// ─── Position ───────────────────────────────────────────────────────────────
+
+/// `Position` has exactly the five documented variants, and `Any` is a
+/// lookup wildcard no classifier ever returns — it exists only so a
+/// registry entry can state one verdict that applies at every call
+/// position. This match is exhaustive: adding or removing a variant is a
+/// compile error here, forcing this test (and its doc comment) to be
+/// updated alongside the enum.
+#[test]
+fn position_variants_are_exhaustive() {
+    let variants = [
+        Position::Any,
+        Position::Scalar,
+        Position::Aggregate,
+        Position::WholePartitionWindow,
+        Position::Window,
+    ];
+    for v in variants {
+        match v {
+            Position::Any
+            | Position::Scalar
+            | Position::Aggregate
+            | Position::WholePartitionWindow
+            | Position::Window => {}
+        }
+    }
+    assert_eq!(
+        variants.len(),
+        5,
+        "Position must have exactly five variants"
+    );
+}
+
+/// A verdict stated at the call's own position wins over one stated only at
+/// the `Any` wildcard for the same dialect — the wildcard is a default, not a
+/// veto.
+#[test]
+fn emission_at_prefers_exact_position_over_any() {
+    let sig = test_signature("TEST_PREFERS_EXACT").with_emission(&[
+        (
+            DialectId::BigQuery,
+            Position::Any,
+            Emission::Rename("ANY_SPELLING"),
+        ),
+        (
+            DialectId::BigQuery,
+            Position::Aggregate,
+            Emission::Rename("AGG_SPELLING"),
+        ),
+    ]);
+    assert_eq!(
+        sig.emission_at(DialectId::BigQuery, Position::Aggregate),
+        Emission::Rename("AGG_SPELLING"),
+        "the exact-position entry must win over Any"
+    );
+    // A position with no entry of its own still falls through to Any.
+    assert_eq!(
+        sig.emission_at(DialectId::BigQuery, Position::Scalar),
+        Emission::Rename("ANY_SPELLING"),
+        "a position with no dedicated entry falls back to Any"
+    );
+}
+
+/// Lookup falls from the exact position to `Any`, and from `Any` to
+/// `Native` when the dialect has no entry at all — and stops there.
+#[test]
+fn emission_at_falls_back_to_any_then_native() {
+    let sig = test_signature("TEST_FALLS_BACK").with_emission(&[(
+        DialectId::BigQuery,
+        Position::Any,
+        Emission::Rename("X"),
+    )]);
+    assert_eq!(
+        sig.emission_at(DialectId::BigQuery, Position::Scalar),
+        Emission::Rename("X"),
+        "no Scalar entry, but an Any entry exists for this dialect"
+    );
+    assert_eq!(
+        sig.emission_at(DialectId::DuckDb, Position::Scalar),
+        Emission::Native,
+        "no entry at all for this dialect: Native"
+    );
+}
+
+/// The finding that motivated position-scoped emission: the two window
+/// positions must never answer for each other. Falling from
+/// `WholePartitionWindow` to `Window` would refuse a whole-partition call
+/// the restructure exists to serve; falling from `Window` to `Any` would let
+/// a running window reach the backend as `Native` and fail at the warehouse.
+#[test]
+fn window_positions_never_fall_back_to_each_other() {
+    let sig = test_signature("TEST_WINDOW_POSITIONS").with_emission(&[
+        (
+            DialectId::BigQuery,
+            Position::WholePartitionWindow,
+            Emission::Native,
+        ),
+        (
+            DialectId::BigQuery,
+            Position::Window,
+            Emission::Unsupported {
+                reason: "no analytic form for a running window",
+            },
+        ),
+    ]);
+    assert_eq!(
+        sig.emission_at(DialectId::BigQuery, Position::WholePartitionWindow),
+        Emission::Native,
+        "the whole-partition verdict must not be shadowed by the running-window one"
+    );
+    assert!(
+        matches!(
+            sig.emission_at(DialectId::BigQuery, Position::Window),
+            Emission::Unsupported { .. }
+        ),
+        "the running-window verdict must not be shadowed by the whole-partition one"
+    );
+}
+
+/// Coverage-totality gate: an entry declaring a verdict at one window
+/// position must declare one at the other, because there is no fallback
+/// between them for the lookup to fall back on. Checked against the real
+/// registry data, not a hypothetical signature, so the gate fires the moment
+/// a real entry violates it.
+#[test]
+fn window_verdict_totality() {
+    let mut violations: Vec<String> = Vec::new();
+    for name in BuiltinRegistry::names() {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        for dialect in DialectId::ALL {
+            let has_whole_partition = sig
+                .emission
+                .iter()
+                .any(|(d, p, _)| *d == *dialect && *p == Position::WholePartitionWindow);
+            let has_window = sig
+                .emission
+                .iter()
+                .any(|(d, p, _)| *d == *dialect && *p == Position::Window);
+            if has_whole_partition != has_window {
+                let (present, missing) = if has_whole_partition {
+                    ("WholePartitionWindow", "Window")
+                } else {
+                    ("Window", "WholePartitionWindow")
+                };
+                violations.push(format!(
+                    "{name} on {}: declares {present} but not {missing}",
+                    dialect.slug()
+                ));
+            }
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "window-verdict totality violated (an entry stating one window \
+         position must state the other, since lookup never falls between \
+         them):\n{}",
+        violations.join("\n")
+    );
 }

@@ -102,6 +102,21 @@ jobs:
       - name: Maintenance-plan conformance gate (generative regression net)
         run: cargo test -p smelt-cli --no-default-features --features duckdb --test maintenance_conformance
 
+      - name: Dialect emission ownership gate
+        # `printer.rs` holds no name-matched dialect arm — a built-in's
+        # per-dialect spelling is registry data (architecture.md §Constraints
+        # item 14).
+        run: cargo test -p smelt-dialect --test emission_ownership
+
+      - name: Dialect audit (DuckDB legs, totality, ledger)
+        # Offline: the enumeration's totality gates, the two DuckDB legs, and
+        # the two-sided divergence ledger with its gap ratchet. The Spark and
+        # BigQuery legs of the same binary skip green without their engines.
+        run: cargo test -p smelt-db --no-default-features --test dialect_audit
+
+      - name: Dialect seam (compile-path emission refusal)
+        run: cargo test -p smelt-runtime --test dialect_seam
+
       - name: Run LSP integration tests
         # All integration tests under crates/smelt-lsp/tests/ — completion,
         # diagnostics, e2e, example_workspaces, goto_definition, hover,

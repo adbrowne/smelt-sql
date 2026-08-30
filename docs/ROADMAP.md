@@ -178,6 +178,94 @@ Deeper Databricks integration beyond the existing Spark / Databricks-Connect pat
 
 ## Recently Completed
 
+### ~~Registry-owned dialect emission and the cross-engine audit~~ ✅ (August 24, 2026)
+
+BigQuery dialect coverage was incident-driven: probe a live warehouse, hit a failure, add a
+lowering. Nothing walked the builtin registry and asked whether each name is native, needs a
+lowering, or — the dangerous class — exists on both engines with *different semantics*, so the
+query succeeds and returns a different number. Closes #171.
+
+- **The registry owns emission.** `DialectId`, `SyntaxForm`, `Emission` and `RewriteId` on
+  `Signature`; `printer.rs` resolves the entry and dispatches on the verdict, and holds no
+  name-matched dialect arm. `remap_function_name` and the three `matches!(ctx.dialect, …)` guards
+  are gone. The one residual dialect branch — the pipe `SET`/`DROP`/`RENAME` lowering — turned out
+  to be capability-shaped, not emission-shaped, and became
+  `BackendCapabilities::supports_pipe_set_drop_rename`.
+- **`Unsupported` is a compile-time refusal**, not a warehouse round trip. `UnsupportedOnBackend`
+  names the construct, the backend, and the registry's own reason. The ephemeral-CTE path is
+  checked too, since an ephemeral model is inlined into its consumer and never passes through the
+  consumer's own check.
+- **The audit is derived, not authored.** 186 probes over 165 registry entries: a parameter's
+  `TypeConstraint` picks a fixture column, `SyntaxForm` picks the spelling, `ExprKind` picks the
+  query shape. Aggregates are probed in both aggregate and window position, because `MEDIAN`
+  proves the lowering differs between them. Two legs — schema (does it run?) and value (does it
+  compute the same thing?) — against DuckDB per-PR and Spark nightly.
+- **`^` was silently wrong on Spark.** smelt's grammar reads `^` as power; Spark SQL and GoogleSQL
+  both read it as bitwise XOR. `10 ^ 2` returned 8 on Spark and 100 on DuckDB. Proven against a
+  live Spark by reverting the emission row and watching the value leg catch it.
+
+**The type leg.** The schema leg does not stop at "does the printed SQL run?" — it also
+compares smelt's inferred output type against what the engine reports, for every entry the
+enumeration reaches. `type_property_tests` generates from `core_functions()`, a hand-maintained
+registry-blind table, so most of the registry had never been type-checked against any engine.
+The comparison shares `prop_helpers/divergences.rs` rather than building a second registry: a
+type difference belongs in the table both suites read.
+
+It found two inference families immediately, both confirmed independently on more than one
+engine:
+
+- **Unnesting an `ARRAY<T>` infers `Unknown(Dynamic)`** rather than the element type `T`
+  (`UNNEST`, `EXPLODE`).
+- **`FIRST` and `LAST` never parse as calls at all.** Both are lexed as keywords for
+  `NULLS FIRST` / `NULLS LAST`, so `FIRST(x)` yields an `Unknown` type in aggregate position
+  and, in window position, a select item with no alias at all — while the registry classifies
+  both as aggregates. Closing it is a contextual-keyword change in `smelt-parser`.
+
+Sixteen gaps closed in the same pass, as verified `Emission::Rename` rows — each measured
+against the live engine, never read from documentation: `ARG_MAX`/`ARG_MIN` → `MAX_BY`/`MIN_BY`,
+`STRPOS` → `INSTR`, `JSON_EXTRACT`/`JSON_EXTRACT_TEXT` → `GET_JSON_OBJECT` on Spark;
+`RANDOM` → `RAND`, `NOW` → `CURRENT_TIMESTAMP`, `TRUNCATE` → `TRUNC`,
+`GROUP_CONCAT`/`LISTAGG` → `STRING_AGG`, `JSON_EXTRACT_TEXT` → `JSON_VALUE`,
+`MAKE_DATE`/`MAKE_TIME`/`MAKE_TIMESTAMP` → `DATE`/`TIME`/`DATETIME` on BigQuery;
+`JSON_OBJECT_KEYS` → `JSON_KEYS` and `TRUNCATE` → `TRUNC` on DuckDB.
+
+A rename now suppresses itself when the author already wrote the target spelling, so a user
+writing DuckDB's own `json_extract_string` keeps their text — the byte-identity promise held.
+
+**Residual gaps**, all recorded in `crates/smelt-db/tests/dialect_audit/ledger.rs` and ratcheted
+per-dialect by `.claude/dialect-gaps-baseline.txt`:
+
+- **DuckDB: 12.** Seven names smelt's registry recognises that DuckDB has no function for
+  (`INITCAP`, `TO_CHAR`, `QUOTE_IDENT`, `QUOTE_LITERAL`, `DATE_SUB`, …), the five
+  type-inference rows above, and the ordered-set percentiles in window position.
+- **Spark: 27.** Mostly loud refusals, but two are the silent class: `LOG` is the natural
+  logarithm on Spark and base 10 on DuckDB, and `DAYOFWEEK` numbers the week from a different
+  day. Four more are permanent semantic differences no rename can close (`CONCAT`'s NULL
+  propagation, `ARRAY_AGG`'s NULL elements, `CORR`/`REGR_SLOPE`'s NaN-versus-NULL convention).
+- **BigQuery: 42**, from a live sweep on August 24. `LOG` diverges the same way it does on
+  Spark. Two findings are sharper than a missing name: **`%` lowers to `MOD`, and GoogleSQL's
+  `MOD` accepts only `INT64`/`NUMERIC`** — so the lowering is correct for integer operands and a
+  hard failure for floating-point ones, the same operand-type dependence that made `//`
+  unlowerable; and **`DATE_TRUNC`'s argument order is reversed** relative to DuckDB's. Eleven are
+  accepted permanent divergences (`GREATEST`/`LEAST` NULL propagation, `MD5`'s BYTES-versus-hex
+  return, `TO_JSON`'s JSON `null`, `POWER`'s domain on a negative base, `ARRAY_AGG`'s refusal of
+  NULL elements).
+- **PostgreSQL: unverified.** A `SqlDialect` variant with no backend crate and no oracle, so
+  nothing exercises its verdicts. Marked as such in the published table.
+
+Every residual row points at a live tracking issue rather than at #171, which this work closes:
+[#173](https://github.com/adbrowne/smelt-sql/issues/173) (`%` on BigQuery),
+[#174](https://github.com/adbrowne/smelt-sql/issues/174) (`LOG` / `DAYOFWEEK` silent divergence),
+[#175](https://github.com/adbrowne/smelt-sql/issues/175) (`FIRST` / `LAST` lexed as keywords),
+[#176](https://github.com/adbrowne/smelt-sql/issues/176) (inference returning `Unknown`),
+[#177](https://github.com/adbrowne/smelt-sql/issues/177) / [#178](https://github.com/adbrowne/smelt-sql/issues/178) / [#179](https://github.com/adbrowne/smelt-sql/issues/179)
+(the per-dialect verdict backlogs),
+[#180](https://github.com/adbrowne/smelt-sql/issues/180) (documenting the accepted divergences for users),
+[#181](https://github.com/adbrowne/smelt-sql/issues/181) (PostgreSQL is unverified).
+
+The coverage table issue #171 asked for is generated and drift-gated at
+[`docs/reference/dialect-coverage.md`](reference/dialect-coverage.md).
+
 ### ~~Schema-evolution DDL for Spark~~ ✅ (August 21, 2026)
 
 The same dispatch bug the BigQuery work uncovered was live on Spark too: only the *complex* change

@@ -1396,6 +1396,25 @@ impl SelectItem {
         self.0.children().find_map(Expr::cast)
     }
 
+    /// Raw source text of this item's expression, *before* the paren-unwrapping
+    /// [`Expr::cast`] performs.
+    ///
+    /// `Expr::cast` descends through single-child `EXPRESSION` wrappers so that
+    /// semantic callers (type inference, ref resolution) see the operative
+    /// expression rather than a parenthesis wrapper. The printer must not follow
+    /// it there: the wrapper's `LPAREN`/`RPAREN` are tokens of the outer node, so
+    /// printing the unwrapped node drops them and `SELECT (*) x` re-prints as
+    /// `SELECT * AS x`, which no dialect accepts.
+    pub fn expression_source_text(&self) -> Option<String> {
+        let node = self
+            .0
+            .children()
+            .find(|c| Expr::cast(c.clone()).is_some())?;
+        // Trivia between the expression and a following `AS`/alias falls inside
+        // the node's range; the alias is printed with its own separator.
+        Some(node.text().to_string().trim().to_string())
+    }
+
     /// Get the alias if present (explicit `AS alias` or implicit `expr alias`)
     pub fn alias(&self) -> Option<String> {
         let mut found_as = false;

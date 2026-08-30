@@ -476,6 +476,7 @@ impl Backend {
                 DbCode::ContractFrozenHorizonInvalid => "contract-frozen-horizon-invalid",
                 DbCode::ContractDeferralInvalid => "contract-deferral-invalid",
                 DbCode::ReservedProjectionAliasPrefix => "reserved-projection-alias-prefix",
+                DbCode::UnsupportedOnBackend => "unsupported-on-backend",
             };
             NumberOrString::String(code_str.to_string())
         });

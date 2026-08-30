@@ -1,5 +1,7 @@
 //! SQL dialect definitions and backend capabilities.
 
+use smelt_types::DialectId;
+
 /// SQL dialect used by a backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlDialect {
@@ -23,6 +25,36 @@ impl SqlDialect {
             SqlDialect::BigQuery => "BigQuery",
         }
     }
+
+    /// Map this SQL dialect to its canonical [`DialectId`] identity.
+    ///
+    /// Used by the registry and type-divergence ledger to key on a
+    /// closed enum rather than a stringly-typed name.
+    pub fn id(self) -> DialectId {
+        match self {
+            SqlDialect::DuckDB => DialectId::DuckDb,
+            SqlDialect::SparkSQL => DialectId::SparkSql,
+            SqlDialect::PostgreSQL => DialectId::PostgreSql,
+            SqlDialect::BigQuery => DialectId::BigQuery,
+        }
+    }
+}
+
+/// How a backend spells a null-safe equality comparison — one where two
+/// `NULL`s compare equal rather than unknown.
+///
+/// A statement-level restructure's synthesised join must be null-safe: `GROUP
+/// BY g` places `NULL` keys in their own group, but a plain `ON b.g = w.g`
+/// never matches `NULL`, silently dropping every row whose partition key is
+/// `NULL` (measured on BigQuery as 3 rows kept out of 5). The spelling
+/// differs per backend, so it is capability data — never a dialect arm in the
+/// printer (`docs/specs/multi_backend.md` §"Statement-level lowering").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullSafeEqualitySpelling {
+    /// `a IS NOT DISTINCT FROM b` — DuckDB, PostgreSQL, GoogleSQL.
+    IsNotDistinctFrom,
+    /// `a <=> b` — Spark SQL's null-safe equality operator.
+    Spaceship,
 }
 
 /// Capabilities of a backend.
@@ -125,6 +157,26 @@ pub struct BackendCapabilities {
     /// the backend can execute `merge_into` against a source projection
     /// carrying the full target row.
     pub supports_column_scoped_merge: bool,
+
+    /// The canonical dialect this capabilities set was built for.
+    ///
+    /// Stored here so callers that construct capabilities from `BackendCapabilities::duckdb()` etc.
+    /// can recover the dialect without naming a concrete `SqlDialect::*` variant.
+    pub dialect: SqlDialect,
+
+    /// Accepts the star-modifier trio the pipe `SET`/`DROP`/`RENAME` lowering emits:
+    /// `SELECT * REPLACE (…)`, `SELECT * EXCLUDE (…)`, `SELECT * RENAME (…)`.
+    ///
+    /// Only DuckDB accepts all three. A backend that lowers pipe queries
+    /// (`supports_pipe_syntax == false`) but does not accept the trio leaves those
+    /// three stages unlowered rather than emitting SQL it would reject. The gate is
+    /// capability-shaped, not dialect-name-shaped.
+    pub supports_pipe_set_drop_rename: bool,
+
+    /// How this backend spells a null-safe equality comparison. Selects the
+    /// synthesised join spelling for a statement-level restructure
+    /// (`docs/specs/multi_backend.md` §"Statement-level lowering").
+    pub null_safe_equality: NullSafeEqualitySpelling,
 }
 
 impl BackendCapabilities {
@@ -154,6 +206,10 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::DuckDB,
+            // The only backend accepting `* REPLACE` / `* EXCLUDE` / `* RENAME`.
+            supports_pipe_set_drop_rename: true,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 
@@ -192,6 +248,9 @@ impl BackendCapabilities {
             // full-row source projection — the same shape DuckDB's MERGE
             // uses (`docs/specs/multi_backend.md` capability matrix).
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::SparkSQL,
+            supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::Spaceship,
         }
     }
 
@@ -223,6 +282,9 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+            dialect: SqlDialect::SparkSQL,
+            supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::Spaceship,
         }
     }
 
@@ -278,6 +340,9 @@ impl BackendCapabilities {
             // `Not found: Dataset ...`, so the dataset must be created first.
             requires_schema_init: true,
             supports_column_scoped_merge: true,
+            dialect: SqlDialect::BigQuery,
+            supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 
@@ -308,6 +373,9 @@ impl BackendCapabilities {
             supports_pipe_syntax: false,
             requires_schema_init: true,
             supports_column_scoped_merge: false,
+            dialect: SqlDialect::PostgreSQL,
+            supports_pipe_set_drop_rename: false,
+            null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
         }
     }
 }
@@ -371,5 +439,25 @@ mod tests {
         assert!(!caps.supports_nested_array_ddl);
         assert!(!caps.supports_merge_schema_write);
         assert!(!caps.supports_column_mapping);
+    }
+
+    #[test]
+    fn every_sql_dialect_maps_to_a_distinct_dialect_id() {
+        let dialects = [
+            SqlDialect::DuckDB,
+            SqlDialect::SparkSQL,
+            SqlDialect::PostgreSQL,
+            SqlDialect::BigQuery,
+        ];
+        let ids: Vec<_> = dialects.iter().map(|d| d.id()).collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "SqlDialect::id() is not injective");
+        assert_eq!(
+            sorted.len(),
+            DialectId::ALL.len(),
+            "a DialectId has no SqlDialect"
+        );
     }
 }

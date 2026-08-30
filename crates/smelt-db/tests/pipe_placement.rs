@@ -13,8 +13,8 @@ mod prop_helpers;
 
 use std::collections::{HashMap, HashSet};
 
-use prop_helpers::duckdb_oracle::DuckDbOracle;
 use smelt_dialect::{print, BackendCapabilities, PrintContext, SqlDialect};
+use smelt_oracle_testkit::DuckDbOracle;
 use smelt_parser::parse;
 
 /// Lower arbitrary SQL (pipe or standard) to a backend-printable form via the DuckDB printer.
@@ -32,6 +32,7 @@ fn lower_to_duckdb(sql: &str) -> String {
         smelt_fn: None,
         smelt_path_ref: None,
         smelt_path_call: None,
+        restructure_plans: &[],
     };
     print(&parsed.syntax(), &ctx)
 }

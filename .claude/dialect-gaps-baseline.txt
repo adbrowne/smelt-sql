@@ -1,0 +1,22 @@
+# Dialect-emission gap ratchet baseline
+# Updated: 2026-08-24
+#
+# Format: <metric> <count>
+#
+# Each metric is the number of `Verdict::Gap` rows in
+# `crates/smelt-db/tests/dialect_audit/ledger.rs` for that dialect — a lowering
+# smelt owes, with a tracking issue. The bulk trackers are #177 (DuckDB),
+# #178 (Spark) and #179 (BigQuery); rows with a cause of their own point at
+# #173 (`%` on BigQuery), #174 (LOG / DAYOFWEEK), #175 (FIRST / LAST) and
+# #176 (inference returning Unknown).
+#
+# This is a RATCHET, mirroring `.claude/parser-gaps-baseline.txt`:
+#   - The count may only go DOWN as lowerings land.
+#   - Raising it requires editing this file with a reviewer-visible
+#     justification and a new ledger entry — never a silent skip.
+# `gap_count_ratchet` in tests/dialect_audit/main.rs enforces an exact match
+# (a decrease is a "stale baseline" failure prompting you to tighten here).
+dialect_gaps_duckdb 12
+dialect_gaps_spark 27
+dialect_gaps_postgres 0
+dialect_gaps_bigquery 42

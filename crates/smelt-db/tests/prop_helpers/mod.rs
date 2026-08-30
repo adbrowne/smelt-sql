@@ -10,14 +10,13 @@
 //! Mismatches are either bugs (to fix), known divergences (registered in `divergences.rs`),
 //! or compatible type differences (Text vs Varchar, Decimal precision differences).
 
-pub mod arrow_mapping;
-pub mod bigquery_oracle;
 pub mod divergences;
-pub mod duckdb_oracle;
 pub mod generators;
 pub mod known_unknowns;
 pub mod monotonicity_gen;
 pub mod null_data;
 pub mod oracle_check;
-pub mod spark_oracle;
-pub mod type_comparison;
+
+// The oracle transport (the three oracles, the Arrow map, the error
+// classifier, and `compare_types`) lives in `smelt-oracle-testkit`. Import it
+// directly — there is deliberately no re-export shim here.

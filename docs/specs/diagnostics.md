@@ -242,6 +242,16 @@ Owned by `docs/specs/multi_backend.md` §"Output-schema type conformance".
 
 ---
 
+### Dialect emission
+
+Owned by `docs/specs/multi_backend.md` §"Cross-engine emission audit", §"Emission is scoped to call position", §"Statement-level lowering", and `docs/specs/functions.md` §"Registry emission surface".
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `UnsupportedOnBackend` | Error | A model uses a built-in or operator the registry declares unsupported on the selected backend's dialect **at the call's own position** (scalar, aggregate, whole-partition window, or running window — `docs/specs/multi_backend.md` §"Emission is scoped to call position"); the compiler refuses rather than emitting SQL the engine will reject at runtime. The most common trigger is a **running** window (`OVER (PARTITION BY … ORDER BY …)`, or any narrower frame) over a built-in the target backend offers only as an aggregate: the statement-level restructure that lowers a whole-partition window into a synthesised CTE (§"Statement-level lowering") has no correct form for a running window, so the registry states that combination `Unsupported` and the compiler refuses it outright, naming the built-in, the backend, and the whole-partition requirement. The same code also fires when a query block containing an otherwise-restructurable call fails one of the restructure's admissibility rules — `ROLLUP`/`CUBE`/`GROUPING SETS` grouping, an occurrence in `HAVING`/`ORDER BY`/`QUALIFY`, a `DISTINCT` argument or `FILTER (WHERE …)` clause, an unexpanded `SELECT *`, a non-deterministic `PARTITION BY` expression, or a correlated subquery — each naming the specific rule that failed. |
+
+---
+
 ### Python models
 
 Owned by `docs/specs/models.md` (Python model section).

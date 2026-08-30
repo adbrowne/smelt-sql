@@ -240,9 +240,11 @@ impl Display for SelectList {
 
 impl Display for SelectItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Try to get the expression, or fall back to raw text
-        if let Some(expr) = self.expression() {
-            write!(f, "{}", expr.text())?;
+        // Print the expression's own source text, not the `Expr::cast`-unwrapped
+        // node's — see `SelectItem::expression_source_text`, which keeps a
+        // parenthesis wrapper the cast would otherwise strip.
+        if let Some(text) = self.expression_source_text() {
+            write!(f, "{}", text)?;
         } else {
             // For simple tokens like * that don't have an EXPRESSION wrapper,
             // extract the text directly (excluding AS and alias if present)

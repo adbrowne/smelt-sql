@@ -12,8 +12,8 @@
 //!
 //! The harness must observe actual NULLs propagating through expressions.
 
-use super::duckdb_oracle::DuckDbOracle;
 use super::generators::{is_aggregate_expr, is_window_expr, QueryShape, TypedExpr, TypedSource};
+use smelt_oracle_testkit::DuckDbOracle;
 use smelt_types::DataType;
 
 /// A table name used for all real-data nullability tests.

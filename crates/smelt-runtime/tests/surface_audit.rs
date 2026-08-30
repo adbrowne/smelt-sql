@@ -75,7 +75,9 @@ fn test_no_compiler_internals_exposed() {
     let compiler = registry.get("dev");
 
     // `build_ephemeral_resolver` is accessible (needed by rebuild).
-    let resolver = compiler.build_ephemeral_resolver(&[], "main");
+    let resolver = compiler
+        .build_ephemeral_resolver(&[], "main")
+        .expect("no ephemerals");
 
     // `EphemeralResolver::empty` is the other valid empty-resolver path.
     let empty = EphemeralResolver::empty();

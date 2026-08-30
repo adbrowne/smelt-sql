@@ -8,27 +8,8 @@
 
 use smelt_db::type_inference::{infer_select_column_types, registry_migrated_names, TypeContext};
 use smelt_parser::ast::File;
-use smelt_types::signatures::{BuiltinRegistry, ExprKind};
+use smelt_types::signatures::{BuiltinRegistry, ExprKind, SyntaxForm};
 use smelt_types::{DataType, FunctionCategory, SqlFunction, TypedColumn};
-
-/// Registry entries that model SQL *operators* / dedicated-syntax forms
-/// (predicates, `CAST`, interval add/sub) rather than callable functions.
-/// They live in the registry for hover/completion/lint purposes but are not
-/// part of the `SqlFunction` (callable-function) surface, so they are exempt
-/// from the enum⇔registry function-consistency check.
-const OPERATOR_REGISTRY_ENTRIES: &[&str] = &[
-    "BETWEEN",
-    "CAST",
-    "DATE_ADD",
-    "DATE_SUB",
-    "EXISTS",
-    "GLOB",
-    "ILIKE",
-    "IN",
-    "IS_NULL",
-    "IS_NOT_NULL",
-    "LIKE",
-];
 
 /// Expected `ExprKind` classification for a `SqlFunction`, derived from its
 /// category. This is the oracle for registry-vs-enum classification parity.
@@ -69,7 +50,15 @@ fn every_recognized_function_is_registry_backed() {
     // Direction 2: every non-operator registry entry is a recognised function.
     let mut missing_from_enum: Vec<String> = Vec::new();
     for name in BuiltinRegistry::names() {
-        if OPERATOR_REGISTRY_ENTRIES.contains(&name) {
+        let Some(sig) = BuiltinRegistry::resolve(name) else {
+            continue;
+        };
+        // Dedicated-syntax entries (operators, CAST, interval add/sub, table
+        // functions) are exempt from the callable-function surface. The
+        // exemption is registry data, not a hand-written list: a new operator
+        // entry is exempt automatically, and an entry that stops being one
+        // re-enters the gate.
+        if sig.syntax_form != SyntaxForm::Call {
             continue;
         }
         if SqlFunction::from_name(name).is_none() {
@@ -233,5 +222,59 @@ fn to_seconds_and_md5_registered() {
     assert_eq!(
         SqlFunction::from_name("TO_SECONDS"),
         Some(SqlFunction::ToSeconds)
+    );
+}
+
+#[test]
+fn no_position_blind_emission_lookup() {
+    // `Signature::emission_for(dialect)` asked a question the registry can no
+    // longer answer honestly — a built-in's support routinely differs between
+    // the positions it can appear in (`docs/specs/multi_backend.md`
+    // §"Emission is scoped to call position"). It was replaced by
+    // `emission_at(dialect, position)`, which forces every caller to name a
+    // position rather than falling back to a dialect-only verdict. This is a
+    // grep, not a type check, because the compiler enforces the new
+    // signature but nothing stops a future call site from re-adding the old
+    // name under a different guise.
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root must resolve");
+
+    let mut hits: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(workspace_root.join("crates"))
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        if path.components().any(|c| c.as_os_str() == "target") {
+            continue;
+        }
+        // This test's own source names the removed method in prose and in
+        // the pattern it greps for — not a call site.
+        if path.file_name().and_then(|f| f.to_str()) == Some("registry_consistency.rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (i, line) in text.lines().enumerate() {
+            // The leading `.` distinguishes an actual method call from a
+            // doc comment or string mentioning the old name.
+            if line.contains(".emission_for(") {
+                hits.push(format!("{}:{}: {}", path.display(), i + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "no call site may take a dialect without a position — use \
+         `emission_at(dialect, position)` instead of the removed \
+         `emission_for(dialect)`:\n{}",
+        hits.join("\n")
     );
 }
