@@ -616,6 +616,55 @@ fn no_stale_skeleton_column_added_spelling() {
     );
 }
 
+/// Guards the pre-`smelt migrate`-wiring claim
+/// (`docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 8):
+/// `smelt migrate` now ships, so no spec may still say it doesn't exist. The
+/// needle is built from parts so this guard's own source does not itself
+/// trip the check it performs.
+#[test]
+fn no_stale_no_migrate_command_claim() {
+    use std::path::Path;
+
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+
+    let excluded_dirs = [
+        "docs/plans",
+        "docs/handoffs",
+        "docs/research",
+        "docs/outcomes",
+        "target",
+    ];
+    let stale_needle = ["No `smelt ", "migrate` ", "command exists"].concat();
+
+    let mut hits = Vec::new();
+    for entry in walk_files(&workspace_root.join("docs/specs")) {
+        let rel = entry
+            .strip_prefix(&workspace_root)
+            .expect("entry under workspace root");
+        let rel_str = rel.to_string_lossy();
+        if excluded_dirs.iter().any(|d| rel_str.starts_with(d))
+            || rel.components().any(|c| c.as_os_str() == "target")
+        {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(&entry) else {
+            continue;
+        };
+        if content.contains(&stale_needle) {
+            hits.push(rel_str.into_owned());
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "stale 'no smelt migrate command exists' claim found in: {hits:?} — smelt migrate ships \
+         now, reword to describe its actual scope"
+    );
+}
+
 fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {

@@ -308,7 +308,7 @@ open — not that the excluded bullets themselves are gone.
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
 | 7b | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
-| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | planned |
+| 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
 | 9 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
 | 10 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
 | 11 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
@@ -336,6 +336,12 @@ open — not that the excluded bullets themselves are gone.
   sweep (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
   `schema_evolution.md`, `diagnostics.md`) are deferred to phase 7, since renaming a
   diagnostic code is itself a code change out of scope for this docs-only phase.
+
+- **2026-08-30, phase 8.** `backbuild-synthesis.md` rewritten around the shipped `smelt migrate`
+  verb; corrected the "enumerates options; it does not yet choose" claim to state precisely what
+  it does (first-admissible-option-per-group, no cost model) rather than dropping the caveat.
+  Criterion 18's docs-site CLI-surface audit found no gap — every subcommand and `smelt run` flag
+  is already documented in `cli.md` (see `phases/08-summary.md`).
 
 - **2026-08-15, scope decision.** User directive: close every remaining Known Divergences /
   Open Question bullet across the three anchor specs to zero, choosing "build everything" over

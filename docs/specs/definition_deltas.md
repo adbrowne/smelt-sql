@@ -490,7 +490,8 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   `crates/smelt-logical/tests/maintenance_tracer_evolution.rs`;
   `crates/smelt-runtime/tests/tracer_evolution.rs`;
   `crates/smelt-cli/tests/targeted_column_backfill.rs`.
-- **User docs**: none yet — the docs-site page for migration lands with the wiring plan.
+- **User docs**: `docs-site/docs/guide/backbuild-synthesis.md` (the migration guide);
+  `docs-site/docs/reference/cli.md` §"smelt migrate".
 - **Plans (history)**: `docs/plans/20260809-sensitivity-precision.md` (atomicity-gap tracking).
 - **Research**: `docs/research/20260802-backbuild-synthesis.md` (the technique catalogue and its
   correctness oracle); `docs/research/20260811-delta-signatures-and-definition-deltas.md` (the

@@ -825,8 +825,8 @@ smelt diff --json || echo "Schema changes detected!"
 
 Derive, approve, and apply a **definition-delta** migration plan: a targeted script that
 migrates a model's stored table in place after its SQL changed, instead of a full rebuild. See
-the migration guide for the full walkthrough of when each verdict (eclipsed, backfill in place,
-re-derive, skeleton change) applies.
+the [migration guide](../guide/backbuild-synthesis.md) for the full walkthrough of when each
+verdict (eclipsed, backfill in place, rederive, skeleton change) applies.
 
 **Usage:**
 
