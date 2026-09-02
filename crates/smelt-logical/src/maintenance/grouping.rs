@@ -79,7 +79,7 @@ use crate::analysis::skeleton_closure::{enrichment_join_alias, skeleton_source_c
 use crate::analysis::source_bounds::resolve_table_ref_source_name;
 use crate::analysis::walk::{
     enumerate_select_scopes, resolve_reference_leaf, QueryNode, QueryTree, ScopeResolver,
-    SelectNode,
+    SelectNode, SetOpKind, SetOpNode,
 };
 use crate::analysis::{item_alias, item_expr, select_stmt_items, SelectItemKind};
 
@@ -149,35 +149,153 @@ pub fn derive_column_groups(
             "model SQL contains a construct the composition walk cannot normalize",
         );
     }
-    if matches!(tree.root, QueryNode::SetOp(_)) {
-        return degenerate_whole_model(
-            &payload_columns,
-            &all_source_names,
-            "model SQL's outermost query is a set operation — mutation-sensitivity is not \
-             yet classified across set-operation arms",
-        );
-    }
+
     let source_by_name: BTreeMap<&str, &SourceFacts> =
         sources.iter().map(|s| (s.name.as_str(), s)).collect();
+
+    if let QueryNode::SetOp(setop) = &tree.root {
+        return derive_setop_column_groups(
+            &tree,
+            setop,
+            &items,
+            &payload_columns,
+            &all_source_names,
+            skeleton_columns,
+            &source_by_name,
+        );
+    }
 
     if select.from_clause().is_none() {
         return GroupingResult::default();
     }
 
-    let membership_sensitivity = match membership_sensitivity_sources(sql, &tree, &source_by_name) {
-        Ok(set) => set,
-        Err(reason) => {
-            return degenerate_whole_model(&payload_columns, &all_source_names, &reason);
+    let skip_positions: BTreeSet<usize> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| skeleton_columns.contains(item_alias(item)))
+        .map(|(i, _)| i)
+        .collect();
+
+    let arm = classify_arm(&tree, &select, &source_by_name, &skip_positions);
+    if !arm.degenerate.is_empty() {
+        let mut result = degenerate_whole_model(
+            &payload_columns,
+            &all_source_names,
+            "one or more columns had unresolvable provenance",
+        );
+        // The collapse reason above is the model-wide summary; keep the
+        // specific per-column reasons too, so the surfaced report names
+        // exactly which reference could not be resolved and why.
+        result.degenerate = arm.degenerate;
+        return result;
+    }
+
+    // Keyed by alias (a `BTreeMap`, not the arm's own select-list position
+    // order) so column order within a group is alphabetical, matching every
+    // consumer that exact-matches a group's `columns` list (e.g. a
+    // `maintenance: cells: columns:` write pin) against this derivation's
+    // pre-refactor, alphabetized output.
+    let mut per_column: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (i, (alias, sensitivity)) in arm.columns.into_iter().enumerate() {
+        if skip_positions.contains(&i) {
+            continue;
         }
+        per_column.insert(alias, sensitivity);
+    }
+    let mut buckets: BTreeMap<BTreeSet<String>, Vec<String>> = BTreeMap::new();
+    for (col, sens) in per_column {
+        buckets.entry(sens).or_default().push(col);
+    }
+    // Membership sensitivity is row-scoped, not per-column: one admission
+    // read governs every payload group this model's outermost scope
+    // produces, so the same derived set attaches uniformly to each group
+    // below (`docs/specs/model_properties.md` §"Per-column
+    // mutation-sensitivity / column provenance", membership paragraph).
+    let groups = buckets
+        .into_iter()
+        .map(|(mutation_sensitivity, columns)| ColumnGroup {
+            columns,
+            mutation_sensitivity,
+            membership_sensitivity: arm.membership_sensitivity.clone(),
+        })
+        .collect();
+
+    GroupingResult {
+        groups,
+        degenerate: Vec::new(),
+    }
+}
+
+/// One set-operation arm's own classification — value provenance per select
+/// position, its raw referenced-source set, its own row-admission membership
+/// sensitivity, and any unresolvable-reference collapse
+/// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+/// column provenance" "Across set-operation arms").
+struct ArmClassification {
+    /// `(alias, value sensitivity)` for every select item in this arm, in
+    /// position order — including a skipped (skeleton) position, whose
+    /// sensitivity is an empty placeholder and is never resolved or allowed
+    /// to collapse the arm, mirroring the single-arm skeleton skip.
+    columns: Vec<(String, BTreeSet<String>)>,
+    /// Bare source names resolved from every non-skipped select item's own
+    /// column references, before the mutation-profile `contributes` filter
+    /// — the "pre-`contributes`" set the set-operation combination rule
+    /// folds into membership sensitivity for a coupling operator.
+    referenced_sources: BTreeSet<String>,
+    /// This arm's own row-admission membership sensitivity
+    /// (`membership_sensitivity_sources` run over just this arm's tree).
+    membership_sensitivity: BTreeSet<String>,
+    /// Any column this arm could not resolve — non-empty means the caller
+    /// must collapse the whole model, carrying these reasons.
+    degenerate: Vec<DegenerateColumn>,
+}
+
+fn arm_degenerate(reason: impl Into<String>) -> ArmClassification {
+    ArmClassification {
+        columns: Vec::new(),
+        referenced_sources: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
+        degenerate: vec![DegenerateColumn {
+            column: "*".to_string(),
+            reason: reason.into(),
+        }],
+    }
+}
+
+/// Classify one `SELECT` scope — the whole model for a plain query, or one
+/// arm of a set operation — against `source_by_name`. `skip_positions`
+/// names the positions (by index, matched against the caller's own item
+/// list) to exclude from resolution entirely, reproducing the skeleton
+/// skip: a skeleton column's own unresolvable reference must never collapse
+/// the model.
+fn classify_arm(
+    tree: &QueryTree,
+    select: &smelt_parser::SelectStmt,
+    source_by_name: &BTreeMap<&str, &SourceFacts>,
+    skip_positions: &BTreeSet<usize>,
+) -> ArmClassification {
+    let Some(items) = select_stmt_items(select) else {
+        return arm_degenerate(
+            "the SELECT list did not classify (e.g. a wildcard item) — no per-column \
+             provenance could be derived",
+        );
     };
 
-    let mut per_column: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let mut degenerate = Vec::new();
-    let mut collapse = false;
+    let arm_sql = select.syntax().text().to_string();
+    let membership_sensitivity =
+        match membership_sensitivity_sources(&arm_sql, tree, source_by_name) {
+            Ok(set) => set,
+            Err(reason) => return arm_degenerate(reason),
+        };
 
-    for item in &items {
+    let mut columns = Vec::with_capacity(items.len());
+    let mut referenced_sources = BTreeSet::new();
+    let mut degenerate = Vec::new();
+
+    for (i, item) in items.iter().enumerate() {
         let alias = item_alias(item).to_string();
-        if skeleton_columns.contains(&alias) {
+        if skip_positions.contains(&i) {
+            columns.push((alias, BTreeSet::new()));
             continue;
         }
         let is_aggregate = matches!(
@@ -188,7 +306,7 @@ pub fn derive_column_groups(
         let mut sensitivity = BTreeSet::new();
         let mut column_reason = None;
         for cref in &refs {
-            let Some(leaf) = resolve_reference_leaf(&tree, cref.qualifier(), cref.name()) else {
+            let Some(leaf) = resolve_reference_leaf(tree, cref.qualifier(), cref.name()) else {
                 column_reason = Some(format!(
                     "column reference '{}' does not resolve to a base-relation column the \
                      composition walk can chase (an ambiguous unqualified reference, a \
@@ -202,6 +320,7 @@ pub fn derive_column_groups(
                 .strip_prefix("sources.")
                 .unwrap_or(leaf.relation.as_str())
                 .to_string();
+            referenced_sources.insert(bare.clone());
             match source_by_name.get(bare.as_str()) {
                 Some(facts) => {
                     let contributes = match facts.mutation {
@@ -223,37 +342,163 @@ pub fn derive_column_groups(
         }
         if let Some(reason) = column_reason {
             degenerate.push(DegenerateColumn {
-                column: alias,
+                column: alias.clone(),
                 reason,
             });
-            collapse = true;
+            columns.push((alias, BTreeSet::new()));
             continue;
+        }
+        columns.push((alias, sensitivity));
+    }
+
+    ArmClassification {
+        columns,
+        referenced_sources,
+        membership_sensitivity,
+        degenerate,
+    }
+}
+
+/// One tree per arm of a `QueryNode::SetOp`, re-rooted at that arm's own
+/// `SelectNode` with the compound's hoisted `ctes` prepended so a reference
+/// inside the arm can still chase into them — a pure re-rooting of the
+/// already-normalized tree, never a re-walk. `None` when any branch is not
+/// itself a plain `Select` (a nested compound arm — the fallback list in
+/// this module's doc comment).
+fn setop_arm_trees(tree: &QueryTree) -> Option<Vec<QueryTree>> {
+    let QueryNode::SetOp(setop) = &tree.root else {
+        return None;
+    };
+    let mut arms = Vec::with_capacity(setop.branches.len());
+    for branch in &setop.branches {
+        let QueryNode::Select(sn) = branch else {
+            return None;
+        };
+        let mut ctes = setop.ctes.clone();
+        ctes.extend(sn.ctes.clone());
+        arms.push(QueryTree {
+            root: QueryNode::Select(SelectNode {
+                select: sn.select.clone(),
+                ctes,
+                inputs: sn.inputs.clone(),
+            }),
+        });
+    }
+    Some(arms)
+}
+
+/// Per-arm classification and combination for a set-operation model
+/// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+/// column provenance" "Across set-operation arms"). Output column names and
+/// positions come from `arm0_items` (the first arm); every subsequent arm's
+/// own items are matched to them by position, never by name. A chain whose
+/// operators are not all equal, an arm that is not itself a single `SELECT`,
+/// an arity mismatch between arms, or an arm with its own unresolvable
+/// provenance collapses the whole model, fail-closed exactly as a
+/// single-`SELECT` model would.
+fn derive_setop_column_groups(
+    tree: &QueryTree,
+    setop: &SetOpNode,
+    arm0_items: &[SelectItemKind],
+    payload_columns: &[String],
+    all_source_names: &BTreeSet<String>,
+    skeleton_columns: &BTreeSet<String>,
+    source_by_name: &BTreeMap<&str, &SourceFacts>,
+) -> GroupingResult {
+    if !setop.ops.windows(2).all(|w| w[0] == w[1]) {
+        return degenerate_whole_model(
+            payload_columns,
+            all_source_names,
+            "model SQL's outermost query mixes different set-operation kinds across its \
+             arms — mutation-sensitivity is not classified across a mixed chain",
+        );
+    }
+    let op = setop.ops[0];
+
+    let Some(arm_trees) = setop_arm_trees(tree) else {
+        return degenerate_whole_model(
+            payload_columns,
+            all_source_names,
+            "model SQL's outermost query has a set-operation arm that is itself a nested \
+             compound query — mutation-sensitivity is not classified across a nested arm",
+        );
+    };
+
+    let skip_positions: BTreeSet<usize> = arm0_items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| skeleton_columns.contains(item_alias(item)))
+        .map(|(i, _)| i)
+        .collect();
+
+    let mut arms = Vec::with_capacity(arm_trees.len());
+    for arm_tree in &arm_trees {
+        let QueryNode::Select(sn) = &arm_tree.root else {
+            return degenerate_whole_model(
+                payload_columns,
+                all_source_names,
+                "model SQL's outermost query has a set-operation arm that is itself a nested \
+                 compound query — mutation-sensitivity is not classified across a nested arm",
+            );
+        };
+        let classification = classify_arm(arm_tree, &sn.select, source_by_name, &skip_positions);
+        if !classification.degenerate.is_empty() {
+            let mut result = degenerate_whole_model(
+                payload_columns,
+                all_source_names,
+                "one or more set-operation arms had unresolvable provenance",
+            );
+            result.degenerate = classification.degenerate;
+            return result;
+        }
+        if classification.columns.len() != arm0_items.len() {
+            return degenerate_whole_model(
+                payload_columns,
+                all_source_names,
+                "model SQL's set-operation arms select a different number of columns — \
+                 mutation-sensitivity is not classified across arms of mismatched arity",
+            );
+        }
+        arms.push(classification);
+    }
+
+    let mut per_column: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (i, item) in arm0_items.iter().enumerate() {
+        if skip_positions.contains(&i) {
+            continue;
+        }
+        let alias = item_alias(item).to_string();
+        let mut sensitivity = BTreeSet::new();
+        match op {
+            SetOpKind::Except | SetOpKind::ExceptAll => {
+                sensitivity.extend(arms[0].columns[i].1.iter().cloned());
+            }
+            SetOpKind::Union
+            | SetOpKind::UnionAll
+            | SetOpKind::Intersect
+            | SetOpKind::IntersectAll => {
+                for arm in &arms {
+                    sensitivity.extend(arm.columns[i].1.iter().cloned());
+                }
+            }
         }
         per_column.insert(alias, sensitivity);
     }
 
-    if collapse {
-        let mut result = degenerate_whole_model(
-            &payload_columns,
-            &all_source_names,
-            "one or more columns had unresolvable provenance",
-        );
-        // The collapse reason above is the model-wide summary; keep the
-        // specific per-column reasons too, so the surfaced report names
-        // exactly which reference could not be resolved and why.
-        result.degenerate = degenerate;
-        return result;
+    let mut membership_sensitivity: BTreeSet<String> = BTreeSet::new();
+    for arm in &arms {
+        membership_sensitivity.extend(arm.membership_sensitivity.iter().cloned());
+    }
+    if !matches!(op, SetOpKind::UnionAll) {
+        for arm in &arms {
+            membership_sensitivity.extend(arm.referenced_sources.iter().cloned());
+        }
     }
 
     let mut buckets: BTreeMap<BTreeSet<String>, Vec<String>> = BTreeMap::new();
     for (col, sens) in per_column {
         buckets.entry(sens).or_default().push(col);
     }
-    // Membership sensitivity is row-scoped, not per-column: one admission
-    // read governs every payload group this model's outermost scope
-    // produces, so the same derived set attaches uniformly to each group
-    // below (`docs/specs/model_properties.md` §"Per-column
-    // mutation-sensitivity / column provenance", membership paragraph).
     let groups = buckets
         .into_iter()
         .map(|(mutation_sensitivity, columns)| ColumnGroup {
@@ -263,7 +508,10 @@ pub fn derive_column_groups(
         })
         .collect();
 
-    GroupingResult { groups, degenerate }
+    GroupingResult {
+        groups,
+        degenerate: Vec::new(),
+    }
 }
 
 /// Row-admission-position membership sensitivity
@@ -563,5 +811,47 @@ fn degenerate_whole_model(
     GroupingResult {
         groups: vec![group],
         degenerate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `setop_arm_trees` must refuse a branch that is itself a set
+    /// operation. The parser's own `normalize()` never produces this shape
+    /// today — a paren-wrapped compound arm flattens transparently into the
+    /// enclosing chain, so this construct is unreachable through real SQL —
+    /// but the guard stays defensive against a future relaxation, so this
+    /// is tested by direct tree construction rather than through
+    /// `derive_column_groups`.
+    #[test]
+    fn setop_arm_trees_returns_none_for_a_nested_compound_branch() {
+        let stripped = crate::types::Frontmatter::strip("SELECT 1 AS x");
+        let parse = smelt_parser::parse(stripped);
+        let file = smelt_parser::File::cast(parse.syntax()).unwrap();
+        let select = file.select_stmt().unwrap();
+        let plain_branch = QueryNode::Select(SelectNode {
+            select,
+            ctes: Vec::new(),
+            inputs: Vec::new(),
+        });
+        let nested_branch = QueryNode::SetOp(SetOpNode {
+            ctes: Vec::new(),
+            ops: vec![SetOpKind::UnionAll],
+            branches: vec![plain_branch.clone(), plain_branch.clone()],
+        });
+        let tree = QueryTree {
+            root: QueryNode::SetOp(SetOpNode {
+                ctes: Vec::new(),
+                ops: vec![SetOpKind::UnionAll],
+                branches: vec![plain_branch, nested_branch],
+            }),
+        };
+
+        assert!(
+            setop_arm_trees(&tree).is_none(),
+            "a branch that is itself a set operation must not be treated as a plain arm"
+        );
     }
 }

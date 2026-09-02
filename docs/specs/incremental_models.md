@@ -2068,10 +2068,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   and even where the posture is threaded through, only full-input re-derivation is admitted
   (live fold machinery for a change feed's delta shape is §Future Extensions, blocked on the
   retention point).
-- **`INTERSECT`/`EXCEPT` are unclassified set operations**: they collapse to whole-model
-  mutation-sensitivity, so every admitted cell is region recompute; a future distribution
-  proof needs per-arm-cardinality reasoning. Cross-ref `model_properties.md` §Known
-  Divergences.
 - **Conditional-maintenance gaps**: `smelt explain --show-sql` renders the unconditional
   matched arm, never the suppressed form a live run executes; the region DELETE+INSERT
   family has no conditional variant; the whole-row (keyless) staged-candidate realisation

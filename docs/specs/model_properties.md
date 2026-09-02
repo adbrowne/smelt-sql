@@ -158,6 +158,27 @@ Sensitivity has two distinct kinds, and the walk derives both. **Value sensitivi
 
 One proof prunes membership sensitivity, per the only-proofs-prune principle (`incremental_models.md` §"Windowed maintenance and the horizon"). An enrichment join whose skeleton-source closure (§"Skeleton-source closure") is proven `Closed` **with row preservation established by the join shape itself** (a provably outer join, never the declared `referential_integrity` world-fact) cannot add, drop, or duplicate an output row, so the enrichment source's `ON` read contributes no membership sensitivity — its deltas are pure value changes, and value sensitivity carries them. The declared-`referential_integrity` route is excluded here: this pruning pass never attempts the declared route in the first place (`RowPreservation::DeclaredReferentialIntegrity` never arises from a `None` referential-integrity input), so a declaration alone can never delete a membership fact — widening this pass to consult the declared route (paired with its own probe dispatch) is a separate narrowing-widening decision, tracked alongside the delta-restriction consumer's own widening (§"Skeleton-source closure" §Known Divergences). An `Open` closure, or any admission read that is not the enrichment join's own equality (a `WHERE`/`HAVING` conjunct, a semi-join, a subquery), attaches membership sensitivity exactly as above — fail-closed.
 
+**Across set-operation arms**, a model whose outermost query is a chain of one repeated set
+operator over arms `a0..an` gets a real per-arm verdict instead of collapsing whole-model: output
+column names and positions come from `a0`, and each subsequent arm's own select items are matched
+to `a0`'s by position, never by name. Value provenance combines positionally per output position
+across the arms the operator makes *value-contributing*, and every arm's referenced sources fold
+into membership sensitivity wherever the operator couples arms for row existence: `UNION ALL`
+takes every arm's own provenance per position, contributing no cross-arm membership coupling (each
+arm's rows are independent); `UNION` (distinct) does the same for value provenance but also adds
+every arm's referenced sources to membership sensitivity, because deduplication makes one arm's row
+able to suppress or admit another arm's matching row; `INTERSECT[ ALL]` takes every arm's provenance
+per position and adds every arm's referenced sources to membership sensitivity, because any arm can
+decide an output row's existence; `EXCEPT[ ALL]` takes only the first arm's provenance per position
+(the subtrahend arms contribute no value) but still adds every arm's referenced sources to
+membership sensitivity, because a later arm's row can delete a first-arm row from the output.
+"Referenced sources" here is each arm's pre-`contributes` source set — an append-only insert into
+an `EXCEPT` right arm still deletes an output row, so the append-only/aggregated-read filter that
+governs value sensitivity does not filter the membership leg. A chain whose operators are not all
+the same, an arm that is not itself a single `SELECT` (a nested compound arm), an arity mismatch
+between arms, or an arm with its own unresolvable provenance collapses the whole model exactly as
+today, carrying that arm's own degenerate reasons.
+
 ### Affected-key discovery
 
 `derive_affected_keys(delta, sql, ctx)` computes, from a changed input's delta rows, the finite
@@ -354,8 +375,10 @@ recorded here — history lives in git and §References → Plans.
   `docs/plans/20260707-property-composition-walk.md` (standing gate:
   `cargo test -p smelt-logical --test walk_coverage`).
 - **`INTERSECT`/`EXCEPT` are unclassified for filter distribution** — their arm scopes are judged
-  by the admission walk only. Cross-ref `incremental_models.md` §Known Divergences "The contract,
-  plan, and graph layer".
+  by the admission walk only; this is independent of the per-arm mutation-sensitivity combination
+  rule (§"Per-column mutation-sensitivity / column provenance" "Across set-operation arms"), which
+  is classified. A mixed-operator chain, a nested compound arm, or an arity mismatch across arms
+  still collapses whole-model for mutation-sensitivity too.
 - **Additive-only model-diff can't detect a semantic change under an unchanged expression (Open Question)**
   — whether an existing column's meaning changed is not derivable from the column/dependency-set
   diff alone; falls to a declared migration intent whose exact surface is open. Cross-ref

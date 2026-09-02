@@ -327,7 +327,7 @@ open — not that the excluded bullets themselves are gone.
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | done |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
 | 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | done |
-| 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | planned |
+| 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | done |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
@@ -343,6 +343,17 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 26b — per-arm `INTERSECT`/`EXCEPT` classification lands.**
+  `grouping::derive_column_groups` no longer collapses a set-op model whole-model: a chain of one
+  repeated operator gets a real per-arm verdict (value provenance unions/first-arm-only per output
+  position, membership sensitivity couples every arm's referenced sources for every operator except
+  `UNION ALL`), with fail-closed fallback for a mixed-operator chain, a nested compound arm, an
+  arity mismatch, or an arm with its own unresolvable reference. Caught and fixed a real regression
+  along the way: the single-`SELECT` path's refactored column accumulator briefly lost the
+  alphabetical-by-alias column ordering a repair-recipe write pin exact-matches against — only
+  `cargo test --workspace` surfaced it, not any of the phase's own named test targets. See
+  `phases/26b-summary.md`.
 
 - **2026-09-03, phase 26d planning — group-scoped dirt is licensed by the existing
   closure-prune proof, not by a new one.** `grouping.rs` already proves, per enrichment source,

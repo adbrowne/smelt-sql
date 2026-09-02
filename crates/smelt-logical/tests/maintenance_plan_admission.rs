@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashSet};
 use smelt_logical::maintenance::derive::{
     derive_maintenance_plan, derive_triggers, FoldSpec, ModelInputs,
 };
+use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Trigger,
 };
@@ -449,5 +450,84 @@ fn trigger_derivation_is_order_stable_and_deduplicated() {
                 columns: vec!["new_col".to_string()]
             },
         ]
+    );
+}
+
+/// Phase 26b: the per-arm set-operation classification (`docs/specs/
+/// model_properties.md` §"Per-column mutation-sensitivity / column
+/// provenance" "Across set-operation arms") must reach the derived plan —
+/// a `UNION ALL` model's two column groups (one append-only-only, one
+/// mutable-sensitive) get their own `derive_column_groups` verdict, and the
+/// plan derived from it admits a cell only for the mutable-sensitive group,
+/// never a blanket whole-model cell covering both.
+#[test]
+fn setop_model_admits_a_narrower_cell_than_whole_model_recompute() {
+    let fixed_src = SourceFacts {
+        name: "fixed_src".to_string(),
+        mutation: MutationProfile::AppendOnly,
+        partition_col: None,
+        unique_key: vec![],
+        allow_full_scan: false,
+    };
+    let mutable_src = SourceFacts {
+        name: "mutable_src".to_string(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: None,
+        unique_key: vec![],
+        allow_full_scan: true,
+    };
+    // Arm 1 reads `mutable_src` as its own base relation (no JOIN, so no
+    // admission-position read at all), so only 'b' picks up `mutable_src`'s
+    // value sensitivity — 'a' stays unsensitive in both arms, keeping the
+    // two columns in genuinely distinct groups.
+    let sql = "SELECT f.id, f.a, f.b FROM smelt.sources.fixed_src f \
+               UNION ALL \
+               SELECT m.id, 'x' AS a, m.b FROM smelt.sources.mutable_src m";
+    let skeleton = set(&["id"]);
+    let grouping = derive_column_groups(sql, &[fixed_src.clone(), mutable_src.clone()], &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    assert!(
+        grouping.groups.len() > 1,
+        "expected the append-only-only column and the mutable-sensitive column to land in \
+         distinct groups, got {:?}",
+        grouping.groups
+    );
+
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "t".to_string(),
+            grain: Grain::Key {
+                unique_key: strings(&["id"]),
+            },
+            skeleton_columns: skeleton,
+        },
+        sources: vec![fixed_src, mutable_src],
+        column_groups: grouping.groups,
+        fold: None,
+        old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+    };
+    let triggers = vec![Trigger::UpstreamMutation {
+        source: "mutable_src".to_string(),
+    }];
+    let plan = derive_maintenance_plan(&inputs, &triggers);
+
+    assert_eq!(
+        plan.cells.len(),
+        1,
+        "only the mutable-sensitive group should get a cell, got {:?}",
+        plan.cells
+    );
+    assert!(
+        plan.cells[0].group.contains('b') && !plan.cells[0].group.contains('a'),
+        "the admitted cell must name the mutable-sensitive column's own group, not a \
+         blanket whole-model group: {:?}",
+        plan.cells[0].group
     );
 }

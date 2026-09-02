@@ -773,3 +773,300 @@ fn aggregating_scope_does_not_prune_membership() {
         result.groups
     );
 }
+
+// ===== Phase 26b: per-arm set-operation classification =====
+// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+// column provenance" "Across set-operation arms")
+
+/// `UNION ALL` combines every arm's own provenance per output position — two
+/// positions whose combined provenance differs must land in distinct
+/// groups, never the old blanket whole-model collapse.
+#[test]
+fn union_all_arms_combine_provenance_per_position() {
+    let sources = vec![
+        source("fixed_src", MutationProfile::AppendOnly, None, &[]),
+        source("mutable_src", MutationProfile::MutableSnapshot, None, &[]),
+    ];
+    let sql = "SELECT f.id, f.a, m.b FROM smelt.sources.fixed_src f \
+               JOIN smelt.sources.mutable_src m ON m.id = f.id \
+               UNION ALL \
+               SELECT f2.id, f2.a, f2.b FROM smelt.sources.fixed_src f2";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    assert!(
+        result.groups.len() > 1,
+        "expected 'a' (never sensitive) and 'b' (sensitive via arm 0's mutable_src read) in \
+         distinct groups, got {:?}",
+        result.groups
+    );
+    let a_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"a".to_string()))
+        .expect("a is grouped");
+    assert!(
+        a_group.mutation_sensitivity.is_empty(),
+        "neither arm's read of 'a' is mutation-sensitive: {:?}",
+        a_group.mutation_sensitivity
+    );
+    let b_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"b".to_string()))
+        .expect("b is grouped");
+    assert_eq!(b_group.mutation_sensitivity, set(&["mutable_src"]));
+}
+
+/// `EXCEPT`'s value provenance comes from the first (minuend) arm only, but
+/// the subtrahend's own source still couples membership — an append-only
+/// insert into the right arm can still delete an output row.
+#[test]
+fn except_right_arm_is_membership_only() {
+    let sources = vec![
+        source("a_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("b_src", MutationProfile::AppendOnly, None, &[]),
+    ];
+    let sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+               EXCEPT \
+               SELECT b.id, b.val FROM smelt.sources.b_src b";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    let val_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert_eq!(
+        val_group.mutation_sensitivity,
+        set(&["a_src"]),
+        "value provenance must come from the minuend arm only"
+    );
+    assert!(
+        val_group.membership_sensitivity.contains("b_src"),
+        "the subtrahend's own source must still couple membership: {:?}",
+        val_group.membership_sensitivity
+    );
+}
+
+/// `INTERSECT` couples every arm for both value provenance and membership:
+/// any arm can decide an output row's existence, and every arm's provenance
+/// feeds the shared output position.
+#[test]
+fn intersect_arms_contribute_to_value_and_membership() {
+    let sources = vec![
+        source("a_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("b_src", MutationProfile::MutableSnapshot, None, &[]),
+    ];
+    let sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+               INTERSECT \
+               SELECT b.id, b.val FROM smelt.sources.b_src b";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    let val_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert_eq!(val_group.mutation_sensitivity, set(&["a_src", "b_src"]));
+    assert_eq!(val_group.membership_sensitivity, set(&["a_src", "b_src"]));
+}
+
+/// Dedup coupling: `UNION` (distinct) adds every arm's referenced sources to
+/// membership sensitivity — a source `UNION ALL` over the identical arms
+/// does not, since `UNION ALL` never couples arms for row existence.
+#[test]
+fn union_distinct_couples_arms_into_membership() {
+    let sources = vec![
+        source("a_src", MutationProfile::AppendOnly, None, &[]),
+        source("b_src", MutationProfile::AppendOnly, None, &[]),
+    ];
+    let skeleton = set(&["id"]);
+
+    let union_all_sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+                          UNION ALL \
+                          SELECT b.id, b.val FROM smelt.sources.b_src b";
+    let union_all = derive_column_groups(union_all_sql, &sources, &skeleton);
+    assert!(
+        union_all.degenerate.is_empty(),
+        "{:?}",
+        union_all.degenerate
+    );
+    let union_all_val = union_all
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert!(
+        union_all_val.membership_sensitivity.is_empty(),
+        "UNION ALL must not couple arms into membership: {:?}",
+        union_all_val.membership_sensitivity
+    );
+
+    let union_sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+                      UNION \
+                      SELECT b.id, b.val FROM smelt.sources.b_src b";
+    let union_distinct = derive_column_groups(union_sql, &sources, &skeleton);
+    assert!(
+        union_distinct.degenerate.is_empty(),
+        "{:?}",
+        union_distinct.degenerate
+    );
+    let union_distinct_val = union_distinct
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert_eq!(
+        union_distinct_val.membership_sensitivity,
+        set(&["a_src", "b_src"]),
+        "dedup (UNION distinct) must couple both arms' sources into membership"
+    );
+}
+
+/// A chain mixing more than one set-operation kind (`A UNION ALL B EXCEPT
+/// C`) is not the single-repeated-operator shape the combination rule
+/// covers — collapse whole-model, naming the mixed chain.
+#[test]
+fn mixed_op_chain_falls_back_to_whole_model() {
+    let sources = vec![
+        source("a_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("b_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("c_src", MutationProfile::MutableSnapshot, None, &[]),
+    ];
+    let sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+               UNION ALL \
+               SELECT b.id, b.val FROM smelt.sources.b_src b \
+               EXCEPT \
+               SELECT c.id, c.val FROM smelt.sources.c_src c";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        !result.degenerate.is_empty(),
+        "a mixed-operator chain must collapse whole-model"
+    );
+    assert!(
+        result.degenerate.iter().any(|d| d.reason.contains("mixed")),
+        "the collapse reason should name the mixed chain: {:?}",
+        result.degenerate
+    );
+    let val_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"val".to_string()))
+        .expect("val is grouped");
+    assert_eq!(
+        val_group.mutation_sensitivity,
+        set(&["a_src", "b_src", "c_src"])
+    );
+}
+
+/// A set-operation arm that selects a different number of columns than arm
+/// 0 has no well-defined positional match — collapse whole-model.
+#[test]
+fn arity_mismatch_across_arms_falls_back_to_whole_model() {
+    let sources = vec![
+        source("a_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("b_src", MutationProfile::MutableSnapshot, None, &[]),
+    ];
+    let sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+               UNION ALL \
+               SELECT b.id, b.val, b.extra FROM smelt.sources.b_src b";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        !result.degenerate.is_empty(),
+        "an arity mismatch across arms must collapse whole-model"
+    );
+}
+
+/// An unresolvable reference in one non-first arm still fails the whole
+/// model closed, and the arm's own per-column reason survives into
+/// `degenerate` rather than being replaced with a generic message.
+#[test]
+fn unresolvable_reference_in_one_arm_collapses_whole_model() {
+    let sources = vec![
+        source("a_src", MutationProfile::MutableSnapshot, None, &[]),
+        source("b_src", MutationProfile::MutableSnapshot, None, &[]),
+    ];
+    // `val` is unqualified with two joined inputs in arm 1's own scope.
+    let sql = "SELECT a.id, a.val FROM smelt.sources.a_src a \
+               UNION ALL \
+               SELECT b.id, val FROM smelt.sources.a_src b \
+               JOIN smelt.sources.b_src c ON c.id = b.id";
+    let skeleton = set(&["id"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        !result.degenerate.is_empty(),
+        "an unresolvable reference in a non-first arm must collapse whole-model"
+    );
+    assert!(
+        result.degenerate.iter().any(|d| d.column == "val"),
+        "the arm's own per-column reason must be preserved: {:?}",
+        result.degenerate
+    );
+}
+
+/// Regression anchor for the refactor: a plain (non-set-op) `SELECT`
+/// model's groups and degenerate list are unchanged.
+#[test]
+fn single_select_grouping_is_unchanged() {
+    let sources = vec![
+        source(
+            "orders",
+            MutationProfile::AppendOnly,
+            Some("order_date"),
+            &[],
+        ),
+        source(
+            "customers",
+            MutationProfile::MutableSnapshot,
+            None,
+            &["user_id"],
+        ),
+    ];
+    let sql = "SELECT o.order_id, o.order_date, o.amount, c.tier \
+               FROM smelt.sources.orders o \
+               JOIN smelt.sources.customers c ON c.user_id = o.user_id";
+    let skeleton = set(&["order_id", "order_date"]);
+    let result = derive_column_groups(sql, &sources, &skeleton);
+
+    assert!(
+        result.degenerate.is_empty(),
+        "degenerate: {:?}",
+        result.degenerate
+    );
+    let amount_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"amount".to_string()))
+        .expect("amount is grouped");
+    assert!(amount_group.mutation_sensitivity.is_empty());
+    let tier_group = result
+        .groups
+        .iter()
+        .find(|g| g.columns.contains(&"tier".to_string()))
+        .expect("tier is grouped");
+    assert_eq!(tier_group.mutation_sensitivity, set(&["customers"]));
+    assert_ne!(amount_group.columns, tier_group.columns);
+}

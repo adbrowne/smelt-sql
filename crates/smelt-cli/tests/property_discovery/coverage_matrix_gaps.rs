@@ -108,26 +108,25 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
 
 // ---------------------------------------------------------------------------
 // EX-41/EX-42 — `INTERSECT`/`EXCEPT` set operations
-// (`docs/specs/model_properties.md` §Known Divergences: set-op distribution
-// classifies `UNION ALL` only; `incremental_models.md` §Known Divergences
-// records the maintenance-plan-level consequence directly). Not a matrix
-// row in `07-example-catalogue.md` today — added here to pin exactly the
-// gap the spec names.
+// (`docs/specs/model_properties.md` §"Per-column mutation-sensitivity /
+// column provenance" "Across set-operation arms" — the real per-arm
+// classification; set-op *filter distribution* remains `UNION [ALL]`-only,
+// an independent gap, per that section's own §Known Divergences entry).
+// Not a matrix row in `07-example-catalogue.md` today — added here to pin
+// the classification directly.
 //
-// `grouping::derive_column_groups` fails closed on ANY set operation
-// (`select.has_set_operation()`), collapsing every payload column into one
-// group sensitive to every declared source — the SAME collapse an
-// unrecognised CTE/derived-table shape gets, never a silent narrower
-// group. This test proves that collapse directly, then shows its
-// consequence for the plan: because the production query builder only
-// ever constructs `NewData`/`Backfill` triggers for a clocked source
-// (`incremental_models.md`'s trigger-list-builder divergence entry — an
-// `UpstreamMutation` trigger is never built for a clocked append-only
-// source regardless of column grouping), every reachable cell for a
-// typical `INTERSECT`/`EXCEPT` model (two clocked, append-only arms) is
-// `DeleteInsert` region recompute, matching the spec's "every admitted
-// cell is `DeleteInsert` region recompute regardless of source property"
-// exactly.
+// `grouping::derive_column_groups` classifies a chain of one repeated
+// set-operation kind per arm: value provenance unions (or, for `EXCEPT`,
+// takes only the first arm's) each arm's own per-position provenance, and
+// membership sensitivity couples every arm's referenced sources whenever
+// the operator makes one arm's row able to affect another's existence
+// (every kind except `UNION ALL`). The first test below covers the
+// pass-through case (no payload column, both output columns skeleton); the
+// second covers a genuine payload column. A shape outside the
+// single-repeated-operator rule (a mixed-operator chain, a nested compound
+// arm, an arity mismatch, or an arm with its own unresolvable provenance)
+// still collapses whole-model, fail-closed exactly as an unrecognised
+// CTE/derived-table shape does.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -211,14 +210,17 @@ fn ex41_ex42_intersect_no_payload_column_still_delete_insert() {
 }
 
 // ---------------------------------------------------------------------------
-// A genuinely mutation-sensitive `INTERSECT` payload column DOES hit the
-// fail-closed whole-model collapse (the case the classification-level
-// doc comment above describes in general terms) — this variant proves it
-// with a payload column present, complementing the pass-through case above.
+// A genuinely mutation-sensitive `INTERSECT` payload column gets the real
+// per-arm classification (`docs/specs/model_properties.md` §"Per-column
+// mutation-sensitivity / column provenance" "Across set-operation arms"),
+// not the whole-model collapse this catalogue entry used to pin: value
+// provenance unions every arm's own non-skeleton read of `amount`, and
+// `INTERSECT` additionally couples every arm's referenced sources into
+// membership sensitivity (either arm can decide the output row exists).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ex41_ex42_intersect_with_payload_column_collapses_whole_model() {
+fn ex41_ex42_intersect_with_payload_column_derives_per_arm_provenance() {
     let sql = "SELECT order_id, order_date, amount FROM smelt.sources.web_orders \
                INTERSECT \
                SELECT order_id, order_date, amount FROM smelt.sources.mobile_orders";
@@ -240,13 +242,20 @@ fn ex41_ex42_intersect_with_payload_column_collapses_whole_model() {
     ];
     let skeleton = set(&["order_id", "order_date"]);
     let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(grouping.degenerate.is_empty(), "{:?}", grouping.degenerate);
     assert_eq!(grouping.groups.len(), 1);
     assert_eq!(grouping.groups[0].columns, vec!["amount".to_string()]);
     assert_eq!(
         grouping.groups[0].mutation_sensitivity,
-        set(&["web_orders", "mobile_orders"]),
-        "collapses to sensitive-to-every-declared-source, never a silently narrower group"
+        set(&["web_orders"]),
+        "value provenance is the union of every arm's own non-skeleton read: \
+         web_orders' MutableSnapshot read of amount contributes, mobile_orders' \
+         non-aggregated AppendOnly read of amount does not"
     );
-    assert!(!grouping.degenerate.is_empty());
-    assert!(grouping.degenerate[0].reason.contains("set operation"));
+    assert_eq!(
+        grouping.groups[0].membership_sensitivity,
+        set(&["web_orders", "mobile_orders"]),
+        "INTERSECT couples every arm's own referenced source into membership sensitivity — \
+         either arm can decide the output row exists"
+    );
 }
