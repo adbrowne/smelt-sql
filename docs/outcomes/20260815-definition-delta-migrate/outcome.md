@@ -323,7 +323,7 @@ open — not that the excluded bullets themselves are gone.
 | 21 | Keyed dirt cascades and is consumed: `propagate` walks a node dirtied only through the keyed channel, and `plan_since_upstream` schedules and reports keyed dirt — a bare `grain: key` model with readers propagates end to end past `MaintenanceGraphUnsupportedNode` | done |
 | 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | done |
 | 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | done |
-| 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | planned |
+| 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
@@ -334,6 +334,20 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 24 — open-ended run windows resolve; whole-workspace
+  `examples/web_analytics` under `--since-upstream` completes.**
+  `resolve_run_window` (`crates/smelt-runtime/src/propagation.rs`) resolves a
+  `(start: Some, end: None)` propagated run (a time-unrolled self-edge's
+  frontier) to `[start, today + 1 day)` against the same `now` the
+  propagation planner already takes; a `start` on/after that resolved end
+  refuses fail-loud naming the model. Wired into `run_since_upstream`'s
+  per-run loop ahead of `ExecuteRequest` construction. The whole-workspace,
+  unfiltered `--since-upstream --dry-run` run over `examples/web_analytics`
+  now completes (7 `RUN` lines, exit 0) rather than dying on
+  `parse_run_window`'s "Both start and end" guard. `docs/specs/
+  incremental_models.md` §"Time-unrolled self-edges" and `docs-site/docs/
+  reference/cli.md` state the resolution rule. See `phases/24-summary.md`.
 
 - **2026-09-03, phase 23 — `--select` scoping lands.** `scope_plan_to_selection`
   (`crates/smelt-runtime/src/propagation.rs`) intersects a computed `SinceUpstreamPlan` with the

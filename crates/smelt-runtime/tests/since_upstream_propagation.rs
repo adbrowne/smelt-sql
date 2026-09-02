@@ -19,8 +19,8 @@ use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, 
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
     build_forward_graph, load_observed_delta_lookup, plan_since_upstream,
-    plan_since_upstream_with_observed_deltas, resolve_build_plan, scope_plan_to_selection,
-    ObservedDeltaLookup, PropagatedRun, SinceUpstreamPlan, SourceDelta,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, resolve_run_window,
+    scope_plan_to_selection, ObservedDeltaLookup, PropagatedRun, SinceUpstreamPlan, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1966,4 +1966,68 @@ fn scoping_with_an_empty_selection_yields_no_runs() {
     let upstreams = BTreeMap::new();
     let scoped = scope_plan_to_selection(&plan, &BTreeSet::new(), &upstreams).expect("scope");
     assert!(scoped.runs.is_empty());
+}
+
+#[test]
+fn open_ended_run_resolves_end_to_the_day_after_now() {
+    let run = PropagatedRun {
+        model: "silver.sessions_chained".to_string(),
+        start: Some("2026-08-01".to_string()),
+        end: None,
+    };
+    let resolved = resolve_run_window(&run, "2026-09-03T12:34:56").expect("resolve");
+    assert_eq!(resolved.start.as_deref(), Some("2026-08-01"));
+    assert_eq!(resolved.end.as_deref(), Some("2026-09-04"));
+}
+
+#[test]
+fn closed_run_is_returned_unchanged_by_resolution() {
+    let run = PropagatedRun {
+        model: "silver.sessions_chained".to_string(),
+        start: Some("2026-08-01".to_string()),
+        end: Some("2026-08-05".to_string()),
+    };
+    let resolved = resolve_run_window(&run, "2026-09-03T12:34:56").expect("resolve");
+    assert_eq!(resolved, run);
+}
+
+#[test]
+fn whole_table_run_is_returned_unchanged_by_resolution() {
+    let run = PropagatedRun {
+        model: "silver.sessions_chained".to_string(),
+        start: None,
+        end: None,
+    };
+    let resolved = resolve_run_window(&run, "2026-09-03T12:34:56").expect("resolve");
+    assert_eq!(resolved, run);
+}
+
+#[test]
+fn open_ended_run_starting_after_now_is_refused() {
+    let run = PropagatedRun {
+        model: "silver.sessions_chained".to_string(),
+        start: Some("2026-09-05".to_string()),
+        end: None,
+    };
+    let err = resolve_run_window(&run, "2026-09-03T12:34:56").unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("silver.sessions_chained"),
+        "error must name the model: {msg}"
+    );
+    assert!(
+        msg.contains("2026-09-05") && msg.contains("2026-09-04"),
+        "error must name both dates: {msg}"
+    );
+}
+
+#[test]
+fn open_ended_run_resolution_accepts_a_bare_date_now() {
+    let run = PropagatedRun {
+        model: "silver.sessions_chained".to_string(),
+        start: Some("2026-08-01".to_string()),
+        end: None,
+    };
+    let resolved = resolve_run_window(&run, "2026-09-03").expect("resolve");
+    assert_eq!(resolved.end.as_deref(), Some("2026-09-04"));
 }

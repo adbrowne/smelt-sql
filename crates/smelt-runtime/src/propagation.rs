@@ -1497,6 +1497,49 @@ pub fn scope_plan_to_selection(
     })
 }
 
+/// Resolve an open-ended propagated run (`start: Some(_), end: None` — a
+/// time-unrolled self-edge's frontier, `incremental_models.md` §"Time-unrolled
+/// self-edges") to a finite `[start, end)` window a real run can execute.
+///
+/// The dirty *set* stays open-ended — that is the honest statement of what is
+/// dirty — but a *run* needs a closed region, so at scheduling time (here,
+/// never in the plan itself) the open end is resolved to `today + 1 day`
+/// (today's partition inclusive), against the caller-supplied `now` (the SAME
+/// clock value the propagation planner already takes, so a self-edge's
+/// forward widening and this resolution agree on "today"). A closed or
+/// whole-table run is returned unchanged. A `start` on or after the resolved
+/// end (the frontier's own start is already past today) is a fail-loud
+/// refusal naming the model — a silently empty window would be
+/// wrong-and-quiet.
+pub fn resolve_run_window(run: &PropagatedRun, now: &str) -> Result<PropagatedRun> {
+    let (Some(start), None) = (&run.start, &run.end) else {
+        return Ok(run.clone());
+    };
+
+    let now_date = now
+        .get(0..10)
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .with_context(|| format!("Invalid `now` value for run-window resolution: {now}"))?;
+    let resolved_end = now_date + chrono::Duration::days(1);
+
+    let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .with_context(|| format!("Invalid start date in propagated run: {start}"))?;
+    if start_date >= resolved_end {
+        bail!(
+            "'{model}' has an open-ended propagated run starting {start} — on or after the \
+             resolved window end {end} — nothing to run",
+            model = run.model,
+            end = resolved_end.format("%Y-%m-%d")
+        );
+    }
+
+    Ok(PropagatedRun {
+        model: run.model.clone(),
+        start: Some(start.clone()),
+        end: Some(resolved_end.format("%Y-%m-%d").to_string()),
+    })
+}
+
 /// The resolved backward-resolution plan for `smelt build --include-upstreams`:
 /// the per-ancestor required slices (raw sources to stage, model regions to
 /// build) plus the ancestor-first/target-last build order, and a

@@ -514,12 +514,17 @@ async fn run_since_upstream(
     };
 
     for run in &plan.runs {
+        let resolved = smelt_runtime::propagation::resolve_run_window(run, &now)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
         info!(
             "[--since-upstream] running {} over {}",
             run.model,
             match (&run.start, &run.end) {
                 (Some(s), Some(e)) => format!("[{s}, {e})"),
-                (Some(s), None) => format!("[{s}, →)"),
+                (Some(s), None) => format!(
+                    "[{s}, →) → [{s}, {})",
+                    resolved.end.as_deref().unwrap_or("")
+                ),
                 _ => "whole table".to_string(),
             }
         );
@@ -527,8 +532,8 @@ async fn run_since_upstream(
             target: args.target.clone(),
             select: vec![run.model.clone()],
             exclude: vec![],
-            start: run.start.clone(),
-            end: run.end.clone(),
+            start: resolved.start.clone(),
+            end: resolved.end.clone(),
             batch_size_days: args.batch_size,
             per_partition: args.per_partition,
             full_refresh: args.full_refresh,

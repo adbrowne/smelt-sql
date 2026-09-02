@@ -1149,3 +1149,108 @@ fn select_matching_nothing_is_a_quiet_no_op() {
     assert!(!table_exists(&db_path, "silver"), "nothing must execute");
     assert!(!table_exists(&db_path, "gold"), "nothing must execute");
 }
+
+/// `--since-upstream` over the whole, unfiltered `examples/web_analytics`
+/// workspace (no `--select`) completes under `--dry-run`: phase 22's
+/// day-unrolled self-edge (`silver.sessions_chained`, then propagated to its
+/// only reader `silver.events_enriched`) schedules an open-ended
+/// `[start, →)` run, which phase 24's `resolve_run_window` resolves to a
+/// finite window before `execute_project` — rather than dying on
+/// `parse_run_window`'s "Both start and end must be provided together"
+/// guard. Flagship end-to-end gate for
+/// `docs/outcomes/20260815-definition-delta-migrate`'s phase 24.
+#[test]
+fn web_analytics_whole_workspace_since_upstream_dry_run_completes() {
+    let web_analytics_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("web_analytics");
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("dev.duckdb");
+
+    let output = Command::new(smelt_bin())
+        .arg("run")
+        .arg("--since-upstream")
+        .arg("--source")
+        .arg("sources.raw.events")
+        .arg("--landed")
+        .arg("2026-03-22..2026-03-23")
+        .arg("--dry-run")
+        .arg("--project-dir")
+        .arg(&web_analytics_dir)
+        .arg("--database")
+        .arg(&db_path)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run --since-upstream`: {e}"));
+
+    assert!(
+        output.status.success(),
+        "whole-workspace --since-upstream --dry-run must complete: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !combined.contains("Both start and end"),
+        "the open-ended self-edge frontier must resolve to a finite run window, not refuse: {combined}"
+    );
+    assert!(
+        combined.contains("[2026-03-22, \u{2192})") || combined.contains("[2026-03-20, \u{2192})"),
+        "the printed dirty-set report must still show the open-ended form for the self-edge \
+         chain: {combined}"
+    );
+}
+
+/// The same whole-workspace run under `--verbose` names the resolved closed
+/// window alongside the open-ended form in its per-run log line.
+#[test]
+fn web_analytics_open_ended_run_logs_the_resolved_window() {
+    let web_analytics_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join("web_analytics");
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("dev.duckdb");
+
+    let output = Command::new(smelt_bin())
+        .arg("run")
+        .arg("--since-upstream")
+        .arg("--source")
+        .arg("sources.raw.events")
+        .arg("--landed")
+        .arg("2026-03-22..2026-03-23")
+        .arg("--dry-run")
+        .arg("--verbose")
+        .arg("--project-dir")
+        .arg(&web_analytics_dir)
+        .arg("--database")
+        .arg(&db_path)
+        .env("RUST_LOG", "info")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run --since-upstream`: {e}"));
+
+    assert!(
+        output.status.success(),
+        "whole-workspace --since-upstream --dry-run must complete: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let chained_line = stdout
+        .lines()
+        .find(|l| l.contains("running silver.sessions_chained"))
+        .unwrap_or_else(|| panic!("no log line for silver.sessions_chained: {stdout}"));
+    assert!(
+        chained_line.contains("\u{2192}) \u{2192} ["),
+        "the log line must name both the open-ended and resolved-closed forms: {chained_line}"
+    );
+}

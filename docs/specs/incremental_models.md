@@ -1566,6 +1566,14 @@ self-edge's forward and backward directions do not read the same relation:
   a fixed point, since a bounded self-read converges from a known prior state rather than
   recursing indefinitely.
 
+The dirty set stays open-ended (`[a, →)`) because that is the honest statement of what is
+dirty — but a *run* needs a closed region, so at scheduling time an open-ended interval is
+resolved to `[a, today + 1 day)` (today's partition inclusive), against the same `now` the
+propagation planner already takes. An open-ended interval whose start is itself after today is
+a fail-loud refusal naming the model — a silently empty window would be wrong-and-quiet. The
+printed dirty-set report still renders the open-ended `[a, →)` form; the per-run log line
+reports the resolved closed window it actually executes.
+
 A self-edge that reads forward (`after > 0`), is unbounded or underivable, or touches a
 `Keyed`-grain partition axis on either side, is refused exactly as before: fail-loud
 (`MaintenanceGraphUnsupportedNode`), naming the model and the reason. A genuine multi-node
