@@ -327,7 +327,7 @@ open — not that the excluded bullets themselves are gone.
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | done |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
 | 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | planned |
-| 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | pending |
+| 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | planned |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | pending |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
@@ -910,6 +910,20 @@ open — not that the excluded bullets themselves are gone.
   `maintenance_tracer_evolution.rs`) — both asserted the old `NoAdmissibleTechnique`/
   `ScanUnbounded` variant for the exact shape this phase retargets; fixed in place after a full
   `cargo test --workspace` sweep caught them.
+
+- **2026-09-03 (phase 26b planning)** — no table reshape; phase 25's summary named no residue rows
+  26+ do not already own. Two things recorded instead. (1) Tooling: `.claude/scripts/outcome-loop.sh`'s
+  row scanner skipped every lettered row (`if (n !~ /^[0-9]+$/) next`), so 3b/24b/26a–26d were
+  invisible to the wrapper and it dispatched a PLAN step for row 27 while row 26a sat `planned` and
+  unimplemented — an infinite-plan stall. Regex widened to `^[0-9]+[a-z]?$`; the table, as always,
+  wins over the hint. (2) Design call for 26b so the implementer does not re-litigate it: the
+  per-arm verdict splits *value* arms from *cardinality-deciding* arms — `EXCEPT`'s subtrahend
+  contributes membership sensitivity only, `INTERSECT`/`UNION`-distinct couple every arm into
+  membership (dedup/matching make a row's existence depend on the other arms), and `UNION ALL` adds
+  nothing beyond each arm's own membership set. The membership leg is *not* filtered by mutation
+  profile: an append-only insert into an `EXCEPT` right arm still deletes an output row. A
+  mixed-op chain, a nested compound arm and an arity mismatch keep today's whole-model collapse,
+  each with its own named reason.
 
 ## Blocked
 
