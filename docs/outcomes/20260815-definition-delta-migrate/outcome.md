@@ -324,7 +324,7 @@ open — not that the excluded bullets themselves are gone.
 | 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | done |
 | 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | done |
 | 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
-| 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
+| 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | planned |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
@@ -860,6 +860,23 @@ open — not that the excluded bullets themselves are gone.
 - 2026-09-03 (phase 23 plan): phase 24 extended to name the open-ended `(Some, None)` run window `parse_run_window` still rejects (surfaced by phase 22's summary); phase 27 extended to cover `window_independence`'s same-partition `Ordered` gap. Both serve the outcome's end-to-end criterion, so neither is deferred out.
 
 - **2026-09-03 (plan 24)** — Split phase 24 in two. A live `smelt run --since-upstream --source sources.raw.events` over the whole unfiltered `examples/web_analytics` workspace now builds and propagates with **no** graph refusal (phases 21–23 closed that); the single remaining hard error is `parse_run_window`'s "both or neither" guard rejecting the open-ended `silver.sessions_chained`/`silver.events_enriched` runs. Separately, `smelt explain silver.device_user_edges` still reports `RepairKeysNotDiscoverable { source: "silver.events_deduped", why: "grain expression reads column 'device_id' absent from the delta's own row shape" }`, so that model is silently unscheduled. The two gaps share no machinery (one is a runtime window-encoding boundary, the other a P7 affected-key proof extension), so they get one row each: 24 (window) and 24b (admission). 24b keeps the "Graph-layer gaps" divergence-bullet removal, since it is the later of the two to close the criterion.
+
+- **2026-09-03 (plan 24b)** — Spec correction folded into this phase rather than deferred.
+  §"Upstream model edges" pins the key-addressed discovery at the *upstream's* key columns and
+  then projects changed keys forward over the post-change upstream. For a downstream whose grain
+  differs from the upstream's key (`silver.device_user_edges`: grain `(device_id, user_id)` over
+  an `event_id`-keyed upstream), a grain value that **moves** between downstream groups surfaces
+  the arriving group and never the vacated one — an under-approximation the equivalence invariant
+  forbids, and the `maintenance_conformance` gate would catch it. Decided: when the two key sets
+  differ, group the fingerprint sidecar at the **downstream's grain projected over the upstream
+  relation**, so the diff's own `delta_key` is the affected downstream key and both groups' XOR
+  digests flip. The existing upstream-keyed route stays verbatim for the equal-key case, where no
+  move is representable. Rejected: shipping the spec's literal post-state projection with the
+  residue recorded as a divergence (knowingly unsound maintenance), and extending the sidecar to
+  store pre-image grain *values* (new sidecar schema + migration for no extra precision over
+  regrouping). The admission leg is corrected in the same edit — the obligation is that the
+  downstream's grain resolve against the upstream *relation*, not that the downstream carry the
+  upstream's key columns.
 
 ## Blocked
 
