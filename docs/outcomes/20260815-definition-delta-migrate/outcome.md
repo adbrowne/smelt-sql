@@ -334,7 +334,7 @@ open — not that the excluded bullets themselves are gone.
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
-| 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | pending |
+| 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | pending |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
@@ -1004,6 +1004,25 @@ open — not that the excluded bullets themselves are gone.
   substituting `emit_staged_candidate_conditional` over the fold's delta SQL would be silently
   wrong. 27d owns the selection layer and the folded-candidate emitter; new row 27g owns the live
   dispatch and the Known Divergences narrowing. Neither half leaves the outcome.
+
+- **2026-09-03 (phase 27e planning)** — no table reshape. Recorded design calls so the
+  implementer does not re-litigate them: (1) the non-DuckDB widened-scan fallback becomes a
+  declared `BackendCapabilities::supports_fingerprint_sidecar` flag rather than the inline
+  dialect equality check `diff_fingerprint_sidecar_changed_keys` uses today — success
+  criterion 17 admits the gap only when it is declared via the capability struct; (2) the
+  external route reuses `execute_delete_insert_with_delta_restriction` through a
+  `RestrictionDeltaSource` enum rather than gaining a parallel executor, so the
+  count-preservation probe dispatch and the emitter path keep one owner. Rejected: a second
+  `execute_delete_insert_with_external_delta_restriction` entry point (duplicates the probe
+  obligation, which `statement_parity` would then have to police twice).
+
+- **2026-09-03 (loop hygiene, second observation)** — the running `outcome-loop.sh` process
+  (PID 1367419, started 03:51) predates commit 518e317e's fix to `next_step()`'s
+  `^[0-9]+$` row-number filter, so it still cannot see the lettered rows and has emitted a
+  plan step every iteration since phase 25 — eight plan commits, no implementation. The
+  committed script is already correct; this planning run terminated the stale process so
+  `outcome-loop-forever.sh` restarts it with the fixed scanner, which should pick rows
+  26a–27e up as IMPLEMENT steps.
 
 
 ## Blocked
