@@ -325,7 +325,7 @@ open — not that the excluded bullets themselves are gone.
 | 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | done |
 | 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | planned |
-| 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
+| 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | planned |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
@@ -877,6 +877,19 @@ open — not that the excluded bullets themselves are gone.
   regrouping). The admission leg is corrected in the same edit — the obligation is that the
   downstream's grain resolve against the upstream *relation*, not that the downstream carry the
   upstream's key columns.
+
+- **2026-09-03 (phase 25 planning)** — no table reshape. Phase 24's summary left one residue
+  (`window_independence`'s `Ordered` verdict not checking `before > 0` for a same-partition
+  self-read), which row 27 already owns explicitly — no new row needed. Design call recorded so
+  the implementer does not re-litigate it: the pre-execution gate's posture is reconciled by
+  giving the definition-change trigger's non-skeleton refusals their own variant
+  (`DefinitionChangeNotBackfillable`) mapped to a **Warning**, because `execute.rs`'s
+  definition-delta run gate already exempts a pure column addition outright — the gate must not
+  report as an Error what a run does not refuse. A skeleton-position add keeps its
+  `MaintenanceSkeletonChanged` Error, and a `schema_evolution: full_refresh` model derives no
+  definition-change trigger in the gate at all (fact assembly in the Salsa wrapper, not a new
+  branch in the pure derivation). With that posture, real `deployed_column_names` are threaded
+  from the existing `DeployedSchemaInput` world fact.
 
 ## Blocked
 
