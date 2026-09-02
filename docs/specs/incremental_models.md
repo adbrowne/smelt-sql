@@ -330,7 +330,10 @@ maintenance:
 - The override ladder is `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
   scope winning; `technique:` alone bypasses the cost model. Overrides select among
   **admissible** techniques only — an override can never select an inadmissible one (§"Per-cell
-  admission"). (Cost-model and `prefer` consumption status: §Known Divergences.)
+  admission"). The ladder is consulted uniformly by every dispatch route, including the
+  ordinary windowed/partition-grain region path (§Design "Absent a cost model: the fixed
+  preference order"); no cost model exists yet to rank between two admissible techniques
+  (§Future Extensions).
 - `<source-address>` names the changed input the cell handles, as the model's SQL refers to
   it — a source (`sources.customers`) or an upstream model (`order_facts`). A worked pin from
   the running example — steer `order_facts`'s tier-correction cell to an unconditional write:
@@ -530,7 +533,7 @@ codes and the contract-lattice codes below; the partition-grain and key-grain co
 |---|---|
 | `MaintenanceNoAdmissibleTechnique` | No technique survives a cell's admission; names the cell (§"Per-cell admission"). |
 | `MaintenanceReachNotDerivable` | A required scan bound is neither derivable nor declared (§"Per-cell admission" obligation 4). |
-| `MaintenanceScanUnbounded` | A scan/footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists (§"Partition-local maintenance (the K8 guardrail)"). |
+| `MaintenanceScanUnbounded` | A scan/footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists — Error severity by default, or Warning under a `scan_bounds.on_violation: warn` acceptance, which admits the plan instead of refusing it (§"Partition-local maintenance (the K8 guardrail)"). |
 | `MaintenanceUnboundedFootprint` | A targeted write was requested for a cell whose write footprint is unbounded, e.g. a stored trajectory under late data (§"Per-cell admission" obligation 5). |
 | `MaintenanceGraphUnsupportedNode` | A cyclic edge set, an inadmissible self-referential model, or a keyed node whose delta signature degrades to `general` in the propagation graph (§"The graph layer"). |
 | `MaintenanceWriteAddressingRefused` | A `cells[].write` pin names an addressing that cannot uphold the cell's equivalence invariant; names the cell and the refused pattern (§"Per-cell write addressing"). |
@@ -1252,9 +1255,11 @@ predicate on **both** the scan and the merge/overwrite target, since a bound sta
 non-partition column is one the storage layer cannot prune by. Under the default `scan_bounds`
 (`require: partition_local`, `on_violation: error`), a non-local cell refuses
 (`MaintenanceScanUnbounded`) unless the source carries `allow_full_scan: true`; `max_lookback`
-additionally refuses a derived span wider than the operator's stated expectation. The
-guardrail never modifies a clamp — it only refuses or warns (§Surface "Maintenance overrides
-(`maintenance:`)").
+additionally refuses a derived span wider than the operator's stated expectation.
+`on_violation: warn` **admits** the derived plan for that source in place of the refusal and
+reports the violation as a Warning-severity `MaintenanceScanUnbounded` instead of an
+Error-severity one; the guardrail stays check-only either way — it never modifies a derived
+clamp, only refuses or warns (§Surface "Maintenance overrides (`maintenance:`)").
 
 #### Statement emission (single owner)
 
@@ -1580,6 +1585,18 @@ per-model strategy enum would be a lossy projection; strategy is derived per cel
 to prevent. Shape-defining facts remain declared-and-checked.
 (`docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §10, §13.)
 
+**Absent a cost model: the fixed preference order.** Until a cost model exists to rank between
+two admissible techniques, the override ladder resolves to a fixed preference order applied
+uniformly across every dispatch route: a validated `cells[].write` pin first (the most specific
+addressing-level override); then a hard `cells[].technique` pin, which refuses loudly
+(`ChoiceRefusal`) when the resolvable set does not contain it rather than silently falling back;
+then a soft `defaults.prefer`/`cells[].prefer` bias, which never refuses; then the cell's own
+admitted-and-live technique; and finally region recompute, the always-available fallback. This
+order was chosen over letting an unranked ambiguity fall through to an arbitrary pick, because
+"a pin bypasses the cost model, never admission" only holds if the absence of a cost model has
+one deterministic, documented answer rather than a per-call-site accident of implementation
+order.
+
 **One invariant; addressing is the real axis, and it is per-cell.** An earlier framing split
 the contract into a per-partition equivalence and an end-state equivalence, one per shape —
 miscast, since order/set-determinacy falls out of the single invariant for every shape and
@@ -1900,16 +1917,16 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   membership-sensitive (`grain: key`, `UpstreamMutation`-triggered) case only** — `resolve_live_
   membership_recompute_cell` routes a `write: diff_patch` pin to `execute_diff_patch` with the
   trivial whole-scope slice predicate. The ordinary windowed/partition-grain region default (the
-  plain incremental `DELETE`+`INSERT` batch loop, `resolve_incremental_strategy`) still consults
-  no cell choice/write-pin logic at all, so a pin declared there remains silently unenforced —
-  the same gap as before this phase, just narrowed to one fewer case. Tracked:
-  `docs/outcomes/20260809-repair-family/outcome.md`.
+  plain incremental `DELETE`+`INSERT` batch loop, `resolve_incremental_strategy`) now consults
+  the same override ladder (`resolve_cell_choice`) for the creation cell's family choice, but a
+  `write: diff_patch` pin there still maps to `backend_default` (no `diff_patch` lowering for
+  this trigger) rather than the `execute_diff_patch` path — narrower than before this phase, not
+  closed. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Plan-consumer gaps**: the horizon-clamped partition-local mutation quadrant is
   unreachable from any real workspace; dispatch cannot distinguish "a mutation genuinely
-  happened" from re-derivation; the `prefer` soft-bias ladder and
-  `scan_bounds.on_violation: warn` parse but are not consumed (every refusal is an Error);
-  the cost model between two admissible techniques is unbuilt; `AppendOnly` sources get no
-  `UpstreamMutation` cell. Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
+  happened" from re-derivation; `AppendOnly` sources get no `UpstreamMutation` cell. Refs:
+  `docs/plans/20260707-maintenance-plan-impl.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/19-plan.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
@@ -1978,6 +1995,10 @@ Ideas for widening the admission space that are **not decided**. Nothing here is
 none of it may be relied on or implemented against until it graduates into
 §Surface/§Semantics via its own spec diff and plan.
 
+- **The cost model between two admissible techniques.** `defaults.prefer: auto`/absent
+  `prefer` names this as the eventual decision-maker, but nothing ranks admissible
+  alternatives today — the fixed preference order (§Design "Absent a cost model: the fixed
+  preference order") stands in until a real cost model exists.
 - **Further contract-lattice points.** Candidates, in the priority order the delta framing
   suggests (`docs/research/20260811-delta-signatures-and-definition-deltas.md` §5):
   - **Reconciliation points** — equivalence promised at declared moments (say, end of day)

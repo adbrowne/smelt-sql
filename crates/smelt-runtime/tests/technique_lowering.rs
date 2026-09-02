@@ -1165,7 +1165,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources =
+    let (sources, _scan_bounds_warnings) =
         smelt_db::queries::maintenance::build_source_facts(&source_refs, model_scan_bounds, None);
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
@@ -1304,7 +1304,7 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources =
+    let (sources, _scan_bounds_warnings) =
         smelt_db::queries::maintenance::build_source_facts(&source_refs, model_scan_bounds, None);
 
     let partition_col = metadata

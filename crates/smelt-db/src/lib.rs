@@ -1868,7 +1868,7 @@ pub fn maintenance_plan_report(
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let mut sources = crate::queries::maintenance::build_source_facts(
+    let (mut sources, _scan_bounds_warnings) = crate::queries::maintenance::build_source_facts(
         &source_refs,
         model_scan_bounds,
         project_scan_bounds.as_ref(),
@@ -2687,6 +2687,19 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for source in &plan_diags.scan_bounds_warnings {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Warning,
+                message: format!(
+                    "maintenance scan over '{source}' cannot be partition-bounded — admitted \
+                     under scan_bounds.on_violation: warn"
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceScanUnbounded),
                 data: None,
             })
             .accumulate(db);

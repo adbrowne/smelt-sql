@@ -2931,6 +2931,7 @@ pub async fn execute_project(
                         &explicitly_mutable,
                         &model_edges,
                         backend_default_strategy.clone(),
+                        backend.capabilities().supports_column_scoped_merge,
                     )?,
                     None => backend_default_strategy,
                 };

@@ -1,0 +1,23 @@
+# Phase 18 summary — Consume the declared guardrail/preference config
+
+**Shipped:**
+- `scan_bounds.on_violation: warn` is consumed: `effective_scan_bounds` (`smelt-db/src/queries/maintenance.rs`) now resolves `on_violation` with the same narrower-wins ladder as `require`. `maintenance_plan_diagnostics` derives the plan twice only when a warn-eligible source actually surfaces a `Refusal::ScanUnbounded` in the first pass — the second pass admits exactly those sources (`allow_full_scan: true`) and records them in a new `MaintenancePlanDiagnostics.scan_bounds_warnings: Vec<String>` field. `smelt-db/src/lib.rs`'s `file_diagnostics` emits one `MaintenanceScanUnbounded` diagnostic at `Warning` severity per entry.
+- The ordinary region path's creation cell now goes through `resolve_cell_choice` instead of a raw `cell.technique` match: `smelt-runtime/src/maintenance_driver.rs::resolve_incremental_strategy` gained a `backend_supports_column_scoped_merge: bool` parameter (threaded from `execute.rs`'s existing `backend.capabilities().supports_column_scoped_merge`) and a new private `resolve_creation_cell_strategy` helper shared by both the model-edge-driven branch and the first-`NewData`-match branch.
+- Spec: `docs/specs/incremental_models.md` — K8 guardrail section states the warn/admit semantics; new §Design paragraph "Absent a cost model: the fixed preference order"; §Future Extensions gained the cost-model item (moved out of Known Divergences); the "Plan-consumer gaps" bullet narrowed (prefer/on_violation/cost-model clauses removed); the stale `diff_patch`-divergence sentence about `resolve_incremental_strategy` consulting "no cell choice/write-pin logic at all" corrected to reflect the ladder now being consulted (though `diff_patch` itself still has no lowering there). `docs-site/docs/reference/smelt-yml.md` gained one sentence each for `on_violation: warn` and the region-path preference order.
+
+**Decisions:**
+- A `{*}` whole-row creation cell has no real `ColumnGroup` of its own (`PlanCell.group` is the fixed label `"{*}"`), so `effective_override`/`matching_cell` match a `cells[].technique` pin against the UNION of every derived payload group's columns, not a single group — this is what lets a pin naming any real output column address the creation cell at all.
+- `on_violation: warn` cannot be resolved by preemptively forcing `allow_full_scan: true` at `SourceFacts`-build time for every warn-configured source: that would flag compliant sources too (e.g. the driving clocked source, which never needs an unbounded scan). The correct derivation is two-pass: derive once with the true (non-overridden) facts, read which sources actually surfaced `Refusal::ScanUnbounded`, and only re-derive with the override for that subset. Caught by a red test (`scan_bounds_warn_is_per_model_over_project`) before landing the fix — recorded per CLAUDE.md's property-test-failure convention even though this was a hand-written fixture, not a proptest.
+- `IncrementalStrategy` has exactly one variant (`DeleteInsert`) today, so `region_path_honours_prefer_recompute`'s "resolves to `backend_default`" assertion is currently trivially equal to `DeleteInsert` — the test still has value as a regression guard (it exercises the ladder path rather than the direct-read path) and will become observably meaningful once a second variant exists.
+
+**For the next planner:**
+- Phase 19 (mutation quadrant) is unaffected by this phase's scope; the "Plan-consumer gaps" bullet in `incremental_models.md` now names only the three clauses phase 19 should close.
+- `diff_patch` over the ordinary region path still has no lowering (`resolve_creation_cell_strategy` maps any non-`DeleteInsert` `ChosenTechnique` to `backend_default`) — noted as a narrowed-but-not-closed divergence; a future phase wiring `execute_diff_patch` for the creation trigger should also update that divergence bullet.
+- Did not touch `matching_cell`'s general empty-`columns` semantics (a `cells[]` entry with `columns: []` still never matches via the technique/prefer ladder) — worked around it in this phase via the column-union approach rather than changing shared `smelt-logical` code, since that was out of this phase's stated scope.
+
+**Gates:**
+- `bash .claude/scripts/verify-phase.sh` — ALL GREEN
+- `cargo test -p smelt-db --test maintenance_diagnostics` — 20 passed
+- `cargo test -p smelt-runtime --test region_choice_ladder --test statement_parity --test execute_parity` — all passed
+- `cargo test -p smelt-cli --features duckdb --test maintenance_conformance --test maintenance_pins --test example_diagnostics` — all passed
+- `cargo test -p smelt-lsp --test example_workspaces` — 35 passed

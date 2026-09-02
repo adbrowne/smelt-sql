@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use smelt_core::config::{
     Grain as ConfigGrain, Granularity, MaintenanceConfig, RefreshStrategy, ScanBoundsConfig,
-    ScanBoundsRequire,
+    ScanBoundsRequire, ScanBoundsViolation,
 };
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
@@ -128,33 +128,38 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
 /// Resolve the effective `maintenance.scan_bounds` for `source_address`:
 /// the model's own block wins over the project baseline in `smelt.yml`
 /// (`incremental_models.md` §Surface "Frontmatter": "A project-level default
-/// in `smelt.yml` sets the baseline; per-model blocks refine it").
+/// in `smelt.yml` sets the baseline; per-model blocks refine it"). The
+/// `on_violation` severity resolves with the SAME narrower-wins ladder as
+/// `require` (default `Error`) — `incremental_models.md` §"Partition-local
+/// maintenance (the K8 guardrail)": `warn` admits the derived plan and
+/// reports the violation as a Warning; `error` (the default) refuses.
 ///
-/// Returns `(allow_full_scan, require)`. `on_violation` severity mapping is
-/// not yet consumed here — every refusal maps to an Error diagnostic today
-/// (`docs/specs/incremental_models.md` §Known Divergences narrows this once a
-/// consumer needs the Warning path).
+/// Returns `(allow_full_scan, require, on_violation)`.
 pub fn effective_scan_bounds(
     source_address: &str,
     model: Option<&ScanBoundsConfig>,
     project: Option<&ScanBoundsConfig>,
-) -> (bool, ScanBoundsRequire) {
+) -> (bool, ScanBoundsRequire, ScanBoundsViolation) {
     let require = model
         .and_then(|s| s.require)
         .or_else(|| project.and_then(|s| s.require))
         .unwrap_or(ScanBoundsRequire::PartitionLocal);
+    let on_violation = model
+        .and_then(|s| s.on_violation)
+        .or_else(|| project.and_then(|s| s.on_violation))
+        .unwrap_or(ScanBoundsViolation::Error);
     // `require: none` disables the guardrail outright: every source reads as
     // though it were explicitly accepted, since the operator declared no
     // partition-locality expectation to check the derived plan against.
     if require == ScanBoundsRequire::None {
-        return (true, require);
+        return (true, require, on_violation);
     }
     let allow = model
         .map(|s| s.allow_full_scan(source_address))
         .filter(|b| *b)
         .or_else(|| project.map(|s| s.allow_full_scan(source_address)))
         .unwrap_or(false);
-    (allow, require)
+    (allow, require, on_violation)
 }
 
 /// Detect a fold candidate for a `grain: key` model's own outermost
@@ -788,24 +793,36 @@ pub fn single_clocked_source_granularity(
 }
 
 /// Build [`SourceFacts`] for every `(ref_string, source_info)` pair a model
-/// references, applying the `maintenance.scan_bounds` ladder.
+/// references, applying the `maintenance.scan_bounds` ladder's `require`
+/// half. The second return value names every source whose guardrail
+/// resolved to `on_violation: warn` and was not otherwise accepted
+/// (`require: none` or a declared `allow_full_scan`) — a CANDIDATE the
+/// caller may re-derive with `allow_full_scan` forced on once it knows
+/// (from the plan this first pass derives) whether that source's scan is
+/// actually unbounded; not every candidate here corresponds to a real
+/// violation; only a source that surfaces a `Refusal::ScanUnbounded` in the
+/// derived plan actually needs the second pass and the Warning diagnostic.
 pub fn build_source_facts(
     refs: &[(String, Option<SourceInfo>)],
     model_scan_bounds: Option<&ScanBoundsConfig>,
     project_scan_bounds: Option<&ScanBoundsConfig>,
-) -> Vec<SourceFacts> {
+) -> (Vec<SourceFacts>, Vec<String>) {
     let mut out = Vec::new();
+    let mut warn_candidates = Vec::new();
     let mut seen: HashMap<String, ()> = HashMap::new();
     for (name, info) in refs {
         if seen.contains_key(name) {
             continue;
         }
         seen.insert(name.clone(), ());
-        let (allow_full_scan, _require) =
+        let (allow_full_scan, _require, on_violation) =
             effective_scan_bounds(name, model_scan_bounds, project_scan_bounds);
+        if !allow_full_scan && on_violation == ScanBoundsViolation::Warn {
+            warn_candidates.push(name.clone());
+        }
         out.push(source_facts(name, info.as_ref(), allow_full_scan));
     }
-    out
+    (out, warn_candidates)
 }
 
 /// Build the `(bare source name, key_recurrence)` list for every referenced
@@ -945,6 +962,13 @@ pub struct MaintenancePlanDiagnostics {
     /// write addressing" → "User pins") — computed by
     /// [`write_pin_diagnostics`].
     pub write_pin_refusals: Vec<WritePinDiagnostic>,
+    /// Every source name whose `maintenance.scan_bounds.on_violation: warn`
+    /// admitted the derived plan in place of a refusal
+    /// (`incremental_models.md` §"Partition-local maintenance (the K8
+    /// guardrail)") — `file_diagnostics` folds each into a
+    /// `MaintenanceScanUnbounded` diagnostic at `Warning` severity rather
+    /// than the `Error` a bare refusal maps to.
+    pub scan_bounds_warnings: Vec<String>,
 }
 
 /// The open write-pattern registry's [`smelt_logical::maintenance::
@@ -1175,7 +1199,8 @@ pub fn maintenance_plan_diagnostics(
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let mut sources = build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
+    let (mut sources, scan_bounds_warn_candidates) =
+        build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
     for (facts, _) in extra_model_sources {
         if !sources.iter().any(|s| s.name == facts.name) {
             sources.push(facts.clone());
@@ -1205,7 +1230,7 @@ pub fn maintenance_plan_diagnostics(
     let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
     let source_referential_integrity = build_source_referential_integrity(source_refs);
-    let Some(result) = derive_model_maintenance_plan(
+    let Some(mut result) = derive_model_maintenance_plan(
         sql,
         table,
         metadata,
@@ -1227,6 +1252,49 @@ pub fn maintenance_plan_diagnostics(
             ..Default::default()
         };
     };
+    // `on_violation: warn` (`incremental_models.md` §"Partition-local
+    // maintenance (the K8 guardrail)"): a source in `scan_bounds_warn_
+    // candidates` is only a REAL violation when the first pass actually
+    // refused it with `ScanUnbounded` — a candidate whose scan turned out
+    // to be bounded anyway (e.g. the driving, already-clocked source) must
+    // not be reported. Only for the sources that genuinely refused, re-
+    // derive once more with `allow_full_scan` forced on for exactly those
+    // sources, admitting the plan and surfacing each as a Warning instead
+    // of a refusal.
+    let scan_bounds_warnings: Vec<String> = result
+        .plan
+        .refusals
+        .iter()
+        .filter_map(|r| match r {
+            smelt_logical::maintenance::Refusal::ScanUnbounded { source, .. }
+                if scan_bounds_warn_candidates.contains(source) =>
+            {
+                Some(source.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    if !scan_bounds_warnings.is_empty() {
+        for facts in sources.iter_mut() {
+            if scan_bounds_warnings.contains(&facts.name) {
+                facts.allow_full_scan = true;
+            }
+        }
+        if let Some(admitted) = derive_model_maintenance_plan(
+            sql,
+            table,
+            metadata,
+            &sources,
+            &explicitly_mutable,
+            driving_source_granularity,
+            &key_recurrences,
+            deployed_column_names,
+            &source_referential_integrity,
+            deployed_model_sql,
+        ) {
+            result = admitted;
+        }
+    }
     let refusals = result
         .plan
         .refusals
@@ -1308,6 +1376,7 @@ pub fn maintenance_plan_diagnostics(
         cell_column_group_violations,
         granularity_mismatch,
         write_pin_refusals,
+        scan_bounds_warnings,
     }
 }
 
@@ -1395,10 +1464,26 @@ mod tests {
                 allow_full_scan: true,
             },
         );
-        let (allow, require) =
+        let (allow, require, on_violation) =
             effective_scan_bounds("sources.enrichment", Some(&model), Some(&project));
         assert!(allow);
         assert_eq!(require, ScanBoundsRequire::PartitionLocal);
+        assert_eq!(on_violation, ScanBoundsViolation::Error);
+    }
+
+    #[test]
+    fn effective_scan_bounds_on_violation_model_overrides_project() {
+        let project = ScanBoundsConfig {
+            on_violation: Some(ScanBoundsViolation::Error),
+            ..Default::default()
+        };
+        let model = ScanBoundsConfig {
+            on_violation: Some(ScanBoundsViolation::Warn),
+            ..Default::default()
+        };
+        let (_, _, on_violation) =
+            effective_scan_bounds("sources.enrichment", Some(&model), Some(&project));
+        assert_eq!(on_violation, ScanBoundsViolation::Warn);
     }
 
     #[test]

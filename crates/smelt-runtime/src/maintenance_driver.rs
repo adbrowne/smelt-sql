@@ -649,6 +649,16 @@ pub async fn run_windowed_keyed_maintenance(
 /// incremental` requires a declared grain) or the admitted technique has no
 /// `IncrementalStrategy` counterpart (a targeted-write technique never
 /// serves the creation trigger's region-recompute corner).
+/// The creation trigger's cell (whichever `Trigger::NewData` sibling this
+/// resolver reads) is resolved through the SAME override ladder the
+/// mutation/column-added paths already consult
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) rather than a
+/// raw `cell.technique` read: a declared `cells[].write` pin, a hard
+/// `cells[].technique` pin (refusing loudly when the resolvable set does not
+/// contain it), a soft `defaults.prefer`/`cells[].prefer`, then the cell's
+/// own admitted-and-live technique, then region recompute
+/// (`incremental_models.md` §Design "Absent a cost model: the fixed
+/// preference order").
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_incremental_strategy(
     sql: &str,
@@ -658,6 +668,7 @@ pub fn resolve_incremental_strategy(
     explicitly_mutable: &HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     backend_default: IncrementalStrategy,
+    backend_supports_column_scoped_merge: bool,
 ) -> Result<IncrementalStrategy> {
     let result = if model_edges.is_empty() {
         smelt_db::queries::maintenance::derive_model_maintenance_plan(
@@ -701,16 +712,38 @@ pub fn resolve_incremental_strategy(
     let Some(result) = result else {
         return Ok(backend_default);
     };
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    // The whole-row creation cell's own `group` is the fixed cosmetic label
+    // `{*}` (`derive_new_data`'s `Grain::Partition` arm), never one of the
+    // model's own derived payload [`ColumnGroup`]s — so a `cells[].technique`
+    // override naming a real output column is matched against the UNION of
+    // every derived group's columns (every column the whole-row write
+    // touches), not any single group's own members.
+    let all_columns: Vec<String> = result
+        .column_groups
+        .iter()
+        .flat_map(|g| g.columns.iter().cloned())
+        .collect();
 
     if let Some(driving_edge) = model_edges.first() {
         let driving_trigger = Trigger::NewData {
             source: driving_edge.name.clone(),
         };
         if let Some(cell) = result.plan.cell_for(&driving_trigger) {
-            return Ok(match &cell.technique {
-                Technique::DeleteInsert => IncrementalStrategy::DeleteInsert,
-                _ => backend_default,
-            });
+            return resolve_creation_cell_strategy(
+                cell,
+                &driving_edge.name,
+                metadata,
+                cells_cfg,
+                &result.column_groups,
+                &all_columns,
+                backend_default,
+                backend_supports_column_scoped_merge,
+            );
         }
         let driving_edge_refused = result.plan.refusals.iter().any(|r| {
             matches!(
@@ -744,8 +777,70 @@ pub fn resolve_incremental_strategy(
         .cells
         .iter()
         .find(|c| matches!(c.trigger, Trigger::NewData { .. }));
-    Ok(match creation_cell.map(|c| &c.technique) {
-        Some(Technique::DeleteInsert) => IncrementalStrategy::DeleteInsert,
+    match creation_cell {
+        Some(cell) => {
+            let Trigger::NewData { source } = &cell.trigger else {
+                unreachable!("filtered to Trigger::NewData above")
+            };
+            resolve_creation_cell_strategy(
+                cell,
+                source,
+                metadata,
+                cells_cfg,
+                &result.column_groups,
+                &all_columns,
+                backend_default,
+                backend_supports_column_scoped_merge,
+            )
+        }
+        None => Ok(backend_default),
+    }
+}
+
+/// Resolve the technique the creation-trigger `cell` should actually
+/// execute, consulting the SAME override ladder
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) every other
+/// per-cell dispatch resolver uses: a validated `cells[].write` pin, a hard
+/// `cells[].technique` pin (refusing loudly when the resolvable set does not
+/// contain it), a soft `defaults.prefer`/`cells[].prefer`, then the cell's
+/// own admitted-and-live technique, then region recompute
+/// (`incremental_models.md` §Design "Absent a cost model: the fixed
+/// preference order"). `IncrementalStrategy` has exactly one live variant
+/// (`DeleteInsert`) today, so every non-`DeleteInsert` choice maps to
+/// `backend_default` — the caller's own region-recompute fallback.
+#[allow(clippy::too_many_arguments)]
+fn resolve_creation_cell_strategy(
+    cell: &PlanCell,
+    trigger_address: &str,
+    metadata: &smelt_core::ModelMetadata,
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+    column_groups: &[smelt_logical::maintenance::ColumnGroup],
+    all_columns: &[String],
+    backend_default: IncrementalStrategy,
+    backend_supports_column_scoped_merge: bool,
+) -> Result<IncrementalStrategy> {
+    let write_pin =
+        smelt_db::queries::maintenance::matching_write_pin(cell, column_groups, cells_cfg)
+            .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        trigger_address,
+        all_columns,
+    );
+    let chosen = resolve_cell_choice(
+        Some(cell),
+        &cell.trigger,
+        &overrides,
+        write_pin,
+        backend_supports_column_scoped_merge,
+    )
+    .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+    Ok(match chosen {
+        ChosenTechnique::Admitted(Technique::DeleteInsert) => IncrementalStrategy::DeleteInsert,
         _ => backend_default,
     })
 }

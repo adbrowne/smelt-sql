@@ -159,6 +159,230 @@ JOIN smelt.sources.enrichment e ON o.customer_id = e.customer_id
     );
 }
 
+const SCAN_BOUNDS_ORDERS_SOURCE: &str = r#"
+description: Orders, append-only, clocked on order_date.
+mutation_profile: append_only
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: customer_id, type: INTEGER, nullable: false }
+"#;
+
+const SCAN_BOUNDS_ENRICHMENT_SOURCE: &str = r#"
+description: Customer enrichment lookup, mutable snapshot, unclocked.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: category, type: VARCHAR, nullable: true }
+"#;
+
+/// A model with exactly one payload column group (`{enrichment_category}`)
+/// sensitive to the unclocked `enrichment` source — `order_date` is the
+/// skeleton/clock column, excluded from `column_groups` entirely (mirrors
+/// `unbounded_scan_refuses_by_default`'s own two-group fixture, minus the
+/// `order_id` pass-through group, so exactly one `MaintenanceScanUnbounded`
+/// is derivable per test).
+fn scan_bounds_model(extra_frontmatter: &str) -> String {
+    format!(
+        r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+{extra_frontmatter}---
+SELECT
+    o.order_date,
+    e.category AS enrichment_category
+FROM smelt.sources.orders o
+JOIN smelt.sources.enrichment e ON o.customer_id = e.customer_id
+"#
+    )
+}
+
+/// `scan_bounds.on_violation: warn` admits the derived plan for the
+/// otherwise-unbounded `enrichment` source and reports exactly one
+/// `MaintenanceScanUnbounded` diagnostic at `Warning` severity — the plan
+/// still admits a `Trigger::NewData` creation cell
+/// (`docs/specs/incremental_models.md` §"Partition-local maintenance (the K8
+/// guardrail)").
+#[test]
+fn scan_bounds_on_violation_warn_admits_and_warns() {
+    let model = scan_bounds_model("maintenance:\n  scan_bounds:\n    on_violation: warn\n");
+    let files = [
+        ("smelt.yml", SMELT_YML),
+        ("models/sources/orders.yml", SCAN_BOUNDS_ORDERS_SOURCE),
+        (
+            "models/sources/enrichment.yml",
+            SCAN_BOUNDS_ENRICHMENT_SOURCE,
+        ),
+        ("models/revenue.sql", model.as_str()),
+    ];
+    let diags = diagnostics_for(&files, "revenue");
+
+    let scan_unbounded: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
+        .collect();
+    assert_eq!(
+        scan_unbounded.len(),
+        1,
+        "expected exactly one MaintenanceScanUnbounded, got {diags:?}"
+    );
+    assert_eq!(
+        scan_unbounded[0].severity,
+        smelt_db::DiagnosticSeverity::Warning,
+        "on_violation: warn must report a Warning, not an Error"
+    );
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    for (rel, content) in &files {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+    }
+    let loaded = load_workspace(&root);
+    let mut db = smelt_db::Database::default();
+    let ingested = ingest_loaded_workspace(&mut db, &loaded);
+    db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
+    let ws = db.workspace();
+    let target_path = root.join("models").join("revenue.sql");
+    let file = ingested
+        .source_files
+        .iter()
+        .zip(ingested.paths.iter())
+        .find(|(_, p)| **p == target_path)
+        .map(|(f, _)| *f)
+        .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
+    let report = smelt_db::maintenance_plan_report(&db, ws, file)
+        .expect("revenue is an incremental model with a resolved grain");
+    assert!(
+        report.plan.cells.iter().any(|c| matches!(
+            c.trigger,
+            smelt_logical::maintenance::Trigger::NewData { .. }
+        )),
+        "on_violation: warn must still admit a creation cell, got {:?}",
+        report.plan.cells
+    );
+}
+
+/// The same fixture with `on_violation` absent (default `error`) still
+/// refuses with an Error — guards the default.
+#[test]
+fn scan_bounds_on_violation_error_still_refuses() {
+    let model = scan_bounds_model("maintenance:\n  scan_bounds:\n    on_violation: error\n");
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", SCAN_BOUNDS_ORDERS_SOURCE),
+            (
+                "models/sources/enrichment.yml",
+                SCAN_BOUNDS_ENRICHMENT_SOURCE,
+            ),
+            ("models/revenue.sql", model.as_str()),
+        ],
+        "revenue",
+    );
+    let scan_unbounded: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
+        .collect();
+    assert_eq!(
+        scan_unbounded.len(),
+        1,
+        "expected exactly one MaintenanceScanUnbounded, got {diags:?}"
+    );
+    assert_eq!(
+        scan_unbounded[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "explicit on_violation: error must still refuse as an Error"
+    );
+
+    let model_default = scan_bounds_model("");
+    let diags_default = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/orders.yml", SCAN_BOUNDS_ORDERS_SOURCE),
+            (
+                "models/sources/enrichment.yml",
+                SCAN_BOUNDS_ENRICHMENT_SOURCE,
+            ),
+            ("models/revenue.sql", model_default.as_str()),
+        ],
+        "revenue",
+    );
+    let scan_unbounded_default: Vec<_> = diags_default
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
+        .collect();
+    assert_eq!(
+        scan_unbounded_default.len(),
+        1,
+        "absent on_violation must default to error, got {diags_default:?}"
+    );
+    assert_eq!(
+        scan_unbounded_default[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "absent on_violation must default to Error"
+    );
+}
+
+/// A project-level `on_violation: error` with a model-level `warn` resolves
+/// to Warn — narrower wins, mirroring `require`'s own ladder
+/// (`effective_scan_bounds_model_overrides_project`).
+#[test]
+fn scan_bounds_warn_is_per_model_over_project() {
+    let smelt_yml_project_error: &str = r#"
+name: maintenance_diagnostics_fixture
+version: 1
+
+paths:
+  - models
+
+maintenance:
+  scan_bounds:
+    on_violation: error
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+    let model = scan_bounds_model("maintenance:\n  scan_bounds:\n    on_violation: warn\n");
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", smelt_yml_project_error),
+            ("models/sources/orders.yml", SCAN_BOUNDS_ORDERS_SOURCE),
+            (
+                "models/sources/enrichment.yml",
+                SCAN_BOUNDS_ENRICHMENT_SOURCE,
+            ),
+            ("models/revenue.sql", model.as_str()),
+        ],
+        "revenue",
+    );
+    let scan_unbounded: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
+        .collect();
+    assert_eq!(
+        scan_unbounded.len(),
+        1,
+        "expected exactly one MaintenanceScanUnbounded, got {diags:?}"
+    );
+    assert_eq!(
+        scan_unbounded[0].severity,
+        smelt_db::DiagnosticSeverity::Warning,
+        "model-level warn must win over project-level error"
+    );
+}
+
 /// A `grain: key` model whose body never aggregates has no fold candidate —
 /// the plan-shaped read is a partition-shaped (row-per-event) body under a
 /// key-addressed declaration. This particular body also declares no
