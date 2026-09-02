@@ -969,30 +969,19 @@ pub fn resolve_live_column_scoped_cell(
             // resolver's own rule, never a runtime special case here.
             //
             // A `technique: suppress` pin forcing suppression on over a genuine
-            // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
-            // dimension just resolved above — where `resolve_cell_choice`'s
-            // refusal is now a real run error — there is currently NO
-            // pre-execution diagnostic gate for this write-*variant* pin
-            // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
-            // `continue` below on `Err` is a REAL silent fallback: an
-            // inadmissible variant pin is not refused here, it just falls
-            // through to the safe region-recompute batch loop instead of
-            // failing the run loudly. This is a known gap, not by design; see
-            // `docs/specs/incremental_models.md` §"Known Divergences" and
-            // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
-            // Phase G1 for the tracked follow-up to extend the diagnostic gate
-            // to this dimension — out of scope for Phase 2 of
-            // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
-            // family (Fold/Recompute/RederiveColumns) dimension.
-            let write_variant_result = resolve_write_variant(
+            // P2/P3 proof failure is a hard `ChoiceRefusal`, propagated as a
+            // real run error below — mirroring how the family dimension's
+            // own `resolve_cell_choice` refusal above already fails the run,
+            // never a silent fallback to region recompute
+            // (`incremental_models.md` §"Per-cell write addressing" →
+            // "User pins").
+            let (suppression, _variant_reason) = resolve_write_variant(
                 &raw_suppression,
                 &cell.trigger,
                 cell.ledger_catch_up,
                 &overrides,
-            );
-            let Ok((suppression, _variant_reason)) = write_variant_result else {
-                continue;
-            };
+            )
+            .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
             return Ok(Some((source.clone(), cell.clone(), suppression)));
         }
     }
@@ -1283,15 +1272,17 @@ pub fn resolve_live_membership_recompute_cell(
                         &comparability,
                         &cell.row_identity,
                     );
-                    let write_variant_result = resolve_write_variant(
+                    // A `technique: suppress` pin whose P2/P3 proof refused
+                    // propagates as a real run error (`incremental_models.md`
+                    // §"Per-cell write addressing" → "User pins") — never a
+                    // silent fallback to region recompute.
+                    let (suppression, _variant_reason) = resolve_write_variant(
                         &raw_suppression,
                         &cell.trigger,
                         cell.ledger_catch_up,
                         &overrides,
-                    );
-                    let Ok((suppression, _variant_reason)) = write_variant_result else {
-                        continue;
-                    };
+                    )
+                    .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
                     // `emit_staged_candidate_conditional` has no
                     // unconditional counterpart (unlike
                     // `emit_column_scoped_merge`/`emit_column_scoped_merge_

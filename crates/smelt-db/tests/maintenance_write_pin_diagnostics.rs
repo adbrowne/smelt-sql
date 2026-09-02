@@ -68,6 +68,25 @@ columns:
   - { name: amount, type: DOUBLE, nullable: false }
 "#;
 
+// `customer_id` (not `order_id`) is deliberately the GROUP BY key column
+// below — `order_id` collides with a pre-existing lexer/GROUP-BY-derivation
+// gap (`group_by_unique_key` derives an empty key whenever the GROUP BY
+// column is literally named `order_id`, independent of anything this
+// fixture is testing), so these two `grain: key` fixtures sidestep it
+// rather than exercise it.
+const PAYMENTS_SOURCE_KEYED: &str = r#"
+description: Payments fact, append-only, clocked on order_date.
+mutation_profile: append_only
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+
 /// A `write:` pin naming a pattern the registry does not recognise refuses
 /// `MaintenanceWritePatternUnavailable`, naming the pattern and the (project
 /// default) backend — never a silent downgrade to a substituted technique.
@@ -211,5 +230,103 @@ SELECT order_id, order_date, amount FROM smelt.sources.payments
                 | Some(DiagnosticCode::MaintenanceWriteAddressingRefused)
         )),
         "a valid `write: region` pin on a partition-grain model must not refuse: {diags:?}"
+    );
+}
+
+/// A `write: diff_patch` pin over a column group whose only member is not
+/// proven comparable across runs (P3 — here, an unrecognised opaque
+/// function call inside the fold aggregate, which the comparability walk
+/// fails closed on) refuses `MaintenanceWriteAddressingRefused`, naming the
+/// incomparable column — the derived-comparability half of the write-pin
+/// equivalence proof, not just the structural contract-fact check.
+#[test]
+fn diff_patch_pin_over_an_incomparable_group_reports_addressing_refused() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+maintenance:
+  cells:
+    - columns: [amount]
+      on: payments
+      write: diff_patch
+---
+SELECT customer_id, SUM(my_opaque_udf(amount)) AS amount FROM smelt.sources.payments GROUP BY customer_id
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", PAYMENTS_SOURCE_KEYED),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    let hit = diags
+        .iter()
+        .find(|d| d.code == Some(DiagnosticCode::MaintenanceWriteAddressingRefused))
+        .unwrap_or_else(|| {
+            panic!("expected a MaintenanceWriteAddressingRefused diagnostic, got: {diags:?}")
+        });
+    assert!(
+        hit.message.contains("amount"),
+        "message must name the incomparable column: {}",
+        hit.message
+    );
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::MaintenanceWritePatternUnavailable)),
+        "a comparability violation must not ALSO refuse as pattern-unavailable: {diags:?}"
+    );
+}
+
+/// A `write: diff_patch` pin over a fully comparable column group and a
+/// proven key resolves cleanly — no write-pin diagnostic at all. Proves the
+/// comparability check added above does not false-positive on the ordinary
+/// admissible case.
+#[test]
+fn write_pin_over_a_comparable_group_still_reports_nothing() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+maintenance:
+  cells:
+    - columns: [amount]
+      on: payments
+      write: diff_patch
+---
+SELECT customer_id, SUM(amount) AS amount FROM smelt.sources.payments GROUP BY customer_id
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", PAYMENTS_SOURCE_KEYED),
+            ("models/revenue.sql", model),
+        ],
+        "revenue",
+    );
+
+    // Not a vacuous pass: the plan must actually have derived a `NewData`
+    // cell over `payments` admitting a fold technique (never
+    // `MaintenanceNoAdmissibleTechnique`) — otherwise the absence of a
+    // write-pin diagnostic below would just mean the plan derivation itself
+    // failed for an unrelated reason.
+    assert!(
+        !diags
+            .iter()
+            .any(|d| d.code == Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique)),
+        "the fold cell itself must be admissible for this fixture to be meaningful: {diags:?}"
+    );
+    assert!(
+        !diags.iter().any(|d| matches!(
+            d.code,
+            Some(DiagnosticCode::MaintenanceWritePatternUnavailable)
+                | Some(DiagnosticCode::MaintenanceWriteAddressingRefused)
+        )),
+        "a `write: diff_patch` pin over a comparable, proven-key group must not refuse: {diags:?}"
     );
 }

@@ -69,6 +69,18 @@ pub struct MaintenancePlanResult {
     /// internal derivation never re-decides which columns are
     /// state-bearing).
     pub state_columns: Vec<smelt_logical::StateColumnSummary>,
+    /// This model's per-column change-comparability (P3,
+    /// `model_properties.md` §"Change comparability") — the SAME
+    /// `analysis::walk::model_property_vector` call `derive_fold_spec` (or,
+    /// for a `grain: partition` model with no fold spec, a dedicated call
+    /// below) already makes, surfaced here so a `write:` pin's equivalence
+    /// proof ([`smelt_logical::maintenance::cell_equivalence_proof`]) and
+    /// `smelt explain` both read the one derivation rather than re-walking
+    /// the model's SQL (`CLAUDE.md` §"Maintenance-plan purity"). Empty for
+    /// every early-refusal path (`key_per_partition`, a declared/derived
+    /// `unique_key` mismatch, a locality refusal) — those never reach the
+    /// walk at all.
+    pub comparability: Vec<smelt_logical::analysis::walk::ColumnComparability>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -385,6 +397,7 @@ pub fn derive_model_maintenance_plan(
             column_groups: Vec::new(),
             degenerate: Vec::new(),
             state_columns: Vec::new(),
+            comparability: Vec::new(),
         });
     }
     let partition_col = metadata
@@ -434,6 +447,7 @@ pub fn derive_model_maintenance_plan(
                         column_groups: Vec::new(),
                         degenerate: Vec::new(),
                         state_columns: Vec::new(),
+                        comparability: Vec::new(),
                     });
                 }
             }
@@ -499,6 +513,7 @@ pub fn derive_model_maintenance_plan(
                             column_groups: Vec::new(),
                             degenerate: Vec::new(),
                             state_columns: Vec::new(),
+                            comparability: Vec::new(),
                         });
                     }
                     // Admitted: the derived `LocalitySlice` is folded onto
@@ -608,10 +623,24 @@ pub fn derive_model_maintenance_plan(
             settle_bound: bound,
         }
     });
+    // The single `model_property_vector` call this derivation surfaces to
+    // callers (`MaintenancePlanResult::comparability`'s own doc comment) —
+    // `derive_fold_spec` above already re-derives the same vector for a
+    // `grain: key` model's fold-spec walk, so this call is only load-bearing
+    // for a `grain: partition` model (no fold spec) or when the fold-spec
+    // walk itself failed to parse; either way, consumers read this field,
+    // never re-walk.
+    let comparability = smelt_logical::analysis::walk::model_property_vector(
+        sql,
+        &smelt_logical::analysis::join_shape::JoinContext::new(),
+    )
+    .map(|v| v.comparability)
+    .unwrap_or_default();
     Some(MaintenancePlanResult {
         plan,
         column_groups: grouping.groups,
         degenerate: grouping.degenerate,
+        comparability,
         state_columns: Vec::new(),
     })
 }
@@ -979,17 +1008,27 @@ pub fn matching_write_pin(
 /// on any declared target backend refuses, naming that backend, rather than
 /// silently passing because a *different* target happens to support it.
 ///
+/// A compare-based pin (`diff_patch`/`keyed_conditional`/`staged_candidate`)
+/// is additionally checked against `comparability` — the model's derived
+/// P3 column-comparability (`MaintenancePlanResult::comparability`) — via
+/// [`smelt_logical::maintenance::cell_equivalence_proof`], so an
+/// incomparable compared column or a `WholeRow` cell refuses
+/// `MaintenanceWriteAddressingRefused` here too, not just the structural
+/// contract-fact check.
+///
 /// Pure function — the caller ([`maintenance_plan_diagnostics`]) gathers
-/// `metadata`/`plan`/`column_groups`/`active_backends` and calls this; it
-/// never re-derives the plan itself (Salsa purity rule).
+/// `metadata`/`plan`/`column_groups`/`active_backends`/`comparability` and
+/// calls this; it never re-derives the plan itself (Salsa purity rule).
 pub fn write_pin_diagnostics(
     metadata: &ModelMetadata,
     plan: &MaintenancePlan,
     column_groups: &[ColumnGroup],
     active_backends: &[String],
+    comparability: &[smelt_logical::analysis::walk::ColumnComparability],
 ) -> Vec<WritePinDiagnostic> {
     use smelt_logical::maintenance::{
-        resolve_write_pin, OutputContractFacts, RowIdentity, WritePinRefusal,
+        cell_equivalence_proof, resolve_write_pin, OutputContractFacts, RowIdentity,
+        WritePinRefusal,
     };
 
     let Some(maintenance) = metadata.maintenance.as_ref() else {
@@ -1034,6 +1073,11 @@ pub fn write_pin_diagnostics(
             has_partition_axis,
         };
         let cell_label = format!("{:?}", plan_cell.trigger);
+        let group_columns: Vec<String> = column_groups
+            .iter()
+            .find(|g| g.name() == plan_cell.group)
+            .map(|g| g.columns.clone())
+            .unwrap_or_default();
 
         for backend_name in &backends {
             let backend_caps = backend_write_capabilities_for(backend_name);
@@ -1043,7 +1087,14 @@ pub fn write_pin_diagnostics(
                 backend_name,
                 facts,
                 backend_caps,
-                |_pattern| Ok(()),
+                |pattern| {
+                    cell_equivalence_proof(
+                        pattern,
+                        &group_columns,
+                        comparability,
+                        &plan_cell.row_identity,
+                    )
+                },
             ) {
                 out.push(match refusal {
                     WritePinRefusal::PatternUnavailable { pattern, backend } => {
@@ -1219,6 +1270,7 @@ pub fn maintenance_plan_diagnostics(
         &result.plan,
         &result.column_groups,
         active_backends,
+        &result.comparability,
     );
     MaintenancePlanDiagnostics {
         refusals,

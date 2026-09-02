@@ -711,6 +711,7 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
         }],
         degenerate: vec![],
         state_columns: vec![],
+        comparability: vec![],
     };
     let report = build_maintenance_plan_report(
         "non_repair_fixture",

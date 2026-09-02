@@ -469,33 +469,21 @@ pub fn build_maintenance_plan_report(
                      falls back to unconditional rewrite, nothing to record)"
                 );
             }
-            // Write variant (`docs/plans/20260715-composed-axes-conditional-
-            // maintenance.md` Phase G1; `incremental_models.md` §"Windowed
-            // maintenance and the horizon" category 2, §"Interchangeability
-            // and choice"): which matched-arm shape the override ladder's
+            // Write variant (`incremental_models.md` §"Windowed maintenance
+            // and the horizon" category 2, §"Interchangeability and
+            // choice"): which matched-arm shape the override ladder's
             // conditional-variant dimension resolves for a suppressible
             // cell (`Technique::ColumnScopedMerge` or `Technique::KeyedFold`),
             // and why — pin / preference / default / first-build, mirroring
-            // `choice::VariantReason`. Like the observed-delta recording
-            // line above, this reporting path has no `sql`/`JoinContext`
-            // threaded to redo the P3 comparability walk, so `facts.
-            // has_identity` (the P2 half only) is the best-effort proxy for
-            // "the conditional variant is admitted" in the branches below
-            // that print a preference/pin/default line — the authoritative
-            // check at runtime is `choice::resolve_write_suppression` folded
-            // through `choice::resolve_write_variant`.
-            //
-            // The one case that IS fully decidable without a P3 walk is
-            // `!facts.has_identity` (`RowIdentity::WholeRow`):
-            // `resolve_write_suppression` checks row identity first and
-            // short-circuits to `Unconditional` before ever consulting
-            // comparability or the column group, so a `technique: suppress`
-            // pin over a `WholeRow` cell is genuinely, always inadmissible —
-            // this block calls the real resolvers for that decidable case
-            // and propagates the resulting `ChoiceRefusal` as an actual
-            // `explain` error, rather than the silently-wrong success line a
-            // pre-this-fix version printed unconditionally here regardless
-            // of any pin.
+            // `choice::VariantReason`. `result.comparability` (the same
+            // derivation `MaintenancePlanResult::comparability`'s own doc
+            // comment names) is threaded straight into the real
+            // `choice::resolve_write_suppression`/`choice::
+            // resolve_write_variant` calls below — the authoritative P2/P3
+            // proof, not a `facts.has_identity`-only proxy — so a
+            // `technique: suppress` pin over an incomparable compared
+            // column refuses here exactly as it does at runtime, not only
+            // the decidable `WholeRow` (P2) case.
             if matches!(
                 cell.technique,
                 Technique::ColumnScopedMerge | Technique::KeyedFold
@@ -536,32 +524,35 @@ pub fn build_maintenance_plan_report(
 
                 use smelt_core::config::{CellTechnique, TechniquePreference};
 
-                if !facts.has_identity {
-                    // Real (not proxy): a `WholeRow` cell always resolves
-                    // `WriteSuppression::Unconditional` regardless of the
-                    // column group or comparability
-                    // (`resolve_write_suppression`'s own fail-closed first
-                    // check), so calling the real resolvers here with an
-                    // empty compared-column set is exact, not an
-                    // approximation. A hard `technique: suppress` pin over
-                    // this is a genuine `ChoiceRefusal`.
-                    let raw_suppression =
-                        smelt_logical::maintenance::choice::resolve_write_suppression(
-                            &[],
-                            &[],
-                            &cell.row_identity,
-                        );
-                    smelt_logical::maintenance::choice::resolve_write_variant(
-                        &raw_suppression,
-                        &cell.trigger,
-                        cell.ledger_catch_up,
-                        &overrides,
-                    )
-                    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                // The real P2/P3 proof (`choice::resolve_write_suppression`)
+                // over this cell's own group columns and the plan's derived
+                // comparability — `WholeRow` cells short-circuit to
+                // `Unconditional` inside this same call (no special-casing
+                // needed here), and an incomparable compared column over a
+                // proven key does too. `resolve_write_variant` folds in the
+                // override ladder and is the single point a hard
+                // `technique: suppress` pin over either failure propagates
+                // as a real `explain` error, never a silently-wrong success
+                // line.
+                let raw_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+                    &group_columns,
+                    &result.comparability,
+                    &cell.row_identity,
+                );
+                smelt_logical::maintenance::choice::resolve_write_variant(
+                    &raw_suppression,
+                    &cell.trigger,
+                    cell.ledger_catch_up,
+                    &overrides,
+                )
+                .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+
+                if let smelt_logical::maintenance::choice::WriteSuppression::Unconditional { why } =
+                    &raw_suppression
+                {
                     let _ = writeln!(
                         out,
-                        "      write variant: unconditional (default — no proven row identity, \
-                         the conditional variant is never admitted for this cell)"
+                        "      write variant: unconditional (not admitted — {why})"
                     );
                 } else if let Some(CellTechnique::Suppress) = overrides.technique {
                     let _ = writeln!(

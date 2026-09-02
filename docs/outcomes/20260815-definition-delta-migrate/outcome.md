@@ -312,7 +312,7 @@ open — not that the excluded bullets themselves are gone.
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | done |
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | done |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | done |
-| 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | planned |
+| 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | done |
 | 13b | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | pending |
 | 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
 | 15 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity | pending |
@@ -639,6 +639,15 @@ open — not that the excluded bullets themselves are gone.
 - **2026-09-02 (phase 11 planning)** — reshape: added row 20b. Phase 10's summary recorded the narrowed `architecture.md` backbuild statement-parity gap as an honest *untracked* residue with no owning phase. Success criterion 9 requires the standing gates (which name `statement_parity`) green for this outcome's own mechanism, so extending that gate's structural leg to the backbuild emitter family serves a success criterion and is not deferred out. Placed before the final validate row so phase 21 can confirm the bullet is actually removed.
 
 - **2026-09-02 (phase 13 planning)** — reshape: added row 13b. Phase 12's summary proved that the per-cell deferral data layer (address, ledger frontier, decision builder, manifest field) landed but that no *validly declarable* cell reaches any wired dispatch site — `contract.cells[].deferral` is admissible only on a clocked `on:`, i.e. the ordinary `Trigger::NewData` fold cell, which phase 12 did not touch. Success criterion 11 requires per-cell `deferral` to be **scheduled**, so this residue serves a success criterion and gets its own row rather than being deferred out. Placed after 13 so the write-pin equivalence work (already pre-scanned) proceeds first.
+- **2026-09-02, phase 13.** `cell_equivalence_proof` classifies compare-based patterns by registry
+  `pattern.name` (`diff_patch`/`keyed_conditional`/`staged_candidate`), not `WriteSelection` (which
+  collapses `keyed`/`keyed_conditional`/`staged_candidate` onto the same `Technique::KeyedFold`
+  selection and would blur which ones actually carry a comparability obligation).
+  `MaintenancePlanResult::comparability` is populated by one new `model_property_vector` call in
+  `derive_model_maintenance_plan`'s success path. Discovered (not fixed, out of scope): a real bug
+  in `group_by_unique_key`/`analyze_select` derives an empty `GROUP BY` key whenever the grouping
+  column is literally named `order_id` (confirmed via isolated probe; `customer_id`/`orderid` both
+  work) — smells like a keyword/lexer collision on the `ORDER` substring, worth its own ticket.
 
 ## Blocked
 

@@ -997,7 +997,15 @@ addressing (§"Partition-local maintenance (the K8 guardrail)"). **User pins**:
 *admissible* mechanisms without ever widening the admissible set — refused with
 `MaintenanceWriteAddressingRefused` when the addressing cannot uphold the equivalence
 invariant, and with `MaintenanceWritePatternUnavailable` when the name is unrecognised or the
-backend cannot execute it.
+backend cannot execute it. A pin's equivalence factor is evaluated against the cell's
+**derived** column comparability and row identity — the same P2/P3 proof
+`resolve_write_suppression` owns (§"Windowed maintenance and the horizon") — not structural
+facts alone: a compare-based pattern (`diff_patch`, `keyed_conditional`, `staged_candidate`)
+over a column group with an unproven-comparable member, or over a cell with no proven row
+identity, refuses `MaintenanceWriteAddressingRefused` naming the offending column(s). A hard
+`technique: suppress` pin whose suppression proof itself refuses is a run-refusing
+`ChoiceRefusal` raised before any statement executes — never a silent fallback to the
+unconditional/region form — and `smelt explain` prints the same refusal.
 
 **Worked example — the plan of a composed model.** `order_facts` (running example) declares
 both `unique_key: [order_id]` and a `timeseries:` clock on `order_ts`/`order_date`, joining
@@ -1857,13 +1865,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
   identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
   derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).
-- **The write-pin equivalence factor is structural only** — the per-cell equivalence hook
-  always accepts; threading column-comparability or a suppression-specific proof is later
-  work. Tracked: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **An inadmissible write-*variant* pin has no pre-execution gate** — forcing
-  `technique: suppress` on a refusing cell silently falls back to full recompute instead of
-  refusing; `smelt explain` also misses this case. Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded
   delta table live; backward resolution consumes none; the keyed-fold and staged-candidate
   write families record nothing; the settle-bound × observed-delta composition has no live

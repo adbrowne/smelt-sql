@@ -898,6 +898,121 @@ pub fn resolve_write_pin(
     Ok(pattern)
 }
 
+/// The per-cell equivalence-invariant proof a `write:` pin's
+/// `cell_can_uphold_equivalence` hook ([`resolve_write_pin`]) delegates to —
+/// single owner of "does this cell's own derived facts uphold the pattern's
+/// equivalence obligation" (`incremental_models.md` §"Per-cell write
+/// addressing" → "User pins"). A **compare-based** pattern (`diff_patch`,
+/// `keyed_conditional`, `staged_candidate` — the write mechanisms whose
+/// physical form diffs a candidate row against prior state before writing)
+/// delegates to [`choice::resolve_write_suppression`]'s P2 (row identity)/P3
+/// (column comparability) proof and maps a
+/// [`choice::WriteSuppression::Unconditional`] verdict to `Err`; every other
+/// registry pattern (plain `region`/`keyed`/`column`/`update`/`full_rebuild`,
+/// none of which compares against prior state) has no comparability
+/// obligation at all and is unconditionally `Ok`.
+pub fn cell_equivalence_proof(
+    pattern: &WritePattern,
+    group_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+) -> Result<(), String> {
+    match pattern.name {
+        "diff_patch" | "keyed_conditional" | "staged_candidate" => {
+            match choice::resolve_write_suppression(group_columns, comparability, row_identity) {
+                choice::WriteSuppression::Suppressed { .. } => Ok(()),
+                choice::WriteSuppression::Unconditional { why } => Err(why),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod cell_equivalence_proof_tests {
+    use super::*;
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    fn incomparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Incomparable,
+        }
+    }
+
+    fn keyed_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["id".to_string()]),
+            proven_mismatch: None,
+        }
+    }
+
+    #[test]
+    fn compare_based_pattern_refuses_an_incomparable_group() {
+        let pattern = lookup_write_pattern("diff_patch").expect("diff_patch registered");
+        let err = cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[incomparable("amount")],
+            &keyed_identity(),
+        )
+        .expect_err("an incomparable compared column must refuse");
+        assert!(
+            err.contains("amount"),
+            "refusal must name the incomparable column: {err}"
+        );
+    }
+
+    #[test]
+    fn compare_based_pattern_accepts_a_fully_comparable_group() {
+        let pattern = lookup_write_pattern("keyed_conditional").expect("registered");
+        cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[comparable("amount")],
+            &keyed_identity(),
+        )
+        .expect("a fully comparable group over a proven key must be admitted");
+    }
+
+    #[test]
+    fn region_and_full_rebuild_patterns_need_no_comparability_proof() {
+        let region = lookup_write_pattern("region").expect("registered");
+        let full_rebuild = lookup_write_pattern("full_rebuild").expect("registered");
+        let whole_row = RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        };
+        cell_equivalence_proof(region, &[], &[], &whole_row)
+            .expect("region has no comparability obligation");
+        cell_equivalence_proof(full_rebuild, &[], &[], &whole_row)
+            .expect("full_rebuild has no comparability obligation");
+    }
+
+    #[test]
+    fn compare_based_pattern_refuses_a_whole_row_cell() {
+        let pattern = lookup_write_pattern("staged_candidate").expect("registered");
+        let whole_row = RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        };
+        let err = cell_equivalence_proof(
+            pattern,
+            &["amount".to_string()],
+            &[comparable("amount")],
+            &whole_row,
+        )
+        .expect_err("no proven row identity must refuse regardless of comparability");
+        assert!(err.contains("row identity"), "got: {err}");
+    }
+}
+
 #[cfg(test)]
 mod write_pattern_registry_tests {
     use super::*;
