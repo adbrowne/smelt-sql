@@ -310,7 +310,7 @@ open — not that the excluded bullets themselves are gone.
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
 | 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | done |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | done |
-| 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | planned |
+| 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | done |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
 | 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
@@ -344,6 +344,14 @@ open — not that the excluded bullets themselves are gone.
   column add that `smelt-runtime`'s narrower live-cell resolution still executes safely —
   confirmed via two real e2e regressions before scoping the fix down to the skeleton-clause
   check alone.
+
+- **2026-09-02, phase 11.** Factored the key-addressed model-edge cell's resolve-then-execute
+  body into a shared `resolve_and_dispatch_key_addressed_edge_cell` helper, then wired it into
+  the non-keyed (window-forward) incremental branch's `Some(inc_plan)` arm alongside the
+  existing keyed-branch call site, short-circuiting past that branch's self-ref bootstrap and
+  batch loop via a labeled block when the cell resolves live. A `grain: partition` downstream
+  fed by a clockless `KeyedUpsert` upstream now dispatches `Technique::PerGroupRecompute`
+  instead of falling back to the ordinary window-forward batch loop.
 
 - **2026-08-30, phase 8.** `backbuild-synthesis.md` rewritten around the shipped `smelt migrate`
   verb; corrected the "enumerates options; it does not yet choose" claim to state precisely what

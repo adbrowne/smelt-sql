@@ -1361,7 +1361,10 @@ upstream whose derived shape is *not* key-addressed (`append-only within window`
 refused. The fail-closed leg is explicit: when the downstream's own SQL does not carry the
 upstream's key columns (they cannot be resolved through the downstream's own grain), the edge
 is refused by name (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a
-silent whole-table cell.
+silent whole-table cell. A live key-addressed cell is dispatched irrespective of the
+downstream's own grain — a `grain: partition` downstream takes it in place of its ordinary
+window-forward batch loop for that run, because the cell's bounded read is the affected key
+set and has no partition-interval axis to compose with a run window.
 
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
@@ -1812,13 +1815,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   record: `docs/research/20260816-open-questions-triage.md`).
 - **The scheduler does not yet consume delta signatures end to end.** Signatures shape
   admission and are printed, but the DAG scheduler's currency for "what needs re-running" is
-  still whole day-intervals: a clockless `keyed upsert` upstream feeding a `grain: partition`
-  downstream derives a key-addressed repair cell the run loop never dispatches (the result is
-  correct but not incremental — that route is wired only inside the `grain: key` run branch,
-  so such an upstream instead maintains its downstream via the ordinary run route); keyed
-  dirt-sets carry key columns and provenance, not affected key *values* (value-level discovery
-  stays with the run-time mechanism); and cross-model runs require the operator to state what
-  landed upstream on the command line, because no per-source watermark is persisted. Tracked:
+  still whole day-intervals: keyed dirt-sets carry key columns and provenance, not affected key
+  *values* (value-level discovery stays with the run-time mechanism); and cross-model runs
+  require the operator to state what landed upstream on the command line, because no
+  per-source watermark is persisted. Tracked:
   `docs/outcomes/20260809-output-delta-typing/outcome.md`;
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 1.
 - **`smelt explain` does not yet print the delta-signature headline** (§Surface "CLI" makes
