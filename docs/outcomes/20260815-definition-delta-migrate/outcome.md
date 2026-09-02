@@ -321,9 +321,9 @@ open — not that the excluded bullets themselves are gone.
 | 19 | Mutation-cell reachability: trigger derivation moves to a pure `smelt-logical` function and covers clocked explicitly-mutable sources plus aggregate-sensitive `AppendOnly` sources, so the horizon-clamped `PartitionLocal::Yes` corner is reachable from `examples/timeseries` through the production wrapper | done |
 | 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | done |
 | 21 | Keyed dirt cascades and is consumed: `propagate` walks a node dirtied only through the keyed channel, and `plan_since_upstream` schedules and reports keyed dirt — a bare `grain: key` model with readers propagates end to end past `MaintenanceGraphUnsupportedNode` | done |
-| 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | pending |
+| 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | planned |
 | 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | pending |
-| 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal); remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
+| 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal), including the bare-keyed→clocked-reader model-edge admission gap phase 21 surfaced (a `grain: partition` downstream reached only through a plain `FROM`, no `JOIN`, cannot resolve its grain for `admit_key_addressed_recompute`); remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
@@ -809,6 +809,18 @@ open — not that the excluded bullets themselves are gone.
   depends on 21 and 22 landing, is row 24. Old rows 22–28 shift to 25–31. Nothing left the outcome;
   all five items remain, each with its own row (success criterion 15). Numeric ids only, per the
   phase-20 planning entry.
+- 2026-09-03 (phase 22 plan): no reshape of the remaining rows. Phase 21's "for the next
+  planner" note — a `grain: partition` downstream's key-addressed model-edge admission when the
+  bare-keyed upstream is reached only through a plain `FROM` — serves success criterion 15
+  (`examples/web_analytics` fully `--since-upstream`-compatible end to end), so it is folded
+  into phase 24's row text rather than deferred out or given a row of its own.
+- 2026-09-03 (phase 22 plan): a self-edge is unrolled as a *time* edge, not admitted into the
+  table graph — `topo_order` excludes it, forward dirt widens open-ended to the frontier
+  (`[a, →)`, scheduled as `start: Some(_), end: None`), and the backward requirement applies
+  the clamp once against the model's stored basis. Rejected: a fixed-point unrolling over the
+  day axis (unbounded work for no extra precision — forward dirt reaches the frontier either
+  way) and admitting the self-edge into `topo_order` with a tie-break (would silently make a
+  genuine table-graph cycle orderable).
 
 ## Blocked
 
