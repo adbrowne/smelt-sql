@@ -51,7 +51,8 @@ export function dailyIndex(date, listLength) {
 }
 
 export function msUntilNextPuzzle(date) {
-  return startOfDay(date) + 86400000 - date.getTime();
+  const nextMidnight = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+  return nextMidnight.getTime() - date.getTime();
 }
 
 export function isValidGuess(word, allowedSet) {

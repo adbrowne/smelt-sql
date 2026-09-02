@@ -2,7 +2,7 @@
 import { ANSWERS, ALLOWED } from './words.js';
 import { scoreGuess, mergeKeyStates, isValidGuess, WORD_LENGTH, MAX_GUESSES,
          dailyIndex, puzzleNumber, msUntilNextPuzzle, shareText } from './game.js';
-import { KEY, load, serialize, recordResult } from './storage.js';
+import { KEY, load, serialize, recordResult, expireStreak } from './storage.js';
 
 const VALID = new Set([...ANSWERS, ...ALLOWED]);
 const KB_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
@@ -18,8 +18,9 @@ const practiceBtn = document.getElementById('practice-btn');
 const readSave = () => { try { return load(localStorage.getItem(KEY)); } catch { return load(null); } };
 const writeSave = data => { try { localStorage.setItem(KEY, serialize(data)); } catch { /* private mode */ } };
 
-let save = readSave();
 const todayPuzzle = puzzleNumber(new Date());
+let save = readSave();
+save.stats = expireStreak(save.stats, todayPuzzle);
 
 const state = { mode: 'daily', puzzle: todayPuzzle, answer: '', guesses: [], current: '', status: 'playing', keys: {} };
 let busy = false;
@@ -90,6 +91,7 @@ function toast(message, ms = 1500) {
 
 function shakeRow(i) {
   const row = rowEl(i);
+  if (!row) return;
   row.classList.add('shake');
   setTimeout(() => row.classList.remove('shake'), 600);
 }

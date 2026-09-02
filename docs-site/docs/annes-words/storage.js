@@ -13,6 +13,17 @@ export const DEFAULTS = Object.freeze({
 
 const clone = v => JSON.parse(JSON.stringify(v));
 
+/** Coerce to a finite number, falling back when it is not one. */
+const toFiniteNumber = (v, fallback) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+/** Same, but a `null` input stays `null` rather than becoming a number. */
+const toFiniteOrNull = v => (v === null ? null : toFiniteNumber(v, null));
+
+const isValidGuessEntry = g => typeof g === 'string' && g.length === 5;
+
 /** Parse stored JSON, repairing anything missing. Never throws. */
 export function load(raw) {
   if (!raw) return clone(DEFAULTS);
@@ -21,13 +32,32 @@ export function load(raw) {
   if (!parsed || parsed.version !== VERSION) return clone(DEFAULTS);
   const base = clone(DEFAULTS);
   const stats = { ...base.stats, ...(parsed.stats ?? {}) };
-  if (!Array.isArray(stats.dist) || stats.dist.length !== 6) stats.dist = [0, 0, 0, 0, 0, 0];
-  const daily = parsed.daily && typeof parsed.daily.puzzle === 'number'
-    ? { puzzle: parsed.daily.puzzle,
-        guesses: Array.isArray(parsed.daily.guesses) ? parsed.daily.guesses : [],
-        status: parsed.daily.status ?? 'playing' }
+  stats.played = toFiniteNumber(stats.played, 0);
+  stats.wins = toFiniteNumber(stats.wins, 0);
+  stats.streak = toFiniteNumber(stats.streak, 0);
+  stats.maxStreak = toFiniteNumber(stats.maxStreak, 0);
+  stats.lastPuzzle = toFiniteOrNull(stats.lastPuzzle);
+  stats.dist = Array.isArray(stats.dist) && stats.dist.length === 6
+    ? stats.dist.map(n => toFiniteNumber(n, 0))
+    : [0, 0, 0, 0, 0, 0];
+  const rawGuesses = parsed.daily && Array.isArray(parsed.daily.guesses) ? parsed.daily.guesses : null;
+  const guessesOk = rawGuesses !== null && rawGuesses.length <= 6 && rawGuesses.every(isValidGuessEntry);
+  const daily = parsed.daily && typeof parsed.daily.puzzle === 'number' && guessesOk
+    ? { puzzle: parsed.daily.puzzle, guesses: rawGuesses, status: parsed.daily.status ?? 'playing' }
     : null;
   return { version: VERSION, daily, stats };
+}
+
+/**
+ * A skipped day (a gap of more than one puzzle since the stored streak was
+ * last extended) resets the streak. Pure: takes today's puzzle number as an
+ * argument rather than reading the clock itself.
+ */
+export function expireStreak(stats, todayPuzzle) {
+  if (stats.lastPuzzle !== null && stats.lastPuzzle < todayPuzzle - 1) {
+    return { ...stats, streak: 0 };
+  }
+  return stats;
 }
 
 export const serialize = data => JSON.stringify(data);

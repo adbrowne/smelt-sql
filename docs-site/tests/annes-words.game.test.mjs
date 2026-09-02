@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { scoreGuess, mergeKeyStates, dailyIndex, puzzleNumber, msUntilNextPuzzle, shareText } from '../docs/annes-words/game.js';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { scoreGuess, mergeKeyStates, dailyIndex, puzzleNumber, msUntilNextPuzzle, shareText,
+         isValidGuess } from '../docs/annes-words/game.js';
 
 const C = 'correct', P = 'present', A = 'absent';
 
@@ -91,4 +94,47 @@ test('share text renders an emoji grid', () => {
 test('share text marks a loss with X', () => {
   const marks = Array.from({ length: 6 }, () => [A, A, A, A, A]);
   assert.ok(shareText(3, marks, false).startsWith("Anne's Words 3 X/6"));
+});
+
+test('countdown across a DST-end fall-back day equals the true remaining time', () => {
+  // America/New_York: DST ends 2026-11-01 02:00 -> 01:00, making the local
+  // day 25 hours long. At 01:30 local (post-fallback, still Nov 1) the true
+  // remaining time to the next local midnight is 23.5h, not the naive
+  // 22.5h a fixed +86400000 would compute.
+  //
+  // Note: setting process.env.TZ in *this* file would not help, since ES
+  // module static imports are hoisted ahead of any top-level statement in
+  // the importing module -- game.js (and its module-level EPOCH constant)
+  // would already be evaluated under whatever TZ the process started with.
+  // So the assertion is spawned in a fresh child process with TZ fixed
+  // before node even starts, making the test deterministic regardless of
+  // the host machine's timezone.
+  const gamePath = fileURLToPath(new URL('../docs/annes-words/game.js', import.meta.url));
+  const script = `
+    import('${gamePath}').then(({ msUntilNextPuzzle }) => {
+      const date = new Date(2026, 10, 1, 1, 30); // Nov 1 2026, 01:30 local
+      const ms = msUntilNextPuzzle(date);
+      const trueRemaining = new Date(2026, 10, 2, 0, 0).getTime() - date.getTime();
+      if (!(ms > 0)) throw new Error('ms must be positive on a DST-transition day, got ' + ms);
+      if (ms !== trueRemaining) throw new Error('expected ' + trueRemaining + ' got ' + ms);
+      if (ms !== 23.5 * 3600 * 1000) throw new Error('expected 23.5h got ' + ms);
+      console.log('OK');
+    }).catch(e => { console.error(e); process.exit(1); });
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, TZ: 'America/New_York' },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /OK/);
+});
+
+test('isValidGuess accepts a word in the allowed set', () => {
+  assert.equal(isValidGuess('crane', new Set(['crane', 'slate'])), true);
+});
+
+test('isValidGuess rejects a well-formed word absent from the set and a wrong-length word', () => {
+  const allowed = new Set(['crane', 'slate']);
+  assert.equal(isValidGuess('zzzzz', allowed), false);
+  assert.equal(isValidGuess('cranes', allowed), false);
 });
