@@ -717,3 +717,160 @@ fn bare_keyed_source_still_refuses() {
     );
     assert!(!stderr.contains("panicked at"), "{stderr}");
 }
+
+/// Seed a single `_smelt_observed_delta` row directly (bypassing an actual
+/// conditional write, mirroring `seed_composed`'s direct-population
+/// approach — the observed-delta read side under test doesn't care how the
+/// row got there).
+fn seed_observed_delta(
+    db_path: &Path,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+    changed_keys: &[&str],
+    partitions: &[&str],
+) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    conn.execute_batch(&ddl)
+        .expect("create observed-delta table");
+    let render = |vals: &[&str]| -> String {
+        if vals.is_empty() {
+            "[]::VARCHAR[]".to_string()
+        } else {
+            format!(
+                "[{}]",
+                vals.iter()
+                    .map(|v| format!("'{v}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    };
+    let insert = format!(
+        "INSERT INTO main._smelt_observed_delta \
+         (model_name, window_start, window_end, changed_keys, partitions) \
+         VALUES ('{model}', '{window_start}', '{window_end}', {}, {})",
+        render(changed_keys),
+        render(partitions),
+    );
+    conn.execute_batch(&insert)
+        .expect("seed observed-delta row");
+}
+
+/// Phase 15 (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 15-plan.md`): a recorded observed delta narrows `--since-upstream`'s
+/// dirty set to exactly the recorded partitions, instead of the whole
+/// declared `--landed` window — using the same locality-admitted composed
+/// origin fixture as `composed_model_address_landed_delta_propagates`,
+/// but with a much WIDER declared window than the recorded delta covers.
+#[test]
+fn recorded_observed_delta_narrows_the_dirty_set() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_composed_origin_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_composed(&db_path);
+    seed_observed_delta(
+        &db_path,
+        "composed",
+        "2026-01-01",
+        "2026-01-11",
+        &["5"],
+        &["2026-01-05"],
+    );
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "composed",
+            "--landed",
+            "2026-01-01..2026-01-11",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "narrowed since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        gold_dates_composed(&db_path),
+        vec!["2026-01-05".to_string()],
+        "the recorded delta must narrow the dirty set to exactly the recorded partition, not \
+         the whole 10-day declared window"
+    );
+}
+
+/// A **present-and-empty** recorded observed delta propagates nothing —
+/// the CLI's own end-to-end leg of `empty_observed_delta_schedules_zero_
+/// downstream_regions` (`crates/smelt-runtime/tests/
+/// since_upstream_propagation.rs`).
+#[test]
+fn present_and_empty_observed_delta_propagates_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_composed_origin_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_composed(&db_path);
+    seed_observed_delta(&db_path, "composed", "2026-01-01", "2026-01-11", &[], &[]);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "composed",
+            "--landed",
+            "2026-01-01..2026-01-11",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an empty recorded delta must not be a refusal: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("propagated nothing"),
+        "a present-and-empty recorded delta must propagate nothing: {stderr}"
+    );
+}
+
+/// Unchanged baseline: with no recorded observed delta at all (absent),
+/// `--since-upstream` falls back to the declared `--landed` window exactly
+/// as before this phase (widen-never-narrow) — the CLI's own end-to-end
+/// pin of the "absent" branch, using the same wide 10-day window the
+/// narrowing test above uses so the two are directly comparable.
+#[test]
+fn absent_observed_delta_falls_back_to_the_declared_window() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_composed_origin_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_composed(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "composed",
+            "--landed",
+            "2026-01-01..2026-01-11",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "baseline since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut expected: Vec<String> = (1..=10).map(|d| format!("2026-01-{:02}", d)).collect();
+    expected.sort();
+    assert_eq!(
+        gold_dates_composed(&db_path),
+        expected,
+        "with no recorded delta, the whole declared window must be dirtied, unwidened and \
+         unnarrowed"
+    );
+}

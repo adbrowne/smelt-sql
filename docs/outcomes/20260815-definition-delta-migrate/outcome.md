@@ -314,7 +314,7 @@ open — not that the excluded bullets themselves are gone.
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | done |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | done |
 | 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | done |
-| 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | planned |
+| 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | done |
 | 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | pending |
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | pending |
 | 18 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
@@ -679,6 +679,20 @@ open — not that the excluded bullets themselves are gone.
   work) — smells like a keyword/lexer collision on the `ORDER` substring, worth its own ticket.
 
 - **2026-09-02 (phase 13b planning)** — reshape: merged phase 13's discovered `order_id` empty-key bug into row 15, which already owns the `GROUP BY`-derived `grain: key` identity check — same code path (`group_by_unique_key`/`analyze_select`), so a separate row would split one fix across two phases. It silently breaks `grain: key` admission, so it stays inside the outcome rather than moving to Out of scope. Phase 13b's own design call, recorded here so the implementer does not re-litigate it: the plain fold's write is whole-row, so a per-cell skip is licensed only when **every** `Trigger::NewData` column group the fold serves is covered by a skip-licensed declaring cell; partial coverage falls through to the normal path (declining unlicensed work would violate the deferral oracle), and the residue is stated in the spec rather than silently accepted.
+
+- **2026-09-03, phase 15 implementation.** `--since-upstream`'s CLI wiring now reads
+  `_smelt_observed_delta` live via a new `propagation::load_observed_delta_lookup` before calling
+  `plan_since_upstream_with_observed_deltas`; `plan_since_upstream` (empty-lookup) is now only the
+  testkit/conformance harness's wrapper, not a CLI-reachable path. `maintenance_driver::
+  read_observed_delta` is the new shared decoder for both `changed_keys` and `partitions`;
+  `read_observed_delta_changed_keys` is re-expressed over it. Backward resolution's non-consumption
+  landed in the spec verbatim (already decided in this log above). Found and fixed a real bug
+  while wiring the CLI: the lookup's backend connection was kept alive across the whole
+  `run_since_upstream` function, overlapping with the run loop's own connection to the same DuckDB
+  file — two live connections to one file from the same process silently lost writes (3 tests
+  failed, 2 of them pre-existing and unmodified by this phase, with "table gold does not exist").
+  Fixed with an explicit `drop(lookup_backend)` before the run loop. Full detail in
+  `phases/15-summary.md`.
 
 ## Blocked
 

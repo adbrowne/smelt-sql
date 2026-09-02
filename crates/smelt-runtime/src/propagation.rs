@@ -1020,13 +1020,11 @@ fn render_interval(iv: &DayInterval) -> String {
 /// empty observed-delta lookup — every model-edge origin falls back to its
 /// declared `--landed` window unwidened-and-unprojected (the D1
 /// widen-never-narrow rule's "absent" case, since an empty lookup can never
-/// contain a recorded row). Live wiring of the real `_smelt_observed_delta`
-/// warehouse table into this call is CLI/backend-read work outside this
-/// phase's critical files (`crates/smelt-state/src/`,
-/// `crates/smelt-runtime/src/propagation.rs`,
-/// `crates/smelt-logical/src/maintenance/{locality,propagate}.rs`) —
-/// tracked in `docs/plans/20260715-composed-axes-conditional-maintenance.md`
-/// Phase D3's "Decisions taken" note.
+/// contain a recorded row). Consumed by the testkit and the generative
+/// conformance harness's DAG families, which need the pure/empty-lookup
+/// form; `smelt run --since-upstream`'s real CLI path instead loads a live
+/// lookup via [`load_observed_delta_lookup`] and calls
+/// [`plan_since_upstream_with_observed_deltas`] directly.
 pub fn plan_since_upstream(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
@@ -1052,6 +1050,49 @@ pub type ObservedDeltaKey = (String, String, String);
 /// — means a conditional write ran and recorded its (possibly empty)
 /// changed-row set for that exact window.
 pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckdb::ObservedDelta>;
+
+/// Load the live observed-delta lookup [`plan_since_upstream_with_observed_deltas`]
+/// consults, for `--since-upstream`'s real CLI caller. One read per delta
+/// whose origin names a maintained model (`model_names`, the caller's
+/// already-discovered model set — the CLI's own `model_by_addr`); a delta
+/// whose origin is a raw source is skipped (never a valid observed-delta
+/// key, `sources.*` never records one). Keyed exactly `(model,
+/// iso(landed.start), iso(landed.end))`, matching
+/// [`plan_since_upstream_with_observed_deltas`]'s own lookup key
+/// construction. A non-DuckDB backend yields an empty map (every delta
+/// falls back to the declared window unwidened) via
+/// [`crate::maintenance_driver::read_observed_delta`]'s own read-side
+/// fallback — never an error, matching every other observed-delta read.
+pub async fn load_observed_delta_lookup(
+    backend: &dyn smelt_backend::Backend,
+    schema: &str,
+    deltas: &[SourceDelta],
+    model_names: &BTreeSet<String>,
+) -> Result<ObservedDeltaLookup> {
+    let mut lookup = ObservedDeltaLookup::new();
+    for delta in deltas {
+        if !model_names.contains(&delta.source) {
+            continue;
+        }
+        let window_start = ordinal_to_iso(delta.landed.start);
+        let window_end = ordinal_to_iso(delta.landed.end);
+        let observed = crate::maintenance_driver::read_observed_delta(
+            backend,
+            schema,
+            &delta.source,
+            &window_start,
+            &window_end,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("failed to read observed delta for '{}': {e}", delta.source)
+        })?;
+        if let Some(od) = observed {
+            lookup.insert((delta.source.clone(), window_start, window_end), od);
+        }
+    }
+    Ok(lookup)
+}
 
 /// [`plan_since_upstream`]'s full form: consults `observed` for every
 /// delta origin that names a locality-admitted composed model
@@ -1220,6 +1261,14 @@ pub struct ResolvedBuildPlan {
 /// [`smelt_logical::maintenance::propagate::required_inputs`]; this
 /// function only assembles the graph, renders the report, and shapes the
 /// per-model build order the CLI executes.
+///
+/// Deliberately never consults the observed-delta record
+/// (`docs/specs/incremental_models.md` §"Backward resolution — what must
+/// exist"): the resolved slices answer an existence question ("what must
+/// exist over this period"), and a change record cannot soundly narrow
+/// that — narrowing on delta evidence alone would under-cover the resolved
+/// period, breaking `forward(backward(P)) ⊇ P`. A stated non-goal, not
+/// unfinished work.
 pub fn resolve_build_plan(
     models: &[ModelFile],
     source_infos: &[SourceInfo],

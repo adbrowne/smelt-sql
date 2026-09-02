@@ -2779,6 +2779,61 @@ pub async fn read_observed_delta_changed_keys(
     window_start: &str,
     window_end: &str,
 ) -> std::result::Result<Option<Vec<String>>, BackendError> {
+    Ok(
+        read_observed_delta(backend, schema, model, window_start, window_end)
+            .await?
+            .map(|od| od.changed_keys),
+    )
+}
+
+/// Decode a single `VARCHAR[]` column of an observed-delta result batch
+/// into owned strings, skipping a null list entry or a non-string-array
+/// column shape (defensive — the DDL guarantees `VARCHAR[] NOT NULL`, but
+/// this never panics on an unexpected shape).
+fn decode_string_list_column(batch: &arrow::array::RecordBatch, column: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(col) = batch.column_by_name(column) else {
+        return out;
+    };
+    let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
+        return out;
+    };
+    for i in 0..list.len() {
+        if list.is_null(i) {
+            continue;
+        }
+        let values = list.value(i);
+        let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
+            continue;
+        };
+        for j in 0..strings.len() {
+            if !strings.is_null(j) {
+                out.push(strings.value(j).to_string());
+            }
+        }
+    }
+    out
+}
+
+/// Read the exact observed delta (both `changed_keys` and `partitions`) an
+/// upstream driving model edge recorded for `[window_start, window_end)` —
+/// the single decode site [`read_observed_delta_changed_keys`] and
+/// [`crate::propagation::load_observed_delta_lookup`] both re-express
+/// themselves over. `None` = no row was ever recorded for this window (the
+/// widen-never-narrow fallback trigger); `Some` — even with both vectors
+/// empty — means a row exists (§"Empty and absent are distinct").
+///
+/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
+/// this module: a missing delta on the read side is always a legal
+/// fallback trigger, so a non-DuckDB backend reads back `None` rather than
+/// erroring.
+pub async fn read_observed_delta(
+    backend: &dyn Backend,
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> std::result::Result<Option<ddl_duckdb::ObservedDelta>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Ok(None);
     }
@@ -2793,30 +2848,16 @@ pub async fn read_observed_delta_changed_keys(
         return Ok(None);
     }
 
-    let mut keys = Vec::new();
+    let mut changed_keys = Vec::new();
+    let mut partitions = Vec::new();
     for batch in &batches {
-        let Some(col) = batch.column_by_name("changed_keys") else {
-            continue;
-        };
-        let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
-            continue;
-        };
-        for i in 0..list.len() {
-            if list.is_null(i) {
-                continue;
-            }
-            let values = list.value(i);
-            let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
-                continue;
-            };
-            for j in 0..strings.len() {
-                if !strings.is_null(j) {
-                    keys.push(strings.value(j).to_string());
-                }
-            }
-        }
+        changed_keys.extend(decode_string_list_column(batch, "changed_keys"));
+        partitions.extend(decode_string_list_column(batch, "partitions"));
     }
-    Ok(Some(keys))
+    Ok(Some(ddl_duckdb::ObservedDelta {
+        changed_keys,
+        partitions,
+    }))
 }
 
 // ── F3: fingerprint sidecar — synthesized external change feed ─────────

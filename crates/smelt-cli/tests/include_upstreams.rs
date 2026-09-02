@@ -408,3 +408,97 @@ fn full_refresh_target_with_no_inbound_edge_still_builds() {
          source, since `flat` has no incremental config to bound it)"
     );
 }
+
+/// Extract just the resolved-slices report block ("Required upstream
+/// slices ..." through the "Build order: ..." line) from `--include-
+/// upstreams`'s printed stdout, for a byte-identical comparison that
+/// ignores unrelated per-model execution logging.
+fn extract_report(stdout: &str) -> Vec<&str> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.starts_with("Required upstream slices"))
+        .expect("report must start with 'Required upstream slices'");
+    let end = lines
+        .iter()
+        .position(|l| l.starts_with("Build order:"))
+        .expect("report must contain a 'Build order:' line");
+    lines[start..=end].to_vec()
+}
+
+/// Phase 15 (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 15-plan.md`): backward resolution (`smelt build --include-upstreams`) is
+/// a stated non-goal for observed-delta consumption
+/// (`docs/specs/incremental_models.md` §"Backward resolution — what must
+/// exist") — `resolve_build_plan` never consults `_smelt_observed_delta` at
+/// all, so its required-slices report and build order are byte-identical
+/// whether or not a (even present-and-empty) row is recorded for a model in
+/// the resolved ancestor sub-DAG. Pinned here so a later phase cannot
+/// silently start narrowing backward resolution on delta evidence.
+#[test]
+fn include_upstreams_ignores_a_recorded_empty_observed_delta() {
+    let tmp = TempDir::new().unwrap();
+
+    // Baseline: no `_smelt_observed_delta` table/row at all.
+    let baseline_dir = tmp.path().join("baseline").join("proj");
+    stage_chain_workspace(&baseline_dir);
+    let baseline_db = baseline_dir.join("target/dev.duckdb");
+    seed_bronze(&baseline_db);
+    let baseline_out = run_smelt(
+        &baseline_dir,
+        &[
+            "gold",
+            "--period",
+            "2026-01-05..2026-01-06",
+            "--include-upstreams",
+        ],
+    );
+    assert!(
+        baseline_out.status.success(),
+        "baseline --include-upstreams build must succeed: stderr={}",
+        String::from_utf8_lossy(&baseline_out.stderr)
+    );
+
+    // Same fixture, but with a present-and-empty observed-delta row
+    // recorded for `silver` (an ancestor in the resolved sub-DAG) BEFORE
+    // the build runs.
+    let seeded_dir = tmp.path().join("seeded").join("proj");
+    stage_chain_workspace(&seeded_dir);
+    let seeded_db = seeded_dir.join("target/dev.duckdb");
+    seed_bronze(&seeded_db);
+    {
+        let conn = Connection::open(&seeded_db).expect("open duckdb");
+        let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+        conn.execute_batch(&ddl)
+            .expect("create observed-delta table");
+        conn.execute_batch(
+            "INSERT INTO main._smelt_observed_delta \
+             (model_name, window_start, window_end, changed_keys, partitions) \
+             VALUES ('silver', '2026-01-04', '2026-01-06', []::VARCHAR[], []::VARCHAR[])",
+        )
+        .expect("seed a present-and-empty observed-delta row");
+    }
+    let seeded_out = run_smelt(
+        &seeded_dir,
+        &[
+            "gold",
+            "--period",
+            "2026-01-05..2026-01-06",
+            "--include-upstreams",
+        ],
+    );
+    assert!(
+        seeded_out.status.success(),
+        "seeded --include-upstreams build must succeed: stderr={}",
+        String::from_utf8_lossy(&seeded_out.stderr)
+    );
+
+    let baseline_stdout = String::from_utf8_lossy(&baseline_out.stdout);
+    let seeded_stdout = String::from_utf8_lossy(&seeded_out.stdout);
+    assert_eq!(
+        extract_report(&baseline_stdout),
+        extract_report(&seeded_stdout),
+        "a recorded observed delta (even present-and-empty) must never change backward \
+         resolution's required-slices report or build order"
+    );
+}

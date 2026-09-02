@@ -8,13 +8,18 @@
 //! sized, over real fixture models on disk — never a hand-typed clamp
 //! number.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use smelt_backend::Backend;
+use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+
+use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, plan_since_upstream_with_observed_deltas,
-    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    build_forward_graph, load_observed_delta_lookup, plan_since_upstream,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1370,4 +1375,183 @@ fn bare_keyed_origin_refusal_narrows_to_general() {
     let msg = refused.to_string();
     assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
     assert!(msg.contains("general_agg"), "{msg}");
+}
+
+/// Phase 15 (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 15-plan.md`): [`load_observed_delta_lookup`] builds the read-side lookup
+/// [`plan_since_upstream_with_observed_deltas`] consults, keyed exactly
+/// `(model, iso(start), iso(end))`, for a model-address delta origin — and
+/// skips a raw-source delta origin entirely (never a valid observed-delta
+/// key).
+#[tokio::test]
+async fn load_observed_delta_lookup_keys_by_model_and_window() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let model_names: BTreeSet<String> = models.iter().map(|m| m.canonical_path()).collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let window_start = smelt_logical::maintenance::propagate::ordinal_to_iso(window.start);
+    let window_end = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ddl).await.expect("create delta table");
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "user_daily_spend",
+        &window_start,
+        &window_end,
+        "SELECT 'u1'::VARCHAR AS delta_key, NULL::VARCHAR AS delta_partition",
+    );
+    backend
+        .execute_sql(&upsert)
+        .await
+        .expect("record a delta for user_daily_spend");
+
+    let deltas = vec![
+        SourceDelta {
+            source: "user_daily_spend".to_string(),
+            landed: window,
+        },
+        SourceDelta {
+            source: "bronze".to_string(),
+            landed: window,
+        },
+    ];
+
+    let lookup = load_observed_delta_lookup(&backend, "main", &deltas, &model_names)
+        .await
+        .expect("load succeeds");
+
+    assert_eq!(
+        lookup.len(),
+        1,
+        "only the model-address delta origin is looked up, the raw source is skipped: \
+         {lookup:?}"
+    );
+    let key = (
+        "user_daily_spend".to_string(),
+        window_start.clone(),
+        window_end.clone(),
+    );
+    assert_eq!(
+        lookup.get(&key).map(|od| od.changed_keys.clone()),
+        Some(vec!["u1".to_string()]),
+        "the lookup must be keyed exactly (model, iso(start), iso(end)): {lookup:?}"
+    );
+}
+
+/// A fake [`Backend`] reporting a non-DuckDB dialect — every method beyond
+/// `dialect()` panics if called, since [`load_observed_delta_lookup`] must
+/// never reach a backend call for a non-DuckDB target (the read-side
+/// fallback is unconditional, `read_observed_delta`'s own dialect guard).
+struct NonDuckDbBackend;
+
+#[async_trait]
+impl Backend for NonDuckDbBackend {
+    async fn execute_sql(&self, _sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        unimplemented!("must not be called for a non-DuckDB target")
+    }
+    async fn create_table_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn create_view_as(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_table_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn drop_view_if_exists(&self, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn get_row_count(&self, _: &str, _: &str) -> Result<usize, BackendError> {
+        unimplemented!()
+    }
+    async fn get_preview(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<RecordBatch>, BackendError> {
+        unimplemented!()
+    }
+    async fn table_exists(&self, _: &str, _: &str) -> Result<bool, BackendError> {
+        unimplemented!()
+    }
+    async fn ensure_schema(&self, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    fn dialect(&self) -> SqlDialect {
+        SqlDialect::SparkSQL
+    }
+    fn capabilities(&self) -> BackendCapabilities {
+        unimplemented!()
+    }
+    async fn load_table(
+        &self,
+        _: &str,
+        _: &str,
+        _: SchemaRef,
+        _: Vec<RecordBatch>,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn delete_partitions(
+        &self,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_into_from_query(&self, _: &str, _: &str, _: &str) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+    async fn insert_overwrite(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), BackendError> {
+        unimplemented!()
+    }
+}
+
+/// [`load_observed_delta_lookup`] on a non-DuckDB target reads back an
+/// EMPTY lookup — never an error — matching every other observed-delta
+/// read's fallback posture.
+#[tokio::test]
+async fn load_observed_delta_lookup_is_empty_on_a_non_duckdb_target() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let model_names: BTreeSet<String> = models.iter().map(|m| m.canonical_path()).collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+
+    let backend = NonDuckDbBackend;
+    let lookup = load_observed_delta_lookup(&backend, "main", &deltas, &model_names)
+        .await
+        .expect("a non-DuckDB target must not error");
+    assert!(
+        lookup.is_empty(),
+        "a non-DuckDB target's lookup must be empty, not an error: {lookup:?}"
+    );
 }

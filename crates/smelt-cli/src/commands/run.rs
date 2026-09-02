@@ -7,6 +7,7 @@ use smelt_cli::{
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_runtime::execute::BackendFactory;
 use smelt_runtime::types::ExecuteRequest;
 use smelt_state::generate_run_id;
 use std::sync::Arc;
@@ -372,9 +373,47 @@ async fn run_since_upstream(
         .execution_order()
         .with_context(|| "Failed to compute execution order")?;
 
-    let plan =
-        smelt_runtime::propagation::plan_since_upstream(models, &source_infos, &order, &deltas)
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Read the recorded observed-delta table live before planning (spec
+    // §"Observed deltas on model edges"): a model-address delta origin
+    // narrows to its recorded partitions rather than always falling back to
+    // the declared `--landed` window. The backend built here is used only
+    // for this read — the run loop below builds its own via
+    // `backend_factory` exactly as before this phase. A backend that
+    // cannot be created here must fail loud, not silently fall back to an
+    // empty lookup, since the run itself needs that same backend moments
+    // later.
+    let lookup_backend_factory = CliBackendFactory {
+        database_override: args.database.clone(),
+    };
+    let target_config = &config.targets[&args.target];
+    let lookup_backend = lookup_backend_factory
+        .create(&args.target, target_config, project_dir)
+        .await
+        .with_context(|| "Failed to create backend for observed-delta lookup")?;
+    let model_names: std::collections::BTreeSet<String> =
+        models.iter().map(|m| m.canonical_path()).collect();
+    let observed = smelt_runtime::propagation::load_observed_delta_lookup(
+        lookup_backend.as_ref(),
+        &target_config.schema,
+        &deltas,
+        &model_names,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    // Drop the lookup connection before the run loop opens its own backend
+    // connection to the same database file — DuckDB's embedded engine does
+    // not support two independent live connections to one file from the
+    // same process.
+    drop(lookup_backend);
+
+    let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+        models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {

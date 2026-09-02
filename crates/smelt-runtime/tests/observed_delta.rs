@@ -20,7 +20,9 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::analysis::walk::{ColumnComparability, Comparability};
 use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
 use smelt_logical::maintenance::{RowIdentity, RowIdentityVerdict};
-use smelt_runtime::maintenance_driver::execute_column_scoped_merge_full;
+use smelt_runtime::maintenance_driver::{
+    execute_column_scoped_merge_full, read_observed_delta, read_observed_delta_changed_keys,
+};
 
 /// A retry policy that never retries — these tests exercise the
 /// column-scoped MERGE write directly against a real DuckDB backend,
@@ -495,5 +497,149 @@ async fn partitioned_window_records_touched_partitions() {
         sorted_partitions,
         vec!["east".to_string(), "west".to_string()],
         "recorded partitions must hold exactly the touched partitions, got: {partitions:?}"
+    );
+}
+
+/// Phase 15 (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 15-plan.md`): [`read_observed_delta`] decodes BOTH `VARCHAR[]` columns
+/// (`changed_keys` and `partitions`) from a real recorded row, not just the
+/// `changed_keys` half `read_observed_delta_changed_keys` already covered.
+#[tokio::test]
+async fn read_observed_delta_decodes_both_columns() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, region VARCHAR, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql(
+            "CREATE TABLE main.sources_users (user_id BIGINT, region VARCHAR, tier VARCHAR)",
+        )
+        .await
+        .unwrap();
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES (1, 'east', 'bronze'), (2, 'west', 'bronze')",
+        )
+        .await
+        .unwrap();
+    backend
+        .execute_sql(
+            "INSERT INTO main.sources_users VALUES (1, 'east', 'gold'), (2, 'west', 'bronze')",
+        )
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["tier"]);
+    let dimension_batch_sql = "SELECT u.user_id, u.region, u.tier FROM main.sources_users u";
+    let w = partitioned_window();
+
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &[],
+        &suppression,
+        &w,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("suppressed merge succeeds");
+
+    let decoded = read_observed_delta(&backend, "main", "dim_users", &w.start, &w.end)
+        .await
+        .expect("read succeeds")
+        .expect("a row was recorded");
+    assert_eq!(
+        decoded.changed_keys,
+        vec!["1".to_string()],
+        "changed_keys must decode to exactly the one changed row"
+    );
+    assert_eq!(
+        decoded.partitions,
+        vec!["east".to_string()],
+        "partitions must decode to exactly the touched partition"
+    );
+
+    // No row for a window that was never recorded.
+    assert!(
+        read_observed_delta(&backend, "main", "dim_users", "1999-01-01", "1999-01-02")
+            .await
+            .expect("read succeeds")
+            .is_none(),
+        "an unrecorded window must decode to None, not a default-empty row"
+    );
+}
+
+/// Regression on the [`read_observed_delta`] refactor: the pre-existing
+/// `read_observed_delta_changed_keys` reader, now re-expressed over the
+/// shared decoder, must still return `Some(&[])` (present-and-empty) vs
+/// `None` (absent) distinctly.
+#[tokio::test]
+async fn read_observed_delta_changed_keys_shares_the_decoder() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["tier"]);
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let w = window();
+
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &[],
+        &suppression,
+        &w,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("suppressed merge succeeds (fully suppressed — nothing changed)");
+
+    let keys = read_observed_delta_changed_keys(&backend, "main", "dim_users", &w.start, &w.end)
+        .await
+        .expect("read succeeds");
+    assert_eq!(
+        keys,
+        Some(vec![]),
+        "a fully-suppressed run must read back Some(&[]) — present, not absent"
+    );
+
+    let absent =
+        read_observed_delta_changed_keys(&backend, "main", "dim_users", "1999-01-01", "1999-01-02")
+            .await
+            .expect("read succeeds");
+    assert_eq!(
+        absent, None,
+        "a never-recorded window must read back None, not present-and-empty"
     );
 }

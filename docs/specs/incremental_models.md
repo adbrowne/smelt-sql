@@ -1444,6 +1444,15 @@ is the whole table. The two directions are **one-sided inverses at best** ("adjo
 inverse"): `forward(backward(P)) ⊇ P` — resolving what a period needs and propagating it
 forward may over-cover the period, never under-cover it.
 
+Backward resolution does not consult a recorded observed delta (§"Observed deltas on model
+edges"): the resolved slices state what must **exist** over the requested period, and a change
+record cannot soundly narrow an existence question — a present-and-empty record means a past
+run changed nothing, not that the region is current with respect to inputs that landed since.
+Currency is the reconciliation ledger's question (§"The frontier record (reconciliation
+ledger)", `smelt run --auto`), not the observed-delta record's; narrowing on delta evidence
+alone would under-cover the resolved period, breaking `forward(backward(P)) ⊇ P` above. This
+is a deliberate non-goal, not unbuilt work.
+
 **Observed deltas on model edges.** A model edge's propagated delta follows the same
 landed-delta refinement as a source edge (`sources.md` §"Landed-delta (derived, recorded)"):
 where a run recorded an **observed output delta** — the changed-row set a conditional write
@@ -1462,7 +1471,13 @@ the run executed and changed nothing (a real, propagatable fact); an absent reco
 delta was recorded, and a consumer must not conflate the two. This composes with the derived
 settle bound (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
 output)"): a stable upstream chain degenerates to empty-delta no-op propagation with a
-provable horizon behind it.
+provable horizon behind it. `smelt run --since-upstream` reads the recorded delta live for a
+model-address delta origin, at the exact `(model, window_start, window_end)` key the write side
+records under: absent, it falls back to the declared `--landed` window unchanged
+(widen-never-narrow); present and empty, it propagates nothing; present and non-empty, it
+projects the recorded partitions through the model's own established locality route. The read
+is DuckDB-scoped today, matching the write side — a target with no observed-delta storage reads
+back "absent" and falls back, never errors.
 
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic
 edge set; a **self-referential** model (a table-graph cycle that is a DAG only when
@@ -1873,10 +1888,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
   identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
   derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).
-- **Observed-delta consumption is partial**: `--since-upstream` doesn't read the recorded
-  delta table live; backward resolution consumes none; the keyed-fold and staged-candidate
-  write families record nothing; the settle-bound × observed-delta composition has no live
-  "delta empty" leg. Tracked:
+- **Observed-delta consumption is partial**: the keyed-fold and staged-candidate write
+  families record nothing; the settle-bound × observed-delta composition has no live "delta
+  empty" leg. (`--since-upstream`'s read side is live, §"Observed deltas on model edges";
+  backward resolution's non-consumption is a stated non-goal, §"Backward resolution — what
+  must exist".) Tracked:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **No execution technique keys off a maintained-model creation cell** — the propagated
   region materializes via the ordinary run loop, not a per-cell technique. Tracked:

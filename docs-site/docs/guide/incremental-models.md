@@ -886,6 +886,8 @@ Chain a few of these stages together and the payoff compounds: a stable upstream
 
 Recording and projection are both static facts about the derived plan — `smelt explain` never opens a backend connection, so it reports what a cell's technique *would* record and how its route *would* project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is `smelt run --since-upstream`'s job, not `explain`'s.
 
+**What a recorded delta narrows.** `smelt run --since-upstream --source <model-address> --landed <a>..<b>` reads the recorded delta for that exact `(model, window)` before propagating: absent, it falls back to the declared `--landed` window unchanged; present-and-empty, it propagates nothing downstream; present-and-non-empty, it narrows to the recorded partitions (projected per the routes above). This read is DuckDB-scoped today, matching the write side — a non-DuckDB target reads back "absent" and falls back rather than erroring. `smelt build <model> --period <a>..<b> --include-upstreams` (backward resolution) never consults a recorded delta at all — it answers "what must exist over this period", a question a change record can't soundly narrow.
+
 ## Repairing only the affected groups
 
 A non-invertible combiner (`MAX`, `MAX_BY`, and similar overwrite-family folds) can't undo a retracted contribution — when its input changes underneath it, the plan normally refuses to fold at all and falls back to a full refresh. The repair family narrows that refusal for the common case where the change is a **retraction or mutation over a mutable dimension**: if the affected output keys are provably finite, smelt recomputes only those groups from their bounded input slice instead of rebuilding the whole table.
