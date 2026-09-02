@@ -1730,6 +1730,53 @@ pub fn emit_append_only_baseline_snapshot(
     MaintenanceStatement::new(sql)
 }
 
+/// The whole-source (unpartitioned) counterpart of
+/// [`emit_append_only_baseline_snapshot`]: a source's CURRENT row count and
+/// order-independent content fingerprint over `digest_columns`, with no
+/// `GROUP BY` and no partition column — the mutation-happened discrimination
+/// baseline an `UpstreamMutation` cell's dispatch decision compares against
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches").
+///
+/// The fingerprint construction is identical to
+/// [`emit_append_only_baseline_snapshot`]'s own (same per-row hash via
+/// [`row_fingerprint_expr`], same sorted-`STRING_AGG`-then-`sha256`
+/// aggregate, same per-dialect forms) — this emitter differs only in scope
+/// (the whole source, not one partition at a time).
+///
+/// `source_table` is already fully qualified (`schema.table`).
+///
+/// # Panics
+/// Panics if `digest_columns` is empty — nothing to fingerprint is not a
+/// degenerate probe.
+pub fn emit_source_mutation_fingerprint(
+    source_table: &str,
+    digest_columns: &[String],
+    dialect: MaintenanceDialect,
+) -> MaintenanceStatement {
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_source_mutation_fingerprint requires a non-empty digest column set for \
+         {source_table}"
+    );
+    let row_hash = row_fingerprint_expr(digest_columns, dialect);
+    let agg_fingerprint = match dialect {
+        MaintenanceDialect::DuckDb => {
+            format!("sha256(STRING_AGG({row_hash}, '' ORDER BY {row_hash}))")
+        }
+        MaintenanceDialect::Spark => {
+            format!("sha256(CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash}))))")
+        }
+        MaintenanceDialect::BigQuery => {
+            format!("TO_HEX(SHA256(STRING_AGG({row_hash}, '' ORDER BY {row_hash})))")
+        }
+    };
+    let sql = format!(
+        "SELECT COUNT(*) AS current_count, {agg_fingerprint} AS current_fingerprint \
+         FROM {source_table}"
+    );
+    MaintenanceStatement::new(sql)
+}
+
 /// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
 /// (`maintenance_driver::run_windowed_keyed_maintenance`'s create arm): the
 /// target table does not exist yet, so the first step's delta becomes the

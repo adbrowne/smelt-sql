@@ -10,6 +10,7 @@ pub mod migration_approvals;
 pub mod reconciliation;
 pub mod schema_tracking;
 pub mod snapshot_store;
+pub mod source_mutations;
 pub mod source_postures;
 
 use chrono::{DateTime, Utc};

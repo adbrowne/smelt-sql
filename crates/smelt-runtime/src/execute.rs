@@ -2056,10 +2056,12 @@ pub async fn execute_project(
             // corrupted stored state. It is still ordered after those two
             // in the ladder in the sense that matters — a source they
             // already claim carries an `UpstreamMutation` cell, never a
-            // repair cell (repair is only derived for a CLOCKED mutable
-            // source, and `derive_model_maintenance_plan` derives an
-            // `UpstreamMutation` trigger only for an UNCLOCKED one), so the
-            // three can never contend for the same source.
+            // repair cell: `derive_mutation` narrows a source already
+            // covered by a `Trigger::NewData`/`Technique::PerGroupRecompute`
+            // repair cell out of the wider `UpstreamMutation` admission rule
+            // (`derive_triggers`'s own doc comment — the clock is NOT part
+            // of that rule since phase 19), so the two can never both be
+            // derived for the same source in the first place.
             let per_group_recompute_cell = match plan.model_file.metadata.as_deref() {
                 Some(metadata) => {
                     crate::maintenance_driver::resolve_live_per_group_recompute_cell(
@@ -2515,6 +2517,33 @@ pub async fn execute_project(
             let mut used_column_scoped_merge = false;
             if let Some((source, cell, suppression)) = column_scoped_cell.as_ref() {
                 if table_exists_before_run {
+                    // Mutation-happened discrimination
+                    // (`docs/specs/incremental_models.md` §"When a mutation
+                    // cell dispatches"): before dispatching the technique
+                    // this live `UpstreamMutation` cell licenses, compare
+                    // `source`'s current whole-source fingerprint against
+                    // its recorded baseline. `None` here (no declared
+                    // columns for the source) is treated the same as
+                    // `Dispatch` — nothing to fingerprint means no evidence
+                    // to skip on, same fail-open-to-dispatch posture the
+                    // spec's "no recorded baseline at all" clause takes.
+                    let mutation_gate =
+                        resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?;
+                    let mutation_should_dispatch = !matches!(
+                        mutation_gate.as_ref().map(|(v, _)| v),
+                        Some(crate::mutation_probe::MutationVerdict::NoOp)
+                    );
+                    if mutation_should_dispatch {
                     // The mutated dimension's own declared `unique_key`
                     // (`sources.md` §"Row identity") — same lookup the
                     // non-keyed incremental branch performs, needed only for
@@ -2624,6 +2653,14 @@ pub async fn execute_project(
                         };
                         used_column_scoped_merge = true;
                         total_rows = merge_result.row_count;
+                        record_upstream_mutation_baseline(
+                            mutation_gate,
+                            source,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await;
+                    }
                     }
                 }
             }
@@ -2641,10 +2678,26 @@ pub async fn execute_project(
             // SAME derived plan), so this never double-dispatches a source
             // `column_scoped_cell` already handled.
             let mut used_membership_recompute = false;
-            if let Some((_source, cell, _group_columns, write)) =
+            if let Some((source, cell, _group_columns, write)) =
                 membership_recompute_cell.as_ref()
             {
                 if table_exists_before_run && !used_column_scoped_merge {
+                    let mutation_gate = resolve_upstream_mutation_gate(
+                        backend,
+                        &plan.name,
+                        source_infos,
+                        source,
+                        model_target,
+                        schema,
+                        file_store,
+                        state_io_lock,
+                    )
+                    .await?;
+                    let mutation_should_dispatch = !matches!(
+                        mutation_gate.as_ref().map(|(v, _)| v),
+                        Some(crate::mutation_probe::MutationVerdict::NoOp)
+                    );
+                    if mutation_should_dispatch {
                     let smelt_logical::maintenance::RowIdentity::Key(key) =
                         &cell.row_identity.identity
                     else {
@@ -2732,6 +2785,14 @@ pub async fn execute_project(
                     };
                     used_membership_recompute = true;
                     total_rows = row_count;
+                    record_upstream_mutation_baseline(
+                        mutation_gate,
+                        source,
+                        file_store,
+                        state_io_lock,
+                    )
+                    .await;
+                    }
                 }
             }
             if !used_column_scoped_merge && !used_membership_recompute {
@@ -3101,6 +3162,40 @@ pub async fn execute_project(
                         }
                         None => None,
                     };
+
+                // Mutation-happened discrimination
+                // (`docs/specs/incremental_models.md` §"When a mutation
+                // cell dispatches"): resolved ONCE for the whole run
+                // (matching `column_merge_dispatch`'s own once-per-run
+                // decision above) — the source's fingerprint does not
+                // change across this run's own batches. A `NoOp` verdict
+                // overrides `column_merge_dispatch` to `None`, so every
+                // batch below falls through to its ordinary DELETE+INSERT
+                // path exactly as if no live cell had resolved.
+                let mutation_gate = match column_scoped_cell.as_ref() {
+                    Some((source, _cell, _suppression)) => {
+                        resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?
+                    }
+                    None => None,
+                };
+                let column_merge_dispatch = if matches!(
+                    mutation_gate.as_ref().map(|(v, _)| v),
+                    Some(crate::mutation_probe::MutationVerdict::NoOp)
+                ) {
+                    None
+                } else {
+                    column_merge_dispatch
+                };
 
                 // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
                 // §"Upstream model edges") has no run-window axis of its own —
@@ -3765,6 +3860,24 @@ pub async fn execute_project(
                         exec_result.row_count,
                         batch_duration,
                     );
+                }
+
+                // Recorded once for the whole run — the observed fingerprint
+                // `mutation_gate` carries was itself computed once, before
+                // the batch loop, and every batch that dispatched the merge
+                // did so against that SAME observed state
+                // (`docs/specs/incremental_models.md` §"When a mutation
+                // cell dispatches").
+                if used_column_scoped_merge {
+                    if let Some((source, _cell, _suppression)) = column_scoped_cell.as_ref() {
+                        record_upstream_mutation_baseline(
+                            mutation_gate,
+                            source,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await;
+                    }
                 }
 
                 // Manifest entry for the model
@@ -5034,6 +5147,89 @@ struct KeyAddressedEdgeDispatch {
 /// before_run` must be captured by the caller BEFORE any write this run
 /// performs, since there is nothing to repair yet and the fold/batch loop's
 /// own create path is what materializes the table.
+/// Mutation-happened discrimination
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches"):
+/// resolve `source`'s `SourceInfo` (same bare-address lookup every
+/// `UpstreamMutation` dispatch site already performs), and — only if it
+/// declares digest columns — probe its current whole-source fingerprint
+/// against the recorded baseline. Returns `None` when the source has no
+/// declared columns to fingerprint (nothing to compare against, so the
+/// caller treats it the same as `Dispatch`) or is not found in
+/// `source_infos` at all.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_upstream_mutation_gate(
+    backend: &dyn Backend,
+    model: &str,
+    source_infos: &[smelt_core::sources::SourceInfo],
+    source: &str,
+    model_target: &str,
+    schema: &str,
+    file_store: &FileStore,
+    state_io_lock: &tokio::sync::Mutex<()>,
+) -> Result<
+    Option<(
+        crate::mutation_probe::MutationVerdict,
+        smelt_state::source_mutations::SourceMutationBaseline,
+    )>,
+> {
+    let Some(info) = source_infos.iter().find(|info| {
+        let segs = &info.address_segments;
+        let bare = match segs.split_first() {
+            Some((first, rest)) if first == "sources" => rest.join("."),
+            _ => segs.join("."),
+        };
+        bare == source
+    }) else {
+        return Ok(None);
+    };
+    if info.columns.is_empty() {
+        return Ok(None);
+    }
+    let digest_columns: Vec<String> = info.columns.iter().map(|c| c.name.clone()).collect();
+    let source_table = info.db_name_for_target(model_target, schema);
+    let _io_guard = state_io_lock.lock().await;
+    let mutation_baselines = file_store
+        .load_source_mutations()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    let (verdict, refreshed) = crate::mutation_probe::gate_upstream_mutation_dispatch(
+        backend,
+        model,
+        source,
+        &source_table,
+        &digest_columns,
+        smelt_backend::maintenance_dialect(backend.dialect()),
+        mutation_baselines.get(source),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(Some((verdict, refreshed)))
+}
+
+/// Record the refreshed baseline `resolve_upstream_mutation_gate` returned —
+/// called only after the licensed technique's write actually succeeded
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches":
+/// "a failed run cannot suppress the next run's cell"). A `None` gate or a
+/// `NoOp` verdict records nothing — the recorded baseline changes only on a
+/// genuine dispatch.
+async fn record_upstream_mutation_baseline(
+    mutation_gate: Option<(
+        crate::mutation_probe::MutationVerdict,
+        smelt_state::source_mutations::SourceMutationBaseline,
+    )>,
+    source: &str,
+    file_store: &FileStore,
+    state_io_lock: &tokio::sync::Mutex<()>,
+) {
+    let Some((crate::mutation_probe::MutationVerdict::Dispatch, refreshed)) = mutation_gate else {
+        return;
+    };
+    let _io_guard = state_io_lock.lock().await;
+    if let Ok(mut mutation_baselines) = file_store.load_source_mutations() {
+        mutation_baselines.record(source, refreshed);
+        let _ = file_store.save_source_mutations(&mutation_baselines);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn resolve_and_dispatch_key_addressed_edge_cell(
     backend: &dyn Backend,

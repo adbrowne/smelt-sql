@@ -972,6 +972,18 @@ time gate. A clocked mutable source whose scan cannot be clamped surfaces the or
 `MaintenanceScanUnbounded` refusal — escapable by `allow_full_scan` / `scan_bounds.on_violation:
 warn` — the same loud path an unclocked one already takes, never a silently-dropped cell.
 
+**When a mutation cell dispatches.** An `UpstreamMutation` cell that is otherwise live does not
+unconditionally dispatch on every run: a run compares the source's recorded content fingerprint
+(row count plus an order-independent row digest over the source's digest columns) against the
+source's current fingerprint. Equal — the same row count, the same digest-column set, and the
+same content digest — means nothing changed since the last dispatch, so the cell is recorded as a
+no-op for this run and executes no statements. Anything else (a differing digest, a differing row
+count, a changed digest-column set, or no recorded baseline at all) means the cell dispatches as
+above, and the observed fingerprint is re-recorded as the new baseline. Recording happens only on
+a run that actually dispatched — the same discipline the append-only posture baseline follows
+(§"Probe obligation" in `model_properties.md`) — so a failed run cannot suppress the next run's
+cell.
+
 **Interchangeability and choice.** Two techniques serve one cell interchangeably iff, at a
 fixed `S`, they produce identical state on the columns deciding which rows exist — the
 `S`-indexed refinement of the equivalence invariant, `S` a **per-input vector** once the plan
@@ -1933,11 +1945,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   `write: diff_patch` pin there still maps to `backend_default` (no `diff_patch` lowering for
   this trigger) rather than the `execute_diff_patch` path — narrower than before this phase, not
   closed. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
-- **Plan-consumer gaps**: dispatch cannot distinguish "a mutation genuinely happened" from
-  re-derivation for an `UpstreamMutation` cell — every run re-checks and, where live, re-applies
-  the cell rather than skipping a genuinely unchanged source. Refs:
-  `docs/plans/20260707-maintenance-plan-impl.md`,
-  `docs/outcomes/20260815-definition-delta-migrate/phases/20-plan.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.

@@ -2715,11 +2715,11 @@ const DIM_MUTATION_TEST_ID: i64 = 9001;
 ///    stale — the row must now disappear from the maintained output.
 ///
 /// Finally, one hand-built zero-change window (no new fact rows, no
-/// dimension mutation) closes the change-suppressed
-/// `WriteSuppression::Suppressed` arm's no-op path — including proving the
-/// NEW departed-key `DELETE` predicate (window 4 above) is itself a no-op
-/// once nothing has departed since: the maintained table's full contents
-/// are asserted byte-identical before and after.
+/// dimension mutation) proves mutation-happened discrimination
+/// (`docs/specs/incremental_models.md` §"When a mutation cell dispatches")
+/// skips the cell entirely once the dimension's fingerprint is unchanged
+/// since the prior run's recorded baseline: the maintained table's full
+/// contents are asserted byte-identical before and after.
 #[test]
 fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
     let n = keyed_enriched_case_count();
@@ -2768,12 +2768,30 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                         "case {i}: the creation run must not take the membership-recompute \
                          path — the target doesn't exist yet"
                     );
-                } else {
+                } else if w == 1 {
+                    // The first post-creation window has no recorded
+                    // mutation-fingerprint baseline yet for the dimension
+                    // (`docs/specs/incremental_models.md` §"When a mutation
+                    // cell dispatches"), so it always dispatches once —
+                    // regardless of whether the schedule's OWN fact-only
+                    // windows ever touch the dimension.
                     assert_eq!(
                         record.strategy, "delete_insert_suppressed",
                         "case {i}: window {w} must dispatch the keyed run loop through the \
                          staged-candidate membership-recompute technique once the target \
-                         exists"
+                         exists — no baseline is recorded yet"
+                    );
+                } else {
+                    // Every window in `schedule.0` only inserts fact rows —
+                    // it never mutates the dimension — so once a baseline
+                    // is recorded (window 1 above), mutation-happened
+                    // discrimination correctly finds nothing changed and
+                    // the cell is a no-op.
+                    assert_eq!(
+                        record.strategy, "cumulative_aggregate",
+                        "case {i}: window {w} must NOT dispatch the membership-recompute \
+                         technique — the dimension is unchanged since the last recorded \
+                         baseline"
                     );
                 }
 
@@ -2956,14 +2974,15 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
             }
 
             // Zero-change redelivery: a fresh, never-processed window with
-            // no new fact rows and no dimension mutation. The live
-            // `UpstreamMutation` cell still dispatches (known divergence —
-            // unconditional per-run dispatch, `incremental_models.md`
-            // §Known Divergences), but nothing has changed since window 4,
-            // so this exercises the change-suppressed arm's genuine no-op
-            // path — INCLUDING the new departed-key DELETE predicate, which
-            // must itself be a no-op now that nothing has departed since
-            // the last run.
+            // no new fact rows and no dimension mutation. Mutation-happened
+            // discrimination (`docs/specs/incremental_models.md` §"When a
+            // mutation cell dispatches") now recognizes the dimension's
+            // fingerprint is unchanged since window 4's recorded baseline,
+            // so the `UpstreamMutation` cell is a no-op this run and the
+            // run falls back to the ordinary cumulative-fold label — no
+            // staged-candidate `DELETE`+`INSERT` executes at all, which is
+            // strictly stronger than the change-suppressed arm's own
+            // zero-affected-row no-op path this window used to exercise.
             let (label, redelivery_start, redelivery_end) = run_dim_mutation_window("redelivery");
 
             let maintained_before = {
@@ -2989,9 +3008,10 @@ fn keyed_enriched_pool_upholds_equivalence_under_dim_mutation() {
                 .get(&recipe.model_name)
                 .unwrap_or_else(|| panic!("case {i}: model did not run on redelivery"));
             assert_eq!(
-                record.strategy, "delete_insert_suppressed",
-                "case {i}: the zero-change redelivery window must still dispatch the \
-                 staged-candidate membership-recompute technique"
+                record.strategy, "cumulative_aggregate",
+                "case {i}: the zero-change redelivery window must NOT dispatch the \
+                 staged-candidate membership-recompute technique — the dimension is unchanged \
+                 since the last recorded baseline"
             );
 
             let k = tracker.record_run(redelivery_start, redelivery_end, snapshot);
@@ -3517,9 +3537,16 @@ fn value_enriched_recipe_executes_column_scoped_merge() {
             .models
             .get(&recipe.model_name)
             .unwrap_or_else(|| panic!("{label}: model did not run"));
+        // Mutation-happened discrimination (`docs/specs/incremental_models.md`
+        // §"When a mutation cell dispatches"): the dimension's fingerprint is
+        // unchanged since the prior run's recorded baseline, so the
+        // column-scoped MERGE cell is a no-op this run — the run correctly
+        // falls back to the ordinary DELETE+INSERT path instead of
+        // re-dispatching a MERGE with nothing to change.
         assert_eq!(
-            record.strategy, "column_scoped_merge",
-            "{label}: expected the live column-scoped MERGE to dispatch, got {:?}",
+            record.strategy, "deleteinsert",
+            "{label}: an unchanged dimension's UpstreamMutation cell must be a no-op, not \
+             re-dispatch the column-scoped MERGE, got {:?}",
             record.strategy
         );
         let k = tracker.record_run(redelivery_start, redelivery_end, snapshot);

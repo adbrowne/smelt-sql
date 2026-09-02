@@ -319,7 +319,7 @@ open — not that the excluded bullets themselves are gone.
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | done |
 | 18 | Consume the declared guardrail/preference config: `scan_bounds.on_violation: warn` admits the plan and reports a Warning; the `prefer`/`technique` choice ladder is consulted by the ordinary region path (`resolve_incremental_strategy`); the absent-cost-model fallback preference order is stated in the spec | done |
 | 19 | Mutation-cell reachability: trigger derivation moves to a pure `smelt-logical` function and covers clocked explicitly-mutable sources plus aggregate-sensitive `AppendOnly` sources, so the horizon-clamped `PartitionLocal::Yes` corner is reachable from `examples/timeseries` through the production wrapper | done |
-| 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | planned |
+| 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | done |
 | 21 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
 | 22 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 23 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
@@ -330,6 +330,15 @@ open — not that the excluded bullets themselves are gone.
 | 28 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 20 — mutation-happened discrimination lands.** Closed the "Plan-consumer
+  gaps" bullet entirely: every live `UpstreamMutation` dispatch site (keyed column-scoped-merge,
+  keyed membership-recompute, non-keyed column-scoped-merge) now compares a recorded per-source
+  whole-source fingerprint against the source's current state before dispatching, recording a
+  no-op when unchanged. This closed a real, previously-undocumented-as-such behavior change in
+  several existing tests that had encoded the old "fires every run regardless" divergence as
+  their expected assertion (`technique_lowering.rs`, `maintenance_conformance/gate.rs`) — all
+  updated; see `phases/20-summary.md` for the full list.
 
 - **2026-09-03, phase-19 planning — table reshape.** Row 19 bundled three independent clauses of
   the same `incremental_models.md` "Plan-consumer gaps" bullet, two of which are plan-derivation

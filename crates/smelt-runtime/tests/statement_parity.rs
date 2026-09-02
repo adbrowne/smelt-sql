@@ -46,7 +46,7 @@ use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_column_scoped_merge, emit_create_table_as,
     emit_delete_insert, emit_diff_patch, emit_keyed_fold, emit_keyed_fold_suppressed,
-    emit_per_group_recompute, emit_recurrence_bound_probe,
+    emit_per_group_recompute, emit_recurrence_bound_probe, emit_source_mutation_fingerprint,
     emit_staged_candidate_conditional_recompute, MaintenanceDialect, Region, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
@@ -4350,5 +4350,83 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
         executed,
         vec![expected_probe_sql.clone()],
         "the dispatch site must execute exactly the emitted probe SQL, nothing more"
+    );
+}
+
+/// The mutation-happened discrimination gate
+/// (`smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch`) must
+/// execute SQL byte-identical to a direct `emit_source_mutation_fingerprint`
+/// call over the same inputs (`docs/specs/incremental_models.md` §"When a
+/// mutation cell dispatches") — the statement-emission single-owner rule
+/// (`CLAUDE.md` §"Maintenance-plan purity").
+#[tokio::test]
+async fn source_mutation_fingerprint_comes_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS raw;\n\
+             CREATE TABLE raw.dim_users (user_id INTEGER, status TEXT);\n\
+             INSERT INTO raw.dim_users VALUES (1, 'active'), (2, 'inactive');",
+        )
+        .expect("stage raw.dim_users");
+    }
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open backend");
+    let backend = RecordingBackend::new(inner);
+
+    let digest_columns = vec!["user_id".to_string(), "status".to_string()];
+    let expected_sql = emit_source_mutation_fingerprint(
+        "raw.dim_users",
+        &digest_columns,
+        MaintenanceDialect::DuckDb,
+    )
+    .sql;
+
+    let (verdict, refreshed) = smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch(
+        &backend,
+        "m",
+        "raw.dim_users",
+        "raw.dim_users",
+        &digest_columns,
+        MaintenanceDialect::DuckDb,
+        None,
+    )
+    .await
+    .expect("gate must succeed against a live backend");
+
+    assert_eq!(
+        verdict,
+        smelt_runtime::mutation_probe::MutationVerdict::Dispatch,
+        "no recorded baseline must always dispatch"
+    );
+    assert_eq!(refreshed.recorded_count, 2);
+    assert_eq!(refreshed.digest_columns, digest_columns);
+
+    let executed = backend.recorded_sql();
+    assert_eq!(
+        executed,
+        vec![expected_sql],
+        "the gate must execute exactly the emitted fingerprint SQL, nothing more"
+    );
+
+    // A second gate call against the SAME baseline (nothing changed) must
+    // observe the identical fingerprint and report NoOp.
+    let (verdict2, _refreshed2) = smelt_runtime::mutation_probe::gate_upstream_mutation_dispatch(
+        &backend,
+        "m",
+        "raw.dim_users",
+        "raw.dim_users",
+        &digest_columns,
+        MaintenanceDialect::DuckDb,
+        Some(&refreshed),
+    )
+    .await
+    .expect("gate must succeed against a live backend");
+    assert_eq!(
+        verdict2,
+        smelt_runtime::mutation_probe::MutationVerdict::NoOp
     );
 }
