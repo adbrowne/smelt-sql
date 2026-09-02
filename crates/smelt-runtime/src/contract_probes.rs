@@ -573,6 +573,28 @@ pub fn propagate_deferral_skip(
     skip
 }
 
+/// Advance every one of `addresses`' cell frontiers for `model_name` to
+/// `end`, and no sibling entry — the write-side counterpart of
+/// [`deferral_cell_decisions`]'s read, called once from the plain
+/// incremental fold's success path for each address
+/// `maintenance_driver::resolve_fold_deferral` resolved as covering the
+/// fold it just ran (`docs/outcomes/20260815-definition-delta-migrate/
+/// phases/14-plan.md`). `model_hash` mirrors `IntervalStore::get_or_create`'s
+/// own invalidation key — a definition change invalidates a model's cell
+/// frontiers exactly like it already invalidates `covered_intervals`.
+pub fn advance_cell_frontiers(
+    intervals: &mut IntervalStore,
+    model_name: &str,
+    model_hash: &str,
+    addresses: &[String],
+    end: &str,
+) {
+    let mi = intervals.get_or_create(model_name, model_hash);
+    for address in addresses {
+        mi.record_cell_frontier(address, end);
+    }
+}
+
 /// Whether `pending` (this model's `contract.deferral` pending window,
 /// already computed by [`deferral_decision`]) is subsumed by a run whose
 /// own write range is `[scheduled_start, scheduled_end]`, given whether a

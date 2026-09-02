@@ -313,7 +313,7 @@ open — not that the excluded bullets themselves are gone.
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | done |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | done |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | done |
-| 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | planned |
+| 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | done |
 | 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | planned |
 | 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | pending |
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | pending |
@@ -326,6 +326,16 @@ open — not that the excluded bullets themselves are gone.
 | 24 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–23 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-02, phase 14.** Per-cell `deferral` skip on the plain `Trigger::NewData` fold
+  requires FULL coverage: a skip fires only when every one of the fold's own column groups is
+  fully covered (union of matching declaring cells' columns) by cells that are ALL
+  skip-licensed. A run that actually folds (partial coverage, an unlicensed covering cell, or
+  measured lag past `D`) always advances every one of the model's own declaring cells'
+  frontiers together — never a partial advance — since the plain fold's write is whole-row.
+  "Fold groups" are the model's `derive_column_groups` output paired with the first
+  `Trigger::NewData` cell's source, mirroring `resolve_incremental_strategy`'s existing
+  single-creation-cell assumption.
 
 - **2026-09-02, phase-15 planning — table reshape.** Renumbered every lettered phase row to a
   plain integer (`13b` → 14, `20b` → 23, everything after shifted): the loop's own row scanner

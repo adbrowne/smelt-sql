@@ -592,6 +592,97 @@ pub fn resolve_incremental_strategy(
     }
 }
 
+/// Resolve the plain `Trigger::NewData` incremental fold's own per-cell
+/// `deferral` scheduling verdict (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/14-plan.md`) — the only trigger family where
+/// `contract.cells[].deferral` is validly declarable (`resolve_deferral`
+/// requires an interval-representable clock; every other live per-cell
+/// dispatch resolver serves an inadmissible trigger, see phase 12's
+/// decision log). Thin: derives the model's maintenance plan the same way
+/// [`resolve_incremental_strategy`] does, reads its own column groups (the
+/// fold's own groups — creation is whole-row, so a group here is exactly
+/// one payload column-group the model derives, never re-implemented here),
+/// and hands both that and the caller-resolved `cell_decisions` (already
+/// licensed via `contract_probes::deferral_cell_decisions`'s own lag
+/// comparison — this function makes no independent lag judgement) to
+/// `smelt_logical::contract::deferral::fold_deferral_verdict`, the
+/// single-owner coverage rule.
+///
+/// Returns `(Proceed, [])` whenever the model declares no cell-level
+/// `deferral` at all, or has no `Trigger::NewData` cell to serve — never a
+/// silent skip for an undeclared model.
+pub fn resolve_fold_deferral(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    cell_decisions: &[crate::contract_probes::CellDeferralDecision],
+) -> (
+    smelt_logical::contract::deferral::FoldDeferralVerdict,
+    Vec<String>,
+) {
+    use smelt_logical::contract::deferral::{
+        cell_address, fold_deferral_verdict, DeclaredFoldCell, FoldDeferralVerdict, RunLicense,
+    };
+
+    let no_deferral = (FoldDeferralVerdict::Proceed, Vec::new());
+
+    let Some(cells_cfg) = metadata.contract.as_ref().map(|c| c.cells.as_slice()) else {
+        return no_deferral;
+    };
+    let declared: Vec<DeclaredFoldCell> = cells_cfg
+        .iter()
+        .filter(|cell_cfg| cell_cfg.deferral.is_some())
+        .filter_map(|cell_cfg| {
+            let address = cell_address(&cell_cfg.columns, &cell_cfg.on);
+            let decision = cell_decisions.iter().find(|d| d.address == address)?;
+            Some(DeclaredFoldCell {
+                address,
+                columns: cell_cfg.columns.clone(),
+                on: cell_cfg.on.clone(),
+                skip_licensed: matches!(decision.license, RunLicense::Skip { .. }),
+            })
+        })
+        .collect();
+    if declared.is_empty() {
+        return no_deferral;
+    }
+
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        None,
+        &[],
+        &[],
+        &SourceReferentialIntegrity::new(),
+        None,
+    ) else {
+        return no_deferral;
+    };
+    let Some(creation_source) = result.plan.cells.iter().find_map(|c| match &c.trigger {
+        Trigger::NewData { source } => Some(source.clone()),
+        _ => None,
+    }) else {
+        return no_deferral;
+    };
+    let fold_groups: Vec<(Vec<String>, String)> = result
+        .column_groups
+        .iter()
+        .map(|g| (g.columns.clone(), creation_source.clone()))
+        .collect();
+
+    let verdict = fold_deferral_verdict(&declared, &fold_groups);
+    let addresses = match &verdict {
+        FoldDeferralVerdict::SkipFold { addresses } => addresses.clone(),
+        FoldDeferralVerdict::Proceed => Vec::new(),
+    };
+    (verdict, addresses)
+}
+
 /// Which physical technique actually executes for one plan cell, resolved
 /// from the derived [`MaintenancePlan`], the operator's optional hard pin
 /// (`maintenance.cells[].technique`), and whether the target backend can

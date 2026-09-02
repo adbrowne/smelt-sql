@@ -220,6 +220,81 @@ pub fn cell_address(columns: &[String], on: &str) -> String {
     format!("{}@{}", sorted.join(","), on)
 }
 
+/// One `contract.cells[].deferral` declaration paired with its licensing
+/// decision for this run — [`fold_deferral_verdict`]'s input, matched
+/// against the plain fold's own column groups. `skip_licensed` is the
+/// caller-resolved `RunLicense::Skip` verdict for this address (already
+/// computed elsewhere from the cell's own maintained/input frontiers, e.g.
+/// `smelt-runtime::contract_probes::deferral_cell_decisions`) — this module
+/// makes no independent lag comparison of its own, mirroring every other
+/// function in this file.
+#[derive(Debug, Clone)]
+pub struct DeclaredFoldCell {
+    pub address: String,
+    pub columns: Vec<String>,
+    pub on: String,
+    pub skip_licensed: bool,
+}
+
+/// The scheduling verdict `contract.cells[].deferral` licenses for the plain
+/// `Trigger::NewData` incremental fold (`incremental_models.md` §"The
+/// contract lattice", deferral paragraph): [`FoldDeferralVerdict::SkipFold`]
+/// only when EVERY one of `fold_groups` (the fold's own column groups, each
+/// `(columns, on)`) is fully covered — every member column named by some
+/// declaring cell sharing that group's `on` — by declaring cells that are
+/// ALL skip-licensed. A declaring cell addressing a strict subset of a
+/// fold group's columns still counts toward covering that group (coverage
+/// is the union of every matching cell's columns), but if the union still
+/// leaves a column unaddressed, or any matching cell is not itself
+/// skip-licensed, the whole fold falls through to
+/// [`FoldDeferralVerdict::Proceed`] — the plain fold's write is whole-row,
+/// so it cannot partially decline; skipping is a licensed relaxation, never
+/// a way to decline unlicensed work (mirrors [`run_license`]'s own
+/// "nothing to skip" fallthrough for `lag <= 0`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FoldDeferralVerdict {
+    Proceed,
+    SkipFold { addresses: Vec<String> },
+}
+
+/// The pure coverage/licensing fold behind [`FoldDeferralVerdict`] — see its
+/// doc comment for the rule. No declared cells, or no fold groups to serve,
+/// is always [`FoldDeferralVerdict::Proceed`] (nothing to license a skip
+/// against).
+pub fn fold_deferral_verdict(
+    declared: &[DeclaredFoldCell],
+    fold_groups: &[(Vec<String>, String)],
+) -> FoldDeferralVerdict {
+    if declared.is_empty() || fold_groups.is_empty() {
+        return FoldDeferralVerdict::Proceed;
+    }
+    let mut addresses: Vec<String> = Vec::new();
+    for (columns, source) in fold_groups {
+        let matching: Vec<&DeclaredFoldCell> = declared
+            .iter()
+            .filter(|c| &c.on == source && c.columns.iter().any(|col| columns.contains(col)))
+            .collect();
+        if matching.is_empty() {
+            return FoldDeferralVerdict::Proceed;
+        }
+        let covered: std::collections::HashSet<&str> = matching
+            .iter()
+            .flat_map(|c| c.columns.iter().map(String::as_str))
+            .collect();
+        let full_coverage = columns.iter().all(|col| covered.contains(col.as_str()));
+        if !full_coverage || !matching.iter().all(|c| c.skip_licensed) {
+            return FoldDeferralVerdict::Proceed;
+        }
+        for c in matching {
+            if !addresses.contains(&c.address) {
+                addresses.push(c.address.clone());
+            }
+        }
+    }
+    addresses.sort();
+    FoldDeferralVerdict::SkipFold { addresses }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +421,66 @@ mod tests {
     fn subsumption_requires_a_prior_deferred_run() {
         let pending = pending_window(Some(100), Some(106));
         assert_eq!(subsumption(pending, false, 100, 106), None);
+    }
+
+    fn declared(
+        address: &str,
+        columns: &[&str],
+        on: &str,
+        skip_licensed: bool,
+    ) -> DeclaredFoldCell {
+        DeclaredFoldCell {
+            address: address.to_string(),
+            columns: columns.iter().map(|c| c.to_string()).collect(),
+            on: on.to_string(),
+            skip_licensed,
+        }
+    }
+
+    #[test]
+    fn fold_deferral_verdict_skips_only_on_full_coverage() {
+        let declared_cells = vec![declared("a@raw.events", &["a"], "raw.events", true)];
+        let fold_groups = vec![(vec!["a".to_string()], "raw.events".to_string())];
+        assert_eq!(
+            fold_deferral_verdict(&declared_cells, &fold_groups),
+            FoldDeferralVerdict::SkipFold {
+                addresses: vec!["a@raw.events".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn fold_deferral_verdict_proceeds_on_partial_coverage() {
+        // The fold's group has two columns; the only declaring cell covers
+        // just one of them — the union of matching cells' columns does not
+        // fully cover the group, so the whole-row fold must proceed.
+        let declared_cells = vec![declared("a@raw.events", &["a"], "raw.events", true)];
+        let fold_groups = vec![(
+            vec!["a".to_string(), "b".to_string()],
+            "raw.events".to_string(),
+        )];
+        assert_eq!(
+            fold_deferral_verdict(&declared_cells, &fold_groups),
+            FoldDeferralVerdict::Proceed
+        );
+    }
+
+    #[test]
+    fn fold_deferral_verdict_proceeds_when_a_covered_cell_is_not_licensed() {
+        let declared_cells = vec![declared("a@raw.events", &["a"], "raw.events", false)];
+        let fold_groups = vec![(vec!["a".to_string()], "raw.events".to_string())];
+        assert_eq!(
+            fold_deferral_verdict(&declared_cells, &fold_groups),
+            FoldDeferralVerdict::Proceed
+        );
+    }
+
+    #[test]
+    fn fold_deferral_verdict_is_proceed_with_no_declared_cells() {
+        let fold_groups = vec![(vec!["a".to_string()], "raw.events".to_string())];
+        assert_eq!(
+            fold_deferral_verdict(&[], &fold_groups),
+            FoldDeferralVerdict::Proceed
+        );
     }
 }

@@ -1103,10 +1103,15 @@ pub async fn execute_project(
     // hard failure.
     let legacy_sources_config = smelt_core::sources::SourcesConfig::load(project_dir).ok();
 
-    // Models declaring `contract.deferral` at model granularity
-    // (`docs/specs/incremental_models.md` §"The contract lattice") — needed
-    // below to widen the `upstream_map` build condition, since a deferral
-    // skip must also propagate to dependents.
+    // Models declaring `contract.deferral` at model granularity, or
+    // `contract.cells[].deferral` at cell granularity — the latter is only
+    // ever validly declared on a plain `Trigger::NewData` fold cell over a
+    // clocked source (`docs/outcomes/20260815-definition-delta-migrate/
+    // phases/14-plan.md`); this set's only job here is widening the
+    // `upstream_map` build condition and the pre-run snapshot loop below,
+    // since a deferral skip (model- or cell-level) must also propagate to
+    // dependents (`docs/specs/incremental_models.md` §"The contract
+    // lattice").
     let deferral_declared: HashSet<String> = model_plans
         .iter()
         .filter(|p| {
@@ -1114,8 +1119,9 @@ pub async fn execute_project(
                 .metadata
                 .as_deref()
                 .and_then(|m| m.contract.as_ref())
-                .and_then(|c| c.deferral.as_ref())
-                .is_some()
+                .is_some_and(|c| {
+                    c.deferral.is_some() || c.cells.iter().any(|c| c.deferral.is_some())
+                })
         })
         .map(|p| p.name.clone())
         .collect();
@@ -1255,21 +1261,45 @@ pub async fn execute_project(
     // to skip on its own declaration; `deferral_pending` is every declaring
     // model's pending window (`None` when nothing is pending), consulted
     // later to prove work subsumption on a covering run.
-    let (deferral_own_skip, deferral_pending): (
+    // Named so the `let` below stays under clippy's `type_complexity` gate —
+    // both maps are per-model cell-address lists, one for the addresses a
+    // `SkipFold` verdict named, one for every declaring address a model
+    // that reached the fold-deferral branch owns (see the field's own doc
+    // comment a few lines down).
+    type PerModelCellAddresses = HashMap<String, Vec<String>>;
+    let (deferral_own_skip, deferral_pending, deferral_skipped_cells, deferral_fold_addresses): (
         HashSet<String>,
         HashMap<String, smelt_logical::contract::deferral::PendingWindow>,
+        PerModelCellAddresses,
+        PerModelCellAddresses,
     ) = if deferral_declared.is_empty() {
-        (HashSet::new(), HashMap::new())
+        (
+            HashSet::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashMap::new(),
+        )
     } else {
         let interval_store = file_store.load_intervals().unwrap_or_default();
         let landed_deltas = file_store.load_landed_deltas().unwrap_or_default();
         let mut own_skip = HashSet::new();
         let mut pending = HashMap::new();
+        let mut skipped_cells: HashMap<String, Vec<String>> = HashMap::new();
+        // Every declaring `contract.cells[].deferral` address for a model
+        // that reaches the fold-deferral branch below, independent of the
+        // resolved verdict — a fold that actually runs (`Proceed`, or a
+        // later catch-up run past a prior skip) advances ALL of its own
+        // declaring cells' frontiers, since the plain fold's write is
+        // whole-row (`incremental_models.md` §Known Divergences: "its
+        // frontier advances with the rest"). Consulted from the incremental
+        // success path below, not re-derived per model.
+        let mut fold_addresses: HashMap<String, Vec<String>> = HashMap::new();
         for plan in model_plans.iter() {
             if !deferral_declared.contains(&plan.name) {
                 continue;
             }
-            let (source_facts, _) = build_maint_source_facts(&plan.model_file, &source_infos);
+            let (source_facts, explicitly_mutable) =
+                build_maint_source_facts(&plan.model_file, &source_infos);
             let clocked_source_addresses: Vec<String> = source_facts
                 .iter()
                 .filter(|sf| {
@@ -1301,8 +1331,73 @@ pub async fn execute_project(
                     pending.insert(plan.name.clone(), window);
                 }
             }
+
+            // `contract.cells[].deferral` on the plain `Trigger::NewData`
+            // fold — the per-cell counterpart of the model-level decision
+            // above, licensed independently (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/14-plan.md`). A model
+            // already licensed to skip at model granularity has nothing more
+            // to resolve here.
+            if own_skip.contains(&plan.name) {
+                continue;
+            }
+            if let Some(metadata) = plan.model_file.metadata.as_deref() {
+                if metadata
+                    .contract
+                    .as_ref()
+                    .is_some_and(|c| c.cells.iter().any(|cell| cell.deferral.is_some()))
+                {
+                    let cell_decisions = crate::contract_probes::deferral_cell_decisions(
+                        &plan.name,
+                        Some(metadata),
+                        &interval_store,
+                        &landed_deltas,
+                    );
+                    let declared_addresses: Vec<String> = metadata
+                        .contract
+                        .as_ref()
+                        .map(|c| {
+                            c.cells
+                                .iter()
+                                .filter(|cell| cell.deferral.is_some())
+                                .map(|cell| {
+                                    smelt_logical::contract::deferral::cell_address(
+                                        &cell.columns,
+                                        &cell.on,
+                                    )
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !declared_addresses.is_empty() {
+                        fold_addresses.insert(plan.name.clone(), declared_addresses);
+                    }
+                    let (verdict, addresses) = crate::maintenance_driver::resolve_fold_deferral(
+                        &plan.sql,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &source_facts,
+                        &explicitly_mutable,
+                        &cell_decisions,
+                    );
+                    if let smelt_logical::contract::deferral::FoldDeferralVerdict::SkipFold {
+                        ..
+                    } = verdict
+                    {
+                        tracing::info!(
+                            "Deferring model '{}''s plain incremental fold — every column \
+                             group is covered by a skip-licensed contract.cells[].deferral \
+                             declaration ({:?})",
+                            plan.name,
+                            addresses
+                        );
+                        own_skip.insert(plan.name.clone());
+                        skipped_cells.insert(plan.name.clone(), addresses);
+                    }
+                }
+            }
         }
-        (own_skip, pending)
+        (own_skip, pending, skipped_cells, fold_addresses)
     };
 
     // A deferral skip propagates to dependents (`docs/outcomes/
@@ -1389,6 +1484,8 @@ pub async fn execute_project(
     let deferral_own_skip = &deferral_own_skip;
     let deferral_skip_set = &deferral_skip_set;
     let deferral_pending = &deferral_pending;
+    let deferral_skipped_cells = &deferral_skipped_cells;
+    let deferral_fold_addresses = &deferral_fold_addresses;
 
     // ── Per-model execution unit ──────────────────────────────────────────
     // Runs one model to completion (or cancellation, or failure) and returns
@@ -1506,7 +1603,13 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
-                    deferred_cells: Vec::new(),
+                    // Empty for an upstream-propagated skip (`own == false`)
+                    // — only the model that itself declared+resolved the
+                    // per-cell skip names its own addresses.
+                    deferred_cells: deferral_skipped_cells
+                        .get(&plan.name)
+                        .cloned()
+                        .unwrap_or_default(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -3728,6 +3831,25 @@ pub async fn execute_project(
                         let model_hash = compute_model_hash(&plan.sql);
                         let intervals = interval_store.get_or_create(&plan.name, &model_hash);
                         intervals.record_interval(&start_str, &end_str);
+                        // `contract.cells[].deferral`: this fold just ran,
+                        // so every one of this model's own declaring cells
+                        // (resolved once in the pre-run pass, not
+                        // re-derived here) advances its frontier to this
+                        // run's own end — a run past the cell window (or an
+                        // unlicensed `Proceed`) always folds the whole row,
+                        // so every declaring cell is caught up regardless of
+                        // which one(s) actually licensed the coverage check
+                        // (`docs/outcomes/20260815-definition-delta-migrate/
+                        // phases/14-plan.md`).
+                        if let Some(addresses) = deferral_fold_addresses.get(&plan.name) {
+                            crate::contract_probes::advance_cell_frontiers(
+                                &mut interval_store,
+                                &plan.name,
+                                &model_hash,
+                                addresses,
+                                &end_str,
+                            );
+                        }
                         let _ = file_store.save_intervals(&interval_store);
                     }
                 }

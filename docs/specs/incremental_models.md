@@ -828,7 +828,11 @@ default point forbids. Work subsumption is proven from two ledger facts, never i
 range coverage alone: a prior manifest recorded `skipped_deferral` for this cell, **and** the
 current run's write range covers that cell's pending window
 (`(maintained_frontier, input_frontier]`); when both hold, the covering run's manifest records
-the subsumed window alongside its normal `success` outcome.
+the subsumed window alongside its normal `success` outcome. A per-cell `deferral` declared on
+the plain `Trigger::NewData` fold licenses a skip only when it covers ALL of the fold's own
+column groups — a cell addressing a strict subset cannot decline the fold's whole-row write, the
+same "licensed relaxation, never a way to decline unlicensed work" posture `lag ≤ 0` already
+falls through to.
 
 **Retention (`retain_departed`), keyed shapes over a mutable snapshot.** At the default point
 a key absent from the current snapshot is deleted at reconcile (§"The equivalence invariant",
@@ -1840,20 +1844,24 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   the signature the first line; today's output leads with grain), nor the per-column guarantee
   summary or derived run shape. Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
-- **Per-cell `deferral` scheduling has a frontier record and a pure decision builder
-  (`smelt_logical::contract::deferral::cell_address`,
-  `smelt_runtime::contract_probes::deferral_cell_decisions`, `IntervalStore`'s per-model
-  `cell_frontiers` map) but no live dispatch site consults it yet** — a cell's own address is
-  addressable and its lag independently licensable, but every currently-wired dispatch site
+- **A `contract.cells[].deferral` cell addressing a strict subset of the plain fold's own
+  column groups cannot decline the fold's whole-row write.** The plain `Trigger::NewData`
+  incremental fold now resolves its per-cell decisions before running: it skips only when
+  EVERY one of its own column groups is fully covered by skip-licensed declaring cells
+  (`smelt_logical::contract::deferral::fold_deferral_verdict`, dispatched from
+  `maintenance_driver::resolve_fold_deferral`), recording the skip as `skipped_deferral` with
+  the declaring addresses in `RunManifest.deferred_cells` and advancing no cell frontier. A run
+  that actually folds — because coverage is partial, a covered cell is unlicensed, or the
+  measured lag exceeds the declared window — always folds the whole row and advances every one
+  of its own declaring cells' frontiers together (`IntervalStore`'s per-model `cell_frontiers`
+  map), never a partial advance. Every other currently-wired per-cell dispatch site
   (`resolve_live_membership_recompute_cell`, `resolve_live_column_scoped_cell`,
-  `resolve_live_per_group_recompute_cell`'s `UpstreamMutation` branch) serves an `on:` trigger
-  over a mutable or unclocked source, and `contract.cells[].deferral` is validly declarable
-  only on a clocked, interval-representable `on:` — the ordinary `Trigger::NewData` fold cell
-  over an append-only source. Wiring a real skip therefore reaches into the plain
-  windowed-incremental/cumulative-fold dispatch, not the `UpstreamMutation` family. `RunManifest`'s
-  `deferred_cells` field is defined (`run_state.md` §"Run manifest") but consequently never
-  populated yet. Tracked: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`,
-  `docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`.
+  `resolve_live_per_group_recompute_cell`'s `UpstreamMutation` branch) still serves an `on:`
+  trigger over a mutable or unclocked source, over which `contract.cells[].deferral` is not
+  validly declarable at all (`validate_deferral`), so this dispatch remains the only one a
+  per-cell `deferral` declaration can ever reach. Tracked:
+  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/14-plan.md`.
 - **`diff_patch` over the region `DeleteInsert` default has a runtime lowering for the
   membership-sensitive (`grain: key`, `UpstreamMutation`-triggered) case only** — `resolve_live_
   membership_recompute_cell` routes a `write: diff_patch` pin to `execute_diff_patch` with the

@@ -124,6 +124,83 @@ GROUP BY 1
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
 }
 
+/// Stages `upstream_advancer` (same shape as [`stage_project`]) plus
+/// `cell_deferred_model`, which declares `contract.cells[].deferral` on the
+/// clocked `events` source instead of a model-level `contract.deferral` —
+/// the per-cell dispatch fixture (`docs/outcomes/20260815-definition-delta-
+/// migrate/phases/14-plan.md`). `cell_deferred_model`'s only payload column
+/// (`total_amount`) is the fold's whole (and only) column group, so a cell
+/// naming it fully covers the fold and can license a skip.
+fn stage_cell_deferral_project(project_dir: &Path, db_path: &Path) {
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    let source_yml = r#"description: Raw events.
+columns:
+  - name: event_date
+    type: DATE
+  - name: amount
+    type: DOUBLE
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+mutation_profile:
+  kind: append_only
+"#;
+    std::fs::write(project_dir.join("models/sources/events.yml"), source_yml).unwrap();
+
+    let upstream_sql = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT event_date, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1
+"#;
+    std::fs::write(
+        project_dir.join("models/upstream_advancer.sql"),
+        upstream_sql,
+    )
+    .unwrap();
+
+    let cell_deferred_sql = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+contract:
+  cells:
+    - columns: [total_amount]
+      on: events
+      deferral: '2 days'
+---
+SELECT event_date, SUM(amount) AS total_amount
+FROM smelt.sources.events
+GROUP BY 1
+"#;
+    std::fs::write(
+        project_dir.join("models/cell_deferred_model.sql"),
+        cell_deferred_sql,
+    )
+    .unwrap();
+
+    // See `stage_project`'s doc comment on `probes: cadence: off` — the
+    // same rationale applies here for the catch-up-run scenario.
+    let smelt_yml = format!(
+        "name: cell_deferral_skip_e2e_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\nprobes:\n  cadence: off\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
 fn seed_events(db_path: &Path) -> anyhow::Result<()> {
     let conn = duckdb::Connection::open(db_path)?;
     conn.execute_batch(
@@ -442,4 +519,239 @@ async fn catch_up_run_records_the_subsumed_window() {
         .expect("the covering run must record the subsumed window");
     assert_eq!(subsumed.maintained_exclusive, "2026-01-02");
     assert_eq!(subsumed.input_inclusive, "2026-01-07");
+}
+
+/// A `contract.cells[].deferral` declaration whose columns fully cover the
+/// plain fold's only column group, and whose measured lag is within the
+/// declared window, licenses a skip of the whole fold — recorded
+/// `skipped_deferral` with the declaring cell address in `deferred_cells`,
+/// and leaves the target table and interval ledger byte-unchanged (mirrors
+/// `deferred_run_is_recorded_skipped_and_writes_nothing`'s model-level
+/// counterpart, but through the per-cell dispatch).
+#[tokio::test]
+async fn per_cell_deferral_skips_the_fold_and_records_the_cell_address() {
+    use smelt_logical::contract::deferral::cell_address;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_cell_deferral_project(&project_dir, &db_path);
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    // Run A: both models establish their maintained frontier (model-level
+    // interval AND cell frontier) at 2026-01-02.
+    run(
+        "run-a",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec![],
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .await
+    .expect("run A must succeed");
+
+    let deferred_rows_after_a = row_count(&db_path, "cell_deferred_model");
+    assert_eq!(deferred_rows_after_a, 1);
+
+    let address = cell_address(&["total_amount".to_string()], "events");
+    let file_store = FileStore::new(&project_dir, "dev");
+    let interval_store = file_store.load_intervals().expect("load intervals");
+    assert_eq!(
+        interval_store
+            .get("cell_deferred_model")
+            .and_then(|mi| mi.cell_frontier(&address)),
+        Some("2026-01-02"),
+        "the fold that ran in run A must have advanced its own declaring cell's frontier"
+    );
+
+    // Run B: only `upstream_advancer` runs, advancing the shared source's
+    // landed-delta frontier to 2026-01-04 while `cell_deferred_model` never
+    // runs — its cell frontier stays at 2026-01-02. Lag is now 2 days,
+    // exactly the declared `D`.
+    run(
+        "run-b",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["upstream_advancer".to_string()],
+        "2026-01-02",
+        "2026-01-04",
+    )
+    .await
+    .expect("run B must succeed");
+
+    // Run C: `cell_deferred_model` is selected — the measured lag (2 days)
+    // is within the declared per-cell window, so the fold must be skipped.
+    let outcome = run(
+        "run-c",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["cell_deferred_model".to_string()],
+        "2026-01-04",
+        "2026-01-05",
+    )
+    .await
+    .expect("run C must succeed (a licensed skip, not a failure)");
+
+    let record = outcome
+        .models
+        .get("cell_deferred_model")
+        .expect("cell_deferred_model must have a manifest entry even when skipped");
+    assert_eq!(record.strategy, "skipped_deferral");
+    assert_eq!(record.outcome, RunOutcomeKind::Skipped);
+    assert_eq!(record.row_count, 0);
+    assert_eq!(
+        record.deferred_cells,
+        vec![address.clone()],
+        "the skip manifest entry must name the declaring cell address"
+    );
+
+    assert_eq!(
+        row_count(&db_path, "cell_deferred_model"),
+        deferred_rows_after_a,
+        "a deferral-licensed skip must not write to the target table"
+    );
+
+    let interval_store = file_store.load_intervals().expect("load intervals");
+    assert_eq!(
+        interval_store
+            .get("cell_deferred_model")
+            .and_then(|mi| mi.cell_frontier(&address)),
+        Some("2026-01-02"),
+        "a skipped run must not advance the cell frontier"
+    );
+}
+
+/// Once the measured lag exceeds the declared per-cell window, the fold
+/// actually runs — a run whose write range covers the fold's whole column
+/// group advances every declaring cell's frontier to the run's own end, and
+/// the success manifest entry names no deferred cell (mirrors
+/// `catch_up_run_records_the_subsumed_window`'s model-level counterpart).
+#[tokio::test]
+async fn a_run_past_the_cell_window_folds_and_advances_the_cell_frontier() {
+    use smelt_logical::contract::deferral::cell_address;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_cell_deferral_project(&project_dir, &db_path);
+    seed_events(&db_path).expect("seed events");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    // Run A: both models establish a cell/interval frontier at 2026-01-02.
+    run(
+        "run-a",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec![],
+        "2026-01-01",
+        "2026-01-02",
+    )
+    .await
+    .expect("run A must succeed");
+
+    // Run B: advance the shared source's landed-delta frontier to
+    // 2026-01-04 (lag 2, within D) without `cell_deferred_model` running.
+    run(
+        "run-b",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["upstream_advancer".to_string()],
+        "2026-01-02",
+        "2026-01-04",
+    )
+    .await
+    .expect("run B must succeed");
+
+    // Run C: `cell_deferred_model` is skipped (lag 2 <= D 2).
+    run(
+        "run-c",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["cell_deferred_model".to_string()],
+        "2026-01-04",
+        "2026-01-05",
+    )
+    .await
+    .expect("run C must succeed (a licensed skip)");
+
+    // Run D: advance the shared source's landed-delta frontier further, to
+    // 2026-01-07 — lag against `cell_deferred_model`'s still-2026-01-02
+    // cell frontier is now 5 days, past `D = 2 days`.
+    run(
+        "run-d",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["upstream_advancer".to_string()],
+        "2026-01-04",
+        "2026-01-07",
+    )
+    .await
+    .expect("run D must succeed");
+
+    // Run E: `cell_deferred_model`'s measured lag now exceeds `D`, so the
+    // per-cell verdict is `Proceed` and the fold actually runs. Its
+    // requested range [2026-01-01, 2026-01-07) covers the whole fold.
+    let outcome = run(
+        "run-e",
+        &config,
+        &db,
+        &graph,
+        &project_dir,
+        &db_path,
+        vec!["cell_deferred_model".to_string()],
+        "2026-01-01",
+        "2026-01-07",
+    )
+    .await
+    .expect("run E must succeed — lag exceeds D, licensing a normal run");
+
+    let record = outcome
+        .models
+        .get("cell_deferred_model")
+        .expect("cell_deferred_model must have a manifest entry");
+    assert_eq!(record.outcome, RunOutcomeKind::Success);
+    assert!(
+        record.deferred_cells.is_empty(),
+        "a run that actually folded must not name any deferred cell"
+    );
+
+    let address = cell_address(&["total_amount".to_string()], "events");
+    let file_store = FileStore::new(&project_dir, "dev");
+    let interval_store = file_store.load_intervals().expect("load intervals");
+    assert_eq!(
+        interval_store
+            .get("cell_deferred_model")
+            .and_then(|mi| mi.cell_frontier(&address)),
+        Some("2026-01-07"),
+        "a covering run must advance the declaring cell's frontier to the run's own end"
+    );
 }

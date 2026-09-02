@@ -12,7 +12,8 @@ use smelt_core::config::{ContractCellConfig, ContractConfig, DataLatency};
 use smelt_core::metadata::ModelMetadata;
 use smelt_logical::contract::deferral::RunLicense;
 use smelt_runtime::contract_probes::{
-    deferral_cell_decisions, deferral_decision, propagate_deferral_skip, subsumed_window,
+    advance_cell_frontiers, deferral_cell_decisions, deferral_decision, propagate_deferral_skip,
+    subsumed_window,
 };
 use smelt_state::intervals::{Interval, IntervalStore, ModelIntervals};
 use smelt_state::landed_deltas::{LandedDeltaStore, SourceLanding};
@@ -276,4 +277,36 @@ fn model_level_deferral_still_decides_when_no_cells_are_declared() {
     )
     .expect("model declares contract.deferral");
     assert_eq!(decision.license, RunLicense::Skip { lag: 3, d: 6 });
+}
+
+#[test]
+fn cell_frontier_advance_is_scoped_to_the_declaring_cells() {
+    use smelt_logical::contract::deferral::cell_address;
+
+    let addr_a = cell_address(&["a".to_string()], "raw.a");
+    let addr_b = cell_address(&["b".to_string()], "raw.b");
+    let addr_c = cell_address(&["c".to_string()], "raw.c");
+
+    let mut interval_store = IntervalStore::default();
+    // A sibling cell frontier that must survive untouched.
+    interval_store
+        .get_or_create("m", "hash")
+        .record_cell_frontier(&addr_c, "2026-01-01");
+
+    advance_cell_frontiers(
+        &mut interval_store,
+        "m",
+        "hash",
+        &[addr_a.clone(), addr_b.clone()],
+        "2026-01-10",
+    );
+
+    let mi = interval_store.get("m").expect("model intervals created");
+    assert_eq!(mi.cell_frontier(&addr_a), Some("2026-01-10"));
+    assert_eq!(mi.cell_frontier(&addr_b), Some("2026-01-10"));
+    assert_eq!(
+        mi.cell_frontier(&addr_c),
+        Some("2026-01-01"),
+        "a sibling cell frontier not named in `addresses` must be untouched"
+    );
 }
