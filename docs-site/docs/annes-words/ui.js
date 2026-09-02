@@ -127,7 +127,12 @@ async function submit() {
   }
   persist();
   updateFooter();
-  if (state.mode === 'daily' && state.status !== 'playing') setTimeout(openStats, 2200);
+  if (state.mode === 'daily' && state.status !== 'playing') {
+    const puzzleAtSchedule = state.puzzle;
+    setTimeout(() => {
+      if (state.mode === 'daily' && state.status !== 'playing' && state.puzzle === puzzleAtSchedule) openStats();
+    }, 2200);
+  }
 }
 
 function revealRow(rowIndex, marks) {
