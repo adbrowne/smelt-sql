@@ -332,7 +332,7 @@ open — not that the excluded bullets themselves are gone.
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
-| 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | pending |
+| 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism | pending |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | pending |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | pending |
@@ -976,6 +976,23 @@ open — not that the excluded bullets themselves are gone.
   a fourth staged emitter would duplicate `emit_diff_patch`'s legs for no semantic difference.
   Delta restriction keeps precedence over suppression when both admit; everything unproven falls
   closed to today's byte-identical widened scan.
+
+- **2026-09-03 (phase 27c planning)** — no table reshape. Two calls recorded. (1) **Keyless
+  suppression is region-grained, not row-grained.** Without a row address a multiset difference
+  cannot be deleted with multiplicity in portable SQL, so the whole-row realisation materialises a
+  two-way `EXCEPT ALL` diff sentinel once and guards an otherwise byte-identical region
+  `DELETE`+`INSERT` with it: empty diff ⇒ no write at all, non-empty ⇒ exactly today's
+  unconditional statements. The spec must state this grain rather than let "EXCEPT ALL both ways"
+  imply per-row suppression. (2) **The keyless path records no observed delta** — the
+  observed-delta table is keyed by the identity's key columns and a keyless write has none;
+  it records nothing rather than synthesising a key.
+
+- **2026-09-03 (loop hygiene, noted during 27c planning)** — rows 26a, 26b, 26c, 26d, 27a and 27b
+  are `planned` with plan files committed but **no summaries and no implementation commits**; the
+  last feature commit is phase 25's. The wrapper's own pre-scan for this run also disagreed with
+  the table (it hinted phase 28 while `next_step()` over the committed file returns
+  `implement 26a`). Whoever picks this outcome up next should run the IMPLEMENT step against 26a
+  first — this planning run deliberately did not renumber or re-flip those rows.
 
 
 ## Blocked
