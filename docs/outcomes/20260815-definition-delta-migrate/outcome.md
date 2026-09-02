@@ -310,7 +310,7 @@ open — not that the excluded bullets themselves are gone.
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
 | 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | done |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | done |
-| 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
+| 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | planned |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
 | 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
@@ -320,6 +320,7 @@ open — not that the excluded bullets themselves are gone.
 | 18 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
 | 19 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 20 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 20b | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
 | 21 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–20 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
@@ -614,6 +615,8 @@ open — not that the excluded bullets themselves are gone.
   extended to backbuild specifically). No behavioral gap was found — everything else validate
   checked (Surface, Semantics, invariants, cli.md/model_selection.md/models.md/seeds.md sibling
   sweep, docs-site) was already correct from phases 1–9.
+
+- **2026-09-02 (phase 11 planning)** — reshape: added row 20b. Phase 10's summary recorded the narrowed `architecture.md` backbuild statement-parity gap as an honest *untracked* residue with no owning phase. Success criterion 9 requires the standing gates (which name `statement_parity`) green for this outcome's own mechanism, so extending that gate's structural leg to the backbuild emitter family serves a success criterion and is not deferred out. Placed before the final validate row so phase 21 can confirm the bullet is actually removed.
 
 ## Blocked
 
