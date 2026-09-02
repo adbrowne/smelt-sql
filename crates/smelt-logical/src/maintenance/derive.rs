@@ -1803,25 +1803,28 @@ fn derive_column_added(
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: "re-derives from upstream, but this group's mutation-sensitivity \
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why: "re-derives from upstream, but this group's mutation-sensitivity \
                               names no source to scan — a column-scoped merge cannot be \
                               constructed"
-                            .to_string(),
-                    });
+                                .to_string(),
+                        });
                 }
                 (_, Some(why)) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why,
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why,
+                        });
                 }
                 (_, None) => {
-                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                        trigger: format!("{trigger:?}"),
-                        why: "in-place update not proven additive-only".to_string(),
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: added_in_group.iter().map(|c| (*c).clone()).collect(),
+                            why: "in-place update not proven additive-only".to_string(),
+                        });
                 }
             }
             continue;
@@ -1846,14 +1849,20 @@ fn derive_column_added(
             match project_source_link(inputs.output_partition_col(), loc, facts) {
                 SourceLink::Clamp(clamp) => scans.push(clamp),
                 SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
-                    plan.refusals.push(Refusal::ScanUnbounded {
-                        source: facts.name.clone(),
-                        why: format!(
-                            "backfill of {} reads '{}' with no partition bound",
-                            group.name(),
-                            facts.name
-                        ),
-                    });
+                    plan.refusals
+                        .push(Refusal::DefinitionChangeNotBackfillable {
+                            columns: group
+                                .columns
+                                .iter()
+                                .filter(|c| columns.contains(c))
+                                .cloned()
+                                .collect(),
+                            why: format!(
+                                "backfill of {} reads '{}' with no partition bound",
+                                group.name(),
+                                facts.name
+                            ),
+                        });
                     refused = true;
                     break;
                 }

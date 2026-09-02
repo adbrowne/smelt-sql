@@ -389,6 +389,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
         DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
         DbCode::MaintenanceSkeletonChanged => "maintenance-skeleton-changed",
+        DbCode::MaintenanceColumnAddNotBackfillable => "maintenance-column-add-not-backfillable",
         DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
         DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
         DbCode::MaintenanceWritePatternUnavailable => "maintenance-write-pattern-unavailable",

@@ -112,6 +112,28 @@ safely and atomically as part of an ordinary run, predating and coexisting with 
 a pending definition delta and its whole-plan verdict ahead of a run, without deriving or executing
 anything beyond the plan derivation itself.
 
+**The pre-execution gate's posture matches what a run actually refuses.** The maintenance-plan
+gate that backs `smelt explain` and editor diagnostics derives the same `Trigger::ColumnAdded`
+cell a run's maintenance driver would, and reports its refusals at the severity the runtime
+actually implies rather than defaulting every refusal to `Error`:
+
+1. A column addition that **cannot be backfilled in place** — an unbounded scan for the
+   column-scoped merge, no admissible technique, an unresolvable expression, or added columns in
+   one group disagreeing on their definition-change classification — does not refuse the model's
+   ongoing maintenance plan. The run proceeds: the column is ALTERed in and its historical rows
+   stay `NULL` until a `smelt migrate` backfill closes the gap. Reported as a **Warning**
+   (`MaintenanceColumnAddNotBackfillable`, §Diagnostics) naming the affected columns and pointing
+   at `smelt migrate`.
+2. A **skeleton-position** add keeps the existing `MaintenanceSkeletonChanged` **Error** — it is a
+   grain change, not a backfillable column add (§"Skeleton changes are a new relation").
+3. A model declaring `schema_evolution: strategy: full_refresh` derives no definition-change
+   trigger in the gate at all: the runtime rebuilds the whole table on its next run, so there is
+   no in-place backfill obligation to report ahead of time.
+
+This posture mirrors `smelt-runtime`'s own run gate, which already exempts a pure column addition
+from the definition-delta refusal outright (`incremental_models.md` §"Delta signatures") — the
+pre-execution gate never reports as an error what a run does not itself refuse.
+
 ### `smelt migrate`
 
 ```

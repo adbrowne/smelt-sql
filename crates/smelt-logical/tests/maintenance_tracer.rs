@@ -534,7 +534,7 @@ fn ex36_without_the_additive_only_proof_fails_closed() {
     assert!(plan.cells.is_empty());
     assert!(matches!(
         &plan.refusals[..],
-        [Refusal::NoAdmissibleTechnique { .. }]
+        [Refusal::DefinitionChangeNotBackfillable { .. }]
     ));
 }
 

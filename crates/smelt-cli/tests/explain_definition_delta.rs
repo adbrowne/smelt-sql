@@ -264,3 +264,80 @@ fn explain_reports_skeleton_change_from_deployed_schema() {
          `smelt run` needed: {stdout}"
     );
 }
+
+const CLOCKED_BASE_SOURCE_NO_RUN: &str = "description: base rows, append-only.\n\
+mutation_profile: append_only\ncolumns:\n\
+  - { name: id, type: INTEGER, nullable: false }\n\
+  - { name: event_date, type: DATE, nullable: false }\n\
+  - { name: a, type: INTEGER, nullable: false }\n";
+
+const DERIVED_TOTALS_MODEL_NO_RUN: &str =
+    "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+timeseries:\n  event_time_column: event_date\n  partition_column: event_date\n  granularity: day\n---\n\
+SELECT id, event_date, a, a + 1 AS b, b + 1 AS c FROM smelt.sources.base\n";
+
+/// Phase 25 (`docs/outcomes/20260815-definition-delta-migrate`,
+/// `docs/specs/definition_deltas.md` §"Detection" posture rule 1): `smelt
+/// explain` surfaces a non-backfillable column add as a Warning ahead of any
+/// run — the command still exits success (a run would proceed, ALTERing the
+/// column in and leaving historical rows NULL until `smelt migrate`), unlike
+/// the skeleton-changed test above which is a genuine Error.
+#[test]
+fn explain_reports_a_non_backfillable_column_add_as_a_warning() {
+    if skip_without_duckdb_lib() {
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    write(&root, "smelt.yml", KEYED_SMELT_YML_NO_RUN);
+    write(&root, "models/sources/base.yml", CLOCKED_BASE_SOURCE_NO_RUN);
+    write(
+        &root,
+        "models/derived_totals.sql",
+        DERIVED_TOTALS_MODEL_NO_RUN,
+    );
+
+    // A registered snapshot missing `b` and `c` — both newly added, no
+    // prior `smelt run` needed.
+    let store = smelt_state::file_store::FileStore::new(&root, "dev");
+    store.init().expect("init .smelt");
+    let schema = smelt_state::schema_tracking::DeployedSchema {
+        model: "derived_totals".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "test-hash".to_string(),
+        model_sql: Some("SELECT id, event_date, a FROM smelt.sources.base".to_string()),
+        columns: vec![
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            },
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "event_date".to_string(),
+                data_type: "DATE".to_string(),
+                nullable: false,
+            },
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "a".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            },
+        ],
+    };
+    store.save_schema(&schema).expect("save deployed schema");
+
+    let out = run_smelt(&root, &["explain", "derived_totals"]);
+    assert!(
+        out.status.success(),
+        "smelt explain should succeed — a non-backfillable column add never blocks the \
+         command.\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("DefinitionChangeNotBackfillable"),
+        "expected the DefinitionChangeNotBackfillable refusal in the Refusals section, no \
+         prior `smelt run` needed: {stdout}"
+    );
+}

@@ -325,7 +325,7 @@ open — not that the excluded bullets themselves are gone.
 | 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | done |
 | 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | done |
-| 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | planned |
+| 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
@@ -890,6 +890,13 @@ open — not that the excluded bullets themselves are gone.
   definition-change trigger in the gate at all (fact assembly in the Salsa wrapper, not a new
   branch in the pure derivation). With that posture, real `deployed_column_names` are threaded
   from the existing `DeployedSchemaInput` world fact.
+
+- **2026-09-03 (phase 25 done)** — implemented per the recorded design call. Reclassifying the
+  four non-skeleton `Trigger::ColumnAdded` refusal pushes broke two pre-existing non-regression
+  unit tests outside the phase's own listed test files (`maintenance_tracer.rs`,
+  `maintenance_tracer_evolution.rs`) — both asserted the old `NoAdmissibleTechnique`/
+  `ScanUnbounded` variant for the exact shape this phase retargets; fixed in place after a full
+  `cargo test --workspace` sweep caught them.
 
 ## Blocked
 

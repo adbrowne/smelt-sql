@@ -1796,24 +1796,32 @@ pub fn maintenance_plan(
     // The deployed-schema snapshot (`docs/specs/definition_deltas.md`
     // §"Detection"): a Salsa world-fact input the CLI and LSP both register
     // at workspace load (`workspace_ingest::register_deployed_schemas_from_disk`).
-    // Only `model_sql` is threaded through here, feeding the skeleton-clause
-    // check (`MaintenanceSkeletonChanged` via `Refusal::SkeletonClauseChanged`).
-    // `deployed_column_names` stays `&[]` — unchanged from before this input
-    // existed — because feeding it a real value here would additionally
-    // derive a live `Trigger::ColumnAdded` cell in this PRE-EXECUTION
-    // diagnostic gate; that cell's own backfill/scan-bound admission can
-    // refuse (`MaintenanceScanUnbounded`) for a column addition
-    // `smelt-runtime`'s narrower `resolve_live_in_place_update_cell` still
-    // executes safely, since that call derives the SAME full plan but only
-    // ever inspects the one cell it looks for — widening what blocks a
-    // build/LSP diagnostic ahead of a run is out of this phase's scope
-    // (`docs/outcomes/20260815-definition-delta-migrate/phases/09-plan.md`).
+    // `deployed_column_names` now threads the snapshot's real column names —
+    // a non-skeleton `Trigger::ColumnAdded` cell that cannot be backfilled in
+    // place reports `MaintenanceColumnAddNotBackfillable` as a Warning rather
+    // than blocking the plan (`definition_deltas.md` §"Detection" posture
+    // rules 1-3), matching what `smelt-runtime`'s own run gate already
+    // admits. A model declaring `schema_evolution: strategy: full_refresh`
+    // derives no definition-change trigger at all (rule 3): the runtime
+    // rebuilds the whole table, so there is no in-place backfill obligation
+    // to report ahead of time — implemented here, at fact assembly, rather
+    // than as a new branch inside the pure derivation.
     let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
     let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
         s.model_sql(db)
             .as_ref()
             .map(|sql: &Arc<str>| sql.to_string())
     });
+    let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
+        se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
+    });
+    let deployed_column_names: Vec<String> = if full_refresh_schema_evolution {
+        Vec::new()
+    } else {
+        deployed_schema
+            .map(|s| s.columns(db).iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default()
+    };
 
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
@@ -1823,7 +1831,7 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
-        &[],
+        &deployed_column_names,
         deployed_model_sql.as_deref(),
     ))
 }
@@ -1965,15 +1973,27 @@ pub fn maintenance_plan_report(
     let source_referential_integrity =
         crate::queries::maintenance::build_source_referential_integrity(&source_refs);
     // The deployed-schema snapshot world-fact — see `maintenance_plan`'s own
-    // call site for the full rationale (`deployed_column_names` stays `&[]`;
-    // only `model_sql` feeds the skeleton-clause check; `smelt explain`'s
-    // report path reads the same registered Salsa input).
+    // call site for the full rationale: `deployed_column_names` threads the
+    // snapshot's real column names (gated to empty under `schema_evolution:
+    // strategy: full_refresh`, rule 3), and `model_sql` feeds the
+    // skeleton-clause check; `smelt explain`'s report path reads the same
+    // registered Salsa input `maintenance_plan` does.
     let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
     let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
         s.model_sql(db)
             .as_ref()
             .map(|sql: &Arc<str>| sql.to_string())
     });
+    let full_refresh_schema_evolution = metadata.schema_evolution.as_ref().is_some_and(|se| {
+        se.strategy == smelt_core::metadata::SchemaEvolutionStrategy::FullRefresh
+    });
+    let deployed_column_names: Vec<String> = if full_refresh_schema_evolution {
+        Vec::new()
+    } else {
+        deployed_schema
+            .map(|s| s.columns(db).iter().map(|c| c.to_string()).collect())
+            .unwrap_or_default()
+    };
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1983,7 +2003,7 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-        &[],
+        &deployed_column_names,
         &source_referential_integrity,
         deployed_model_sql.as_deref(),
     )?;
@@ -2662,8 +2682,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let plan_diags = maintenance_plan(db, workspace, file);
         let body_start = rowan::TextSize::from(sql_offset as u32);
         for refusal in &plan_diags.refusals {
-            let (code, message) = match refusal {
+            let (severity, code, message) = match refusal {
                 crate::queries::maintenance::MaintenanceRefusal::ScanUnbounded { source, why } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceScanUnbounded,
                     format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
                 ),
@@ -2671,16 +2692,26 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     trigger,
                     why,
                 } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceNoAdmissibleTechnique,
                     format!("no maintenance technique admits trigger {trigger}: {why}"),
                 ),
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
-                } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::KeyedForbidsTimeseries,
+                    message.clone(),
+                ),
                 crate::queries::maintenance::MaintenanceRefusal::IdentityNotDerivable {
                     message,
-                } => (DiagnosticCode::GrainAssertionMismatch, message.clone()),
+                } => (
+                    DiagnosticSeverity::Error,
+                    DiagnosticCode::GrainAssertionMismatch,
+                    message.clone(),
+                ),
                 crate::queries::maintenance::MaintenanceRefusal::SkeletonChanged { column } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceSkeletonChanged,
                     format!(
                         "column '{column}' occupies a row-membership/identity (skeleton) \
@@ -2691,6 +2722,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 crate::queries::maintenance::MaintenanceRefusal::SkeletonClauseChanged {
                     reason,
                 } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceSkeletonChanged,
                     format!(
                         "the model's skeleton clause changed against its deployed schema \
@@ -2702,6 +2734,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     grain,
                     tracking_plan,
                 } => (
+                    DiagnosticSeverity::Error,
                     DiagnosticCode::MaintenanceUnsupportedGrain,
                     format!(
                         "grain: {grain} is not yet supported by maintenance-plan derivation \
@@ -2709,9 +2742,22 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                          (partition or key) or use refresh: full",
                     ),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::DefinitionChangeNotBackfillable {
+                    columns,
+                    why,
+                } => (
+                    DiagnosticSeverity::Warning,
+                    DiagnosticCode::MaintenanceColumnAddNotBackfillable,
+                    format!(
+                        "added column(s) {} cannot be backfilled in place: {why} — the run will \
+                         ALTER them in and leave historical rows NULL until `smelt migrate` \
+                         backfills them",
+                        columns.join(", "),
+                    ),
+                ),
             };
             DiagnosticAcc(Diagnostic {
-                severity: DiagnosticSeverity::Error,
+                severity,
                 message,
                 range: rowan::TextRange::empty(body_start),
                 code: Some(code),

@@ -157,6 +157,13 @@ verdicts, worst-first when a plan mixes them:
   for this group. `smelt migrate` prints the plan's refusals and leaves full
   refresh (`smelt run --allow-full-refresh`) as the only route.
 
+A non-skeleton column addition that turns out **not** to be backfillable in
+place (an unbounded scan, no admissible technique, or an unresolvable
+expression) never blocks an ordinary run: it shows up ahead of time as an
+editor/`smelt explain` warning naming the affected columns, the run ALTERs the
+column in and leaves its historical rows `NULL`, and `smelt migrate` is the
+fix that backfills them.
+
 Per group, `smelt migrate` picks the first admissible technique from the
 option set [How it works](#how-it-works) enumerates — there is no cost model
 weighing a targeted script against full refresh; a targeted script is always

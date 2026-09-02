@@ -319,7 +319,7 @@ fn v4_without_the_explicit_partition_predicate_refuses_scan_unbounded() {
     );
     assert!(plan.cells.is_empty(), "cells: {:?}", plan.cells);
     assert!(
-        matches!(&plan.refusals[..], [Refusal::ScanUnbounded { source, .. }] if source == "sessions"),
+        matches!(&plan.refusals[..], [Refusal::DefinitionChangeNotBackfillable { columns, .. }] if columns == &["session_id".to_string()]),
         "refusals: {:?}",
         plan.refusals
     );

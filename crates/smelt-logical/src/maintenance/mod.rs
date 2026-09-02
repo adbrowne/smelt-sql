@@ -432,6 +432,18 @@ pub enum Refusal {
     /// (no reach / key-temporal-locality route applies) — the
     /// `MaintenanceRepairSliceUnbounded` diagnostic.
     RepairSliceUnbounded { source: String, why: String },
+    /// A non-skeleton `Trigger::ColumnAdded` column cannot be backfilled in
+    /// place — an unbounded scan for the column-scoped merge, no admissible
+    /// technique, an unresolvable expression, or added columns in one group
+    /// disagreeing on their definition-change classification. Unlike every
+    /// other `Refusal` variant, this one does NOT block the model's ongoing
+    /// maintenance plan: a run proceeds, ALTERs the column in, and leaves
+    /// historical rows `NULL` until `smelt migrate` backfills them — the
+    /// posture `docs/specs/definition_deltas.md` §"Detection" states, and
+    /// mirrors `smelt-runtime`'s own run gate, which already exempts a pure
+    /// column addition outright. Reported as a Warning
+    /// (`MaintenanceColumnAddNotBackfillable`), never an Error.
+    DefinitionChangeNotBackfillable { columns: Vec<String>, why: String },
 }
 
 /// The admitted key-temporal-locality verdict for a `grain: key` model that

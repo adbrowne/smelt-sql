@@ -66,13 +66,25 @@ fn plan_for(
 ) -> smelt_db::queries::maintenance::MaintenancePlanResult {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
+    plan_for_in(&root, files, model_file)
+}
+
+/// Like [`plan_for`], but ingests against a caller-supplied root — lets a
+/// test stage a `.smelt/` deployed-schema snapshot at the same root before
+/// ingest sees it, mirroring [`diagnostics_for_in`]'s relationship to
+/// [`diagnostics_for`].
+fn plan_for_in(
+    root: &std::path::Path,
+    files: &[(&str, &str)],
+    model_file: &str,
+) -> smelt_db::queries::maintenance::MaintenancePlanResult {
     for (rel, content) in files {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, content).unwrap();
     }
 
-    let loaded = load_workspace(&root);
+    let loaded = load_workspace(root);
     let mut db = smelt_db::Database::default();
     let ingested = ingest_loaded_workspace(&mut db, &loaded);
     db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
@@ -1358,6 +1370,268 @@ SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
                 .any(|d| d.code == Some(DiagnosticCode::MaintenanceSkeletonChanged)),
             "setting the deployed-schema input must re-invalidate maintenance_plan \
              within the same Database, got {diags_after:?}"
+        );
+    }
+
+    const CLOCKED_BASE_SOURCE: &str = r#"
+description: Base rows, append-only, clocked on event_date.
+mutation_profile: append_only
+columns:
+  - { name: id, type: INTEGER, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: a, type: INTEGER, nullable: false }
+"#;
+
+    /// Phase 25 (`docs/outcomes/20260815-definition-delta-migrate`,
+    /// `docs/specs/definition_deltas.md` §"Detection" posture rule 1): two
+    /// added, non-skeleton columns whose classifications disagree (`b` is a
+    /// pure function of an already-stored column, `c` depends on `b` — a
+    /// column that did not exist before this edit, so it re-derives) cannot
+    /// share one technique. Reported as `MaintenanceColumnAddNotBackfillable`
+    /// — a Warning, never an Error — and the message names `smelt migrate`.
+    #[test]
+    fn not_backfillable_column_add_is_a_warning_naming_smelt_migrate() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT id, event_date, a, a + 1 AS b, b + 1 AS c FROM smelt.sources.base
+"#;
+        write_schema(
+            &root,
+            "dev",
+            "derived_totals",
+            &["id", "event_date", "a"],
+            Some("SELECT id, event_date, a FROM smelt.sources.base"),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", SMELT_YML),
+                ("models/sources/base.yml", CLOCKED_BASE_SOURCE),
+                ("models/derived_totals.sql", model),
+            ],
+            "derived_totals",
+        );
+
+        let warning = diags
+            .iter()
+            .find(|d| d.code == Some(DiagnosticCode::MaintenanceColumnAddNotBackfillable))
+            .unwrap_or_else(|| {
+                panic!("expected MaintenanceColumnAddNotBackfillable, got {diags:?}")
+            });
+        assert_eq!(
+            warning.severity,
+            smelt_db::DiagnosticSeverity::Warning,
+            "a non-backfillable column add must never be an Error: {warning:?}"
+        );
+        assert!(
+            warning.message.contains("smelt migrate"),
+            "message must point at smelt migrate: {}",
+            warning.message
+        );
+        assert!(
+            diags.iter().all(
+                |d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)
+                    && d.code != Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique)
+            ),
+            "a non-backfillable column add must never ALSO surface as an Error code, \
+             got {diags:?}"
+        );
+    }
+
+    /// Posture rule 1 does not widen to an ordinary ongoing-fold refusal: a
+    /// ScanUnbounded refusal from a plain `Trigger::NewData` fold (no
+    /// definition delta involved — the deployed snapshot's columns match the
+    /// current model exactly) stays `MaintenanceScanUnbounded` at Error, even
+    /// now that real deployed column names are threaded through.
+    #[test]
+    fn ongoing_fold_refusal_is_still_an_error_with_a_deployed_snapshot() {
+        let orders_source = r#"
+description: Orders, append-only, clocked on order_date.
+mutation_profile: append_only
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: customer_id, type: INTEGER, nullable: false }
+"#;
+        let enrichment_source = r#"
+description: Customer enrichment lookup, mutable snapshot, unclocked.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: category, type: VARCHAR, nullable: true }
+"#;
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+---
+SELECT
+    o.order_id,
+    o.order_date,
+    e.category AS enrichment_category
+FROM smelt.sources.orders o
+JOIN smelt.sources.enrichment e ON o.customer_id = e.customer_id
+"#;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        // The deployed snapshot's columns match the current model's output
+        // exactly — no `Trigger::ColumnAdded` derives at all.
+        write_schema(
+            &root,
+            "dev",
+            "revenue",
+            &["order_id", "order_date", "enrichment_category"],
+            Some(model),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", SMELT_YML),
+                ("models/sources/orders.yml", orders_source),
+                ("models/sources/enrichment.yml", enrichment_source),
+                ("models/revenue.sql", model),
+            ],
+            "revenue",
+        );
+
+        let scan_unbounded: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == Some(DiagnosticCode::MaintenanceScanUnbounded))
+            .collect();
+        assert!(
+            !scan_unbounded.is_empty(),
+            "expected the ordinary fold's MaintenanceScanUnbounded to survive threading a \
+             real deployed snapshot, got {diags:?}"
+        );
+        assert!(
+            scan_unbounded
+                .iter()
+                .all(|d| d.severity == smelt_db::DiagnosticSeverity::Error),
+            "an ordinary fold's ScanUnbounded refusal must stay Error: {scan_unbounded:?}"
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.code != Some(DiagnosticCode::MaintenanceColumnAddNotBackfillable)),
+            "no definition delta exists here (deployed columns match current output); no \
+             MaintenanceColumnAddNotBackfillable should fire, got {diags:?}"
+        );
+    }
+
+    /// Posture rule 3: a model declaring `schema_evolution: strategy:
+    /// full_refresh` derives no definition-change trigger in the gate at
+    /// all, even though the registered snapshot is missing an additive
+    /// column — the runtime rebuilds the whole table on its next run, so
+    /// there is no in-place backfill obligation to warn about ahead of time.
+    #[test]
+    fn full_refresh_schema_evolution_model_derives_no_definition_change_refusal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+schema_evolution:
+  strategy: full_refresh
+---
+SELECT id, event_date, a, a + 1 AS b FROM smelt.sources.base
+"#;
+        write_schema(
+            &root,
+            "dev",
+            "full_refresh_totals",
+            &["id", "event_date", "a"],
+            Some("SELECT id, event_date, a FROM smelt.sources.base"),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", SMELT_YML),
+                ("models/sources/base.yml", CLOCKED_BASE_SOURCE),
+                ("models/full_refresh_totals.sql", model),
+            ],
+            "full_refresh_totals",
+        );
+
+        assert!(
+            diags.iter().all(|d| {
+                d.code != Some(DiagnosticCode::MaintenanceColumnAddNotBackfillable)
+                    && d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)
+            }),
+            "schema_evolution: strategy: full_refresh must derive no definition-change \
+             trigger at all, got {diags:?}"
+        );
+    }
+
+    /// The Salsa path (`maintenance_plan_report`, via `plan_for`) now sees a
+    /// real `Trigger::ColumnAdded` cell — proof the threading actually
+    /// happened, not just that the diagnostic mapping is wired.
+    #[test]
+    fn maintenance_plan_derives_the_column_added_cell_from_the_registered_snapshot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT id, event_date, a, a + 1 AS b FROM smelt.sources.base
+"#;
+        write_schema(
+            &root,
+            "dev",
+            "pure_backfill_totals",
+            &["id", "event_date", "a"],
+            Some("SELECT id, event_date, a FROM smelt.sources.base"),
+        );
+        let result = plan_for_in(
+            &root,
+            &[
+                ("smelt.yml", SMELT_YML),
+                ("models/sources/base.yml", CLOCKED_BASE_SOURCE),
+                ("models/pure_backfill_totals.sql", model),
+            ],
+            "pure_backfill_totals",
+        );
+
+        let column_added_cell = result.plan.cells.iter().find(|c| {
+            matches!(&c.trigger, smelt_logical::maintenance::Trigger::ColumnAdded { columns }
+                if columns == &vec!["b".to_string()])
+        });
+        assert!(
+            column_added_cell.is_some(),
+            "expected a real Trigger::ColumnAdded cell for [\"b\"] once the registered \
+             snapshot's column names are threaded; got cells {:?}, refusals {:?}",
+            result.plan.cells,
+            result.plan.refusals
+        );
+        assert_eq!(
+            column_added_cell.unwrap().technique,
+            smelt_logical::maintenance::Technique::InPlaceUpdate,
         );
     }
 }

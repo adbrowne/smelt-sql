@@ -885,6 +885,13 @@ pub enum MaintenanceRefusal {
     SkeletonClauseChanged {
         reason: String,
     },
+    /// `MaintenanceColumnAddNotBackfillable` — a non-skeleton column
+    /// addition that cannot be backfilled in place; the run proceeds with a
+    /// Warning rather than refusing (`definition_deltas.md` §"Detection").
+    DefinitionChangeNotBackfillable {
+        columns: Vec<String>,
+        why: String,
+    },
 }
 
 /// A Salsa-friendly (`PartialEq`) projection of a
@@ -1319,6 +1326,13 @@ pub fn maintenance_plan_diagnostics(
             // lands it.
             smelt_logical::maintenance::Refusal::RepairKeysNotDiscoverable { .. } => None,
             smelt_logical::maintenance::Refusal::RepairSliceUnbounded { .. } => None,
+            smelt_logical::maintenance::Refusal::DefinitionChangeNotBackfillable {
+                columns,
+                why,
+            } => Some(MaintenanceRefusal::DefinitionChangeNotBackfillable {
+                columns: columns.clone(),
+                why: why.clone(),
+            }),
         })
         .collect();
     let cell_column_group_violations = metadata

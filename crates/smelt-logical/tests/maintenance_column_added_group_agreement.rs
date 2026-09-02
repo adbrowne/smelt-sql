@@ -93,9 +93,9 @@ fn disagreeing_added_columns_in_one_group_refuse() {
     );
     assert!(plan.cells.is_empty(), "cells: {:?}", plan.cells);
     assert!(
-        matches!(&plan.refusals[..], [Refusal::NoAdmissibleTechnique { why, .. }]
+        matches!(&plan.refusals[..], [Refusal::DefinitionChangeNotBackfillable { why, .. }]
             if why.contains("disagree")),
-        "expected a group-disagreement refusal, got {:?}",
+        "expected a group-disagreement DefinitionChangeNotBackfillable refusal, got {:?}",
         plan.refusals
     );
 }

@@ -885,6 +885,14 @@ pub enum DiagnosticCode {
     /// (EX-39, `definition_deltas.md` §"The verdict per column group").
     /// Anchored at the model SQL body start.
     MaintenanceSkeletonChanged,
+    /// Emitted (Warning) when a model's definition-change `Trigger::
+    /// ColumnAdded` names a non-skeleton column that cannot be backfilled in
+    /// place (unbounded scan, no admissible technique, unresolvable
+    /// expression, or group disagreement) — the run still proceeds, ALTERing
+    /// the column in and leaving historical rows `NULL` until `smelt
+    /// migrate` backfills them (`definition_deltas.md` §"Detection").
+    /// Anchored at the model SQL body start.
+    MaintenanceColumnAddNotBackfillable,
     /// Emitted (Error) when a model's declared `timeseries.granularity`
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
