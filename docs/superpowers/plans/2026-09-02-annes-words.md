@@ -17,7 +17,7 @@
 - The name is **Anne's Words** everywhere user-visible. Never "Wordle" in UI copy, page title, or share text.
 - This work touches no Rust crate. Do not run `verify-phase.sh`, `cargo` anything, or update `docs/ROADMAP.md`. The repo's spec/plan workflow is explicitly waived for this feature.
 - Tests live in `docs-site/tests/` — never under `docs-site/docs/`, which is published.
-- Run tests with: `node --test docs-site/tests/`
+- Run tests with: `node --test 'docs-site/tests/*.test.mjs'` (quote the glob — on Node 24 a bare directory argument is resolved as a module and errors)
 - Manual check at every task: `cd docs-site/docs && python3 -m http.server 8000`, open `http://localhost:8000/annes-words/`.
 - Original Wordle palette, exact values: correct `#6aaa64`, present `#c9b458`, absent `#787c7e`, tile border idle `#d3d6da`, tile border filled `#878a8c`, key idle `#d3d6da`, key text `#1a1a1b`, page background `#ffffff`.
 
@@ -103,7 +103,7 @@ test('answers are shuffled, not alphabetical', () => {
 
 - [ ] **Step 4: Run the test**
 
-Run: `node --test docs-site/tests/`
+Run: `node --test 'docs-site/tests/*.test.mjs'`
 Expected: 3 passing tests. If "no overlap" fails, the two source lists changed —
 subtract the answers from ALLOWED in the generator rather than editing the test.
 
@@ -314,7 +314,7 @@ export function shareText(puzzleNo, marks2d, won) {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `node --test docs-site/tests/`
+Run: `node --test 'docs-site/tests/*.test.mjs'`
 Expected: all tests pass (Task 1's 3 plus these 15).
 
 - [ ] **Step 5: Commit and push**
@@ -753,7 +753,7 @@ export function recordResult(stats, { won, guesses, puzzle, lastPuzzle }) {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `node --test docs-site/tests/`
+Run: `node --test 'docs-site/tests/*.test.mjs'`
 Expected: all pass.
 
 - [ ] **Step 5: Add the header controls to `index.html`**
@@ -1192,7 +1192,7 @@ zoom or select text.
 
 - [ ] **Step 6: Run the full test suite one more time**
 
-Run: `node --test docs-site/tests/`
+Run: `node --test 'docs-site/tests/*.test.mjs'`
 Expected: all tests pass.
 
 - [ ] **Step 7: Commit and push**
