@@ -35,7 +35,7 @@ Sources (all permissively licensed):
 
 - **Word list** — [dwyl/english-words `words_alpha.txt`](https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt) (Unlicense).
 - **Frequency corpus** — [Norvig's `count_1w.txt`](https://norvig.com/ngrams/count_1w.txt), a tab-separated `word<TAB>count` list already ordered most-frequent-first.
-- **Profanity exclusions** — [LDNOOBW's English bad-word list](https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en).
+- **Profanity exclusions** — three lists: [LDNOOBW's English bad-word list](https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en) (narrow — applied to `ALLOWED`), [coffee-and-fun/google-profanity-words `en.txt`](https://raw.githubusercontent.com/coffee-and-fun/google-profanity-words/main/data/en.txt), and [zacanger/profane-words `words.json`](https://raw.githubusercontent.com/zacanger/profane-words/master/words.json) (the latter two unioned with LDNOOBW into a broader set applied to `ANSWERS` only — over-filtering the answer pool costs nothing, but a false negative gets published).
 - **Local dictionaries** — the SCOWL-derived `/usr/share/dict/american-english` and `/usr/share/dict/british-english`, used both as extra guess candidates and to detect proper nouns: an entry counts as a proper noun (excluded from the candidate pool entirely) if it contains any uppercase letter, e.g. `McCoy`, `McKay`, `ASCII`, `COBOL` — this catches acronyms and internal-capital names, not just the `^[A-Z][a-z]{4}$` shape. Only already-lowercase entries are admitted as candidate words.
 
 Two separate pools:
@@ -44,8 +44,12 @@ Two separate pools:
   (dwyl ∩ frequency corpus) ∪ (american-english ∪ british-english).
   Intersecting dwyl with the frequency corpus removes dwyl entries that are
   technically words but never appear in real text (e.g. `arioi`, `kanap`).
-  `ALLOWED` is this pool minus `ANSWERS`, minus the profanity list, minus
-  `MANUAL_EXCLUSIONS` (roughly 7,700 words).
+  `ALLOWED` is this pool minus `ANSWERS`, minus the narrow (LDNOOBW-only)
+  profanity list, minus `MANUAL_EXCLUSIONS` (roughly 7,700 words). The two
+  broader profanity lists are deliberately not applied to `ALLOWED`: it
+  contains ordinary words the broader lists flag (`abuse`, `moron`,
+  `naked`), and rejecting those as guesses would make the game feel
+  broken — only the answer list needs to be clean.
 - **Answer pool** (narrow, curated) — a word is answer-eligible only if it
   is in the system dictionary (american-english ∪ british-english) **and**
   also in dwyl (two independent dictionaries must agree — this keeps
@@ -53,15 +57,17 @@ Two separate pools:
   `strom`, out of the answers, though they remain valid guesses) **and**
   appears in the frequency corpus (for ranking) **and** contains at least
   one vowel (`[aeiou]`, which excludes non-words like Roman numerals, e.g.
-  `xxvii`) **and** does not end in `s` (plurals), is not on the profanity
-  list, is not capitalised in either system dictionary (proper-noun
-  heuristic), and is not in the hand-maintained `MANUAL_EXCLUSIONS` list.
+  `xxvii`) **and** does not end in `s` (plurals), is not on the union of
+  all three profanity lists, is not capitalised in either system
+  dictionary (proper-noun heuristic), and is not in the hand-maintained
+  `MANUAL_EXCLUSIONS` list.
   `MANUAL_EXCLUSIONS` covers stragglers the automated filters miss: vulgar
-  slang the profanity list doesn't carry (`cunny`), and acronyms/proper
-  nouns that upstream word lists themselves carry as lowercase entries
-  (`mccoy`, `mckay`, `ascii`, `cobol`) or that a system dictionary lists as
-  a lowercase non-word (`xxvii`, a Roman numeral). It is applied to both
-  `ANSWERS` and `ALLOWED`.
+  slang the profanity lists don't carry (`cunny`), regional slurs/offensive
+  terms none of the three lists carry (`nonce`, `queer`), and
+  acronyms/proper nouns that upstream word lists themselves carry as
+  lowercase entries (`mccoy`, `mckay`, `ascii`, `cobol`) or that a system
+  dictionary lists as a lowercase non-word (`xxvii`, a Roman numeral). It
+  is applied to both `ANSWERS` and `ALLOWED`.
   `ANSWERS` is the top 2,000 answer-eligible words by frequency rank,
   shuffled once at generation time with a Fisher-Yates shuffle driven by a
   mulberry32 PRNG seeded `0x9e3779b9` (the same documented seed the
