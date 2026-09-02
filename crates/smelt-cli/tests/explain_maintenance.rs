@@ -234,9 +234,10 @@ fn degenerate_plan_visibly_reported() {
                       refresh: incremental\n\
                       grain: key\n\
                       ---\n\
-                      SELECT o.order_id, o.order_date, amount \
+                      SELECT o.order_id, MIN(o.order_date) AS order_date, MIN(amount) AS amount \
                       FROM smelt.sources.orders o \
-                      JOIN smelt.sources.customers c ON c.user_id = o.user_id\n";
+                      JOIN smelt.sources.customers c ON c.user_id = o.user_id \
+                      GROUP BY o.order_id\n";
     std::fs::write(tmp.path().join("models/ambiguous_join.sql"), model_sql).unwrap();
 
     let report = build_report_for(tmp.path(), "ambiguous_join")

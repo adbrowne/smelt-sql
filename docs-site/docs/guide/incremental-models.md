@@ -799,6 +799,8 @@ cell routes through the reconciliation ledger via the `ledger_catch_up` flag on 
 - Use `grain: partition` when the answer to "what did this partition produce?" is well-defined and stable.
 - Use `grain: key` when the answer is "what's the running total per key?".
 
+A `grain: key` model's identity comes from a top-level `unique_key:` or, absent that, its own `GROUP BY` columns — declaring `grain: key` with neither (no `unique_key:` and no `GROUP BY` in the model's SQL) is a hard error naming the asserted grain and the empty derived key, checked at frontmatter time (no run required).
+
 See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
 ## The composed shape (key + time)

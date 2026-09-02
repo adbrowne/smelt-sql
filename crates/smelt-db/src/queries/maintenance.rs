@@ -31,8 +31,8 @@ use smelt_logical::maintenance::locality::{
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    locality_refused_plan, ColumnGroup, Grain as PlanGrain, MaintenancePlan,
-    MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
+    identity_not_derivable_plan, locality_refused_plan, ColumnGroup, Grain as PlanGrain,
+    MaintenancePlan, MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
 };
 use smelt_logical::rules::cumulative::{
     declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
@@ -450,6 +450,27 @@ pub fn derive_model_maintenance_plan(
                         comparability: Vec::new(),
                     });
                 }
+            } else if unique_key.is_empty() {
+                // No declared top-level `unique_key:` and the model's own
+                // GROUP BY derives no key either — there is no identity to
+                // check anything against. Checked here (frontmatter-time,
+                // reached by `file_diagnostics()` and `smelt explain`
+                // without a run) rather than left to fail later, opaquely,
+                // wherever a plan first consults `unique_key`
+                // (`docs/specs/models.md` §"Constraint violations").
+                return Some(MaintenancePlanResult {
+                    plan: identity_not_derivable_plan(format!(
+                        "model '{table}' asserts grain: key but declares no top-level \
+                         unique_key: and its outermost SELECT's GROUP BY derives no key \
+                         (empty) — a keyed model must have a derivable identity, either a \
+                         declared unique_key: or a non-empty GROUP BY \
+                         (docs/specs/models.md §\"Constraint violations\")"
+                    )),
+                    column_groups: Vec::new(),
+                    degenerate: Vec::new(),
+                    state_columns: Vec::new(),
+                    comparability: Vec::new(),
+                });
             }
             // A `grain: key` model that also declares a `timeseries:`
             // block must clear the key-temporal-locality gate before a
@@ -863,6 +884,11 @@ pub enum MaintenanceRefusal {
     LocalityNotEstablished {
         message: String,
     },
+    /// `GrainAssertionMismatch` — a `grain: key` model with no declared
+    /// top-level `unique_key:` and no GROUP-BY-derivable identity either.
+    IdentityNotDerivable {
+        message: String,
+    },
     /// `MaintenanceSkeletonChanged` — an added or changed column occupies a
     /// row-membership/identity (skeleton) position, a grain change rather
     /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
@@ -1244,6 +1270,11 @@ pub fn maintenance_plan_diagnostics(
             }),
             smelt_logical::maintenance::Refusal::LocalityNotEstablished { message } => {
                 Some(MaintenanceRefusal::LocalityNotEstablished {
+                    message: message.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::IdentityNotDerivable { message } => {
+                Some(MaintenanceRefusal::IdentityNotDerivable {
                     message: message.clone(),
                 })
             }

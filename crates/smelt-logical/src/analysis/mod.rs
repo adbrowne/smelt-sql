@@ -618,6 +618,14 @@ fn extract_group_by_from_text(sql: &str, select_item_exprs: &[String]) -> Vec<St
         .collect()
 }
 
+/// True for the characters that can appear inside a bare identifier — an
+/// end-keyword boundary check must treat `_` as identifier-forming (not just
+/// alphanumeric), or a column named e.g. `order_id` collides with the `ORDER`
+/// end-keyword mid-identifier (`_` before "non-alphanumeric" == false boundary).
+fn is_identifier_char(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 /// Find a keyword in text that's not inside parentheses.
 fn find_keyword_not_in_parens(text: &str, keyword: &str) -> Option<usize> {
     let mut depth = 0;
@@ -634,10 +642,18 @@ fn find_keyword_not_in_parens(text: &str, keyword: &str) -> Option<usize> {
             && i + kw_bytes.len() <= bytes.len()
             && &bytes[i..i + kw_bytes.len()] == kw_bytes
         {
-            // Check word boundary
-            let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
+            // Word boundary: neither neighbor may be an identifier char, and
+            // the keyword may not be a quoted/qualified identifier (`t.order`,
+            // `"order"`, a backtick-quoted name).
+            let before_ok = i == 0
+                || (!is_identifier_char(bytes[i - 1])
+                    && bytes[i - 1] != b'.'
+                    && bytes[i - 1] != b'"'
+                    && bytes[i - 1] != b'`');
             let after_ok = i + kw_bytes.len() >= bytes.len()
-                || !bytes[i + kw_bytes.len()].is_ascii_alphanumeric();
+                || (!is_identifier_char(bytes[i + kw_bytes.len()])
+                    && bytes[i + kw_bytes.len()] != b'"'
+                    && bytes[i + kw_bytes.len()] != b'`');
             if before_ok && after_ok {
                 return Some(i);
             }
@@ -1033,5 +1049,58 @@ mod tests {
             !scope_group_by_alignment(&branch2, "event_date").is_aligned(),
             "branch 2's own GROUP BY (user_id only) must not inherit branch 1's alignment"
         );
+    }
+
+    /// A GROUP BY column whose name is *prefixed* by an end-keyword
+    /// (`order_id` contains `ORDER`, `having_flag` contains no keyword but is
+    /// listed defensively, etc.) must survive as the sole derived key — the
+    /// end-keyword scan must not treat `_` as a non-identifier boundary char.
+    #[test]
+    fn group_by_column_prefixed_by_an_end_keyword_survives() {
+        let columns = [
+            "order_id",
+            "having_flag",
+            "union_all",
+            "limit_count",
+            "except_code",
+            "intersect_key",
+            "fetch_size",
+        ];
+        for col in columns {
+            let sql = format!("SELECT {col}, COUNT(*) as cnt FROM t GROUP BY {col}");
+            let analysis =
+                analyze_select(&sql).unwrap_or_else(|| panic!("failed to analyze {sql}"));
+            assert_eq!(
+                analysis.group_by_exprs,
+                vec![col.to_string()],
+                "GROUP BY column `{col}` was truncated by an end-keyword collision"
+            );
+        }
+    }
+
+    #[test]
+    fn real_order_by_after_group_by_still_terminates_the_clause() {
+        let sql = "SELECT a, COUNT(*) as cnt FROM t GROUP BY a ORDER BY a";
+        let analysis = analyze_select(sql).unwrap();
+        assert_eq!(analysis.group_by_exprs, vec!["a"]);
+
+        let sql_lower = "SELECT a, COUNT(*) as cnt FROM t GROUP BY a order by a";
+        let analysis = analyze_select(sql_lower).unwrap();
+        assert_eq!(analysis.group_by_exprs, vec!["a"]);
+
+        let sql_having = "SELECT a, COUNT(*) as cnt FROM t GROUP BY a HAVING COUNT(*) > 1";
+        let analysis = analyze_select(sql_having).unwrap();
+        assert_eq!(analysis.group_by_exprs, vec!["a"]);
+    }
+
+    #[test]
+    fn quoted_or_qualified_end_keyword_is_not_a_clause_terminator() {
+        let sql = r#"SELECT t."order", COUNT(*) as cnt FROM t GROUP BY t."order""#;
+        let analysis = analyze_select(sql).unwrap();
+        assert_eq!(analysis.group_by_exprs, vec![r#"t."order""#]);
+
+        let sql_quoted = r#"SELECT "order", COUNT(*) as cnt FROM t GROUP BY "order""#;
+        let analysis = analyze_select(sql_quoted).unwrap();
+        assert_eq!(analysis.group_by_exprs, vec![r#""order""#]);
     }
 }

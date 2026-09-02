@@ -656,40 +656,98 @@ pub fn resolve_incremental_strategy(
     metadata: &smelt_core::ModelMetadata,
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     backend_default: IncrementalStrategy,
-) -> IncrementalStrategy {
-    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
-        sql,
-        table,
-        metadata,
-        sources,
-        explicitly_mutable,
-        // See the analogous call in `resolve_live_column_scoped_cell` above.
-        None,
-        // Not (yet) plumbed with declared `key_recurrence` bounds at this
-        // call site — this resolver only reads the creation cell's
-        // `Technique`, which route 3's declared sub-route does not affect
-        // (a locality refusal already yields an empty-cells plan either
-        // way, falling back to `backend_default` below).
-        &[],
-        // This resolver only reads the creation (`NewData`) cell — a
-        // `ColumnAdded` trigger never affects it, so no deployed-schema
-        // snapshot is needed here.
-        &[],
-        &SourceReferentialIntegrity::new(),
-        None,
-    ) else {
-        return backend_default;
+) -> Result<IncrementalStrategy> {
+    let result = if model_edges.is_empty() {
+        smelt_db::queries::maintenance::derive_model_maintenance_plan(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            // See the analogous call in `resolve_live_column_scoped_cell` above.
+            None,
+            // Not (yet) plumbed with declared `key_recurrence` bounds at this
+            // call site — this resolver only reads the creation cell's
+            // `Technique`, which route 3's declared sub-route does not affect
+            // (a locality refusal already yields an empty-cells plan either
+            // way, falling back to `backend_default` below).
+            &[],
+            // This resolver only reads the creation (`NewData`) cell — a
+            // `ColumnAdded` trigger never affects it, so no deployed-schema
+            // snapshot is needed here.
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+        )
+    } else {
+        // Edge-aware derivation — the SAME derivation
+        // `resolve_live_delta_restriction_facts` uses, never a second one.
+        smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+            sql,
+            table,
+            metadata,
+            sources,
+            explicitly_mutable,
+            model_edges,
+            None,
+            &[],
+            &[],
+            &SourceReferentialIntegrity::new(),
+            None,
+        )
     };
+    let Some(result) = result else {
+        return Ok(backend_default);
+    };
+
+    if let Some(driving_edge) = model_edges.first() {
+        let driving_trigger = Trigger::NewData {
+            source: driving_edge.name.clone(),
+        };
+        if let Some(cell) = result.plan.cell_for(&driving_trigger) {
+            return Ok(match &cell.technique {
+                Technique::DeleteInsert => IncrementalStrategy::DeleteInsert,
+                _ => backend_default,
+            });
+        }
+        let driving_edge_refused = result.plan.refusals.iter().any(|r| {
+            matches!(
+                r,
+                smelt_logical::maintenance::Refusal::ReachNotDerivable { edge, .. }
+                    if edge == &driving_edge.name
+            )
+        });
+        let other_creation_cell =
+            result.plan.cells.iter().any(|c| {
+                matches!(&c.trigger, Trigger::NewData { .. }) && c.trigger != driving_trigger
+            });
+        if driving_edge_refused && !other_creation_cell {
+            bail!(
+                "model '{table}' cannot be maintained: upstream maintained model edge '{}' \
+                 declares no timeseries clock and none is inferable, so its creation-trigger \
+                 edge cannot be clamped to the output partition axis, and no other \
+                 creation-trigger cell admits a technique for this run \
+                 (docs/specs/incremental_models.md §\"Upstream model edges\")",
+                driving_edge.name
+            );
+        }
+        // The driving edge's own cell is absent but there is another
+        // admissible creation-trigger cell (or the refusal is unrelated to
+        // the driving edge) — fall through to the first-`NewData`-match
+        // below, mirroring pre-edge-aware behaviour.
+    }
+
     let creation_cell = result
         .plan
         .cells
         .iter()
         .find(|c| matches!(c.trigger, Trigger::NewData { .. }));
-    match creation_cell.map(|c| &c.technique) {
+    Ok(match creation_cell.map(|c| &c.technique) {
         Some(Technique::DeleteInsert) => IncrementalStrategy::DeleteInsert,
         _ => backend_default,
-    }
+    })
 }
 
 /// Resolve the plain `Trigger::NewData` incremental fold's own per-cell

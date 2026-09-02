@@ -1360,7 +1360,11 @@ validated `timeseries:` declaration supplies the clock the downstream creation c
 by, and scan bounds compose through the chain exactly as the propagation graph composes them.
 An upstream-model ref whose clock cannot be derived (the upstream declares no `timeseries:`
 and none is inferable) is a recorded refusal on that cell (`MaintenanceReachNotDerivable`,
-naming the edge) — never a silent drop. A ref to a `full`-mode or view upstream derives no
+naming the edge) — never a silent drop. The partition-addressed creation cell this edge admits
+(when it admits one) is what the run loop actually executes, read from the model's own derived
+plan rather than a hardcoded technique; an edge refused `ReachNotDerivable` with no other
+creation-trigger cell to fall back on refuses the run rather than silently region-recomputing
+under a default technique the plan never admitted for that trigger. A ref to a `full`-mode or view upstream derives no
 creation cell (there is no incremental delta to receive); it participates in
 mutation/backfill triggers only. For forward propagation, `--source` accepts either a declared
 source or an upstream maintained model; a model's landed delta is the output window a
@@ -1900,12 +1904,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   no cell choice/write-pin logic at all, so a pin declared there remains silently unenforced —
   the same gap as before this phase, just narrowed to one fewer case. Tracked:
   `docs/outcomes/20260809-repair-family/outcome.md`.
-- **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
-  identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
-  derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).
-- **No execution technique keys off a maintained-model creation cell** — the propagated
-  region materializes via the ordinary run loop, not a per-cell technique. Tracked:
-  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **Plan-consumer gaps**: the horizon-clamped partition-local mutation quadrant is
   unreachable from any real workspace; dispatch cannot distinguish "a mutation genuinely
   happened" from re-derivation; the `prefer` soft-bias ladder and

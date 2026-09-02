@@ -393,6 +393,12 @@ pub enum Refusal {
     /// diagnostic (`locality::LocalityRefusal::message`): it names all
     /// three routes and the nearest missing fact.
     LocalityNotEstablished { message: String },
+    /// A `grain: key` model declares no top-level `unique_key:` and its own
+    /// outermost SELECT's `GROUP BY` derives no key either (empty or
+    /// absent) — there is no identity to maintain against. Maps onto the
+    /// `GrainAssertionMismatch` diagnostic code, naming the asserted grain
+    /// and the empty derived key (`models.md` §"Constraint violations").
+    IdentityNotDerivable { message: String },
     /// The repair family's affected-key obligation (P7,
     /// `model_properties.md` §"Affected-key discovery") could not resolve a
     /// finite key set for `source`'s delta — the
@@ -510,6 +516,18 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
     MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
+        key_locality: None,
+    }
+}
+
+/// The plan derived when a `grain: key` model has no derivable identity at
+/// all — no declared top-level `unique_key:` and an empty GROUP-BY-derived
+/// key. Bypasses [`derive::derive_maintenance_plan`] entirely — there is no
+/// identity to fold cells around.
+pub fn identity_not_derivable_plan(message: String) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::IdentityNotDerivable { message }],
         key_locality: None,
     }
 }

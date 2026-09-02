@@ -161,10 +161,13 @@ JOIN smelt.sources.enrichment e ON o.customer_id = e.customer_id
 
 /// A `grain: key` model whose body never aggregates has no fold candidate —
 /// the plan-shaped read is a partition-shaped (row-per-event) body under a
-/// key-addressed declaration, and the derivation refuses honestly
-/// (`MaintenanceNoAdmissibleTechnique`) rather than silently keeping the
-/// mismatched declaration (`docs/specs/models.md`: "Declared grain
-/// contradicted by the derived plan ... Hard error").
+/// key-addressed declaration. This particular body also declares no
+/// top-level `unique_key:` and has no `GROUP BY` to derive one from, so the
+/// frontmatter-time identity check (`GrainAssertionMismatch`,
+/// `docs/specs/models.md` §"Constraint violations") now catches it before
+/// plan-derivation's own technique-admission refusal
+/// (`MaintenanceNoAdmissibleTechnique`) ever runs — never silently keeping
+/// the mismatched declaration either way.
 #[test]
 fn grain_mismatch_is_error_never_silent() {
     let payments_source = r#"
@@ -193,17 +196,108 @@ SELECT user_id, amount FROM smelt.sources.payments
 
     let refusals: Vec<_> = diags
         .iter()
-        .filter(|d| d.code == Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique))
+        .filter(|d| d.code == Some(DiagnosticCode::GrainAssertionMismatch))
         .collect();
     assert_eq!(
         refusals.len(),
         1,
-        "expected exactly one MaintenanceNoAdmissibleTechnique, got {diags:?}"
+        "expected exactly one GrainAssertionMismatch, got {diags:?}"
     );
     assert_eq!(
         refusals[0].severity,
         smelt_db::DiagnosticSeverity::Error,
         "grain mismatch must be an Error, never silent"
+    );
+}
+
+/// A `grain: key` model with no declared top-level `unique_key:` and whose
+/// own SELECT has no `GROUP BY` at all derives no identity — the plan
+/// derivation refuses fail-loud (`GrainAssertionMismatch`) at frontmatter
+/// time, naming the asserted grain and the empty derived key
+/// (`docs/specs/models.md` §"Constraint violations").
+#[test]
+fn grain_key_without_unique_key_or_group_by_errors() {
+    let payments_source = r#"
+description: Payments, append-only.
+mutation_profile: append_only
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT user_id, amount FROM smelt.sources.payments
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", payments_source),
+            ("models/lifetime_value.sql", model),
+        ],
+        "lifetime_value",
+    );
+
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::GrainAssertionMismatch))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one GrainAssertionMismatch, got {diags:?}"
+    );
+    assert_eq!(
+        refusals[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "an underivable identity must be an Error, never silent"
+    );
+    assert!(
+        refusals[0].message.contains("grain: key") && refusals[0].message.contains("no key"),
+        "message must name the asserted grain and the empty derived key, got: {}",
+        refusals[0].message
+    );
+}
+
+/// A `grain: key` model with no declared top-level `unique_key:` but whose
+/// own SELECT does have a `GROUP BY` derives its identity from that GROUP
+/// BY — no diagnostic.
+#[test]
+fn grain_key_without_unique_key_but_with_group_by_is_clean() {
+    let payments_source = r#"
+description: Payments, append-only.
+mutation_profile: append_only
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT user_id, SUM(amount) as total_amount FROM smelt.sources.payments GROUP BY user_id
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", payments_source),
+            ("models/lifetime_value.sql", model),
+        ],
+        "lifetime_value",
+    );
+
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::GrainAssertionMismatch))
+        .collect();
+    assert!(
+        refusals.is_empty(),
+        "GROUP-BY-derived identity must not produce GrainAssertionMismatch, got {diags:?}"
     );
 }
 

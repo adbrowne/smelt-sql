@@ -2639,6 +2639,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
                     message,
                 } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
+                crate::queries::maintenance::MaintenanceRefusal::IdentityNotDerivable {
+                    message,
+                } => (DiagnosticCode::GrainAssertionMismatch, message.clone()),
                 crate::queries::maintenance::MaintenanceRefusal::SkeletonChanged { column } => (
                     DiagnosticCode::MaintenanceSkeletonChanged,
                     format!(

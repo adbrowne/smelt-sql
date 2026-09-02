@@ -316,7 +316,7 @@ open — not that the excluded bullets themselves are gone.
 | 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | done |
 | 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | done |
 | 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | done |
-| 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | planned |
+| 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | done |
 | 18 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 19 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
 | 20 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
@@ -720,6 +720,21 @@ open — not that the excluded bullets themselves are gone.
   cell into a fail-loud run refusal instead of a silent region recompute. If a real fixture would
   newly refuse, the refusal condition is narrowed further and the residue restated honestly in
   the spec rather than a fixture being edited.
+
+- **2026-09-03, phase 17.** `IncrementalStrategy` has exactly one variant (`DeleteInsert`), so
+  no fixture can show the driving edge's cell and a plain source's cell resolving to visibly
+  different `IncrementalStrategy` values — the edge-aware dispatch is real at the
+  `MaintenancePlan` level (`plan.cell_for` vs. first-`NewData`-match) but collapses to the same
+  return value either way today. `crates/smelt-runtime/tests/model_edge_creation_cell.rs`'s
+  first test was narrowed to what's actually observable: an edge-only model (no plain
+  `sources:`) resolves via the edge's own cell instead of falling back to `backend_default` for
+  lack of any cell. Two real fixtures (`maintenance_diagnostics.rs::grain_mismatch_is_error_
+  never_silent`, `explain_maintenance.rs::degenerate_plan_visibly_reported`) had `grain: key` +
+  no `unique_key:` + no `GROUP BY` — genuinely underivable identity, now caught by the new
+  frontmatter check earlier than the paths they were written to exercise. Updated rather than
+  relaxed: the first now asserts `GrainAssertionMismatch`; the second's fixture gained a
+  `GROUP BY o.order_id` (with `MIN(...)` folds) to keep a derivable identity while still
+  reproducing the ambiguous-join column-group collapse it actually tests.
 
 ## Blocked
 

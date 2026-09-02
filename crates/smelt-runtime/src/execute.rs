@@ -2908,18 +2908,6 @@ pub async fn execute_project(
                         Some(bare)
                     })
                     .collect();
-                let resolved_strategy = match plan.model_file.metadata.as_deref() {
-                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
-                        &sql_for_bounds,
-                        &plan.model_file.db_name_owned(),
-                        metadata,
-                        &maint_source_facts,
-                        &explicitly_mutable,
-                        backend_default_strategy.clone(),
-                    ),
-                    None => backend_default_strategy,
-                };
-
                 // T3 (`docs/plans/20260715-composed-axes-conditional-
                 // maintenance.md` Phase E3): the model-edge-sourced creation
                 // cell's delta-restriction facts, resolved once per model
@@ -2930,8 +2918,23 @@ pub async fn execute_project(
                 // plan derives no creation cell for the driving edge, or the
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
-                // scan, unchanged from before this phase.
+                // scan, unchanged from before this phase. Hoisted above
+                // `resolved_strategy` below so both consult the same
+                // `model_edges` list without computing it twice.
                 let model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
+                let resolved_strategy = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        &model_edges,
+                        backend_default_strategy.clone(),
+                    )?,
+                    None => backend_default_strategy,
+                };
+
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {

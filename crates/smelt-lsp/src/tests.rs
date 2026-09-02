@@ -2752,3 +2752,19 @@ fn skeleton_changed_maps_to_stable_code_string() {
         "maintenance-skeleton-changed"
     );
 }
+
+/// A `grain: key` model with no derivable identity (no declared top-level
+/// `unique_key:`, no GROUP BY) surfaces `GrainAssertionMismatch` — the same
+/// code the plan-derivation seam now emits (`smelt-db`'s
+/// `maintenance.rs::MaintenanceRefusal::IdentityNotDerivable`,
+/// `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 17) —
+/// through the same wire-visible code string the LSP already renders for
+/// the other `grain:` assertion mismatch, so CLI and LSP consumers agree on
+/// the code string without a run.
+#[test]
+fn grain_assertion_mismatch_maps_to_stable_code_string() {
+    assert_eq!(
+        crate::backend::diagnostic_code_str(smelt_db::DiagnosticCode::GrainAssertionMismatch),
+        "grain-assertion-mismatch"
+    );
+}
