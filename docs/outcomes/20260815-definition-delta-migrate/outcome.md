@@ -329,7 +329,7 @@ open — not that the excluded bullets themselves are gone.
 | 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | planned |
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | planned |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
-| 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | pending |
+| 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
@@ -337,6 +337,21 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 26d planning — group-scoped dirt is licensed by the existing
+  closure-prune proof, not by a new one.** `grouping.rs` already proves, per enrichment source,
+  that a join is `Closed` (row-preserving) and prunes its membership contribution; that is exactly
+  the "this source's delta can revise values but never add or remove rows" fact a narrower dirt
+  scope needs. 26d surfaces it as `GroupingResult::value_only_sources` rather than deriving a
+  second creation-reaching classifier. Everything else — a creation-reaching source, a degenerate
+  collapse, an upstream naming no group, an untyped outbound edge, a node also dirtied by an
+  unscoped edge — stays whole-model (widen-never-narrow). No work leaves the outcome.
+
+- **2026-09-03, phase 26d planning — the residual "grain-alignment check validates only the
+  declaration" clause is posture, not a defect.** Same call as 26c's: §"Granularity is declared,
+  not derived" is the normative rule, so once 26a/26c/26d have deleted their clauses the whole
+  "Locality and diagnostic residues" bullet goes, closing success criterion 16 without a
+  derived-granularity classifier.
 
 - **2026-09-03, phase 26c planning — the "graph edges take the declaration directly" clause is
   posture, not a defect.** `incremental_models.md` §"Granularity is declared, not derived" is the
