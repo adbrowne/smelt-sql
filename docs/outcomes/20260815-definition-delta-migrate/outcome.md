@@ -322,11 +322,11 @@ open — not that the excluded bullets themselves are gone.
 | 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | done |
 | 21 | Keyed dirt cascades and is consumed: `propagate` walks a node dirtied only through the keyed channel, and `plan_since_upstream` schedules and reports keyed dirt — a bare `grain: key` model with readers propagates end to end past `MaintenanceGraphUnsupportedNode` | done |
 | 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | done |
-| 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | pending |
-| 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal), including the bare-keyed→clocked-reader model-edge admission gap phase 21 surfaced (a `grain: partition` downstream reached only through a plain `FROM`, no `JOIN`, cannot resolve its grain for `admit_key_addressed_recompute`); remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
+| 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | planned |
+| 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal), including the bare-keyed→clocked-reader model-edge admission gap phase 21 surfaced (a `grain: partition` downstream reached only through a plain `FROM`, no `JOIN`, cannot resolve its grain for `admit_key_addressed_recompute`); plus an open-ended propagated window (`start: Some(_), end: None`) surviving `parse_run_window`'s "both or neither" guard in a real `execute_project` run; remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -833,6 +833,8 @@ open — not that the excluded bullets themselves are gone.
   day axis (unbounded work for no extra precision — forward dirt reaches the frontier either
   way) and admitting the self-edge into `topo_order` with a tie-break (would silently make a
   genuine table-graph cycle orderable).
+
+- 2026-09-03 (phase 23 plan): phase 24 extended to name the open-ended `(Some, None)` run window `parse_run_window` still rejects (surfaced by phase 22's summary); phase 27 extended to cover `window_independence`'s same-partition `Ordered` gap. Both serve the outcome's end-to-end criterion, so neither is deferred out.
 
 ## Blocked
 
