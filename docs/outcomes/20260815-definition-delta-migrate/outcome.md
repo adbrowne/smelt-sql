@@ -331,7 +331,7 @@ open — not that the excluded bullets themselves are gone.
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
-| 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | pending |
+| 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | pending |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism | pending |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | pending |
@@ -963,6 +963,19 @@ open — not that the excluded bullets themselves are gone.
   `model_transforms.md`'s matching bullets. Also noted for 27b: `emit_staged_candidate_
   conditional_recompute` already exists in `smelt-logical::maintenance::emit`, so that row's real
   scope is establishing which half (admission vs. emission) is unwired rather than assuming both.
+
+- **2026-09-03 (phase 27b planning)** — no table reshape; phase 25's summary named no residue rows
+  26+ do not already own, and 27a's split already covers this bullet clause by clause. Two design
+  calls recorded so the implementer does not re-litigate them. (1) The gap is admission +
+  dispatch, not emission: `emit_staged_candidate_conditional{,_recompute}` both exist and the
+  recompute sibling is live-dispatched for `UpstreamMutation` membership cells; the ordinary
+  `Trigger::NewData` region path simply has no conditional route. (2) The region variant is
+  realised with `emit_diff_patch` under the region's own slice predicate and `DeleteLeg::Complete`
+  — `emit_staged_candidate_conditional` unmodified is unsound here (its keyed `DELETE` is not
+  region-bounded and it has no departed-row leg, so a key leaving the region would go stale), and
+  a fourth staged emitter would duplicate `emit_diff_patch`'s legs for no semantic difference.
+  Delta restriction keeps precedence over suppression when both admit; everything unproven falls
+  closed to today's byte-identical widened scan.
 
 
 ## Blocked
