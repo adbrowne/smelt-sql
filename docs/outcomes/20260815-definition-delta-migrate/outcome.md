@@ -335,7 +335,7 @@ open — not that the excluded bullets themselves are gone.
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
-| 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | pending |
+| 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | planned |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
@@ -1023,6 +1023,26 @@ open — not that the excluded bullets themselves are gone.
   committed script is already correct; this planning run terminated the stale process so
   `outcome-loop-forever.sh` restarts it with the fixed scanner, which should pick rows
   26a–27e up as IMPLEMENT steps.
+
+- **2026-09-03 (phase 27f planning)** — no table reshape. Phase 25's summary named no
+  residue rows 26+ do not already own, and 27f is the last clause of phase 22's surfaced
+  gap, already owned by its own row. One design call recorded so the implementer does not
+  re-litigate it: the fix goes in the **shared** `self_edge_bound_days` derivation, not in
+  `windowing.rs` or `propagate.rs` separately — `self_edge_clamp`'s doc comment already
+  promises the ordered-execution verdict and the propagation-graph admission cannot
+  diverge, and duplicating a `before > 0` check at the two call sites would re-create the
+  divergence it exists to prevent. The refusal text is the derivation's, so the graph
+  layer's `MaintenanceGraphUnsupportedNode` names the same reason ordered backfill does.
+
+- **2026-09-03 (loop hygiene, third observation)** — the stale `outcome-loop.sh`
+  (PID 1367419, started 03:51, predating 518e317e's `next_step()` fix) was **still
+  running** at this iteration: the previous run's scheduled kill did not survive its own
+  session, so the hint again disagreed with the table (hinted phase 28; `next_step()` over
+  the committed file returns `implement 26a`). Terminated for real this run via a detached
+  delayed kill, so `outcome-loop-forever.sh` restarts with the fixed scanner. Rows
+  26a–27e remain `planned` with committed plans and no implementation; whoever picks this
+  outcome up next should let the IMPLEMENT step drain them starting at 26a. This run
+  deliberately did not renumber or re-flip those rows.
 
 
 ## Blocked
