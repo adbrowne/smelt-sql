@@ -35,7 +35,7 @@ same pattern phase 1 already used) wherever the decision is small enough to make
 **Boundary, re-affirmed 2026-08-15 (see decision log).** A bullet only gets a phase — here or in a
 spawned outcome — when the spec has already decided the target behaviour and only the
 implementation is missing, or when the decision needed is small enough to make in the same sitting
-(phase 18/19's pattern: record the call, drop the "(Open Question)" tag, move on). A bullet the
+(the open-questions phase's pattern: record the call, drop the "(Open Question)" tag, move on). A bullet the
 spec itself flags as undecided (an explicit `(Open Question)` tag, or a `§Future Extensions` entry
 stating "not decided ... via its own spec diff") is **not** implemented here or in any spawned
 outcome — deciding it is a product call this program does not make unilaterally. Every such bullet
@@ -199,7 +199,7 @@ accurately described as open.
     on a key-addressed model is not a hard error"). Both bullets are removed from
     `incremental_shapes.md` §Known Divergences.
 20. `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` are run and
-    every Known Divergences bullet this outcome's phases 11–23 close is actually removed from the
+    every Known Divergences bullet this outcome's phases 11–26 close is actually removed from the
     respective spec (not just addressed in code) — the same discipline success criterion 8
     already applies to `definition_deltas.md`. Bullets this outcome deliberately does not close
     (the "Out of scope" list) stay, worded accurately rather than pointing at a done outcome as if
@@ -317,15 +317,38 @@ open — not that the excluded bullets themselves are gone.
 | 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | done |
 | 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | done |
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | done |
-| 18 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
-| 19 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 20 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
-| 21 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
-| 22 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
-| 23 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
-| 24 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–23 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
+| 18 | Consume the declared guardrail/preference config: `scan_bounds.on_violation: warn` admits the plan and reports a Warning; the `prefer`/`technique` choice ladder is consulted by the ordinary region path (`resolve_incremental_strategy`); the absent-cost-model fallback preference order is stated in the spec | planned |
+| 19 | Mutation quadrant: a horizon-clamped partition-local mutation fixture reachable from a real workspace; dispatch distinguishes "a mutation genuinely happened" from re-derivation; `AppendOnly` sources get an `UpstreamMutation` cell | pending |
+| 20 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
+| 21 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
+| 22 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 23 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 24 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 25 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 26 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
+| 27 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase-18 planning — table reshape.** The single row 18 bundled ~10 independent
+  items spanning two distinct `incremental_models.md` §Known Divergences bullets (Plan-consumer
+  gaps, Graph-layer gaps) plus an unrelated `deployed_column_names` threading item. Split into
+  four rows — 18 (declared guardrail/preference config consumption), 19 (mutation quadrant),
+  20 (graph-layer gaps), 21 (`deployed_column_names` / gate-posture reconciliation) — and
+  renumbered the trailing rows 19–24 to 22–27. Nothing left the outcome; success criterion 15
+  is still covered in full by 18+19+20.
+- **2026-09-03, phase 18.** Success criterion 15 explicitly does not require building a cost
+  model, only that the choice between two admissible techniques be principled and documented
+  where none exists. Decision: the fixed preference order is the one `resolve_cell_choice`
+  already implements — validated `cells[].write` pin > hard `cells[].technique` pin (refuses
+  loudly if unadmitted) > soft `prefer` > the cell's own admitted-and-live technique > region
+  recompute — and it is stated in `incremental_models.md` §Design rather than left implicit in
+  the resolver. The cost model itself moves to §Future Extensions.
+- **2026-09-03, phase 18.** `scan_bounds.on_violation: warn` means the guardrail **admits** the
+  plan and reports a Warning, rather than refusing with a downgraded-severity diagnostic — the
+  spec already calls the guardrail "check-only: never modifies a derived clamp, only refuses
+  (or warns)", and a warning that still refuses the cell would make `warn` indistinguishable
+  from `error`.
 
 - **2026-09-02, phase 14.** Per-cell `deferral` skip on the plain `Trigger::NewData` fold
   requires FULL coverage: a skip fires only when every one of the fold's own column groups is
