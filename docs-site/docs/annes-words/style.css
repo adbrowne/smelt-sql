@@ -75,3 +75,34 @@ header { position: relative; }
 #countdown { font-variant-numeric: tabular-nums; color: var(--absent); }
 #practice-btn { border: 0; border-radius: 4px; background: var(--fg); color: #fff;
                 font-family: inherit; font-weight: 700; padding: 10px 16px; cursor: pointer; }
+
+.header-right { display: flex; align-items: center; gap: 10px; }
+#stats-btn { background: none; border: 0; font-size: 1.1rem; cursor: pointer; padding: 0; }
+
+#modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+                  display: flex; align-items: center; justify-content: center; z-index: 20; }
+/* An explicit display beats the UA rule for [hidden], so restore it by hand.
+   Without this line the modal can never be hidden. */
+#modal-backdrop[hidden] { display: none; }
+#stats-modal { position: relative; background: var(--bg); border-radius: 8px; padding: 16px;
+               width: 320px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
+#stats-modal h2 { font-size: .9rem; text-transform: uppercase; text-align: center;
+                  letter-spacing: .05em; margin: 12px 0; }
+#modal-close { position: absolute; top: 8px; right: 10px; border: 0; background: none;
+               font-size: 1.5rem; line-height: 1; cursor: pointer; color: var(--fg); }
+#stat-numbers { display: flex; justify-content: center; }
+.stat { flex: 1; text-align: center; }
+.stat .value { font-size: 2rem; }
+.stat .label { font-size: .7rem; }
+.dist-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: .8rem; }
+.dist-bar { background: var(--absent); color: #fff; text-align: right; padding: 2px 6px;
+            min-width: 20px; font-weight: 700; }
+.dist-bar.best { background: var(--correct); }
+#modal-footer { display: flex; align-items: center; gap: 12px; margin-top: 16px;
+                border-top: 1px solid var(--border); padding-top: 16px; }
+#modal-countdown { flex: 1; text-align: center; }
+#modal-countdown .label { font-size: .7rem; text-transform: uppercase; }
+#modal-countdown .clock { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+#share-btn { flex: 1; background: var(--correct); color: #fff; border: 0; border-radius: 4px;
+             height: 52px; font-family: inherit; font-weight: 700; font-size: 1.1rem;
+             text-transform: uppercase; cursor: pointer; }

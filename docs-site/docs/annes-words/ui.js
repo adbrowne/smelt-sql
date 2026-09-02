@@ -1,7 +1,7 @@
 // docs-site/docs/annes-words/ui.js
 import { ANSWERS, ALLOWED } from './words.js';
 import { scoreGuess, mergeKeyStates, isValidGuess, WORD_LENGTH, MAX_GUESSES,
-         dailyIndex, puzzleNumber, msUntilNextPuzzle } from './game.js';
+         dailyIndex, puzzleNumber, msUntilNextPuzzle, shareText } from './game.js';
 import { KEY, load, serialize, recordResult } from './storage.js';
 
 const VALID = new Set([...ANSWERS, ...ALLOWED]);
@@ -127,6 +127,7 @@ async function submit() {
   }
   persist();
   updateFooter();
+  if (state.mode === 'daily' && state.status !== 'playing') setTimeout(openStats, 2200);
 }
 
 function revealRow(rowIndex, marks) {
@@ -151,7 +152,55 @@ function paintKeyboard() {
   }
 }
 
+const backdrop = document.getElementById('modal-backdrop');
+const shareBtn = document.getElementById('share-btn');
+const modalCountdown = document.getElementById('modal-countdown');
+const modalClock = document.getElementById('modal-clock');
+
+function renderStats() {
+  const { played, wins, streak, maxStreak, dist } = save.stats;
+  const winPct = played ? Math.round((wins / played) * 100) : 0;
+  document.getElementById('stat-numbers').innerHTML =
+    [['Played', played], ['Win %', winPct], ['Current Streak', streak], ['Max Streak', maxStreak]]
+      .map(([label, value]) => `<div class="stat"><div class="value">${value}</div><div class="label">${label}</div></div>`)
+      .join('');
+
+  const max = Math.max(1, ...dist);
+  const winRow = state.mode === 'daily' && state.status === 'won' ? state.guesses.length : 0;
+  document.getElementById('stat-dist').innerHTML = dist.map((n, i) => {
+    const width = Math.max(7, Math.round((n / max) * 100));
+    const best = i + 1 === winRow ? ' best' : '';
+    return `<div class="dist-row"><span>${i + 1}</span><div class="dist-bar${best}" style="width:${width}%">${n}</div></div>`;
+  }).join('');
+
+  const finishedDaily = state.mode === 'daily' && state.status !== 'playing';
+  shareBtn.hidden = !finishedDaily;
+  modalCountdown.hidden = !finishedDaily;
+}
+
+function openStats() { renderStats(); backdrop.hidden = false; }
+function closeStats() { backdrop.hidden = true; }
+
+document.getElementById('stats-btn').addEventListener('click', openStats);
+document.getElementById('modal-close').addEventListener('click', closeStats);
+backdrop.addEventListener('click', e => { if (e.target === backdrop) closeStats(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStats(); });
+
+shareBtn.addEventListener('click', async () => {
+  const marks2d = state.guesses.map(g => scoreGuess(g, state.answer));
+  const text = shareText(state.puzzle, marks2d, state.status === 'won');
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied results to clipboard');
+  } catch {
+    toast('Could not copy');
+  }
+});
+
+// Physical keystrokes must not reach the board while the stats modal is open
+// (Escape is handled by the listener above regardless of this guard).
 document.addEventListener('keydown', e => {
+  if (!backdrop.hidden) return;
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   if (e.key === 'Enter') press('enter');
   else if (e.key === 'Backspace') press('backspace');
@@ -229,11 +278,13 @@ function updateFooter() {
 practiceBtn.addEventListener('click', startPractice);
 
 setInterval(() => {
-  if (countdownEl.hidden) return;
+  if (countdownEl.hidden && modalCountdown.hidden) return;
   const ms = msUntilNextPuzzle(new Date());
   if (ms <= 0) return location.reload();
   const pad = n => String(n).padStart(2, '0');
-  clockEl.textContent = `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)}`;
+  const formatted = `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)}`;
+  clockEl.textContent = formatted;
+  modalClock.textContent = formatted;
 }, 1000);
 
 startDaily();

@@ -12,6 +12,7 @@
   <h1>Anne's Words</h1>
   <div class="header-right">
     <span id="mode-label"></span>
+    <button id="stats-btn" type="button" aria-label="Statistics">&#128202;</button>
   </div>
 </header>
 <main>
@@ -24,5 +25,21 @@
   </div>
 </main>
 <script type="module" src="ui.js"></script>
+<div id="modal-backdrop" hidden>
+  <div id="stats-modal" role="dialog" aria-modal="true" aria-label="Statistics">
+    <button id="modal-close" class="modal-close" type="button" aria-label="Close">&times;</button>
+    <h2>Statistics</h2>
+    <div id="stat-numbers"></div>
+    <h2>Guess Distribution</h2>
+    <div id="stat-dist"></div>
+    <div id="modal-footer">
+      <div id="modal-countdown" hidden>
+        <div class="label">Next Anne's Words</div>
+        <div id="modal-clock" class="clock">--:--:--</div>
+      </div>
+      <button id="share-btn" type="button" hidden>Share</button>
+    </div>
+  </div>
+</div>
 </body>
 </html>
