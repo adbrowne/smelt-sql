@@ -1,6 +1,8 @@
 // docs-site/docs/annes-words/ui.js
 import { ANSWERS, ALLOWED } from './words.js';
-import { scoreGuess, mergeKeyStates, isValidGuess, WORD_LENGTH, MAX_GUESSES } from './game.js';
+import { scoreGuess, mergeKeyStates, isValidGuess, WORD_LENGTH, MAX_GUESSES,
+         dailyIndex, puzzleNumber, msUntilNextPuzzle } from './game.js';
+import { KEY, load, serialize, recordResult } from './storage.js';
 
 const VALID = new Set([...ANSWERS, ...ALLOWED]);
 const KB_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
@@ -8,14 +10,18 @@ const KB_ROWS = ['qwertyuiop', 'asdfghjkl', 'zxcvbnm'];
 const boardEl = document.getElementById('board');
 const keyboardEl = document.getElementById('keyboard');
 const toasterEl = document.getElementById('toaster');
+const modeLabel = document.getElementById('mode-label');
+const countdownEl = document.getElementById('countdown');
+const clockEl = document.getElementById('countdown-clock');
+const practiceBtn = document.getElementById('practice-btn');
 
-const state = {
-  answer: ANSWERS[Math.floor(Math.random() * ANSWERS.length)],
-  guesses: [],
-  current: '',
-  status: 'playing',
-  keys: {},
-};
+const readSave = () => { try { return load(localStorage.getItem(KEY)); } catch { return load(null); } };
+const writeSave = data => { try { localStorage.setItem(KEY, serialize(data)); } catch { /* private mode */ } };
+
+let save = readSave();
+const todayPuzzle = puzzleNumber(new Date());
+
+const state = { mode: 'daily', puzzle: todayPuzzle, answer: '', guesses: [], current: '', status: 'playing', keys: {} };
 let busy = false;
 
 function buildBoard() {
@@ -119,6 +125,8 @@ async function submit() {
     state.status = 'lost';
     toast(state.answer.toUpperCase(), 4000);
   }
+  persist();
+  updateFooter();
 }
 
 function revealRow(rowIndex, marks) {
@@ -150,5 +158,82 @@ document.addEventListener('keydown', e => {
   else if (/^[a-zA-Z]$/.test(e.key)) press(e.key.toLowerCase());
 });
 
-buildBoard();
-buildKeyboard();
+function startDaily() {
+  state.mode = 'daily';
+  state.puzzle = todayPuzzle;
+  state.answer = ANSWERS[dailyIndex(new Date(), ANSWERS.length)];
+  state.guesses = [];
+  state.current = '';
+  state.status = 'playing';
+  state.keys = {};
+  modeLabel.textContent = `#${todayPuzzle}`;
+  buildBoard();
+  buildKeyboard();
+  if (save.daily && save.daily.puzzle === todayPuzzle) replay(save.daily);
+  else { save.daily = null; updateFooter(); }
+}
+
+function startPractice() {
+  state.mode = 'practice';
+  state.answer = ANSWERS[Math.floor(Math.random() * ANSWERS.length)];
+  state.guesses = [];
+  state.current = '';
+  state.status = 'playing';
+  state.keys = {};
+  modeLabel.textContent = 'practice';
+  buildBoard();
+  buildKeyboard();
+  updateFooter();
+}
+
+/** Repaint a stored daily game with no animation. */
+function replay(daily) {
+  daily.guesses.forEach((guess, r) => {
+    const marks = scoreGuess(guess, state.answer);
+    state.guesses.push(guess);
+    state.keys = mergeKeyStates(state.keys, guess, marks);
+    [...rowEl(r).children].forEach((tile, i) => {
+      tile.textContent = guess[i];
+      tile.dataset.state = marks[i];
+    });
+  });
+  state.status = daily.status;
+  paintKeyboard();
+  if (state.status === 'lost') toast(state.answer.toUpperCase(), 4000);
+  updateFooter();
+}
+
+function persist() {
+  if (state.mode !== 'daily') return;              // practice never touches storage
+  const finished = state.status !== 'playing';
+  const alreadyRecorded = save.stats.lastPuzzle === state.puzzle;
+  if (finished && !alreadyRecorded) {
+    save.stats = recordResult(save.stats, {
+      won: state.status === 'won',
+      guesses: state.guesses.length,
+      puzzle: state.puzzle,
+      lastPuzzle: save.stats.lastPuzzle,
+    });
+  }
+  save.daily = { puzzle: state.puzzle, guesses: [...state.guesses], status: state.status };
+  writeSave(save);
+}
+
+function updateFooter() {
+  const done = state.status !== 'playing';
+  countdownEl.hidden = !(done && state.mode === 'daily');
+  practiceBtn.hidden = !done;
+  practiceBtn.textContent = state.mode === 'daily' ? 'Play a practice word' : 'Play another';
+}
+
+practiceBtn.addEventListener('click', startPractice);
+
+setInterval(() => {
+  if (countdownEl.hidden) return;
+  const ms = msUntilNextPuzzle(new Date());
+  if (ms <= 0) return location.reload();
+  const pad = n => String(n).padStart(2, '0');
+  clockEl.textContent = `${pad(Math.floor(ms / 3600000))}:${pad(Math.floor(ms / 60000) % 60)}:${pad(Math.floor(ms / 1000) % 60)}`;
+}, 1000);
+
+startDaily();
