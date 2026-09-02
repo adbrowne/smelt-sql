@@ -56,6 +56,7 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
         }),
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -206,6 +207,7 @@ fn multi_column_inputs(
         }),
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),

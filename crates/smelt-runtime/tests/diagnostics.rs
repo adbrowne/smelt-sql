@@ -788,6 +788,7 @@ fn per_group_recompute_preview_renders_statements_for_an_admitted_repair_cell() 
         column: "changed_at".to_string(),
         before: smelt_logical::analysis::source_bounds::Seconds::days(1),
         after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+        write_footprint: None,
     }];
 
     let diagnostics = build_plan_cell_diagnostics(

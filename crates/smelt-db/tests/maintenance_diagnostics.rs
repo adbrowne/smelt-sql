@@ -1046,6 +1046,81 @@ fn no_stale_no_migrate_command_claim() {
     );
 }
 
+/// Phase 26a: a `grain: key` model's declared `timeseries.partition_column`
+/// must arrive at the real derivation as `ModelInputs::keyed_time_axis` —
+/// not just in a unit test's hand-built `ModelInputs` literal, but through
+/// the production Salsa wrapper (`crates/smelt-db/src/queries/
+/// maintenance.rs`). Evidenced by a scan clamp that carries a derived write
+/// footprint (`docs/specs/model_properties.md` §"Footprint reflection /
+/// bounded write footprint") — a bare keyed model with no declared axis
+/// never gets one (`bare_keyed_output_clamp_carries_no_footprint_claim`,
+/// `crates/smelt-logical/tests/keyed_footprint.rs`).
+#[test]
+fn keyed_model_time_axis_reaches_plan_derivation() {
+    let payments_source = r#"
+description: Payments, append-only, clocked on pay_date.
+mutation_profile: append_only
+timeseries:
+  event_time_column: pay_date
+  partition_column: pay_date
+  granularity: day
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+  - { name: pay_date, type: DATE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: first_pay_date
+  partition_column: first_pay_date
+  granularity: day
+unique_key: [user_id, first_pay_date]
+---
+SELECT
+    user_id,
+    pay_date AS first_pay_date,
+    MIN(amount) AS amount
+FROM smelt.sources.payments
+GROUP BY user_id, pay_date
+"#;
+
+    let result = plan_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", payments_source),
+            ("models/lifetime_spend.sql", model),
+        ],
+        "lifetime_spend",
+    );
+
+    assert!(
+        result.plan.refusals.is_empty(),
+        "expected no refusals, got {:?}",
+        result.plan.refusals
+    );
+    let clamp = result
+        .plan
+        .cells
+        .iter()
+        .flat_map(|c| &c.scans)
+        .find(|c| c.source == "payments")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a scan clamp on 'payments', got {:?}",
+                result.plan.cells
+            )
+        });
+    assert!(
+        clamp.footprint().is_some(),
+        "the declared timeseries.partition_column must reach ModelInputs::keyed_time_axis and \
+         derive a write footprint on the clamp, got {:?}",
+        clamp.footprint()
+    );
+}
+
 fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {

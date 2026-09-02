@@ -580,7 +580,7 @@ pub fn append_model_edge_cells(
             links: &links,
         };
         let (partition_local, scans) =
-            match project_source_link(Some(output_partition_col), &loc, &facts) {
+            match project_source_link(Some(output_partition_col), None, &loc, &facts) {
                 SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
                 SourceLink::Unlinked { why } => (
                     PartitionLocal::No {
@@ -779,6 +779,13 @@ pub struct ModelInputs<'a> {
     /// fail-closed, the same posture `old_columns`/`deployed_column_names`
     /// take (`docs/specs/definition_deltas.md` §"Detection").
     pub old_sql: Option<&'a str>,
+    /// The declared `timeseries.partition_column` of a `Grain::Key` model,
+    /// `None` for a `Grain::Partition` output or a keyed output with no
+    /// declared `timeseries:` block. Poses the footprint question
+    /// (`model_properties.md` §"Footprint reflection / bounded write
+    /// footprint") for a keyed-grain output against this axis; a bare
+    /// keyed output (`None` here) gets no footprint claim at all.
+    pub keyed_time_axis: Option<&'a str>,
 }
 
 impl ModelInputs<'_> {
@@ -856,15 +863,20 @@ pub struct LocalityInputs<'a> {
 /// `ScanUnbounded` refusal honoring `allow_full_scan`) stays at each call
 /// site — this adapter is policy-free.
 ///
-/// For a **keyed-grain** output (`output_partition_col` is `None`), the
-/// locality question is not posed — there is no output partition axis to
-/// project a write onto — and the proof is not consulted. The pre-proof
-/// linking rule is kept verbatim as documented vacuous-locality residue
-/// (`model_properties.md` §Known Divergences: a locality-admitted keyed
-/// model's clamps still carry the assumed mirror into propagation): a
-/// nonzero-margin `Bounded` read links, a zero-margin one does not.
+/// For a **keyed-grain** output (`output_partition_col` is `None`) with a
+/// declared `keyed_time_axis`, the footprint question IS posed against that
+/// axis — `loc.footprints` must already be `reflect_footprint`'s verdicts
+/// against it (the caller's responsibility, exactly as for a
+/// partition-addressed output): a `Bounded` footprint constructs the clamp
+/// carrying the derived write footprint; `Unbounded`/`NotDerivable` refuses
+/// the link. With no declared `keyed_time_axis` at all, the pre-proof
+/// linking rule is kept verbatim (a nonzero-margin `Bounded` read links, a
+/// zero-margin one does not), but the resulting clamp carries no footprint
+/// claim (`write_footprint: None`) — there is no axis to have posed it
+/// against.
 pub fn project_source_link(
     output_partition_col: Option<&str>,
+    keyed_time_axis: Option<&str>,
     loc: &LocalityInputs<'_>,
     facts: &SourceFacts,
 ) -> SourceLink {
@@ -877,30 +889,65 @@ pub fn project_source_link(
         return SourceLink::Unclocked;
     };
     let Some(output_axis) = output_partition_col else {
-        // Keyed-grain residue policy (see doc comment above) — not the proof.
-        return match bounds.get(&facts.name) {
-            Some(BoundResult::Bounded { before, after, .. }) => {
-                if *before > Seconds::ZERO || *after > Seconds::ZERO {
-                    SourceLink::Clamp(ScanClamp {
+        let read = bounds.get(&facts.name);
+        return match keyed_time_axis {
+            Some(_axis) => {
+                let Some(BoundResult::Bounded { before, after, .. }) = read else {
+                    return SourceLink::Unlinked {
+                        why: "scan bound not derivable".to_string(),
+                    };
+                };
+                match footprints
+                    .get(&facts.name)
+                    .unwrap_or(&FootprintResult::NotDerivable)
+                {
+                    FootprintResult::Bounded {
+                        before: write_before,
+                        after: write_after,
+                        ..
+                    } => SourceLink::Clamp(ScanClamp {
                         source: facts.name.clone(),
                         column: col.clone(),
                         before: *before,
                         after: *after,
-                    })
-                } else {
-                    SourceLink::Unlinked {
-                        why: format!(
-                            "no predicate links '{col}' to the output partition axis — the \
-                             scan cannot be partition-pruned"
-                        ),
-                    }
+                        write_footprint: Some((*write_before, *write_after)),
+                    }),
+                    FootprintResult::Unbounded => SourceLink::Unlinked {
+                        why: "derived write footprint is unbounded against the declared time \
+                              axis — a stored trajectory column"
+                            .to_string(),
+                    },
+                    FootprintResult::NotDerivable => SourceLink::Unlinked {
+                        why: "write footprint not derivable against the declared time axis"
+                            .to_string(),
+                    },
                 }
             }
-            Some(BoundResult::Unbounded) => SourceLink::Unlinked {
-                why: "derived scan is unbounded".to_string(),
-            },
-            Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
-                why: "scan bound not derivable".to_string(),
+            None => match read {
+                Some(BoundResult::Bounded { before, after, .. }) => {
+                    if *before > Seconds::ZERO || *after > Seconds::ZERO {
+                        SourceLink::Clamp(ScanClamp {
+                            source: facts.name.clone(),
+                            column: col.clone(),
+                            before: *before,
+                            after: *after,
+                            write_footprint: None,
+                        })
+                    } else {
+                        SourceLink::Unlinked {
+                            why: format!(
+                                "no predicate links '{col}' to the output partition axis — the \
+                                 scan cannot be partition-pruned"
+                            ),
+                        }
+                    }
+                }
+                Some(BoundResult::Unbounded) => SourceLink::Unlinked {
+                    why: "derived scan is unbounded".to_string(),
+                },
+                Some(BoundResult::NotDerivable) | None => SourceLink::Unlinked {
+                    why: "scan bound not derivable".to_string(),
+                },
             },
         };
     };
@@ -920,16 +967,25 @@ pub fn project_source_link(
         .unwrap_or(CrossAxisLink::Absent);
 
     match locality_verdict(read, footprint, Some(col), Some(output_axis), link) {
-        LocalityVerdict::Local => match read {
-            BoundResult::Bounded { before, after, .. } => SourceLink::Clamp(ScanClamp {
+        LocalityVerdict::Local => match (read, footprint) {
+            (
+                BoundResult::Bounded { before, after, .. },
+                FootprintResult::Bounded {
+                    before: write_before,
+                    after: write_after,
+                    ..
+                },
+            ) => SourceLink::Clamp(ScanClamp {
                 source: facts.name.clone(),
                 column: col.clone(),
                 before: *before,
                 after: *after,
+                write_footprint: Some((*write_before, *write_after)),
             }),
             // Unreachable: the proof only ever answers `Local` over a
-            // `Bounded` read; kept fail-closed rather than panicking.
-            BoundResult::Unbounded | BoundResult::NotDerivable => SourceLink::Unlinked {
+            // `Bounded` read AND a `Bounded` footprint; kept fail-closed
+            // rather than panicking.
+            _ => SourceLink::Unlinked {
                 why: "scan bound not derivable".to_string(),
             },
         },
@@ -990,7 +1046,7 @@ fn derive_maintenance_plan_impl(
     // key-grain output has no partition axis to spread a write across, so
     // the footprint question is not posed (empty map — the keyed residue
     // policy in `project_source_link` links instead).
-    let footprints = match inputs.output_partition_col() {
+    let footprints = match inputs.output_partition_col().or(inputs.keyed_time_axis) {
         Some(axis) => reflect_footprint(inputs.sql, &inputs.bound_context(), Some(axis)),
         None => HashMap::new(),
     };
@@ -1257,6 +1313,7 @@ fn derive_new_data(
                     unique_key,
                     facts,
                     inputs.output_partition_col(),
+                    inputs.keyed_time_axis,
                     loc,
                     &delta,
                 ) {
@@ -1505,8 +1562,12 @@ fn derive_mutation(
         // group whose sensitivity to `source` is *purely* value (never
         // membership) is eligible for the cheaper column-scoped merge.
         let membership_sensitive = group.membership_sensitivity.contains(source);
-        let (locality, scans) = match project_source_link(inputs.output_partition_col(), loc, facts)
-        {
+        let (locality, scans) = match project_source_link(
+            inputs.output_partition_col(),
+            inputs.keyed_time_axis,
+            loc,
+            facts,
+        ) {
             SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
             SourceLink::Unclocked => (
                 PartitionLocal::No {
@@ -1846,7 +1907,12 @@ fn derive_column_added(
                 refused = true;
                 break;
             };
-            match project_source_link(inputs.output_partition_col(), loc, facts) {
+            match project_source_link(
+                inputs.output_partition_col(),
+                inputs.keyed_time_axis,
+                loc,
+                facts,
+            ) {
                 SourceLink::Clamp(clamp) => scans.push(clamp),
                 SourceLink::Unclocked | SourceLink::Unlinked { .. } if !facts.allow_full_scan => {
                     plan.refusals
@@ -1944,7 +2010,12 @@ fn read_locality(
     let mut scans = Vec::new();
     let mut verdict = PartitionLocal::Yes;
     for s in &inputs.sources {
-        match project_source_link(inputs.output_partition_col(), loc, s) {
+        match project_source_link(
+            inputs.output_partition_col(),
+            inputs.keyed_time_axis,
+            loc,
+            s,
+        ) {
             SourceLink::Clamp(clamp) => scans.push(clamp),
             SourceLink::Unclocked => {
                 if matches!(verdict, PartitionLocal::Yes) {

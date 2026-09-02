@@ -857,6 +857,7 @@ mod tests {
             column: "d".to_string(),
             before: smelt_logical::analysis::source_bounds::Seconds(2 * 86_400),
             after: smelt_logical::analysis::source_bounds::Seconds(86_400),
+            write_footprint: None,
         };
         let window = (
             NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),

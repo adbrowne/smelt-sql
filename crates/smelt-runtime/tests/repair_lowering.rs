@@ -413,6 +413,7 @@ fn resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity() {
             column: "order_date".to_string(),
             before: Seconds::days(1),
             after: Seconds::ZERO,
+            write_footprint: None,
         }],
         ledger_catch_up: false,
         row_identity: RowIdentityVerdict {
@@ -446,6 +447,7 @@ fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
         column: "order_date".to_string(),
         before: Seconds::days(1),
         after: Seconds::ZERO,
+        write_footprint: None,
     };
 
     // The affected-key relation is a single canonical `delta_key` column

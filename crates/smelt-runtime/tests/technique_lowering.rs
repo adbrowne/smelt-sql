@@ -566,6 +566,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
             column: "changed_at".to_string(),
             before: Seconds::ZERO,
             after: Seconds::hours(24),
+            write_footprint: None,
         }],
         ledger_catch_up: false,
         row_identity: RowIdentityVerdict {
@@ -3607,6 +3608,7 @@ mod external_source_point_lookup_recompute {
             fold: None,
             old_columns: Vec::new(),
             old_sql: None,
+            keyed_time_axis: None,
         };
 
         let mut source_ri = BTreeMap::new();
@@ -3685,6 +3687,7 @@ mod external_source_point_lookup_recompute {
             fold: None,
             old_columns: Vec::new(),
             old_sql: None,
+            keyed_time_axis: None,
         };
         let trigger = Trigger::UpstreamMutation {
             source: "raw.users".to_string(),

@@ -170,6 +170,7 @@ fn v1_without_lateness_clamp_is_not_partition_local() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -202,6 +203,7 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -220,7 +222,7 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         assert_eq!(clamp.before, Seconds::ZERO);
         assert_eq!(clamp.after, Seconds::days(2));
         // Reflection: an arrival at t writes event_date in [t − 2d, t].
-        assert_eq!(clamp.footprint(), (Seconds::days(2), Seconds::ZERO));
+        assert_eq!(clamp.footprint(), Some((Seconds::days(2), Seconds::ZERO)));
     }
 }
 
@@ -240,6 +242,7 @@ fn v3_dedup_keeps_the_v2_plan_shape() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -278,6 +281,7 @@ fn v4_inputs(sql: &str) -> ModelInputs<'_> {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     }
 }
 
@@ -351,6 +355,7 @@ fn v4_without_the_explicit_partition_predicate_but_declared_full_scan_admits() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -406,6 +411,7 @@ fn v5_inputs(sql: &str) -> ModelInputs<'_> {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     }
 }
 
@@ -451,7 +457,7 @@ fn v5_ongoing_conversion_arrival_has_the_reflected_footprint() {
     // Scan (0, 14d) reflects to footprint (14d, 0): a conversion at t
     // repairs events over [t − 14d, t].
     let clamp = clamp_for(&cell.scans, "conversions");
-    assert_eq!(clamp.footprint(), (Seconds::days(14), Seconds::ZERO));
+    assert_eq!(clamp.footprint(), Some((Seconds::days(14), Seconds::ZERO)));
 }
 
 #[test]

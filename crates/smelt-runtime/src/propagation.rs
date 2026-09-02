@@ -344,6 +344,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
 
     let ClampAndLocality {
         clamp_days,
+        footprint_days,
         locality_admitted,
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
@@ -393,11 +394,17 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &consumer_groups,
         );
 
+        let footprint = footprint_days
+            .get(&(upstream.clone(), downstream.clone()))
+            .copied()
+            .flatten();
+
         edges.push(Edge {
             upstream,
             downstream,
             before_days,
             after_days,
+            footprint_days: footprint,
             upstream_grain,
             downstream_grain,
             components,
@@ -417,6 +424,14 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
 /// existing callers, including tests, already destructure directly).
 struct ClampAndLocality {
     clamp_days: BTreeMap<(String, String), (i64, i64)>,
+    /// The derived write footprint in whole days per `(upstream, downstream)`
+    /// pair, folded the same widen-never-narrow way `clamp_days` is —
+    /// `Some((before, after))` widened across every contributing
+    /// `ScanClamp::write_footprint`, downgrading to `None` the moment any
+    /// contributing cell for that pair carried no derived footprint at all
+    /// (`ScanClamp::write_footprint`'s own doc comment: absence is a claim
+    /// too, never silently patched over by a sibling cell's derived number).
+    footprint_days: BTreeMap<(String, String), Option<(i64, i64)>>,
     locality_admitted: BTreeMap<String, bool>,
     /// The established [`smelt_logical::maintenance::locality::LocalitySlice`]
     /// route for every `grain: key` model this workspace admits key temporal
@@ -488,6 +503,7 @@ fn derive_clamp_and_locality(
     for _pass in 0..max_passes {
         let ClampAndLocality {
             clamp_days,
+            footprint_days,
             locality_admitted,
             key_locality_slice,
             key_locality_settle_bound,
@@ -542,6 +558,7 @@ fn derive_clamp_and_locality(
         if sig(&next_composed_sources) == sig(&composed_sources) {
             return Ok(ClampAndLocality {
                 clamp_days,
+                footprint_days,
                 locality_admitted,
                 key_locality_slice,
                 key_locality_settle_bound,
@@ -577,6 +594,27 @@ fn derive_clamp_and_locality_pass(
     // (upstream, downstream) -> widest (before_days, after_days) seen across
     // every cell that derives a clamp for that pair.
     let mut clamp_days: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
+    // (upstream, downstream) -> the derived write footprint in whole days,
+    // widened the same way, downgrading to `None` the moment any
+    // contributing cell for that pair carried no derived footprint
+    // (`ClampAndLocality::footprint_days`'s own doc comment).
+    let mut footprint_days: BTreeMap<(String, String), Option<(i64, i64)>> = BTreeMap::new();
+    // Fold a clamp's derived footprint into `footprint_days` for `key`:
+    // widen-never-narrow when both sides have derived a footprint, and
+    // fail-closed to `None` forever once any contributing cell has none.
+    let fold_footprint = |footprint_days: &mut BTreeMap<(String, String), Option<(i64, i64)>>,
+                          key: (String, String),
+                          new: Option<(i64, i64)>| {
+        footprint_days
+            .entry(key)
+            .and_modify(|existing| {
+                *existing = match (*existing, new) {
+                    (Some((eb, ea)), Some((nb, na))) => Some((eb.max(nb), ea.max(na))),
+                    _ => None,
+                };
+            })
+            .or_insert(new);
+    };
 
     // Per-address key-temporal-locality verdict for every `grain: key`
     // model this workspace derives a plan for — folded from the SAME
@@ -677,6 +715,15 @@ fn derive_clamp_and_locality_pass(
                             .entry((table.clone(), table.clone()))
                             .or_insert((0, 0));
                         entry.0 = entry.0.max(before_days);
+                        // Out of this phase's derivation scope (26a is about
+                        // the keyed/partition-addressed clamp footprint, not
+                        // the self-edge margin) — mirror the read margin
+                        // exactly as `reflect` always has, unchanged.
+                        fold_footprint(
+                            &mut footprint_days,
+                            (table.clone(), table.clone()),
+                            Some((entry.1, entry.0)),
+                        );
                     }
                     Err(reason) => {
                         bail!("MaintenanceGraphUnsupportedNode: {reason}");
@@ -913,6 +960,11 @@ fn derive_clamp_and_locality_pass(
                     .or_insert((0, 0));
                 entry.0 = entry.0.max(e.before_days);
                 entry.1 = entry.1.max(e.after_days);
+                fold_footprint(
+                    &mut footprint_days,
+                    (clamp.source.clone(), table.clone()),
+                    e.footprint_days,
+                );
             }
             // A read the derivation could not bound (`PartitionLocal::No`)
             // carries no `ScanClamp` — `cell.scans` stays empty for it
@@ -932,6 +984,15 @@ fn derive_clamp_and_locality_pass(
                 clamp_days
                     .entry((source.clone(), table.clone()))
                     .or_insert((0, 0));
+                // No `ScanClamp` exists here at all — out of this phase's
+                // scope, unchanged from before it: keep the pre-existing
+                // zero-margin exact behaviour rather than introducing a new
+                // widen-to-`WHOLE` path this branch never had.
+                fold_footprint(
+                    &mut footprint_days,
+                    (source.clone(), table.clone()),
+                    Some((0, 0)),
+                );
                 continue;
             }
             // A locality-admitted composed node's own creation cell
@@ -971,6 +1032,20 @@ fn derive_clamp_and_locality_pass(
                         .or_insert((0, 0));
                     entry.0 = entry.0.max(before_days);
                     entry.1 = entry.1.max(after_days);
+                    // A locality-admitted composed node is a CLOCKED node
+                    // (`model_grain` returns its declared granularity, not
+                    // `Keyed`, once locality is admitted) — `Edge::reflect`
+                    // DOES consult this field for this edge. Out of this
+                    // phase's derivation scope (26a is about the keyed/
+                    // partition-addressed `ScanClamp` footprint, not the
+                    // key→partition margin), so mirror the read margin
+                    // exactly as `reflect` always has for this edge, never
+                    // widening it to `WHOLE`.
+                    fold_footprint(
+                        &mut footprint_days,
+                        (source.clone(), table.clone()),
+                        Some((entry.1, entry.0)),
+                    );
                 }
             }
         }
@@ -978,6 +1053,7 @@ fn derive_clamp_and_locality_pass(
 
     Ok(ClampAndLocality {
         clamp_days,
+        footprint_days,
         locality_admitted,
         key_locality_slice,
         key_locality_settle_bound,

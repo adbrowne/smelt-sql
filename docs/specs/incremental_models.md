@@ -2024,9 +2024,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
-  poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
-  assumed (underived) write-footprint mirror into propagation;
+- **Locality and diagnostic residues on the maintenance-plan proofs**:
   column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
   is declared surface but propagation is day-ordinal; the built grain-alignment check
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and

@@ -488,6 +488,14 @@ pub struct Edge {
     /// refusal. Empty on [`Edge::from_clamp`] (today's untyped-edge
     /// behaviour); populate via [`Edge::with_components`].
     pub components: Vec<EdgeComponent>,
+    /// The derived write footprint in whole days, ceiled outward exactly as
+    /// `before_days`/`after_days` are, or `None` when the clamp it was
+    /// built from carried no derived footprint at all
+    /// (`ScanClamp::write_footprint`'s own doc comment). `reflect` uses this
+    /// pair when present; a `None` here dirties the whole downstream axis
+    /// (`DayInterval::WHOLE`) rather than silently reusing the read-side
+    /// `(before_days, after_days)` mirror as a stand-in.
+    pub footprint_days: Option<(i64, i64)>,
 }
 
 impl Edge {
@@ -504,6 +512,9 @@ impl Edge {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            footprint_days: clamp
+                .footprint()
+                .map(|(before, after)| (clamp_days(before), clamp_days(after))),
         }
     }
 
@@ -518,9 +529,15 @@ impl Edge {
     /// the scan reflection `[a − after, b + before)`, aligned outward to
     /// the downstream axis's grain.
     fn reflect(&self, delta: &DayInterval) -> DayInterval {
+        let Some((footprint_before, footprint_after)) = self.footprint_days else {
+            // No derived footprint to reflect through — widen to the whole
+            // downstream axis rather than guessing (`ScanClamp::
+            // write_footprint`'s doc comment).
+            return DayInterval::WHOLE;
+        };
         self.downstream_grain.align_outward(&DayInterval {
-            start: delta.start - self.after_days,
-            end: delta.end + self.before_days,
+            start: delta.start - footprint_before,
+            end: delta.end + footprint_after,
         })
     }
 
@@ -958,6 +975,7 @@ mod locality_margin_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            footprint_days: Some((after_days, before_days)),
         }
     }
 
@@ -1303,6 +1321,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
+            footprint_days: Some((after_days, before_days)),
         }
     }
 
@@ -1340,6 +1359,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
+            footprint_days: Some((0, 1)),
         };
         let e2 = Edge {
             upstream: "mid".to_string(),
@@ -1349,6 +1369,7 @@ mod typed_edge_advisory_tests {
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
+            footprint_days: Some((1, 0)),
         };
         let edges = vec![e1, e2];
 

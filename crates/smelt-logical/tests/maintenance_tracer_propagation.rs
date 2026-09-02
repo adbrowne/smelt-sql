@@ -41,6 +41,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
+        footprint_days: Some((after_days, before_days)),
     }
 }
 
@@ -88,6 +89,7 @@ fn derived_conversions_clamp_drives_the_propagation() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -215,6 +217,7 @@ fn partial_day_clamps_ceil_outward() {
         column: "d".to_string(),
         before: Seconds::hours(36),
         after: Seconds::ZERO,
+        write_footprint: None,
     };
     let e = Edge::from_clamp("m", &clamp);
     assert_eq!(e.before_days, 2);
@@ -574,6 +577,7 @@ fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
         upstream_grain: PartitionGrain::Unclocked,
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
+        footprint_days: Some((0, 0)),
     }
 }
 
@@ -628,4 +632,76 @@ fn s12_keyed_node_refuses_in_both_directions() {
 
     let bwd = required_inputs(&edges, "report", iv(4, 7)).expect_err("keyed node must refuse");
     assert!(bwd.contains("keyed"), "{bwd}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 26a: `Edge::reflect` uses the clamp's derived write footprint, never
+// a re-mirror of its own read-side `(before_days, after_days)`
+// (`docs/specs/model_properties.md` §"Footprint reflection / bounded write
+// footprint").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn edge_reflects_the_derived_footprint_not_the_read_mirror() {
+    use smelt_logical::maintenance::ScanClamp;
+    use smelt_logical::Seconds;
+
+    // A clamp whose derived write footprint (2d, 0) differs from its own
+    // read margins (1d, 1d) — if `reflect` mirrored `before_days`/
+    // `after_days` directly instead of consulting `footprint_days`, this
+    // edge would dirty `[a-1, b+1)` instead of `[a-2, b+0)`.
+    let clamp = ScanClamp {
+        source: "src".to_string(),
+        column: "d".to_string(),
+        before: Seconds::days(1),
+        after: Seconds::days(1),
+        write_footprint: Some((Seconds::days(2), Seconds::ZERO)),
+    };
+    let e = Edge::from_clamp("m", &clamp);
+    assert_eq!(e.footprint_days, Some((2, 0)));
+
+    let result = propagate(&[e], &deltas(&[("src", iv(10, 12))])).expect("propagate");
+    assert_eq!(
+        result.dirty["m"],
+        vec![iv(8, 12)],
+        "reflect must use the derived footprint (2d before, 0d after), not the read margins"
+    );
+}
+
+#[test]
+fn edge_without_a_derived_footprint_dirties_the_whole_downstream() {
+    use smelt_logical::maintenance::ScanClamp;
+    use smelt_logical::Seconds;
+
+    let clamp = ScanClamp {
+        source: "src".to_string(),
+        column: "d".to_string(),
+        before: Seconds::days(1),
+        after: Seconds::days(1),
+        write_footprint: None,
+    };
+    let e = Edge::from_clamp("m", &clamp);
+    assert_eq!(e.footprint_days, None);
+
+    let result = propagate(&[e], &deltas(&[("src", iv(10, 12))])).expect("propagate");
+    assert!(
+        result.dirty["m"][0].is_whole(),
+        "no derived footprint must widen to the whole downstream axis, got {:?}",
+        result.dirty["m"]
+    );
+
+    // `require` (the read direction) is unchanged — it never consults
+    // `footprint_days`.
+    let edges = vec![Edge::from_clamp(
+        "m",
+        &ScanClamp {
+            source: "src".to_string(),
+            column: "d".to_string(),
+            before: Seconds::days(1),
+            after: Seconds::days(1),
+            write_footprint: None,
+        },
+    )];
+    let result = required_inputs(&edges, "m", iv(10, 12)).expect("resolve");
+    assert_eq!(result.required["src"], vec![iv(9, 13)]);
 }

@@ -141,6 +141,7 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     }
 }
 
@@ -169,6 +170,7 @@ fn rollup_inputs() -> ModelInputs<'static> {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     }
 }
 
@@ -512,6 +514,7 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     }
 }
 
@@ -802,6 +805,7 @@ fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Month,
         components: Vec::new(),
+        footprint_days: Some((0, 0)),
     };
 
     // A January day changes upstream (a late-arriving event lands).

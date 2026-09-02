@@ -159,6 +159,7 @@ fn cross_axis_source_without_predicate_is_not_local() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -347,6 +348,7 @@ fn verdicts_are_per_cell_per_source() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -403,6 +405,7 @@ fn keyed_fold_plan(sql: &str) -> smelt_logical::maintenance::MaintenancePlan {
         }),
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     derive_maintenance_plan(
         &inputs,
@@ -430,6 +433,7 @@ fn keyed_grain_source_with_nonzero_margin_links() {
             column: "pay_date".to_string(),
             before: Seconds::days(1),
             after: Seconds::ZERO,
+            write_footprint: None,
         }],
         "a nonzero read margin on a keyed-grain source must produce the mirrored clamp, \
          got {:?}",
@@ -457,6 +461,7 @@ fn keyed_grain_source_with_after_only_margin_links() {
             column: "pay_date".to_string(),
             before: Seconds::ZERO,
             after: Seconds::days(1),
+            write_footprint: None,
         }],
         "an after-only margin must still produce the mirrored clamp, got {:?}",
         cell.scans

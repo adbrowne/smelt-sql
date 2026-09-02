@@ -215,36 +215,33 @@ pub struct ScanClamp {
     pub column: String,
     pub before: crate::analysis::source_bounds::Seconds,
     pub after: crate::analysis::source_bounds::Seconds,
+    /// The derived write footprint (`model_properties.md` §"Footprint
+    /// reflection / bounded write footprint"), or `None` when the footprint
+    /// question was never posed (a bare keyed output with no declared
+    /// event-time axis). Populated once, at clamp construction
+    /// (`derive::project_source_link`), from
+    /// [`crate::analysis::footprint::reflect_footprint`]'s own
+    /// `FootprintResult::Bounded{before, after}` value — never re-derived
+    /// from this clamp's own read-side `before`/`after` margins.
+    pub write_footprint: Option<(
+        crate::analysis::source_bounds::Seconds,
+        crate::analysis::source_bounds::Seconds,
+    )>,
 }
 
 impl ScanClamp {
-    /// The derived write footprint (`model_properties.md` §"Footprint
-    /// reflection / bounded write footprint"): a delta of this source at
-    /// time `t` writes output over `[t − after, t + before]`.
-    ///
-    /// For a **partition-addressed output** this is the *derived* verdict,
-    /// not an assumed mirror: clamp construction (`derive::project_source_link`)
-    /// consults [`crate::analysis::footprint::reflect_footprint`] and only
-    /// builds a clamp when the derived footprint is
-    /// [`crate::analysis::footprint::FootprintResult::Bounded`] — whose
-    /// value is by definition the mirror `(after, before)` of the read
-    /// reach this clamp carries, so reading the mirror here IS reading the
-    /// derived value. A source whose derived footprint is `Unbounded` (a
-    /// trajectory column) or `NotDerivable` never receives a clamp at all;
-    /// its cell falls back to the fail-closed non-local verdict instead.
-    ///
-    /// For a **keyed-grain output** (no output partition axis) the footprint
-    /// question is not posed at clamp construction, so this mirror is
-    /// unverified there — a locality-admitted keyed model's propagation
-    /// edges still size dirt intervals from it. Recorded as a residue in
-    /// `model_properties.md` §Known Divergences.
+    /// The derived write footprint, or `None` when it was never posed
+    /// (`write_footprint`'s own doc comment). A consumer reading `None`
+    /// widens rather than treating an absent claim as zero-width
+    /// (`model_properties.md` §"Footprint reflection / bounded write
+    /// footprint").
     pub fn footprint(
         &self,
-    ) -> (
+    ) -> Option<(
         crate::analysis::source_bounds::Seconds,
         crate::analysis::source_bounds::Seconds,
-    ) {
-        (self.after, self.before)
+    )> {
+        self.write_footprint
     }
 }
 

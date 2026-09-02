@@ -126,6 +126,7 @@ fn described_technique_matches_execution_partition_recompute() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -201,6 +202,7 @@ fn described_technique_matches_execution_keyed_fold() {
         }),
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -305,6 +307,7 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
         fold: None,
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

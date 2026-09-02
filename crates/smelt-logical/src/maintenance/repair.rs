@@ -81,6 +81,7 @@ pub fn admit_per_group_recompute(
     declared_unique_key: &[String],
     source: &SourceFacts,
     output_partition_col: Option<&str>,
+    keyed_time_axis: Option<&str>,
     loc: &LocalityInputs<'_>,
     delta: &DeltaShape,
 ) -> Result<AdmittedRepair, RepairRefusal> {
@@ -98,7 +99,7 @@ pub fn admit_per_group_recompute(
         }
     };
 
-    let slice = match project_source_link(output_partition_col, loc, source) {
+    let slice = match project_source_link(output_partition_col, keyed_time_axis, loc, source) {
         SourceLink::Clamp(clamp) => clamp,
         SourceLink::Unclocked => {
             return Err(RepairRefusal::SliceUnbounded {

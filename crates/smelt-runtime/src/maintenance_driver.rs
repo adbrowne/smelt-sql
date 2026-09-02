@@ -5004,6 +5004,7 @@ mod tests {
             column: "changed_at".to_string(),
             before: Seconds::ZERO,
             after: Seconds::hours(24),
+            write_footprint: None,
         }
     }
 

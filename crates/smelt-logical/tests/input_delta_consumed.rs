@@ -86,6 +86,7 @@ fn inputs_with(source: SourceFacts) -> (ModelInputs<'static>, Trigger) {
         }),
         old_columns: Vec::new(),
         old_sql: None,
+        keyed_time_axis: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),

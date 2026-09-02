@@ -326,7 +326,7 @@ open — not that the excluded bullets themselves are gone.
 | 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | done |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
-| 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | planned |
+| 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | done |
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | planned |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
@@ -1043,6 +1043,16 @@ open — not that the excluded bullets themselves are gone.
   26a–27e remain `planned` with committed plans and no implementation; whoever picks this
   outcome up next should let the IMPLEMENT step drain them starting at 26a. This run
   deliberately did not renumber or re-flip those rows.
+
+- **2026-09-03, phase 26a implemented — a locality-admitted composed node is a clocked
+  node, not `Keyed`.** `smelt-runtime::propagation::model_grain` returns the model's own
+  declared granularity (not `PartitionGrain::Keyed`) once key temporal locality is
+  admitted, so its inbound key→partition margin edge genuinely runs through
+  `Edge::reflect`'s interval math — it is not exempt the way a bare keyed node is. Missed
+  on the first pass (assumed `Keyed` unconditionally) and caught by
+  `since_upstream_composed_web_analytics`'s e2e test (a 3-day date shift). Every other
+  non-target production fold site (self-edge margin, the `PartitionLocal::No` fallback)
+  keeps mirroring its pre-phase read-margin behaviour exactly, out of 26a's scope.
 
 
 ## Blocked

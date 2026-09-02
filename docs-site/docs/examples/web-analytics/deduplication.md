@@ -171,8 +171,9 @@ Cells (3):
       ledger_catch_up: false
       contract:  default
       region key: Key(["event_id"])
-      locality:  NOT partition_local (source: raw.events, why: no predicate links 'event_date' to the output partition axis — the scan cannot be partition-pruned)
-      scan clamps: (none)
+      locality:  partition_local
+      scan clamps:
+        - source=raw.events column=event_date before=Seconds(0) after=Seconds(0)
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
       observed-delta recording: yes (change-suppressed column-scoped MERGE)

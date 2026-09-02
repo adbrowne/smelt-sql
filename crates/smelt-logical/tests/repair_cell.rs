@@ -75,6 +75,7 @@ fn repair_admits_keyed_non_invertible_mutation() {
         &["customer_id".to_string()],
         &orders_source(),
         None,
+        None,
         &loc,
         &delta,
     )
@@ -101,6 +102,7 @@ fn repair_cell_lands_in_column_merge_corner() {
         sql,
         &["customer_id".to_string()],
         &orders_source(),
+        None,
         None,
         &loc,
         &delta,
@@ -142,6 +144,7 @@ fn repair_refuses_when_affected_keys_not_discoverable() {
         &["customer_id".to_string()],
         &orders_source(),
         None,
+        None,
         &loc,
         &delta,
     )
@@ -165,7 +168,7 @@ fn repair_refuses_when_grain_not_derivable() {
         links: &links,
     };
     let delta = keyed_delta(&["customer_id", "amount"]);
-    let err = admit_per_group_recompute(sql, &[], &orders_source(), None, &loc, &delta)
+    let err = admit_per_group_recompute(sql, &[], &orders_source(), None, None, &loc, &delta)
         .expect_err("expected refusal");
     match err {
         RepairRefusal::KeysNotDiscoverable { why, .. } => {
@@ -194,6 +197,7 @@ fn repair_refuses_when_slice_unbounded() {
         &["customer_id".to_string()],
         &orders_source(),
         None,
+        None,
         &loc,
         &delta,
     )
@@ -216,6 +220,7 @@ fn repair_refuses_when_every_grain_column_independent_of_delta_source() {
         sql,
         &["bucket".to_string()],
         &orders_source(),
+        None,
         None,
         &loc,
         &delta,
@@ -244,6 +249,7 @@ fn repair_over_approximated_keys_are_admitted() {
         sql,
         &["customer_id".to_string()],
         &orders_source(),
+        None,
         None,
         &loc,
         &delta,

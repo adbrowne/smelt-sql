@@ -578,6 +578,18 @@ pub fn derive_model_maintenance_plan(
         smelt_logical::maintenance::derive::diff_deployed_columns(sql, deployed_column_names)
             .unwrap_or_default()
     };
+    // A keyed-grain output's declared `timeseries.partition_column` — the
+    // axis the footprint question is posed against (`model_properties.md`
+    // §"Footprint reflection / bounded write footprint"). `None` for a
+    // `Grain::Partition` output (posed against its own partition axis
+    // instead) or a keyed output with no declared `timeseries:` block.
+    let keyed_time_axis = match &output.grain {
+        PlanGrain::Key { .. } => metadata
+            .timeseries
+            .as_ref()
+            .map(|t| t.partition_column.as_str()),
+        PlanGrain::Partition { .. } => None,
+    };
     let inputs = ModelInputs {
         sql,
         output,
@@ -586,6 +598,7 @@ pub fn derive_model_maintenance_plan(
         fold,
         old_columns,
         old_sql: deployed_model_sql,
+        keyed_time_axis,
     };
 
     // Trigger derivation itself is a pure `smelt-logical` function

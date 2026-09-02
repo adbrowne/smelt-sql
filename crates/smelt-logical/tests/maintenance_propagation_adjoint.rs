@@ -43,6 +43,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         upstream_grain: Default::default(),
         downstream_grain: Default::default(),
         components: Vec::new(),
+        footprint_days: Some((after_days, before_days)),
     }
 }
 
