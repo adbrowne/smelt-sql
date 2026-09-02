@@ -60,7 +60,7 @@ current time belongs in `ui.js`; `game.js` takes dates and state as arguments.
 scoreGuess(guess, answer) -> Array<'correct'|'present'|'absent'>  // length 5
 mergeKeyStates(prev, guess, marks) -> {letter: state}             // green > yellow > grey
 dailyIndex(date, listLength) -> number                            // local-midnight days since epoch
-shareText(title, puzzleNumber, marks2d, won) -> string            // emoji grid
+shareText(puzzleNo, marks2d, won) -> string                       // emoji grid
 isValidGuess(word, allowedSet) -> boolean
 ```
 
@@ -86,7 +86,7 @@ One `localStorage` key, `annes-words:v1`, holding a versioned JSON object:
   "version": 1,
   "daily": { "puzzle": 244, "guesses": ["crane"], "status": "playing" },
   "stats": { "played": 0, "wins": 0, "streak": 0, "maxStreak": 0,
-             "dist": [0,0,0,0,0,0] }
+             "lastPuzzle": null, "dist": [0,0,0,0,0,0] }
 }
 ```
 

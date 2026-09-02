@@ -152,8 +152,8 @@ test('scores a miss', () => {
 });
 
 test('scores simple presents', () => {
-  //            s p e n t  vs  n o t e s
-  assert.deepEqual(scoreGuess('spent', 'notes'), [P, A, P, A, P]);
+  // guess SPENT vs answer NOTES: p is the only letter not in the answer.
+  assert.deepEqual(scoreGuess('spent', 'notes'), [P, A, P, P, P]);
 });
 
 test('duplicate letters in the guess do not over-claim', () => {
@@ -162,9 +162,10 @@ test('duplicate letters in the guess do not over-claim', () => {
 });
 
 test('duplicate letters in the guess are marked left to right', () => {
-  // answer ALLOY has two Ls; guess LLAMA: first L present, second L present? No —
-  // pool of L is 2, neither is positional, so both earn present.
-  assert.deepEqual(scoreGuess('llama', 'alloy'), [P, P, P, A, A]);
+  // answer ALLOY has two Ls. Guess LLAMA: the L at index 1 is positional, which
+  // consumes one L from the pool; the L at index 0 takes the remaining one.
+  // The trailing A is absent because the single A was already claimed at index 2.
+  assert.deepEqual(scoreGuess('llama', 'alloy'), [P, C, P, A, A]);
 });
 
 test('exact matches consume the pool before presents', () => {
