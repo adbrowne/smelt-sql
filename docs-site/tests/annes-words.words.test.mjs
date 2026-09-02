@@ -38,3 +38,14 @@ test('common everyday words are present somewhere in the combined word set', () 
     assert.ok(combined.has(word), `expected "${word}" to be a valid word`);
   }
 });
+
+test('every answer contains a vowel (excludes non-words like Roman numerals)', () => {
+  assert.ok(ANSWERS.every(w => /[aeiou]/.test(w)));
+});
+
+test('manually excluded words never appear as answers', () => {
+  // Words that slip past the LDNOOBW profanity list; see MANUAL_EXCLUSIONS
+  // in docs-site/tools/generate-words.mjs.
+  assert.ok(!ANSWERS.includes('cunny'));
+  assert.ok(!ALLOWED.includes('cunny'));
+});

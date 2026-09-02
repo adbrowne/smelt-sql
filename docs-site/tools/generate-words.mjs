@@ -9,19 +9,36 @@
 //   - Profanity list:    https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en
 //   - Local dictionaries: /usr/share/dict/american-english, /usr/share/dict/british-english (SCOWL)
 //
-// Pipeline:
-//   1. Candidate pool = 5-letter lowercase words in (dwyl ∩ frequency-corpus)
-//      ∪ (american-english ∪ british-english). The corpus intersection strips
-//      dwyl junk entries (e.g. "arioi", "kanap") that never appear in real text.
-//   2. Answer-eligible = candidate pool, ordered by frequency-corpus rank
-//      (most frequent first), excluding words ending in "s" (plurals),
-//      profanity-listed words, and proper nouns (a word that appears
-//      capitalised, e.g. matching /^[A-Z][a-z]{4}$/, in either local
-//      dictionary file).
-//   3. ANSWERS = top 2000 answer-eligible words, shuffled with Fisher-Yates
-//      driven by a mulberry32 PRNG seeded with 0x9e3779b9 (documented seed,
-//      carried over from the original list). Shuffled at generation time.
-//   4. ALLOWED = every candidate-pool word NOT in ANSWERS, minus profanity.
+// Two separate pools:
+//
+//   GUESS pool (wide, permissive — anything a player might reasonably type):
+//     Candidate pool = 5-letter lowercase words in (dwyl ∩ frequency-corpus)
+//     ∪ (american-english ∪ british-english). The corpus intersection strips
+//     dwyl junk entries (e.g. "arioi", "kanap") that never appear in real text.
+//
+//   ANSWER pool (narrow, curated — only words fair to ask a player to guess):
+//     A word is answer-eligible only if ALL hold:
+//       1. it is in the system dictionary (american-english ∪ british-english);
+//       2. AND it is also in dwyl's list (two independent dictionaries must agree
+//          — this is what keeps names/slang that only one source lists, e.g.
+//          "izumi", "sitka", "purdy", "strom", out of the answer pool);
+//       3. AND it appears in the frequency corpus (for ranking);
+//       4. AND it contains at least one vowel [aeiou] (removes non-words like
+//          Roman numerals, e.g. "xxvii");
+//       5. AND it does not end in "s" (plurals), is not on the LDNOOBW
+//          profanity list, and is not capitalised in either system dictionary
+//          (proper-noun heuristic).
+//     Answer-eligible words are ranked by frequency-corpus rank (most frequent
+//     first); the top 2000 become ANSWERS, shuffled once with Fisher-Yates
+//     driven by a mulberry32 PRNG seeded 0x9e3779b9 (documented seed, carried
+//     over from the original list).
+//
+//   MANUAL_EXCLUSIONS: a small hand-maintained list of vulgar or otherwise
+//   unsuitable words that slip past the LDNOOBW list (e.g. "cunny"). Applied
+//   to both ANSWERS and ALLOWED. Add stragglers here as they're found.
+//
+//   ALLOWED = every candidate-pool (guess pool) word NOT in ANSWERS, minus
+//   the profanity list and MANUAL_EXCLUSIONS.
 //
 // Output: a plain ES module exporting `ANSWERS` and `ALLOWED` arrays of
 // lowercase 5-letter words, consumed as-is by ui.js (VALID = union of both).
@@ -42,6 +59,11 @@ const BRITISH_DICT = '/usr/share/dict/british-english';
 
 const SEED = 0x9e3779b9;
 const ANSWER_COUNT = 2000;
+
+// Hand-maintained exclusions for vulgar or otherwise unsuitable words that
+// slip past the LDNOOBW profanity list. Applied to both ANSWERS and ALLOWED.
+// Add stragglers here as they're discovered.
+const MANUAL_EXCLUSIONS = new Set(['cunny']);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,6 +110,7 @@ async function main() {
   const britishText = readFileSync(BRITISH_DICT, 'utf8');
 
   const FIVE_LETTER_LOWER = /^[a-z]{5}$/;
+  const HAS_VOWEL = /[aeiou]/;
 
   // --- dwyl word list: strip CRLF, lowercase, keep 5-letter words ---
   const dwylSet = new Set(
@@ -139,7 +162,7 @@ async function main() {
     }
   }
 
-  // --- candidate pool = (dwyl ∩ freqCorpus) ∪ (american ∪ british) ---
+  // --- GUESS pool (candidate pool) = (dwyl ∩ freqCorpus) ∪ (american ∪ british) ---
   const candidatePool = new Set();
   for (const w of dwylSet) {
     if (freqRank.has(w)) candidatePool.add(w);
@@ -148,25 +171,23 @@ async function main() {
     candidatePool.add(w);
   }
 
-  console.error(`Candidate pool: ${candidatePool.size} words`);
+  console.error(`Candidate (guess) pool: ${candidatePool.size} words`);
 
-  // --- answer-eligible: candidate pool, ranked by frequency, excluding plurals/profanity/proper nouns ---
-  const eligible = [...candidatePool].filter((w) => {
+  // --- ANSWER pool: system dict ∩ dwyl ∩ freq-corpus, with a vowel, minus
+  //     plurals/profanity/proper-nouns/manual exclusions ---
+  const eligible = [...localWordSet].filter((w) => {
+    if (!dwylSet.has(w)) return false;
+    if (!freqRank.has(w)) return false;
+    if (!HAS_VOWEL.test(w)) return false;
     if (w.endsWith('s')) return false;
     if (profanitySet.has(w)) return false;
     if (properNounSet.has(w)) return false;
+    if (MANUAL_EXCLUSIONS.has(w)) return false;
     return true;
   });
 
-  // Order by frequency rank; words with no frequency rank (local-dict-only
-  // words not in the freq corpus) sort after all ranked words, in a stable
-  // deterministic (alphabetical) order among themselves.
-  eligible.sort((a, b) => {
-    const ra = freqRank.has(a) ? freqRank.get(a) : Infinity;
-    const rb = freqRank.has(b) ? freqRank.get(b) : Infinity;
-    if (ra !== rb) return ra - rb;
-    return a < b ? -1 : a > b ? 1 : 0;
-  });
+  // Order by frequency rank (all eligible words are guaranteed to have one).
+  eligible.sort((a, b) => freqRank.get(a) - freqRank.get(b));
 
   console.error(`Answer-eligible: ${eligible.length} words`);
 
@@ -181,9 +202,9 @@ async function main() {
   const ANSWERS = fisherYatesShuffle(topEligible, rng);
   const answerSet = new Set(ANSWERS);
 
-  // --- ALLOWED = candidate pool minus ANSWERS minus profanity ---
+  // --- ALLOWED = guess pool minus ANSWERS minus profanity minus manual exclusions ---
   const ALLOWED = [...candidatePool]
-    .filter((w) => !answerSet.has(w) && !profanitySet.has(w))
+    .filter((w) => !answerSet.has(w) && !profanitySet.has(w) && !MANUAL_EXCLUSIONS.has(w))
     .sort();
 
   console.error(`ANSWERS: ${ANSWERS.length}, ALLOWED: ${ALLOWED.length}`);
@@ -196,14 +217,18 @@ async function main() {
 // (en), and the local SCOWL american-english/british-english dictionaries
 // (used for extra candidates and proper-noun detection).
 //
-// Candidate pool = 5-letter lowercase words in (dwyl ∩ frequency corpus)
-// ∪ (american-english ∪ british-english).
-// Answer-eligible = candidate pool, ranked by frequency (most frequent
-// first), excluding words ending in "s", profanity, and proper nouns
-// (capitalised in either local dictionary).
-// ANSWERS = top ${ANSWER_COUNT} answer-eligible words, Fisher-Yates shuffled with a
-// mulberry32 PRNG seeded 0x9e3779b9 (shuffled once, at generation time).
-// ALLOWED = candidate pool minus ANSWERS minus profanity.
+// GUESS pool (ALLOWED ∪ ANSWERS) = 5-letter lowercase words in
+// (dwyl ∩ frequency corpus) ∪ (american-english ∪ british-english).
+//
+// ANSWER pool: a word is answer-eligible only if it is in the system
+// dictionary AND in dwyl AND in the frequency corpus AND contains a vowel
+// AND does not end in "s" AND is not profanity-listed AND is not
+// capitalised in either system dictionary (proper-noun heuristic) AND is
+// not in the hand-maintained MANUAL_EXCLUSIONS list.
+// ANSWERS = top ${ANSWER_COUNT} answer-eligible words by frequency rank,
+// Fisher-Yates shuffled with a mulberry32 PRNG seeded 0x9e3779b9 (shuffled
+// once, at generation time).
+// ALLOWED = guess pool minus ANSWERS minus profanity minus MANUAL_EXCLUSIONS.
 `;
 
   const body =
