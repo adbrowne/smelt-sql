@@ -199,7 +199,7 @@ accurately described as open.
     on a key-addressed model is not a hard error"). Both bullets are removed from
     `incremental_shapes.md` §Known Divergences.
 20. `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` are run and
-    every Known Divergences bullet this outcome's phases 11–26 close is actually removed from the
+    every Known Divergences bullet this outcome's phases 11–29 close is actually removed from the
     respective spec (not just addressed in code) — the same discipline success criterion 8
     already applies to `definition_deltas.md`. Bullets this outcome deliberately does not close
     (the "Out of scope" list) stay, worded accurately rather than pointing at a done outcome as if
@@ -320,14 +320,17 @@ open — not that the excluded bullets themselves are gone.
 | 18 | Consume the declared guardrail/preference config: `scan_bounds.on_violation: warn` admits the plan and reports a Warning; the `prefer`/`technique` choice ladder is consulted by the ordinary region path (`resolve_incremental_strategy`); the absent-cost-model fallback preference order is stated in the spec | done |
 | 19 | Mutation-cell reachability: trigger derivation moves to a pure `smelt-logical` function and covers clocked explicitly-mutable sources plus aggregate-sensitive `AppendOnly` sources, so the horizon-clamped `PartitionLocal::Yes` corner is reachable from `examples/timeseries` through the production wrapper | done |
 | 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | done |
-| 21 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
-| 22 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
-| 23 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 24 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
-| 25 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
-| 26 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
-| 27 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
-| 28 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
+| 21 | Keyed dirt cascades and is consumed: `propagate` walks a node dirtied only through the keyed channel, and `plan_since_upstream` schedules and reports keyed dirt — a bare `grain: key` model with readers propagates end to end past `MaintenanceGraphUnsupportedNode` | planned |
+| 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | pending |
+| 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | pending |
+| 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal); remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
+| 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
+| 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
+| 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
 
@@ -790,6 +793,22 @@ open — not that the excluded bullets themselves are gone.
   No plan file for a new phase was written this turn — row 20's plan already exists and is
   unchanged in content; the next iteration dispatches its IMPLEMENT step. Lettered row ids must not
   be used in this table again.
+
+- **2026-09-03, phase-21 planning — split the omnibus graph-layer row into four numeric rows.**
+  Old row 21 bundled five independent items (bare-keyed node admission, key-level dirt, time-unrolled
+  self-edges, whole-workspace `examples/web_analytics`, `--select` scoping); reading the code showed
+  they are not one change. `KeyedDirt`/`keyed_dirty`/`per_edge_keys` already exist in
+  `smelt-logical::maintenance::propagate` (so the divergence bullet's "no key-level dirt
+  representation exists" is stale as written), but the representation is consumed by nothing: a node
+  dirtied only through the keyed channel gets no `dirty` entry, so `propagate` never walks its own
+  outbound edges and `plan_since_upstream` never schedules or reports it. That cascade+consumption
+  bug is now row 21 on its own. The self-edge refusal (`examples/web_analytics`'s
+  `silver.sessions_chained`, a backward-bounded `Ordered` self-read) is row 22; `--select` scoping —
+  the flag is parsed on `RunArgs` but `run_since_upstream` ignores it — is row 23; and the
+  whole-workspace `examples/web_analytics` end-to-end leg plus the divergence-bullet removal, which
+  depends on 21 and 22 landing, is row 24. Old rows 22–28 shift to 25–31. Nothing left the outcome;
+  all five items remain, each with its own row (success criterion 15). Numeric ids only, per the
+  phase-20 planning entry.
 
 ## Blocked
 
