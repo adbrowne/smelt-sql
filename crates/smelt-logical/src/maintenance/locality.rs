@@ -303,6 +303,83 @@ pub fn settle_bound(slice: &LocalitySlice) -> SettleBound {
     }
 }
 
+/// The settle-bound × observed-delta composition
+/// (`docs/specs/incremental_models.md`
+/// §"Observed deltas on model edges": "This composes with the derived
+/// settle bound … a stable upstream chain degenerates to empty-delta no-op
+/// propagation with a provable horizon behind it"). A **present-and-empty**
+/// recorded delta whose window lies entirely behind the model's settle
+/// bound is provably final — no later-arriving row can still touch it — and
+/// is reported as a settled no-op, distinct from a present-and-empty delta
+/// still inside the bound (which may yet receive a late row that dirties
+/// the window on a future run). This is a **reporting** distinction only:
+/// both verdicts already contribute zero dirt to propagation (an empty
+/// delta is an empty delta either way) — [`settled_empty_verdict`] never
+/// prunes further work, it only names which empty is provably permanent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettledEmptyVerdict {
+    /// The recorded delta is empty AND the window has passed the settle
+    /// bound — provably final, safe to report as fully settled.
+    SettledNoOp,
+    /// The recorded delta is empty but the window is still within the
+    /// settle bound (or the route — [`SettleBound::Never`] — has no bound
+    /// at all) — real today, but not provably permanent.
+    EmptyUnsettled,
+    /// The recorded delta is non-empty — there is real work, regardless of
+    /// the settle bound.
+    Dirty,
+}
+
+/// Compose a recorded delta's emptiness with the model's derived
+/// [`SettleBound`]. `window_end` and `now` are ISO-8601 date or timestamp
+/// strings (the same rendering [`crate::maintenance::propagate`] and its
+/// callers already use); an unparseable date is treated as
+/// [`SettledEmptyVerdict::EmptyUnsettled`] — never silently reported as
+/// settled — since this function has no fail-loud diagnostic path of its
+/// own (its caller reports a string, it does not refuse a run).
+/// [`SettleBound::Never`] (route 2, key-determined) never settles by
+/// construction: there is no horizon to compare against, so every
+/// present-and-empty delta on that route reports
+/// [`SettledEmptyVerdict::EmptyUnsettled`], honestly, rather than
+/// synthesising a bound.
+pub fn settled_empty_verdict(
+    bound: &SettleBound,
+    window_end: &str,
+    now: &str,
+    delta_is_empty: bool,
+) -> SettledEmptyVerdict {
+    if !delta_is_empty {
+        return SettledEmptyVerdict::Dirty;
+    }
+    let total_margin_seconds = match bound {
+        SettleBound::Never => return SettledEmptyVerdict::EmptyUnsettled,
+        SettleBound::After { margin } => margin.0,
+        SettleBound::AfterRecurrenceBound { r, margin } => r.0.saturating_add(margin.0),
+    };
+    let (Some(window_end), Some(now)) = (parse_instant(window_end), parse_instant(now)) else {
+        return SettledEmptyVerdict::EmptyUnsettled;
+    };
+    let horizon = window_end + chrono::Duration::seconds(total_margin_seconds as i64);
+    if horizon < now {
+        SettledEmptyVerdict::SettledNoOp
+    } else {
+        SettledEmptyVerdict::EmptyUnsettled
+    }
+}
+
+/// Parse an ISO-8601 date (`"2026-01-01"`) or timestamp
+/// (`"2026-01-01T00:00:00"`) string into a comparable instant, defaulting a
+/// bare date to midnight — the same shape [`crate::maintenance::propagate`]
+/// and `smelt-runtime`'s own date-string handling already assume.
+fn parse_instant(s: &str) -> Option<chrono::NaiveDateTime> {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S") {
+        return Some(dt);
+    }
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .ok()
+        .map(|d| d.and_hms_opt(0, 0, 0).unwrap_or_default())
+}
+
 /// Why key temporal locality could not be established for a model's
 /// `timeseries:` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1490,6 +1567,59 @@ mod tests {
                 r: Seconds::days(3),
                 margin: Seconds::ZERO,
             }
+        );
+    }
+
+    // ── settled_empty_verdict: the settle-bound × observed-delta
+    // composition (`docs/specs/incremental_models.md` §"Observed deltas on
+    // model edges") ──
+
+    /// Route 1: a window whose end plus the settle margin has already
+    /// elapsed past `now` is a provably-final empty delta.
+    #[test]
+    fn settled_empty_verdict_is_settled_behind_the_bound() {
+        let bound = SettleBound::After {
+            margin: Seconds::days(2),
+        };
+        assert_eq!(
+            settled_empty_verdict(&bound, "2026-01-01", "2026-01-10", true),
+            SettledEmptyVerdict::SettledNoOp
+        );
+    }
+
+    /// Route 1: a window still within the settle margin of `now` is empty
+    /// today, but not yet provably permanent.
+    #[test]
+    fn settled_empty_verdict_is_unsettled_inside_the_bound() {
+        let bound = SettleBound::After {
+            margin: Seconds::days(2),
+        };
+        assert_eq!(
+            settled_empty_verdict(&bound, "2026-01-08", "2026-01-09", true),
+            SettledEmptyVerdict::EmptyUnsettled
+        );
+    }
+
+    /// Route 2 (`SettleBound::Never`) never settles, no matter how old the
+    /// window is — there is no horizon to compare against.
+    #[test]
+    fn settled_empty_verdict_never_settles_on_route2() {
+        assert_eq!(
+            settled_empty_verdict(&SettleBound::Never, "2000-01-01", "2030-01-01", true),
+            SettledEmptyVerdict::EmptyUnsettled
+        );
+    }
+
+    /// A non-empty delta is always `Dirty`, regardless of how far behind
+    /// the settle bound its window lies.
+    #[test]
+    fn settled_empty_verdict_is_dirty_for_a_non_empty_delta() {
+        let bound = SettleBound::After {
+            margin: Seconds::days(2),
+        };
+        assert_eq!(
+            settled_empty_verdict(&bound, "2026-01-01", "2026-01-10", false),
+            SettledEmptyVerdict::Dirty
         );
     }
 }

@@ -800,6 +800,7 @@ fn observed_delta_narrows_composed_edge_to_recorded_partitions() {
         &order,
         &deltas,
         &observed,
+        "2026-01-01",
     )
     .expect("an observed delta on a composed origin must project and propagate");
 
@@ -891,6 +892,7 @@ fn empty_observed_delta_schedules_zero_downstream_regions() {
         &order,
         &deltas,
         &observed,
+        "2026-01-01",
     )
     .expect("a present-and-empty observed delta must not be a refusal");
 
@@ -942,6 +944,7 @@ fn absent_observed_delta_falls_back_to_the_written_window() {
         &order,
         &deltas,
         &no_observed,
+        "2026-01-01",
     )
     .expect("absent record must fall back, not error");
     let baseline = plan_since_upstream(&models, &source_infos, &order, &deltas)
@@ -1140,27 +1143,66 @@ async fn web_analytics_events_deduped_fully_suppressed_schedules_no_downstream_s
         source: "silver.events_deduped".to_string(),
         landed: window,
     }];
-    let plan = plan_since_upstream_with_observed_deltas(
+    // Phase 16: the settle-bound × observed-delta composition's reporting
+    // leg (`docs/specs/incremental_models.md` §"Observed deltas on model
+    // edges"). `window.end` (day ordinal 101) is deep in 1970 — far behind
+    // ANY real `now`, so it reports a settled no-op; `now` pinned to the
+    // window's own end reports the same empty delta as merely unsettled.
+    // Both legs must schedule the IDENTICAL (empty) run set — this is a
+    // reporting distinction only, never extra pruning.
+    let window_end_iso = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+    let plan_settled = plan_since_upstream_with_observed_deltas(
         &models,
         &source_infos,
         &order,
         &deltas,
         &observed,
+        "2026-01-01",
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+    let plan_unsettled = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+        &window_end_iso,
     )
     .expect("a present-and-empty observed delta must not be a refusal");
 
-    assert!(
-        !plan.runs.iter().any(|r| r.model == "silver.sessions"),
-        "a fully-suppressed events_deduped run must schedule zero downstream silver.sessions \
-         regions: {:?}",
-        plan.runs
+    for plan in [&plan_settled, &plan_unsettled] {
+        assert!(
+            !plan.runs.iter().any(|r| r.model == "silver.sessions"),
+            "a fully-suppressed events_deduped run must schedule zero downstream \
+             silver.sessions regions: {:?}",
+            plan.runs
+        );
+        assert!(
+            !plan
+                .dirty_set_report
+                .contains("silver.sessions <- silver.events_deduped"),
+            "the dirty set must show no dirt on the events_deduped -> sessions edge: {}",
+            plan.dirty_set_report
+        );
+    }
+    assert_eq!(
+        plan_settled.runs, plan_unsettled.runs,
+        "the settled/unsettled distinction is reporting-only — the scheduled run set must be \
+         identical either way"
     );
     assert!(
-        !plan
+        plan_settled
             .dirty_set_report
-            .contains("silver.sessions <- silver.events_deduped"),
-        "the dirty set must show no dirt on the events_deduped -> sessions edge: {}",
-        plan.dirty_set_report
+            .contains("settled no-op (behind the settle bound)"),
+        "a window far behind the settle bound must report a settled no-op: {}",
+        plan_settled.dirty_set_report
+    );
+    assert!(
+        plan_unsettled
+            .dirty_set_report
+            .contains("empty this run (not yet settled)"),
+        "a window still within the settle bound must report merely empty-this-run: {}",
+        plan_unsettled.dirty_set_report
     );
 }
 

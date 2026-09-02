@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-03
 owners: [andrew]
 ---
 
@@ -1462,22 +1462,37 @@ delta; absent a record the edge falls back to the run's written window, the coar
 always-correct form (widen-never-narrow). The record is warehouse-resident, alongside the
 reconciliation ledger, and written in the **same backend transaction as the write it records**
 — a delta visible without its write, or a write without its delta, breaks propagation
-soundness. **Trust boundary:** an observed delta is trusted because the state is smelt-owned,
-written only by smelt's own conditional-write path — the general form of this trust argument
-is `state.md` §"The residency rule"; there is no out-of-band-edit tripwire — an
-external mutation to the target table between runs is not detected (an explicit Open
-Question, §Known Divergences). Empty and absent are distinct: an empty recorded delta means
-the run executed and changed nothing (a real, propagatable fact); an absent record means no
-delta was recorded, and a consumer must not conflate the two. This composes with the derived
-settle bound (`incremental_shapes.md` §"Key temporal locality (the time-partitioned
-output)"): a stable upstream chain degenerates to empty-delta no-op propagation with a
-provable horizon behind it. `smelt run --since-upstream` reads the recorded delta live for a
-model-address delta origin, at the exact `(model, window_start, window_end)` key the write side
-records under: absent, it falls back to the declared `--landed` window unchanged
-(widen-never-narrow); present and empty, it propagates nothing; present and non-empty, it
-projects the recorded partitions through the model's own established locality route. The read
-is DuckDB-scoped today, matching the write side — a target with no observed-delta storage reads
-back "absent" and falls back, never errors.
+soundness. Three write families record a delta this way: the column-scoped conditional
+`MERGE`, the change-suppressed keyed fold, and the staged-candidate conditional recompute (the
+keyed fold's changed-keys guard compares the stored value against the fold's own combine
+expression, not the raw delta column, since a fold's matched arm updates on a folded-value
+change; the staged-candidate recompute additionally records a departed key — present in the
+target, absent from the candidate — since its DELETE removes that row too). An **unconditional**
+write of any family never records one — the record is a byproduct of a conditional write's
+already-computed changed-row set, never derived after the fact. **Trust boundary:** an observed
+delta is trusted because the state is smelt-owned, written only by smelt's own conditional-write
+path — the general form of this trust argument is `state.md` §"The residency rule"; there is no
+out-of-band-edit tripwire — an external mutation to the target table between runs is not
+detected (an explicit Open Question, §Known Divergences). Empty and absent are distinct: an
+empty recorded delta means the run executed and changed nothing (a real, propagatable fact); an
+absent record means no delta was recorded, and a consumer must not conflate the two. This
+composes with the derived settle bound (`incremental_shapes.md` §"Key temporal locality (the
+time-partitioned output)"): a present-and-empty delta whose window lies entirely behind the
+model's derived settle bound is provably final — no later-arriving row can still touch it — and
+is reported as a **settled no-op**, distinct from a present-and-empty delta still inside the
+bound (reported as merely empty-this-run, since it may yet receive a late row that dirties the
+window on a future run). This is a reporting distinction only: both arms already contribute
+zero dirt to propagation — the settle bound names which empty is provably permanent, it never
+prunes further work beyond what an empty delta already prunes. `smelt run --since-upstream`
+reads the recorded delta live for a model-address delta origin, at the exact `(model,
+window_start, window_end)` key the write side records under: absent, it falls back to the
+declared `--landed` window unchanged (widen-never-narrow); present and empty, it propagates
+nothing (and the dirty-set report names it settled or unsettled per the composition above);
+present and non-empty, it projects the recorded partitions through the model's own established
+locality route. The read is DuckDB-scoped today, matching the write side — a target with no
+observed-delta storage reads back "absent" and falls back, never errors; a non-DuckDB backend's
+write side refuses fail-loud on a conditional write that would otherwise record a delta, rather
+than silently writing without recording one.
 
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic
 edge set; a **self-referential** model (a table-graph cycle that is a DAG only when
@@ -1888,12 +1903,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
   identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
   derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).
-- **Observed-delta consumption is partial**: the keyed-fold and staged-candidate write
-  families record nothing; the settle-bound × observed-delta composition has no live "delta
-  empty" leg. (`--since-upstream`'s read side is live, §"Observed deltas on model edges";
-  backward resolution's non-consumption is a stated non-goal, §"Backward resolution — what
-  must exist".) Tracked:
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **No execution technique keys off a maintained-model creation cell** — the propagated
   region materializes via the ordinary run loop, not a per-cell technique. Tracked:
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.

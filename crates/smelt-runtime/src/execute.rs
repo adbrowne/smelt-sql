@@ -2666,6 +2666,24 @@ pub async fn execute_project(
                     )?;
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                    // Same `start_date`/`end_date` → `PartitionRange`
+                    // construction the column-scoped call site above uses —
+                    // a bare `grain: key` output has no partition column of
+                    // its own, so `column: String::new()` (T5's
+                    // observed-delta recording keys on `[start, end)`
+                    // alone).
+                    let (window_start, window_end) = match (start_date, end_date) {
+                        (Some(s), Some(e)) => (
+                            s.format("%Y-%m-%d").to_string(),
+                            e.format("%Y-%m-%d").to_string(),
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
+                    let window = smelt_backend::PartitionRange {
+                        column: String::new(),
+                        start: window_start,
+                        end: window_end,
+                    };
                     let row_count = match write {
                         crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
                             compared_columns,
@@ -2677,6 +2695,7 @@ pub async fn execute_project(
                                 key,
                                 &compiled.sql,
                                 compared_columns,
+                                &window,
                                 &retry_policy,
                             )
                             .await

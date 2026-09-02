@@ -406,12 +406,14 @@ async fn run_since_upstream(
     // same process.
     drop(lookup_backend);
 
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
     let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
         models,
         &source_infos,
         &order,
         &deltas,
         &observed,
+        &now,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 

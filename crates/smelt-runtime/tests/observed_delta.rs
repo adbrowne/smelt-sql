@@ -19,10 +19,17 @@ use smelt_backend::{Backend, PartitionRange};
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::analysis::walk::{ColumnComparability, Comparability};
 use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
+use smelt_logical::maintenance::emit::{
+    emit_keyed_fold, emit_keyed_fold_suppressed, MaintenanceDialect, TargetSlicePredicate,
+};
 use smelt_logical::maintenance::{RowIdentity, RowIdentityVerdict};
 use smelt_runtime::maintenance_driver::{
-    execute_column_scoped_merge_full, read_observed_delta, read_observed_delta_changed_keys,
+    execute_column_scoped_merge_full, execute_staged_membership_recompute,
+    keyed_fold_changed_keys_select, read_observed_delta, read_observed_delta_changed_keys,
+    run_windowed_keyed_maintenance, MaintenanceStep, WindowedKeyedRule,
 };
+use smelt_runtime::probes::ProbePolicy;
+use smelt_runtime::transformer::TimeRange;
 
 /// A retry policy that never retries — these tests exercise the
 /// column-scoped MERGE write directly against a real DuckDB backend,
@@ -642,4 +649,664 @@ async fn read_observed_delta_changed_keys_shares_the_decoder() {
         absent, None,
         "a never-recorded window must read back None, not present-and-empty"
     );
+}
+
+// ── Phase 16: write-side recording for the keyed fold and staged-candidate
+// families (`docs/outcomes/20260815-definition-delta-migrate/phases/
+// 16-plan.md`) ──
+
+/// A minimal [`WindowedKeyedRule`] for these tests: a single `MAX`-combiner
+/// aggregator column (`GREATEST(target.score, delta.score)`), mirroring
+/// `keyed`'s own shape (`crate::cumulative::CumulativeClassification`)
+/// closely enough to exercise `run_windowed_keyed_maintenance`'s
+/// observed-delta recording without pulling in the full `smelt-planner`
+/// classification machinery.
+struct TestKeyedRule {
+    unique_key: Vec<String>,
+    folds: Vec<(String, String)>,
+}
+
+#[async_trait::async_trait]
+impl WindowedKeyedRule for TestKeyedRule {
+    fn refuse(&self) -> Option<String> {
+        None
+    }
+
+    fn merge_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+        suppression: &WriteSuppression,
+        dialect: MaintenanceDialect,
+    ) -> String {
+        let schema_table = format!("{schema}.{table}");
+        let group = match suppression {
+            WriteSuppression::Suppressed { compared_columns } => emit_keyed_fold_suppressed(
+                &schema_table,
+                &self.unique_key,
+                &self.folds,
+                delta_sql,
+                slice,
+                compared_columns,
+                dialect,
+            ),
+            WriteSuppression::Unconditional { .. } => emit_keyed_fold(
+                &schema_table,
+                &self.unique_key,
+                &self.folds,
+                delta_sql,
+                slice,
+                dialect,
+            ),
+        };
+        group.statements[0].sql.clone()
+    }
+
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        let schema_table = format!("{schema}.{table}");
+        Some(keyed_fold_changed_keys_select(
+            &schema_table,
+            &self.unique_key,
+            delta_sql,
+            compared_columns,
+            &self.folds,
+            partition_column,
+        ))
+    }
+}
+
+fn max_score_rule() -> TestKeyedRule {
+    TestKeyedRule {
+        unique_key: vec!["user_id".to_string()],
+        folds: vec![(
+            "score".to_string(),
+            "GREATEST(target.score, delta.score)".to_string(),
+        )],
+    }
+}
+
+/// Same shape as [`TestKeyedRule`], but `merge_sql` returns intentionally
+/// broken SQL (a `MERGE` referencing a column the target table does not
+/// have) — used to prove the recorded delta and the write share one
+/// commit point (test 8: a failed write leaves no delta row behind).
+struct FailingMergeKeyedRule {
+    inner: TestKeyedRule,
+}
+
+#[async_trait::async_trait]
+impl WindowedKeyedRule for FailingMergeKeyedRule {
+    fn refuse(&self) -> Option<String> {
+        None
+    }
+
+    fn merge_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        _delta_sql: &str,
+        _slice: Option<&TargetSlicePredicate>,
+        _suppression: &WriteSuppression,
+        _dialect: MaintenanceDialect,
+    ) -> String {
+        format!(
+            "MERGE INTO {schema}.{table} AS target USING (SELECT 1 AS user_id) AS delta ON \
+             target.user_id = delta.user_id WHEN MATCHED THEN UPDATE SET \
+             does_not_exist_column = 1"
+        )
+    }
+
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        self.inner.observed_delta_changed_keys_sql(
+            schema,
+            table,
+            delta_sql,
+            compared_columns,
+            partition_column,
+        )
+    }
+}
+
+fn one_step(start: &str, end: &str) -> Vec<MaintenanceStep> {
+    vec![MaintenanceStep {
+        partition_value: start.to_string(),
+        range: TimeRange {
+            start: start.to_string(),
+            end: end.to_string(),
+        },
+    }]
+}
+
+/// A suppressed keyed-fold step over 100 rows, 3 of which change (a higher
+/// `score` for a `GREATEST` fold), must record exactly those 3 keys under
+/// `(model, step.range.start, step.range.end)`.
+#[tokio::test]
+async fn keyed_fold_suppressed_records_changed_keys() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.src_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+
+    let mut target_values = Vec::new();
+    let mut source_values = Vec::new();
+    for i in 0..100i64 {
+        target_values.push(format!("({i}, 10)"));
+        source_values.push(format!("({i}, 10)"));
+    }
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO main.dim_scores VALUES {}",
+            target_values.join(", ")
+        ))
+        .await
+        .unwrap();
+    for id in [1i64, 42, 99] {
+        source_values[id as usize] = format!("({id}, 99)");
+    }
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO main.src_scores VALUES {}",
+            source_values.join(", ")
+        ))
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["score"]);
+    let steps = one_step("2026-01-01", "2026-01-02");
+
+    run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &max_score_rule(),
+        None,
+        &suppression,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect("suppressed keyed fold succeeds");
+
+    let w = PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+    let (changed_keys, _partitions) = recorded_delta(&backend, "dim_scores", &w)
+        .await
+        .expect("a delta row is recorded (present, not absent)");
+    let mut sorted = changed_keys.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["1".to_string(), "42".to_string(), "99".to_string()],
+        "recorded delta must hold exactly the 3 changed keys, got: {changed_keys:?}"
+    );
+}
+
+/// A fully-suppressed keyed-fold step (delta never raises any stored
+/// `score`) must record a PRESENT-AND-EMPTY delta.
+#[tokio::test]
+async fn keyed_fold_fully_suppressed_records_an_empty_delta() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_scores VALUES (1, 10), (2, 20)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.src_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    // Every delta score is <= the stored score, so GREATEST never changes
+    // anything.
+    backend
+        .execute_sql("INSERT INTO main.src_scores VALUES (1, 5), (2, 20)")
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["score"]);
+    let steps = one_step("2026-01-01", "2026-01-02");
+
+    run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &max_score_rule(),
+        None,
+        &suppression,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect("suppressed keyed fold succeeds");
+
+    let w = PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+    let (changed_keys, partitions) = recorded_delta(&backend, "dim_scores", &w)
+        .await
+        .expect("a delta row is recorded even when nothing changed (present-and-empty)");
+    assert!(
+        changed_keys.is_empty(),
+        "a fully-suppressed run must record an empty changed-key set, got: {changed_keys:?}"
+    );
+    assert!(partitions.is_empty(), "partitions must also be empty");
+}
+
+/// An `Unconditional` verdict's keyed-fold merge must leave the observed-
+/// delta table untouched — the record is a byproduct of the SUPPRESSED
+/// write's already-computed changed-row set, never derived after the fact
+/// for an unconditional one.
+#[tokio::test]
+async fn keyed_fold_unconditional_records_no_delta() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_scores VALUES (1, 10), (2, 20)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.src_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.src_scores VALUES (1, 99), (2, 99)")
+        .await
+        .unwrap();
+
+    let suppression = WriteSuppression::Unconditional {
+        why: "test: unconditional keyed fold must never record a delta".to_string(),
+    };
+    let steps = one_step("2026-01-01", "2026-01-02");
+
+    run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &max_score_rule(),
+        None,
+        &suppression,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect("unconditional keyed fold succeeds");
+
+    // An `Unconditional` write never even ensures the observed-delta table
+    // exists — it is a pure byproduct of a SUPPRESSED write's own change
+    // detection, so the table is entirely absent here, not merely empty.
+    assert!(
+        !backend
+            .table_exists("main", "_smelt_observed_delta")
+            .await
+            .unwrap(),
+        "an Unconditional keyed-fold write must never create the observed-delta table at all"
+    );
+}
+
+/// The changed-keys query is derived and executed BEFORE the merge, inside
+/// the SAME transaction: when the merge statement itself fails, the whole
+/// transaction rolls back, leaving no delta row behind — proof the record
+/// and the write share one commit point (mirrors
+/// `smelt-backend-duckdb/src/lib.rs::
+/// test_record_observed_delta_rolls_back_record_on_write_failure`).
+#[tokio::test]
+async fn keyed_fold_delta_rolls_back_with_a_failed_write() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_scores VALUES (1, 10), (2, 20)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("CREATE TABLE main.src_scores (user_id BIGINT, score BIGINT)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.src_scores VALUES (1, 99), (2, 99)")
+        .await
+        .unwrap();
+
+    let suppression = key_suppression(&["score"]);
+    let steps = one_step("2026-01-01", "2026-01-02");
+    let rule = FailingMergeKeyedRule {
+        inner: max_score_rule(),
+    };
+
+    let err = run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &rule,
+        None,
+        &suppression,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect_err("a broken MERGE statement must fail the run");
+    assert!(
+        err.to_string().contains("does_not_exist_column")
+            || err.to_string().to_lowercase().contains("column"),
+        "the error should name the SQL failure, got: {err}"
+    );
+
+    let w = PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+    assert!(
+        recorded_delta(&backend, "dim_scores", &w).await.is_none(),
+        "a failed write must roll back the delta record too — no row at all"
+    );
+}
+
+/// A non-DuckDB target refuses fail-loud rather than silently skipping the
+/// observed-delta record — the same posture
+/// `execute_column_scoped_write_with_observed_delta` already takes for its
+/// own `Suppressed` arm.
+struct KeyedNonDuckDbBackend;
+
+#[async_trait::async_trait]
+impl Backend for KeyedNonDuckDbBackend {
+    async fn execute_sql(
+        &self,
+        _sql: &str,
+    ) -> Result<Vec<arrow::array::RecordBatch>, smelt_backend::BackendError> {
+        unimplemented!("must not be called — the driver refuses before any write")
+    }
+    async fn create_table_as(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn create_view_as(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn drop_table_if_exists(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn drop_view_if_exists(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn get_row_count(&self, _: &str, _: &str) -> Result<usize, smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn get_preview(
+        &self,
+        _: &str,
+        _: &str,
+        _: usize,
+    ) -> Result<Vec<arrow::array::RecordBatch>, smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn table_exists(&self, _: &str, _: &str) -> Result<bool, smelt_backend::BackendError> {
+        // The target already exists — so the driver reaches the merge
+        // (not the first-run `CREATE TABLE ... AS`) branch, where the
+        // dialect refusal lives.
+        Ok(true)
+    }
+    async fn ensure_schema(&self, _: &str) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    fn dialect(&self) -> smelt_backend::SqlDialect {
+        smelt_backend::SqlDialect::SparkSQL
+    }
+    fn capabilities(&self) -> smelt_backend::BackendCapabilities {
+        unimplemented!()
+    }
+    async fn load_table(
+        &self,
+        _: &str,
+        _: &str,
+        _: arrow::datatypes::SchemaRef,
+        _: Vec<arrow::array::RecordBatch>,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn delete_partitions(
+        &self,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn insert_into_from_query(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+    async fn insert_overwrite(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &PartitionRange,
+    ) -> Result<(), smelt_backend::BackendError> {
+        unimplemented!()
+    }
+}
+
+#[tokio::test]
+async fn keyed_fold_suppressed_recording_refuses_a_non_duckdb_backend() {
+    let backend = KeyedNonDuckDbBackend;
+    let suppression = key_suppression(&["score"]);
+    let steps = one_step("2026-01-01", "2026-01-02");
+
+    let err = run_windowed_keyed_maintenance(
+        &backend,
+        "dim_scores",
+        "main",
+        "dim_scores",
+        &steps,
+        &max_score_rule(),
+        None,
+        &suppression,
+        |_step| Ok("SELECT user_id, score FROM main.src_scores".to_string()),
+        &no_retry_policy(),
+        &ProbePolicy::per_run(),
+    )
+    .await
+    .expect_err("a non-DuckDB backend must refuse observed-delta recording");
+    assert!(
+        err.to_string().contains("observed-delta"),
+        "the refusal should name the observed-delta recording capability, got: {err}"
+    );
+}
+
+/// The staged-candidate conditional recompute records the keys whose
+/// applied effect was not the identity — new, changed, or departed.
+#[tokio::test]
+async fn staged_membership_recompute_records_changed_keys() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_members (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    // 1: unchanged. 2: changed. 3: departed (absent from the candidate).
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_members VALUES (1, 'bronze'), (2, 'bronze'), (3, 'bronze')",
+        )
+        .await
+        .unwrap();
+
+    // Candidate: 1 unchanged, 2 changed to 'gold', 4 brand new. 3 is absent
+    // (departed).
+    let candidate_select =
+        "SELECT * FROM (VALUES (1, 'bronze'), (2, 'gold'), (4, 'bronze')) AS t(user_id, tier)";
+
+    let w = PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+
+    execute_staged_membership_recompute(
+        &backend,
+        "main",
+        "dim_members",
+        &["user_id".to_string()],
+        candidate_select,
+        &["tier".to_string()],
+        &w,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("staged-candidate recompute succeeds");
+
+    let (changed_keys, _partitions) = recorded_delta(&backend, "dim_members", &w)
+        .await
+        .expect("a delta row is recorded");
+    let mut sorted = changed_keys.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["2".to_string(), "3".to_string(), "4".to_string()],
+        "recorded delta must hold exactly the changed (2), departed (3), and new (4) keys, got: \
+         {changed_keys:?}"
+    );
+}
+
+/// When the candidate is identical to the stored state (nothing changed,
+/// nothing departed, nothing new), the recorded delta must be
+/// present-and-empty.
+#[tokio::test]
+async fn staged_membership_recompute_records_an_empty_delta_when_nothing_changed() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_members (user_id BIGINT, tier VARCHAR)")
+        .await
+        .unwrap();
+    backend
+        .execute_sql("INSERT INTO main.dim_members VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .unwrap();
+
+    let candidate_select =
+        "SELECT * FROM (VALUES (1, 'bronze'), (2, 'silver')) AS t(user_id, tier)";
+
+    let w = PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+
+    execute_staged_membership_recompute(
+        &backend,
+        "main",
+        "dim_members",
+        &["user_id".to_string()],
+        candidate_select,
+        &["tier".to_string()],
+        &w,
+        &no_retry_policy(),
+    )
+    .await
+    .expect("staged-candidate recompute succeeds");
+
+    let (changed_keys, partitions) = recorded_delta(&backend, "dim_members", &w)
+        .await
+        .expect("a delta row is recorded even when nothing changed (present-and-empty)");
+    assert!(
+        changed_keys.is_empty(),
+        "an unchanged staged-candidate run must record an empty changed-key set, got: \
+         {changed_keys:?}"
+    );
+    assert!(partitions.is_empty(), "partitions must also be empty");
 }

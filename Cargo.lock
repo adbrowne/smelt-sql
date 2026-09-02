@@ -4292,6 +4292,7 @@ dependencies = [
 name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
+ "chrono",
  "duckdb",
  "proptest",
  "serde",

@@ -2851,6 +2851,56 @@ fn observed_delta_predicate_matches_suppressed_merge_guard_byte_for_byte() {
     );
 }
 
+/// Phase 16 (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 16-plan.md`): the keyed-fold observed-delta recording's `IS DISTINCT
+/// FROM` guard must be BYTE-IDENTICAL to `emit_keyed_fold_suppressed`'s own
+/// matched-arm guard — one comparison (over the fold's own combine
+/// expression, not the raw delta column), two consumers.
+#[test]
+fn keyed_fold_changed_key_select_matches_the_merge_guard() {
+    let compared_columns = vec!["score".to_string()];
+    let folds = vec![(
+        "score".to_string(),
+        "GREATEST(target.score, delta.score)".to_string(),
+    )];
+
+    let merge_group = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+        "main.dim_scores",
+        &["user_id".to_string()],
+        &folds,
+        "SELECT user_id, score FROM main.src_scores",
+        None,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    let merge_sql = &merge_group.statements[0].sql;
+
+    let record_predicate = smelt_runtime::maintenance_driver::keyed_fold_changed_row_predicate(
+        &compared_columns,
+        &folds,
+    );
+
+    assert!(
+        merge_sql.contains(&record_predicate),
+        "the recorded-delta predicate must appear byte-identical inside the suppressed keyed \
+         fold's own matched-arm guard — predicate: {record_predicate:?}, MERGE: {merge_sql:?}"
+    );
+
+    let changed_keys_query = smelt_runtime::maintenance_driver::keyed_fold_changed_keys_select(
+        "main.dim_scores",
+        &["user_id".to_string()],
+        "SELECT user_id, score FROM main.src_scores",
+        &compared_columns,
+        &folds,
+        None,
+    );
+    assert!(
+        changed_keys_query.contains(&record_predicate),
+        "keyed_fold_changed_keys_select must carry the identical predicate text, got: \
+         {changed_keys_query:?}"
+    );
+}
+
 /// Phase C5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
 /// — the change-suppressed keyed-fold `MERGE` (T1 for `refresh: keyed`
 /// models): `emit_keyed_fold_suppressed` carries the same suppression

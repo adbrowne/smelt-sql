@@ -211,6 +211,32 @@ pub trait WindowedKeyedRule: Send + Sync {
         );
         None
     }
+
+    /// Build the changed-keys `SELECT` a suppressed keyed fold's observed
+    /// output delta is recorded from (T5,
+    /// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+    /// deltas on model edges") — the rule supplies its own `unique_key` and
+    /// fold expressions, which the driver does not otherwise know.
+    /// `partition_column`, when `Some`, is the locality-admitted model's own
+    /// declared partition column (the record's touched-partition
+    /// projection); `None` for a bare keyed model with no partition axis.
+    /// `None` refuses recording fail-closed for a rule with no keyed-fold
+    /// shape at all — the default here exists only so a rule that never
+    /// reaches the suppressed-idempotent branch below need not implement
+    /// it; `keyed`'s own impl
+    /// (`crate::cumulative::CumulativeClassification`) always returns
+    /// `Some`.
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        let _ = (schema, table, delta_sql, compared_columns, partition_column);
+        None
+    }
 }
 
 /// Run the windowed-keyed-maintenance loop: `classify` already happened (its
@@ -481,27 +507,101 @@ pub async fn run_windowed_keyed_maintenance(
                 // documented exception: its action statement is interleaved
                 // with the reconciliation ledger's own DDL/DML via
                 // `fold_ledger_delta`, unchanged by this phase.
-                let group = match &create_group {
-                    Some(group) => group.clone(),
-                    None => StatementGroup {
-                        statements: vec![MaintenanceStatement {
-                            sql: action_sql.clone(),
-                        }],
-                        transactional: false,
-                    },
-                };
-                crate::execute::retry_backend_call(retry, || {
-                    backend.execute_statement_group(&group)
-                })
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                        model_name,
-                        action_sql,
-                        e
-                    )
-                })?;
+                //
+                // A change-suppressed keyed fold's MERGE (T5, `docs/specs/
+                // incremental_models.md` §"The graph layer" — "Observed
+                // deltas on model edges") additionally records its observed
+                // output delta in the SAME backend transaction as the
+                // write — but only past the first (table-creating) step:
+                // `create_group` is a plain `CREATE TABLE ... AS`, not a
+                // conditional write, so there is no changed-row set to
+                // record from it. `Grade::Additive` (ledger-folded) ISN'T
+                // reached here — this arm only ever runs for
+                // `Grade::Idempotent` cells.
+                match (&create_group, suppression) {
+                    (None, WriteSuppression::Suppressed { compared_columns }) => {
+                        if backend.dialect() != SqlDialect::DuckDB {
+                            bail!(
+                                "{}",
+                                BackendError::unsupported(
+                                    backend.dialect().name(),
+                                    "observed-delta recording for a change-suppressed keyed \
+                                     fold (T5)",
+                                )
+                            );
+                        }
+                        let partition_column = locality.map(LocalitySlice::partition_column);
+                        let changed_keys_query = match rule.observed_delta_changed_keys_sql(
+                            schema,
+                            table,
+                            &delta_sql,
+                            compared_columns,
+                            partition_column,
+                        ) {
+                            Some(sql) => sql,
+                            None => bail!(
+                                "windowed-keyed-maintenance driver refused model '{}': a \
+                                 change-suppressed keyed fold requires the rule to provide an \
+                                 observed-delta changed-keys query, and none was provided — \
+                                 refusing fail-closed rather than silently skipping the record",
+                                model_name
+                            ),
+                        };
+                        let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+                        let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+                            schema,
+                            table,
+                            &step.range.start,
+                            &step.range.end,
+                            &changed_keys_query,
+                        );
+                        let group = StatementGroup {
+                            statements: vec![MaintenanceStatement {
+                                sql: action_sql.clone(),
+                            }],
+                            transactional: false,
+                        };
+                        crate::execute::retry_backend_call(retry, || {
+                            backend.execute_conditional_write_and_record_observed_delta(
+                                &ensure_sql,
+                                &group,
+                                &record_sql,
+                            )
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                model_name,
+                                action_sql,
+                                e
+                            )
+                        })?;
+                    }
+                    _ => {
+                        let group = match &create_group {
+                            Some(group) => group.clone(),
+                            None => StatementGroup {
+                                statements: vec![MaintenanceStatement {
+                                    sql: action_sql.clone(),
+                                }],
+                                transactional: false,
+                            },
+                        };
+                        crate::execute::retry_backend_call(retry, || {
+                            backend.execute_statement_group(&group)
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                model_name,
+                                action_sql,
+                                e
+                            )
+                        })?;
+                    }
+                }
             }
         }
 
@@ -1451,7 +1551,17 @@ pub fn resolve_live_membership_recompute_cell(
 /// newly-admitted key is represented correctly, and the recompute variant's
 /// own anti-join `DELETE` removes a departed key rather than leaving it
 /// stale. `compared_columns` is the already fail-closed-admitted
-/// `WriteSuppression::Suppressed` set.
+/// `WriteSuppression::Suppressed` set — this write is always conditional
+/// (`resolve_live_membership_recompute_cell` above only ever returns a cell
+/// once suppression proved `Suppressed`; an `Unconditional` verdict has no
+/// sound lowering and is skipped before reaching here), so its observed
+/// output delta is recorded in the SAME backend transaction as the write
+/// (T5, `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+/// deltas on model edges") unconditionally, matching
+/// [`execute_column_scoped_write_with_observed_delta`]'s posture for its
+/// own `Suppressed` arm. `window` identifies the run window this write
+/// covers — the observed-delta table's own idempotent-replace key.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_staged_membership_recompute(
     backend: &dyn Backend,
     schema: &str,
@@ -1459,6 +1569,7 @@ pub async fn execute_staged_membership_recompute(
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
+    window: &PartitionRange,
     retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
@@ -1473,11 +1584,46 @@ pub async fn execute_staged_membership_recompute(
         compared_columns,
         dialect,
     );
-    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
-        })?;
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(anyhow::anyhow!(
+            "{}",
+            BackendError::unsupported(
+                backend.dialect().name(),
+                "observed-delta recording for a staged-candidate membership recompute (T5)",
+            )
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+    let partition_column = if window.column.is_empty() {
+        None
+    } else {
+        Some(window.column.as_str())
+    };
+    let changed_keys_query = staged_candidate_changed_keys_select(
+        &full_table,
+        key,
+        candidate_select,
+        compared_columns,
+        partition_column,
+    );
+    let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+        schema,
+        table,
+        &window.start,
+        &window.end,
+        &changed_keys_query,
+    );
+    crate::execute::retry_backend_call(retry, || {
+        backend.execute_conditional_write_and_record_observed_delta(
+            &ensure_sql,
+            &group,
+            &record_sql,
+        )
+    })
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
+    })?;
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),
@@ -2637,32 +2783,173 @@ pub fn changed_keys_select(
     compared_columns: &[String],
     partition_column: Option<&str>,
 ) -> String {
+    let predicate = changed_row_predicate("target", "source", compared_columns);
+    changed_keys_select_over_predicate(
+        table,
+        unique_key,
+        source_select,
+        "source",
+        &predicate,
+        partition_column,
+    )
+}
+
+/// The shared "new-or-changed keys, projected to their touched partition"
+/// query shape both [`changed_keys_select`] (column-scoped MERGE, raw
+/// column comparison) and [`keyed_fold_changed_keys_select`] (keyed fold,
+/// fold-expression comparison) build — the two differ only in the
+/// candidate-relation alias and the predicate text, never in the join/
+/// key-projection shape itself.
+fn changed_keys_select_over_predicate(
+    table: &str,
+    unique_key: &[String],
+    candidate_select: &str,
+    candidate_alias: &str,
+    predicate: &str,
+    partition_column: Option<&str>,
+) -> String {
     let on = unique_key
         .iter()
-        .map(|k| format!("target.{k} = source.{k}"))
+        .map(|k| format!("target.{k} = {candidate_alias}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_expr = if unique_key.len() == 1 {
-        format!("CAST(source.{} AS VARCHAR)", unique_key[0])
+        format!("CAST({candidate_alias}.{} AS VARCHAR)", unique_key[0])
     } else {
         let parts = unique_key
             .iter()
-            .map(|k| format!("CAST(source.{k} AS VARCHAR)"))
+            .map(|k| format!("CAST({candidate_alias}.{k} AS VARCHAR)"))
             .collect::<Vec<_>>()
             .join(", '\u{1}', ");
         format!("CONCAT({parts})")
     };
     let partition_expr = match partition_column {
-        Some(col) => format!("CAST(source.{col} AS VARCHAR)"),
+        Some(col) => format!("CAST({candidate_alias}.{col} AS VARCHAR)"),
         None => "NULL".to_string(),
     };
     let first_key = &unique_key[0];
-    let suppression = changed_row_predicate("target", "source", compared_columns);
     format!(
         "SELECT {key_expr} AS delta_key, {partition_expr} AS delta_partition FROM \
-         ({source_select}) AS source LEFT JOIN {table} AS target ON {on} \
-         WHERE target.{first_key} IS NULL OR ({suppression})"
+         ({candidate_select}) AS {candidate_alias} LEFT JOIN {table} AS target ON {on} \
+         WHERE target.{first_key} IS NULL OR ({predicate})"
     )
+}
+
+/// Build the `target.c IS DISTINCT FROM (<fold_expr>)` OR-predicate over
+/// `compared_columns` — the SAME shape [`smelt_logical::maintenance::emit::
+/// emit_keyed_fold_suppressed`] guards its matched arm with (one
+/// comparison, two consumers, `docs/specs/incremental_models.md` §"The
+/// graph layer" — "Observed deltas on model edges"; kept from drifting off
+/// the write's own guard by
+/// `crates/smelt-runtime/tests/statement_parity.rs`). Unlike
+/// [`changed_row_predicate`]'s raw-column comparison (the column-scoped
+/// MERGE's matched arm compares source vs. target directly), a keyed fold's
+/// matched arm compares the target's stored value against the FOLDED
+/// (combiner-applied) delta value — `folds` supplies each compared column's
+/// already-rendered fold expression (`target.c op delta.c`, as
+/// `smelt_logical::maintenance::emit::expand_aggregator_column_folds`
+/// renders it).
+pub fn keyed_fold_changed_row_predicate(
+    compared_columns: &[String],
+    folds: &[(String, String)],
+) -> String {
+    compared_columns
+        .iter()
+        .map(|c| {
+            let expr = folds
+                .iter()
+                .find(|(col, _)| col == c)
+                .map(|(_, expr)| expr.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "keyed_fold_changed_row_predicate: compared column '{c}' is not among \
+                         the fold's own columns"
+                    )
+                });
+            format!("target.{c} IS DISTINCT FROM ({expr})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The changed-key `SELECT` for a suppressed keyed fold's observed delta:
+/// every delta row that is new (no matching target key) or whose applied
+/// fold changes at least one comparable column — the same rowset
+/// [`smelt_logical::maintenance::emit::emit_keyed_fold_suppressed`]'s
+/// matched arm actually updates, restricted to comparable columns
+/// ([`keyed_fold_changed_row_predicate`]). `delta_select` is aliased
+/// `delta` (not `source`), matching the fold expressions' own
+/// `target.c`/`delta.c` qualification.
+pub fn keyed_fold_changed_keys_select(
+    table: &str,
+    unique_key: &[String],
+    delta_select: &str,
+    compared_columns: &[String],
+    folds: &[(String, String)],
+    partition_column: Option<&str>,
+) -> String {
+    let predicate = keyed_fold_changed_row_predicate(compared_columns, folds);
+    changed_keys_select_over_predicate(
+        table,
+        unique_key,
+        delta_select,
+        "delta",
+        &predicate,
+        partition_column,
+    )
+}
+
+/// The changed-key `SELECT` for a staged-candidate conditional recompute's
+/// observed delta (T5): every key whose applied effect was NOT the
+/// identity — new (in the candidate, not the target), changed (in both,
+/// but at least one comparable column differs — the same `IS DISTINCT
+/// FROM` guard [`smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_recompute`]'s `delete_changed`
+/// statement uses), or departed (in the target, not the candidate — the
+/// same anti-join its `delete_departed` statement uses). A key present in
+/// both with no comparable-column difference (untouched) never appears —
+/// its applied effect IS the identity. `partition_column`, when `Some`,
+/// projects the candidate side's own partition column for a new/changed
+/// key; a departed key (no candidate row to read a partition value from)
+/// always reports `NULL` (folded to an empty `partitions` array by the
+/// upsert), matching the write's own inability to name a partition for a
+/// row it no longer has any relation over.
+fn staged_candidate_changed_keys_select(
+    table: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    partition_column: Option<&str>,
+) -> String {
+    let predicate = changed_row_predicate("target", "candidate", compared_columns);
+    let new_or_changed = changed_keys_select_over_predicate(
+        table,
+        key,
+        candidate_select,
+        "candidate",
+        &predicate,
+        partition_column,
+    );
+    let departed_on = key
+        .iter()
+        .map(|k| format!("target.{k} = candidate.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_expr = if key.len() == 1 {
+        format!("CAST(target.{} AS VARCHAR)", key[0])
+    } else {
+        let parts = key
+            .iter()
+            .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+            .collect::<Vec<_>>()
+            .join(", '\u{1}', ");
+        format!("CONCAT({parts})")
+    };
+    let departed = format!(
+        "SELECT {key_expr} AS delta_key, NULL AS delta_partition FROM {table} AS target WHERE \
+         NOT EXISTS (SELECT 1 FROM ({candidate_select}) AS candidate WHERE {departed_on})"
+    );
+    format!("{new_or_changed} UNION ALL {departed}")
 }
 
 /// Execute a live `ColumnScopedMerge` cell's write, and — when the cell's

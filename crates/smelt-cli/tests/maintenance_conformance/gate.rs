@@ -6387,6 +6387,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         &order,
         &deltas,
         &observed,
+        "2026-08-01",
     )
     .expect("a present-and-empty observed delta must not be a refusal");
 

@@ -16,7 +16,10 @@
 //! is re-scanned every run; see that function's own doc comment.
 
 use crate::compile::{CompilerRegistry, EphemeralResolver};
-use crate::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance, WindowedKeyedRule};
+use crate::maintenance_driver::{
+    driving_steps, keyed_fold_changed_keys_select, run_windowed_keyed_maintenance,
+    WindowedKeyedRule,
+};
 use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
@@ -246,6 +249,36 @@ impl WindowedKeyedRule for CumulativeClassification {
             )
             .sql,
         )
+    }
+
+    /// `keyed`'s own `unique_key` plus its aggregator columns' rendered
+    /// fold expressions (the SAME `expand_aggregator_column_folds` call
+    /// [`build_cumulative_merge_sql`] uses to build the live MERGE) are
+    /// exactly what [`keyed_fold_changed_keys_select`] needs — this impl
+    /// supplies them and delegates the query shape entirely to that
+    /// function.
+    fn observed_delta_changed_keys_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        compared_columns: &[String],
+        partition_column: Option<&str>,
+    ) -> Option<String> {
+        let folds: Vec<(String, String)> = self
+            .aggregator_columns
+            .iter()
+            .flat_map(smelt_logical::maintenance::emit::expand_aggregator_column_folds)
+            .collect();
+        let schema_table = format!("{schema}.{table}");
+        Some(keyed_fold_changed_keys_select(
+            &schema_table,
+            &self.unique_key,
+            delta_sql,
+            compared_columns,
+            &folds,
+            partition_column,
+        ))
     }
 }
 

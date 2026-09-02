@@ -13,6 +13,7 @@ smelt-core = { path = "../smelt-core" }
 smelt-dialect = { path = "../smelt-dialect" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 sha2 = "0.10"

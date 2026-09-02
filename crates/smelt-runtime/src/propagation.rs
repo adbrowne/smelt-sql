@@ -429,6 +429,15 @@ struct ClampAndLocality {
     /// never re-derived; the SAME verdict `locality_admitted` above folds
     /// `Some(_).is_some()` from.
     key_locality_slice: BTreeMap<String, smelt_logical::maintenance::locality::LocalitySlice>,
+    /// The SAME admitted verdict's own derived [`SettleBound`]
+    /// (`smelt_logical::maintenance::KeyLocality::settle_bound`) — carried
+    /// alongside `key_locality_slice`, never re-derived
+    /// (`smelt_logical::maintenance::locality::settle_bound` is the single
+    /// derivation). Consulted by [`plan_since_upstream_with_observed_deltas`]
+    /// to compose a present-and-empty recorded delta with the model's
+    /// settle bound (`docs/specs/incremental_models.md` §"Observed deltas
+    /// on model edges" — "This composes with the derived settle bound").
+    key_locality_settle_bound: BTreeMap<String, smelt_logical::maintenance::locality::SettleBound>,
 }
 
 fn derive_clamp_and_locality(
@@ -481,6 +490,7 @@ fn derive_clamp_and_locality(
             clamp_days,
             locality_admitted,
             key_locality_slice,
+            key_locality_settle_bound,
         } = derive_clamp_and_locality_pass(
             models,
             source_infos,
@@ -534,6 +544,7 @@ fn derive_clamp_and_locality(
                 clamp_days,
                 locality_admitted,
                 key_locality_slice,
+                key_locality_settle_bound,
             });
         }
         composed_sources = next_composed_sources;
@@ -577,6 +588,10 @@ fn derive_clamp_and_locality_pass(
     let mut key_locality_slice: BTreeMap<
         String,
         smelt_logical::maintenance::locality::LocalitySlice,
+    > = BTreeMap::new();
+    let mut key_locality_settle_bound: BTreeMap<
+        String,
+        smelt_logical::maintenance::locality::SettleBound,
     > = BTreeMap::new();
 
     for model in models {
@@ -819,6 +834,7 @@ fn derive_clamp_and_locality_pass(
             locality_admitted.insert(table.clone(), result.plan.key_locality.is_some());
             if let Some(key_locality) = result.plan.key_locality.as_ref() {
                 key_locality_slice.insert(table.clone(), key_locality.slice.clone());
+                key_locality_settle_bound.insert(table.clone(), key_locality.settle_bound);
             }
         }
 
@@ -897,6 +913,7 @@ fn derive_clamp_and_locality_pass(
         clamp_days,
         locality_admitted,
         key_locality_slice,
+        key_locality_settle_bound,
     })
 }
 
@@ -1031,7 +1048,17 @@ pub fn plan_since_upstream(
     order: &[String],
     deltas: &[SourceDelta],
 ) -> Result<SinceUpstreamPlan> {
-    plan_since_upstream_with_observed_deltas(models, source_infos, order, deltas, &BTreeMap::new())
+    // `now` is unreachable for this wrapper: an empty lookup can never
+    // produce a `Some(od) if od.is_empty()` match, the only arm that reads
+    // it — so no real clock value is needed here.
+    plan_since_upstream_with_observed_deltas(
+        models,
+        source_infos,
+        order,
+        deltas,
+        &BTreeMap::new(),
+        "",
+    )
 }
 
 /// One `(model, window_start, window_end)` key into the observed-delta
@@ -1126,27 +1153,58 @@ pub fn plan_since_upstream_with_observed_deltas(
     order: &[String],
     deltas: &[SourceDelta],
     observed: &ObservedDeltaLookup,
+    now: &str,
 ) -> Result<SinceUpstreamPlan> {
     refuse_bare_keyed_origins(models, source_infos, deltas)?;
     let edges = build_forward_graph(models, source_infos)?;
     let ClampAndLocality {
-        key_locality_slice, ..
+        key_locality_slice,
+        key_locality_settle_bound,
+        ..
     } = derive_clamp_and_locality(models, source_infos)?;
 
     let mut source_deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    // The settle-bound × observed-delta composition's reporting leg
+    // (`docs/specs/incremental_models.md` §"Observed deltas on model
+    // edges"): a present-and-empty delta whose window lies behind the
+    // origin's own derived settle bound is a provably-final settled no-op,
+    // distinct from one still inside the bound — a REPORTING distinction
+    // only, since both arms already contribute zero dirt above (this never
+    // prunes further work).
+    let mut empty_delta_notes: Vec<String> = Vec::new();
     for d in deltas {
         let projected: Vec<DayInterval> = match key_locality_slice.get(&d.source) {
             Some(slice) => {
-                let key = (
-                    d.source.clone(),
-                    ordinal_to_iso(d.landed.start),
-                    ordinal_to_iso(d.landed.end),
-                );
+                let window_start = ordinal_to_iso(d.landed.start);
+                let window_end = ordinal_to_iso(d.landed.end);
+                let key = (d.source.clone(), window_start.clone(), window_end.clone());
                 match observed.get(&key) {
                     // Present and empty: a fully-suppressed run recorded
                     // nothing to propagate — the graph half of the no-op
                     // cascade.
-                    Some(od) if od.is_empty() => Vec::new(),
+                    Some(od) if od.is_empty() => {
+                        if let Some(bound) = key_locality_settle_bound.get(&d.source) {
+                            let verdict =
+                                smelt_logical::maintenance::locality::settled_empty_verdict(
+                                    bound,
+                                    &window_end,
+                                    now,
+                                    true,
+                                );
+                            let label = match verdict {
+                                smelt_logical::maintenance::locality::SettledEmptyVerdict::SettledNoOp => {
+                                    "settled no-op (behind the settle bound)"
+                                }
+                                _ => "empty this run (not yet settled)",
+                            };
+                            empty_delta_notes.push(format!(
+                                "  {}: recorded delta is empty for [{window_start}, \
+                                 {window_end}) — {label}\n",
+                                d.source
+                            ));
+                        }
+                        Vec::new()
+                    }
                     // Present and non-empty: project the recorded
                     // partitions to exact dirt via the model's own
                     // established locality route.
@@ -1175,6 +1233,9 @@ pub fn plan_since_upstream_with_observed_deltas(
         .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}",))?;
 
     let mut report = String::from("Dirty set (--since-upstream):\n");
+    for note in &empty_delta_notes {
+        report.push_str(note);
+    }
     if prop.per_edge.is_empty() {
         report.push_str("  (no source landed a delta that any model reads — nothing to run)\n");
     }
