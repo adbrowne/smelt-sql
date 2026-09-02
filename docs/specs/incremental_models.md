@@ -1937,7 +1937,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   re-derivation for an `UpstreamMutation` cell — every run re-checks and, where live, re-applies
   the cell rather than skipping a genuinely unchanged source. Refs:
   `docs/plans/20260707-maintenance-plan-impl.md`,
-  `docs/outcomes/20260815-definition-delta-migrate/phases/19b-plan.md`.
+  `docs/outcomes/20260815-definition-delta-migrate/phases/20-plan.md`.
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.

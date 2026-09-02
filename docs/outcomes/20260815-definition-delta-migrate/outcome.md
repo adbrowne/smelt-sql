@@ -319,15 +319,15 @@ open — not that the excluded bullets themselves are gone.
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | done |
 | 18 | Consume the declared guardrail/preference config: `scan_bounds.on_violation: warn` admits the plan and reports a Warning; the `prefer`/`technique` choice ladder is consulted by the ordinary region path (`resolve_incremental_strategy`); the absent-cost-model fallback preference order is stated in the spec | done |
 | 19 | Mutation-cell reachability: trigger derivation moves to a pure `smelt-logical` function and covers clocked explicitly-mutable sources plus aggregate-sensitive `AppendOnly` sources, so the horizon-clamped `PartitionLocal::Yes` corner is reachable from `examples/timeseries` through the production wrapper | done |
-| 19b | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | planned |
-| 20 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
-| 21 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
-| 22 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 23 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
-| 24 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
-| 25 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
-| 26 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
-| 27 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
+| 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | planned |
+| 21 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
+| 22 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
+| 23 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 24 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 25 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 26 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 27 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
+| 28 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
 
@@ -336,8 +336,8 @@ open — not that the excluded bullets themselves are gone.
   work in `smelt-logical`/`smelt-db` (which sources get an `UpstreamMutation` trigger at all) and
   one of which is run-time state work in `smelt-runtime`/`smelt-state` (has the source actually
   changed since the last run). Split into 19 (trigger derivation + real-workspace reachability)
-  and 19b (mutation-happened discrimination). Nothing left the outcome — both rows close clauses
-  of success criterion 15, and the bullet is only fully removed once 19b lands.
+  and 20 (mutation-happened discrimination). Nothing left the outcome — both rows close clauses
+  of success criterion 15, and the bullet is only fully removed once phase 20 lands.
 
 - **2026-09-03, phase-18 planning — table reshape.** The single row 18 bundled ~10 independent
   items spanning two distinct `incremental_models.md` §Known Divergences bullets (Plan-consumer
@@ -767,6 +767,20 @@ open — not that the excluded bullets themselves are gone.
   relaxed: the first now asserts `GrainAssertionMismatch`; the second's fixture gained a
   `GROUP BY o.order_id` (with `MIN(...)` folds) to keep a derivable identity while still
   reproducing the ambiguous-join column-group collapse it actually tests.
+
+- **2026-09-03, phase-20 planning — renumber `19b` to `20`; no new plan written this turn.**
+  The outcome-loop wrapper's row selector (`.claude/scripts/outcome-loop.sh::next_step`) skips any
+  table row whose `#` column is not purely numeric (`if (n !~ /^[0-9]+$/) next`). The lettered row
+  `19b` added by the previous plan step was therefore invisible to the loop: it sat `planned` with
+  a written plan that no IMPLEMENT step would ever be dispatched for, and the pre-scan hint pointed
+  past it to the next numeric row. Since that row closes a real clause of success criterion 15
+  ("dispatch distinguishes a genuine mutation from re-derivation"), dropping or skipping it is not
+  permitted by this outcome's never-defer rule. Fixed by renumbering: `19b` -> `20` (plan file
+  renamed `phases/19b-plan.md` -> `phases/20-plan.md`, its `incremental_models.md` §Known
+  Divergences tracker link updated), and every subsequent row shifted +1 (old 20..27 -> 21..28).
+  No plan file for a new phase was written this turn — row 20's plan already exists and is
+  unchanged in content; the next iteration dispatches its IMPLEMENT step. Lettered row ids must not
+  be used in this table again.
 
 ## Blocked
 
