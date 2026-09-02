@@ -158,9 +158,46 @@ function paintKeyboard() {
 }
 
 const backdrop = document.getElementById('modal-backdrop');
+const helpModal = document.getElementById('help-modal');
+const statsModal = document.getElementById('stats-modal');
 const shareBtn = document.getElementById('share-btn');
 const modalCountdown = document.getElementById('modal-countdown');
 const modalClock = document.getElementById('modal-clock');
+
+// Focus trap: remembers what had focus before a modal opened, keeps Tab
+// cycling within the open modal's own focusable elements, and restores
+// focus on close. Covers both #stats-modal and #help-modal.
+const FOCUSABLE = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+let modalReturnFocus = null;
+
+function focusablesIn(el) {
+  return [...el.querySelectorAll(FOCUSABLE)].filter(node => !node.disabled && node.offsetParent !== null);
+}
+
+function trapTab(e) {
+  if (e.key !== 'Tab' || backdrop.hidden) return;
+  const active = statsModal.hidden ? helpModal : statsModal;
+  const focusables = focusablesIn(active);
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (e.shiftKey && document.activeElement === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && document.activeElement === last) {
+    e.preventDefault();
+    first.focus();
+  }
+}
+
+function showModal(el) {
+  statsModal.hidden = el !== statsModal;
+  helpModal.hidden = el !== helpModal;
+  modalReturnFocus = document.activeElement;
+  backdrop.hidden = false;
+  const focusables = focusablesIn(el);
+  (focusables[0] || el).focus();
+}
 
 function renderStats() {
   const { played, wins, streak, maxStreak, dist } = save.stats;
@@ -183,13 +220,19 @@ function renderStats() {
   modalCountdown.hidden = !finishedDaily;
 }
 
-function openStats() { renderStats(); backdrop.hidden = false; }
-function closeStats() { backdrop.hidden = true; }
+function openStats() { renderStats(); showModal(statsModal); }
+function closeStats() {
+  backdrop.hidden = true;
+  if (modalReturnFocus && typeof modalReturnFocus.focus === 'function') modalReturnFocus.focus();
+  modalReturnFocus = null;
+}
 
 document.getElementById('stats-btn').addEventListener('click', openStats);
-document.getElementById('modal-close').addEventListener('click', closeStats);
+document.getElementById('help-btn').addEventListener('click', () => showModal(helpModal));
+for (const btn of document.querySelectorAll('.modal-close')) btn.addEventListener('click', closeStats);
 backdrop.addEventListener('click', e => { if (e.target === backdrop) closeStats(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeStats(); });
+document.addEventListener('keydown', trapTab);
 
 shareBtn.addEventListener('click', async () => {
   const marks2d = state.guesses.map(g => scoreGuess(g, state.answer));
@@ -293,3 +336,4 @@ setInterval(() => {
 }, 1000);
 
 startDaily();
+if (save.stats.played === 0 && !save.daily) showModal(helpModal);

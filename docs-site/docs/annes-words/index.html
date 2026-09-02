@@ -12,6 +12,7 @@
   <h1>Anne's Words</h1>
   <div class="header-right">
     <span id="mode-label"></span>
+    <button id="help-btn" type="button" aria-label="How to play">?</button>
     <button id="stats-btn" type="button" aria-label="Statistics">&#128202;</button>
   </div>
 </header>
@@ -39,6 +40,19 @@
       </div>
       <button id="share-btn" type="button" hidden>Share</button>
     </div>
+  </div>
+  <div id="help-modal" role="dialog" aria-modal="true" aria-label="How to play" hidden>
+    <button class="modal-close" type="button" aria-label="Close">&times;</button>
+    <h2>How to play</h2>
+    <p>Guess the word in 6 tries. Each guess must be a valid 5-letter word.</p>
+    <p>The colour of the tiles will change to show how close your guess was.</p>
+    <div class="example"><div class="tile" data-state="correct">w</div><div class="tile">e</div><div class="tile">a</div><div class="tile">r</div><div class="tile">y</div></div>
+    <p><strong>W</strong> is in the word and in the right spot.</p>
+    <div class="example"><div class="tile">p</div><div class="tile" data-state="present">i</div><div class="tile">l</div><div class="tile">l</div><div class="tile">s</div></div>
+    <p><strong>I</strong> is in the word but in the wrong spot.</p>
+    <div class="example"><div class="tile">v</div><div class="tile">a</div><div class="tile">g</div><div class="tile" data-state="absent">u</div><div class="tile">e</div></div>
+    <p><strong>U</strong> is not in the word in any spot.</p>
+    <p class="fine">A new word is available each day.</p>
   </div>
 </div>
 </body>

@@ -66,17 +66,19 @@ button.key[data-state="absent"]  { background: var(--absent);  color: #fff; }
 @media (max-width: 500px) {
   #board { width: 100%; height: min(60dvh, 420px); }
   button.key { height: 48px; }
+  .header-right { gap: 6px; font-size: .7rem; }
+  #mode-label { max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
 
 header { position: relative; }
-.header-right { position: absolute; right: 12px; font-size: .8rem; color: var(--absent); }
+.header-right { position: absolute; right: 12px; display: flex; align-items: center;
+                 gap: 10px; font-size: .8rem; color: var(--absent); }
 #footer { min-height: 42px; display: flex; flex-direction: column; align-items: center;
           gap: 6px; font-size: .85rem; }
 #countdown { font-variant-numeric: tabular-nums; color: var(--absent); }
 #practice-btn { border: 0; border-radius: 4px; background: var(--fg); color: #fff;
                 font-family: inherit; font-weight: 700; padding: 10px 16px; cursor: pointer; }
 
-.header-right { display: flex; align-items: center; gap: 10px; }
 #stats-btn { background: none; border: 0; font-size: 1.1rem; cursor: pointer; padding: 0; }
 
 #modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5);
@@ -88,7 +90,7 @@ header { position: relative; }
                width: 320px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
 #stats-modal h2 { font-size: .9rem; text-transform: uppercase; text-align: center;
                   letter-spacing: .05em; margin: 12px 0; }
-#modal-close { position: absolute; top: 8px; right: 10px; border: 0; background: none;
+.modal-close { position: absolute; top: 8px; right: 10px; border: 0; background: none;
                font-size: 1.5rem; line-height: 1; cursor: pointer; color: var(--fg); }
 #stat-numbers { display: flex; justify-content: center; }
 .stat { flex: 1; text-align: center; }
@@ -106,3 +108,12 @@ header { position: relative; }
 #share-btn { flex: 1; background: var(--correct); color: #fff; border: 0; border-radius: 4px;
              height: 52px; font-family: inherit; font-weight: 700; font-size: 1.1rem;
              text-transform: uppercase; cursor: pointer; }
+
+#help-modal { position: relative; background: var(--bg); border-radius: 8px; padding: 16px;
+              width: 340px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
+#help-modal p { font-size: .9rem; line-height: 1.4; }
+#help-modal .fine { border-top: 1px solid var(--border); padding-top: 12px; font-size: .8rem; }
+#help-btn { background: none; border: 0; font-size: 1.1rem; font-weight: 700; cursor: pointer;
+            color: var(--fg); padding: 0; }
+.example { display: flex; gap: 4px; margin: 8px 0; }
+.example .tile { width: 40px; height: 40px; font-size: 1.5rem; }
