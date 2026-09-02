@@ -1538,13 +1538,36 @@ observed-delta storage reads back "absent" and falls back, never errors; a non-D
 write side refuses fail-loud on a conditional write that would otherwise record a delta, rather
 than silently writing without recording one.
 
+**Time-unrolled self-edges.** A self-referential model — one whose own SQL reads
+`smelt.<self>` — is not a table-graph cycle to the propagation graph; it is a **day-unrolled
+self-edge**, admitted iff the self-reference is provably strictly time-backward over the
+model's declared partition axis (the same proof that governs ordered backfill execution,
+§"Window independence and self-referential models" in `incremental_shapes.md`): `after == 0`
+and a derivable finite backward bound (`before_days`), on a day or month partition axis on both
+sides. Admission never depends on the timeseries clock being fresh — only on the bound being
+derivable and strictly backward. Its own two propagation rules are asymmetric, because the
+self-edge's forward and backward directions do not read the same relation:
+
+- **Forward (dirt).** A landed delta on `[a, b)` of the model widens to **the frontier**,
+  `[a, →)` — an open-ended interval, never `[a, b)` alone — because day `D`'s output feeds day
+  `D+1`'s read of the model's own prior output, transitively without bound. This applies once
+  per visit to the node (the topological walk visits it exactly once), not as a fixed point.
+- **Backward (requirement).** A requirement of `[s, e)` on the model additionally requires the
+  model's own `[s − before_days, s)` — one application against the stored basis/checkpoint, not
+  a fixed point, since a bounded self-read converges from a known prior state rather than
+  recursing indefinitely.
+
+A self-edge that reads forward (`after > 0`), is unbounded or underivable, or touches a
+`Keyed`-grain partition axis on either side, is refused exactly as before: fail-loud
+(`MaintenanceGraphUnsupportedNode`), naming the model and the reason. A genuine multi-node
+table-graph cycle (two or more distinct models forming a cycle) is refused unchanged — only a
+node's edge to *itself* gets the day-unrolled treatment.
+
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic
-edge set; a **self-referential** model (a table-graph cycle that is a DAG only when
-time-unrolled — admissible in principle iff its self-clamp is strictly time-backward, with
-forward dirt running to the frontier and backward resolution reaching the model's
-basis/checkpoint); and a **keyed node whose delta signature is `general`** (no partition axis
-for interval dirt and no admitted key addressing either — treating it as day-axis would be
-wrong-and-quiet). A keyed node proven `keyed upsert` is **not** refused on this ground — see
+edge set (excluding an admitted self-edge, above); a **keyed node whose delta signature is
+`general`** (no partition axis for interval dirt and no admitted key addressing either —
+treating it as day-axis would be wrong-and-quiet). A keyed node proven `keyed upsert` is
+**not** refused on this ground — see
 "Keyed dirt-sets and the narrowed refusal", above — and neither is a locality-admitted
 time-partitioned keyed output: it is a clocked node whose edges use its declared granularity,
 and whose outbound dirt is the key→partition projection of what its runs changed — exact under
@@ -1976,11 +1999,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   recorded downgrade is the intended behaviour, not a stopgap (decision record:
   `docs/research/20260816-open-questions-triage.md`).
 - **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); time-unrolled self-edges are designed but unbuilt; no
-  key-level dirt representation exists (intervals are the graph's only currency); the
-  `examples/web_analytics` workspace is not fully `--since-upstream`-compatible end to end (a
-  self-referential model and a bare-keyed model with readers each refuse the whole-workspace
-  graph); no `--select` scoping exists.
+  (`MaintenanceGraphUnsupportedNode`); no key-level dirt representation exists (intervals are
+  the graph's only currency); the `examples/web_analytics` workspace is not fully
+  `--since-upstream`-compatible end to end (a bare-keyed model with readers refuses the
+  whole-workspace graph); no `--select` scoping exists.
 - **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
   landed deltas on the command line; no persisted per-source watermark or automatic diffing
   is consumed (§Future Extensions).

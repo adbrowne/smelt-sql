@@ -452,6 +452,7 @@ async fn run_since_upstream(
             run.model,
             match (&run.start, &run.end) {
                 (Some(s), Some(e)) => format!("[{s}, {e})"),
+                (Some(s), None) => format!("[{s}, →)"),
                 _ => "whole table".to_string(),
             }
         );

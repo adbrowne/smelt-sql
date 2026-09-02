@@ -648,11 +648,41 @@ fn derive_clamp_and_locality_pass(
             }
             let addr = bare.clone();
             if addr == table {
-                bail!(
-                    "MaintenanceGraphUnsupportedNode: '{table}' is self-referential — the \
-                     propagation graph refuses a table-graph cycle rather than treating it as \
-                     a day axis (time-unrolled self-edges are not yet supported)"
-                );
+                // Time-unrolled self-edge (`incremental_models.md`
+                // §"Time-unrolled self-edges"): admitted iff the SAME proof
+                // ordered-backfill execution requires
+                // (`windowing.rs`'s `compute_incremental_windows_ordered`
+                // call site) says this self-reference is strictly
+                // time-backward — shared derivation, so the two verdicts
+                // cannot diverge. `Ok` registers a zero-margin-forward,
+                // derived-margin-backward self-edge; `Err` keeps today's
+                // fail-loud refusal, naming the derivation's own reason.
+                let refs: Vec<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| bare_name(&r.smelt_ref.to_path()))
+                    .collect();
+                let self_partition_col = metadata
+                    .timeseries
+                    .as_ref()
+                    .map(|ts| ts.partition_column.as_str());
+                match smelt_logical::analysis::window_independence::self_edge_clamp(
+                    &table,
+                    &refs,
+                    self_partition_col,
+                    &sql,
+                ) {
+                    Ok(before_days) => {
+                        let entry = clamp_days
+                            .entry((table.clone(), table.clone()))
+                            .or_insert((0, 0));
+                        entry.0 = entry.0.max(before_days);
+                    }
+                    Err(reason) => {
+                        bail!("MaintenanceGraphUnsupportedNode: {reason}");
+                    }
+                }
+                continue;
             }
             if let Some(upstream_model) = model_by_addr.get(&addr) {
                 let up_meta = upstream_model.metadata.as_deref();
@@ -1059,6 +1089,8 @@ pub struct SinceUpstreamPlan {
 fn render_interval(iv: &DayInterval) -> String {
     if iv.is_whole() {
         "whole table".to_string()
+    } else if iv.is_open_ended() {
+        format!("[{}, →)", ordinal_to_iso(iv.start))
     } else {
         format!("[{}, {})", ordinal_to_iso(iv.start), ordinal_to_iso(iv.end))
     }
@@ -1278,10 +1310,17 @@ pub fn plan_since_upstream_with_observed_deltas(
     }
     for ((downstream, upstream), intervals) in &prop.per_edge {
         for iv in intervals {
-            report.push_str(&format!(
-                "  {downstream} <- {upstream}: {}\n",
-                render_interval(iv)
-            ));
+            if downstream == upstream {
+                report.push_str(&format!(
+                    "  {downstream} <-(self, unrolled) {upstream}: {}\n",
+                    render_interval(iv)
+                ));
+            } else {
+                report.push_str(&format!(
+                    "  {downstream} <- {upstream}: {}\n",
+                    render_interval(iv)
+                ));
+            }
         }
     }
     // The keyed channel's per-edge counterpart (`incremental_models.md`
@@ -1354,6 +1393,12 @@ pub fn plan_since_upstream_with_observed_deltas(
                     runs.push(PropagatedRun {
                         model: name.clone(),
                         start: None,
+                        end: None,
+                    });
+                } else if iv.is_open_ended() {
+                    runs.push(PropagatedRun {
+                        model: name.clone(),
+                        start: Some(ordinal_to_iso(iv.start)),
                         end: None,
                     });
                 } else {

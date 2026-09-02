@@ -205,11 +205,20 @@ fn model_delta_origin_propagates_to_downstreams_without_rerunning_origin() {
     );
 }
 
-/// A self-referential model (a ref to its own address) refuses fail-loud
-/// before any interval math runs — `MaintenanceGraphUnsupportedNode`
-/// (`incremental_models.md` §"The graph layer" — refusals).
+/// A self-referential model whose self-read carries no backward margin (a
+/// same-partition self-read — reads exactly the window it is itself
+/// writing, not strictly time-backward) still refuses fail-loud —
+/// `MaintenanceGraphUnsupportedNode` — but the refusal now happens at
+/// `propagate`/`required_inputs` time (`self_edges`'s `before_days <= 0`
+/// gate), not at `build_forward_graph` — a **provably backward-bounded**
+/// self-edge (`before_days > 0`) is a real day-unrolled edge
+/// (`incremental_models.md` §"Time-unrolled self-edges"), so
+/// `build_forward_graph` itself no longer refuses every self-reference on
+/// sight; it defers the strictly-time-backward check to the shared
+/// [`smelt_logical::maintenance::propagate::propagate`]/`required_inputs`
+/// gate both directions share.
 #[test]
-fn self_referential_model_refuses() {
+fn same_partition_self_referential_model_refuses() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path();
     smelt_yml(root);
@@ -225,9 +234,23 @@ fn self_referential_model_refuses() {
     let models = discovery.discover_models().expect("discover models");
     let source_infos = discover_source_infos(root, &["models".to_string()]);
 
-    let err = build_forward_graph(&models, &source_infos).expect_err("self-ref must refuse");
+    let edges = build_forward_graph(&models, &source_infos)
+        .expect("build_forward_graph itself only refuses a non-time-backward self-edge later");
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.upstream == "rolling" && e.downstream == "rolling"),
+        "expected a self-edge to have been assembled: {edges:?}"
+    );
+
+    let deltas = vec![SourceDelta {
+        source: "rolling".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(10, 11),
+    }];
+    let err = plan_since_upstream(&models, &source_infos, &["rolling".to_string()], &deltas)
+        .expect_err("a same-partition (before_days == 0) self-edge must still refuse");
     assert!(err.to_string().contains("MaintenanceGraphUnsupportedNode"));
-    assert!(err.to_string().contains("self-referential"));
+    assert!(err.to_string().contains("rolling"));
 }
 
 /// A keyed-grain model's `PlanCell` never carries a `ScanClamp` (a keyed
@@ -1042,20 +1065,7 @@ async fn web_analytics_events_deduped_fully_suppressed_schedules_no_downstream_s
         .expect("examples/web_analytics exists");
 
     let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
-    // `silver.sessions_chained` is a deliberately self-referential rolling-
-    // window demo model elsewhere in this same workspace
-    // (`incremental_models.md`'s own "table-graph cycle" refusal —
-    // unrelated to `events_deduped`/`sessions`); `build_forward_graph`
-    // refuses the WHOLE graph fail-loud on any self-referential node it
-    // discovers, not just ones reachable from this test's target edge, so
-    // it must be excluded here to exercise the events_deduped -> sessions
-    // edge in isolation.
-    let models: Vec<_> = discovery
-        .discover_models()
-        .expect("discover models")
-        .into_iter()
-        .filter(|m| m.canonical_path() != "silver.sessions_chained")
-        .collect();
+    let models: Vec<_> = discovery.discover_models().expect("discover models");
     let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
 
     // `events_deduped` (route 3, declared recurrence bound via
@@ -1203,6 +1213,107 @@ async fn web_analytics_events_deduped_fully_suppressed_schedules_no_downstream_s
             .contains("empty this run (not yet settled)"),
         "a window still within the settle bound must report merely empty-this-run: {}",
         plan_unsettled.dirty_set_report
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 22 (`docs/outcomes/20260815-definition-delta-migrate/phases/22-plan.md`):
+// `examples/web_analytics`'s own `silver.sessions_chained` — a deliberately
+// self-referential (root-anchored session cut) model — builds a real
+// day-unrolled self-edge in the WHOLE unfiltered workspace graph, instead of
+// refusing the whole-workspace graph as a table-graph cycle.
+// ---------------------------------------------------------------------------
+
+/// `build_forward_graph` over the full, unfiltered `examples/web_analytics`
+/// model set succeeds and contains a self-edge for `silver.sessions_chained`
+/// with `after_days == 0` and a positive derived backward reach.
+#[test]
+fn web_analytics_self_referential_model_builds_a_self_edge() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the whole unfiltered web_analytics graph must build: sessions_chained's self-edge is \
+         a provably backward-bounded time-unrolled self-edge, not a table-graph cycle refusal",
+    );
+
+    let self_edge = edges
+        .iter()
+        .find(|e| {
+            e.upstream == "silver.sessions_chained" && e.downstream == "silver.sessions_chained"
+        })
+        .expect("expected a self-edge for silver.sessions_chained");
+    assert_eq!(
+        self_edge.after_days, 0,
+        "the self-edge must carry no forward reach: {self_edge:?}"
+    );
+    assert!(
+        self_edge.before_days >= 2,
+        "the self-edge's backward reach must be at least the model's own 2-day root-anchored \
+         cutoff: {self_edge:?}"
+    );
+}
+
+/// A delta on `silver.sessions_chained`'s own upstream (`silver.events_deduped`)
+/// schedules an open-ended `PropagatedRun` for it (`start: Some(_), end:
+/// None`), and the dirty-set report renders both the self-edge line and the
+/// `[<date>, →)` open-ended form.
+#[tokio::test]
+async fn self_referential_model_schedules_an_open_ended_run() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "silver.events_deduped" || a == "silver.sessions_chained")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(100, 101);
+    let deltas = vec![SourceDelta {
+        source: "silver.events_deduped".to_string(),
+        landed: window,
+    }];
+
+    let plan =
+        plan_since_upstream(&models, &source_infos, &order, &deltas).expect("plan propagates");
+
+    let chained_run = plan
+        .runs
+        .iter()
+        .find(|r| r.model == "silver.sessions_chained")
+        .expect("expected a scheduled run for silver.sessions_chained");
+    assert!(
+        chained_run.start.is_some(),
+        "an open-ended run must still carry a finite start: {chained_run:?}"
+    );
+    assert!(
+        chained_run.end.is_none(),
+        "a self-referential model's own dirt must widen open-ended (no finite end): \
+         {chained_run:?}"
+    );
+    assert!(
+        plan.dirty_set_report
+            .contains("silver.sessions_chained <-(self, unrolled) silver.sessions_chained"),
+        "the dirty-set report must render the self-edge line: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains(", →)"),
+        "the dirty-set report must render the open-ended interval form: {}",
+        plan.dirty_set_report
     );
 }
 

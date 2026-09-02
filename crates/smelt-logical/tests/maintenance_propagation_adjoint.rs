@@ -752,3 +752,117 @@ fn adjoint_property_holds_with_keyed_edges_present() {
         "forward(backward(P)) must contain P: {dirty:?} vs {period:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 22 (`docs/outcomes/20260815-definition-delta-migrate/phases/22-plan.md`):
+// time-unrolled self-edges — `incremental_models.md` §"Time-unrolled
+// self-edges". A backward-bounded self-referential model (`e.upstream ==
+// e.downstream`) is admitted into the propagation graph as a day-unrolled
+// edge rather than refused as a table-graph cycle.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn self_edge_is_not_a_table_graph_cycle() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))]));
+    assert!(
+        result.is_ok(),
+        "a self-edge must not read as a table-graph cycle: {result:?}"
+    );
+
+    // A genuine two-node cycle must still error.
+    let x_to_y = edge("x", "y", 0, 0);
+    let y_to_x = edge("y", "x", 0, 0);
+    let cyclic = vec![x_to_y, y_to_x];
+    let cyclic_result = propagate(&cyclic, &deltas(&[("x", iv(10, 11))]));
+    assert!(
+        cyclic_result.is_err(),
+        "a genuine multi-node cycle must still be refused"
+    );
+}
+
+#[test]
+fn self_edge_widens_forward_dirt_to_the_frontier() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))])).expect("propagate");
+
+    let n_dirty = result.dirty.get("n").expect("n must be dirty");
+    assert_eq!(
+        n_dirty.len(),
+        1,
+        "expected a single merged interval: {n_dirty:?}"
+    );
+    assert_eq!(
+        n_dirty[0].start, 10,
+        "the interval's start must be unchanged"
+    );
+    assert!(
+        n_dirty[0].is_open_ended(),
+        "a self-edge's forward dirt must widen open-ended to the frontier: {n_dirty:?}"
+    );
+}
+
+#[test]
+fn self_edge_forward_dirt_reaches_downstreams_open_ended() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let n_to_reader = edge("n", "reader", 1, 0);
+    let edges = vec![src_to_n, self_edge, n_to_reader];
+    let result = propagate(&edges, &deltas(&[("src", iv(10, 11))])).expect("propagate");
+
+    let reader_dirty = result.dirty.get("reader").expect("reader must be dirty");
+    assert!(
+        reader_dirty.iter().any(|iv| iv.is_open_ended()),
+        "a reader of a self-referential node must inherit open-ended dirt: {reader_dirty:?}"
+    );
+}
+
+#[test]
+fn forward_reaching_self_edge_is_refused() {
+    let forward_reaching = vec![edge("n", "n", 2, 1)];
+    let result = propagate(&forward_reaching, &deltas(&[("n", iv(10, 11))]));
+    match result {
+        Err(reason) => assert!(reason.contains('n'), "reason must name the model: {reason}"),
+        Ok(_) => panic!("a forward-reaching self-edge must be refused"),
+    }
+
+    let mut keyed_self = edge("k", "k", 2, 0);
+    keyed_self.upstream_grain = PartitionGrain::Keyed;
+    keyed_self.downstream_grain = PartitionGrain::Keyed;
+    let keyed_result = propagate(&[keyed_self], &deltas(&[("k", iv(10, 11))]));
+    assert!(
+        keyed_result.is_err(),
+        "a Keyed-grain self-edge must be refused, not silently treated as a day axis"
+    );
+}
+
+#[test]
+fn required_inputs_self_edge_reaches_the_basis_once() {
+    let src_to_n = edge("src", "n", 0, 0);
+    let self_edge = edge("n", "n", 2, 0);
+    let edges = vec![src_to_n, self_edge];
+
+    let resolved = required_inputs(&edges, "n", iv(50, 51)).expect("resolve");
+
+    let n_required = resolved
+        .required
+        .get("n")
+        .expect("n must have a requirement");
+    assert!(
+        n_required.iter().any(|iv| iv.start <= 48 && iv.end >= 51),
+        "n's own requirement must widen backward by the self-edge's clamp: {n_required:?}"
+    );
+
+    let src_required = resolved
+        .required
+        .get("src")
+        .expect("src must inherit the widened requirement through n's inbound edge");
+    assert!(
+        src_required.iter().any(|iv| iv.start <= 48 && iv.end >= 51),
+        "the widened requirement must flow up n's inbound source edge: {src_required:?}"
+    );
+}

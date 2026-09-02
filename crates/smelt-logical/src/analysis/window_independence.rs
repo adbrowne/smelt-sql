@@ -49,17 +49,57 @@ pub fn window_independence(
     self_partition_col: Option<&str>,
     sql: &str,
 ) -> WindowIndependence {
+    match self_edge_bound_days(model_name, refs, self_partition_col, sql) {
+        None => WindowIndependence::WindowIndependent,
+        Some(Ok(_)) => WindowIndependence::Ordered,
+        Some(Err(reason)) => WindowIndependence::Refused { reason },
+    }
+}
+
+/// The day-unrolled self-edge's own backward reach — the `before_days` the
+/// propagation graph (`crates/smelt-logical/src/maintenance/propagate.rs`)
+/// applies once when widening a requirement up a self-edge
+/// (`incremental_models.md` §"Time-unrolled self-edges"). Shares
+/// [`self_edge_bound_days`] with [`window_independence`] so the two verdicts
+/// — "may this model execute in ordered-backfill mode" and "may this
+/// model's self-edge be admitted into the propagation graph" — can never
+/// diverge: `Ordered` here always means `Ok` there, and vice versa.
+///
+/// `Err(model_name has no self-edge)` when `refs` does not contain
+/// `model_name` — a self-edge clamp is meaningless to ask for absent one.
+pub fn self_edge_clamp(
+    model_name: &str,
+    refs: &[String],
+    self_partition_col: Option<&str>,
+    sql: &str,
+) -> Result<i64, String> {
+    self_edge_bound_days(model_name, refs, self_partition_col, sql).unwrap_or_else(|| {
+        Err(format!(
+            "model '{model_name}' has no self-edge — refs does not contain its own name"
+        ))
+    })
+}
+
+/// `None` when `refs` carries no self-edge at all; `Some(Ok(before_days))`
+/// for a proven backward-bounded self-edge (whole days, ceiled outward);
+/// `Some(Err(reason))` for every other case — no declared partition column,
+/// a forward read, an unbounded/whole-history scan, or an underivable
+/// bound.
+fn self_edge_bound_days(
+    model_name: &str,
+    refs: &[String],
+    self_partition_col: Option<&str>,
+    sql: &str,
+) -> Option<Result<i64, String>> {
     if !refs.iter().any(|r| r == model_name) {
-        return WindowIndependence::WindowIndependent;
+        return None;
     }
 
     let Some(partition_col) = self_partition_col else {
-        return WindowIndependence::Refused {
-            reason: format!(
-                "model '{model_name}' has a self-edge but declares no timeseries \
-                 partition column to prove convergence"
-            ),
-        };
+        return Some(Err(format!(
+            "model '{model_name}' has a self-edge but declares no timeseries \
+             partition column to prove convergence"
+        )));
     };
 
     let ctx = BoundContext::new().with_source(model_name, partition_col);
@@ -67,27 +107,23 @@ pub fn window_independence(
         .remove(model_name)
         .unwrap_or(BoundResult::NotDerivable);
 
-    match bound {
-        BoundResult::Bounded { after, .. } if after == Seconds::ZERO => WindowIndependence::Ordered,
-        BoundResult::Bounded { after, .. } => WindowIndependence::Refused {
-            reason: format!(
-                "model '{model_name}' self-edge reads {} forward of the current partition \
-                 — not provably convergent",
-                after.to_iso8601()
-            ),
-        },
-        BoundResult::Unbounded => WindowIndependence::Refused {
-            reason: format!(
-                "model '{model_name}' self-edge reads unbounded/whole history \
-                 — not provably convergent partition-by-partition"
-            ),
-        },
-        BoundResult::NotDerivable => WindowIndependence::Refused {
-            reason: format!(
-                "model '{model_name}' self-edge's bound could not be derived from its SQL"
-            ),
-        },
-    }
+    Some(match bound {
+        BoundResult::Bounded { after, before, .. } if after == Seconds::ZERO => {
+            Ok(before.0.div_ceil(86_400) as i64)
+        }
+        BoundResult::Bounded { after, .. } => Err(format!(
+            "model '{model_name}' self-edge reads {} forward of the current partition \
+             — not provably convergent",
+            after.to_iso8601()
+        )),
+        BoundResult::Unbounded => Err(format!(
+            "model '{model_name}' self-edge reads unbounded/whole history \
+             — not provably convergent partition-by-partition"
+        )),
+        BoundResult::NotDerivable => Err(format!(
+            "model '{model_name}' self-edge's bound could not be derived from its SQL"
+        )),
+    })
 }
 
 #[cfg(test)]
@@ -159,5 +195,55 @@ mod tests {
         let sql = "SELECT bal.balance AS balance FROM smelt.marts.running_balance bal";
         let verdict = window_independence("marts.running_balance", &refs, None, sql);
         assert!(matches!(verdict, WindowIndependence::Refused { .. }));
+    }
+
+    #[test]
+    fn self_edge_clamp_returns_backward_reach_for_an_ordered_self_edge() {
+        let refs = vec![
+            "marts.running_balance".to_string(),
+            "silver.transactions".to_string(),
+        ];
+        let sql = "SELECT bal.balance + t.amount AS balance \
+                   FROM smelt.marts.running_balance bal \
+                   JOIN smelt.silver.transactions t ON bal.acct_id = t.acct_id \
+                   WHERE bal.partition_date >= t.partition_date - INTERVAL '1 day' \
+                     AND bal.partition_date < t.partition_date";
+        assert_eq!(
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql),
+            WindowIndependence::Ordered
+        );
+        assert_eq!(
+            self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn self_edge_clamp_returns_the_same_refusal_reason_as_window_independence() {
+        let refs = vec!["marts.running_balance".to_string()];
+        let sql = "SELECT bal.balance AS balance \
+                   FROM smelt.marts.running_balance bal \
+                   WHERE bal.partition_date <= m.partition_date + INTERVAL '1 day'";
+        let verdict =
+            window_independence("marts.running_balance", &refs, Some("partition_date"), sql);
+        let WindowIndependence::Refused {
+            reason: verdict_reason,
+        } = verdict
+        else {
+            panic!("expected Refused");
+        };
+        let clamp_err =
+            self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql)
+                .expect_err("forward-reading self-edge must not yield a clamp");
+        assert_eq!(clamp_err, verdict_reason);
+    }
+
+    #[test]
+    fn self_edge_clamp_none_for_no_self_edge() {
+        let refs = vec!["silver.transactions".to_string()];
+        let sql = "SELECT * FROM smelt.silver.transactions";
+        let err = self_edge_clamp("marts.running_balance", &refs, Some("partition_date"), sql)
+            .expect_err("no self-edge must not yield a clamp");
+        assert!(err.contains("no self-edge"));
     }
 }

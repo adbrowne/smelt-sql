@@ -400,11 +400,23 @@ fn deltas_nothing_reads_propagate_nothing() {
 }
 
 #[test]
-fn self_edge_is_refused_as_a_cycle() {
-    // A self-referential model is a cycle in the *table* graph even though
-    // it is a DAG in time — v0 refuses; the unrolling is 10-dependency-
-    // propagation.md §6.
+fn backward_bounded_self_edge_is_admitted_as_a_time_unrolled_edge() {
+    // A self-referential model is a cycle in the *table* graph but a DAG in
+    // time: a strictly time-backward self-edge (`after_days == 0`,
+    // `before_days > 0`) is admitted as a day-unrolled edge, not refused
+    // (`incremental_models.md` §"Time-unrolled self-edges" — the unrolling
+    // designed in `10-dependency-propagation.md` §6).
     let edges = vec![edge("rolling", "rolling", 1, 0)];
+    assert!(propagate(&edges, &deltas(&[("rolling", iv(0, 1))])).is_ok());
+    assert!(required_inputs(&edges, "rolling", iv(0, 1)).is_ok());
+}
+
+#[test]
+fn same_partition_self_edge_is_still_refused() {
+    // A self-edge with no backward margin at all (`before_days == 0`) reads
+    // exactly the partition it is itself writing — not strictly
+    // time-backward, so it is still a genuine cycle, refused fail-loud.
+    let edges = vec![edge("rolling", "rolling", 0, 0)];
     assert!(propagate(&edges, &deltas(&[("rolling", iv(0, 1))])).is_err());
     assert!(required_inputs(&edges, "rolling", iv(0, 1)).is_err());
 }

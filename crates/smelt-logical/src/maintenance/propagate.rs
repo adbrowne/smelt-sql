@@ -78,6 +78,17 @@ impl DayInterval {
         self.start <= Self::WHOLE.start && self.end >= Self::WHOLE.end
     }
 
+    /// Whether this interval is a **time-unrolled self-edge's** forward
+    /// widening: a finite (non-widened) start with an end that has widened
+    /// to (or past) the frontier — `[a, →)`, distinct from [`is_whole`]
+    /// (which additionally requires the start to have widened). A self-edge
+    /// dirties everything from its own delta's start forward, never
+    /// backward past it (`incremental_models.md` §"Time-unrolled
+    /// self-edges").
+    pub fn is_open_ended(&self) -> bool {
+        self.start > Self::WHOLE.start && self.end >= Self::WHOLE.end
+    }
+
     fn is_empty(&self) -> bool {
         self.start >= self.end
     }
@@ -104,6 +115,26 @@ mod day_interval_tests {
         assert!(
             DayInterval::WHOLE.is_whole(),
             "an interval widened on both sides must read as whole"
+        );
+    }
+
+    #[test]
+    fn is_open_ended_requires_a_finite_start_and_a_widened_end() {
+        assert!(
+            DayInterval::new(5, DayInterval::WHOLE.end).is_open_ended(),
+            "a finite start with a widened end is open-ended"
+        );
+        assert!(
+            !DayInterval::new(5, 10).is_open_ended(),
+            "both bounds finite is not open-ended"
+        );
+        assert!(
+            !DayInterval::WHOLE.is_open_ended(),
+            "a fully-whole interval is not open-ended (it is whole)"
+        );
+        assert!(
+            !DayInterval::new(DayInterval::WHOLE.start, DayInterval::WHOLE.end).is_open_ended(),
+            "a widened start disqualifies open-ended even with a widened end"
         );
     }
 }
@@ -540,11 +571,13 @@ fn node_grain(edges: &[Edge], node: &str) -> PartitionGrain {
 }
 
 /// Topological order (Kahn's algorithm) over every node mentioned in
-/// `edges` plus `extra_nodes`. Errors on a cycle — neither direction of
-/// propagation has a well-defined order over a cyclic edge set (a
-/// self-referential model is a *time*-DAG, not a table-DAG; see the
-/// research doc `10-dependency-propagation.md` §6 for the unrolling that
-/// will admit it later).
+/// `edges` plus `extra_nodes`. A **self-edge** (`e.upstream == e.downstream`)
+/// is not a cycle to this walk — it contributes no in-degree and is skipped
+/// in the relaxation step, so a node with a self-edge orders exactly as it
+/// would with that edge absent (`incremental_models.md` §"Time-unrolled
+/// self-edges": a self-referential model is a *time*-DAG, not a
+/// table-graph cycle). Errors on a genuine cycle — two or more distinct
+/// nodes forming a cycle still has no well-defined propagation order.
 fn topo_order<'a>(
     edges: &'a [Edge],
     extra_nodes: impl IntoIterator<Item = &'a str>,
@@ -559,6 +592,9 @@ fn topo_order<'a>(
     }
     let mut in_degree: BTreeMap<&str, usize> = nodes.iter().map(|n| (*n, 0)).collect();
     for e in edges {
+        if e.upstream == e.downstream {
+            continue;
+        }
         if let Some(d) = in_degree.get_mut(e.downstream.as_str()) {
             *d += 1;
         }
@@ -571,7 +607,10 @@ fn topo_order<'a>(
     let mut order = Vec::with_capacity(nodes.len());
     while let Some(node) = queue.pop_front() {
         order.push(node);
-        for e in edges.iter().filter(|e| e.upstream == node) {
+        for e in edges
+            .iter()
+            .filter(|e| e.upstream == node && e.upstream != e.downstream)
+        {
             let d = in_degree
                 .get_mut(e.downstream.as_str())
                 .ok_or_else(|| format!("unknown node '{}'", e.downstream))?;
@@ -587,6 +626,56 @@ fn topo_order<'a>(
     Ok(order)
 }
 
+/// Validate every self-edge (`e.upstream == e.downstream`) in `edges` and
+/// return its backward reach in whole days, keyed by node name
+/// (`incremental_models.md` §"Time-unrolled self-edges"). Admitted iff the
+/// self-edge is a day/month partition axis on both sides, reads no forward
+/// margin (`after_days == 0`), and carries a positive backward margin
+/// (`before_days > 0` — the same "strictly time-backward" proof
+/// `smelt_logical::analysis::window_independence::self_edge_clamp`
+/// derives). Every other self-edge shape (a `Keyed` axis, a forward reach,
+/// or a zero/negative backward margin) is refused fail-loud, naming the
+/// node — called once at the top of [`propagate`] and [`required_inputs`]
+/// so an inadmissible self-edge is refused before either walk begins.
+fn self_edges(edges: &[Edge]) -> Result<BTreeMap<&str, i64>, String> {
+    let mut result = BTreeMap::new();
+    for e in edges {
+        if e.upstream != e.downstream {
+            continue;
+        }
+        if e.upstream_grain != e.downstream_grain
+            || !matches!(
+                e.upstream_grain,
+                PartitionGrain::Day | PartitionGrain::Month
+            )
+        {
+            return Err(format!(
+                "MaintenanceGraphUnsupportedNode: '{}' is self-referential over a \
+                 {:?}/{:?} partition axis — a time-unrolled self-edge needs a day or month \
+                 axis on both sides",
+                e.upstream, e.upstream_grain, e.downstream_grain
+            ));
+        }
+        if e.after_days != 0 {
+            return Err(format!(
+                "MaintenanceGraphUnsupportedNode: '{}' is self-referential and reads {} day(s) \
+                 forward of the current partition — not provably convergent, time-unrolling \
+                 refused",
+                e.upstream, e.after_days
+            ));
+        }
+        if e.before_days <= 0 {
+            return Err(format!(
+                "MaintenanceGraphUnsupportedNode: '{}' is self-referential with no derivable \
+                 backward bound — time-unrolling refused",
+                e.upstream
+            ));
+        }
+        result.insert(e.upstream.as_str(), e.before_days);
+    }
+    Ok(result)
+}
+
 /// Propagate `source_deltas` (the partitions that landed per source) through
 /// `edges`. Nodes are processed in topological order so a model's dirt is
 /// complete (all inbound edges merged) before its consumers read it. Errors
@@ -595,6 +684,7 @@ pub fn propagate(
     edges: &[Edge],
     source_deltas: &BTreeMap<String, Vec<DayInterval>>,
 ) -> Result<Propagation, String> {
+    let self_clamps = self_edges(edges)?;
     let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
 
@@ -614,6 +704,31 @@ pub fn propagate(
     }
 
     for node in order {
+        // A time-unrolled self-edge widens the node's own dirt to the
+        // frontier BEFORE its outbound edges are classified, so every
+        // downstream consumer (including a second self-edge visit — never
+        // possible, the topo walk visits each node once) sees the widened
+        // dirt (`incremental_models.md` §"Time-unrolled self-edges" —
+        // "forward … widens forward to the frontier").
+        if self_clamps.contains_key(node) {
+            if let Some(existing) = result.dirty.get(node).cloned() {
+                if !existing.is_empty() {
+                    let widened: Vec<DayInterval> = normalize(
+                        existing
+                            .iter()
+                            .map(|iv| DayInterval {
+                                start: iv.start,
+                                end: DayInterval::WHOLE.end,
+                            })
+                            .collect(),
+                    );
+                    result
+                        .per_edge
+                        .insert((node.to_string(), node.to_string()), widened.clone());
+                    result.dirty.insert(node.to_string(), widened);
+                }
+            }
+        }
         let node_dirty = result.dirty.get(node).cloned().unwrap_or_default();
         let node_has_keyed_dirt = result.keyed_dirty.get(node).is_some_and(|v| !v.is_empty());
         // A node dirtied ONLY through the keyed channel (no interval `dirty`
@@ -628,7 +743,7 @@ pub fn propagate(
             continue;
         }
         for (idx, e) in edges.iter().enumerate() {
-            if e.upstream != node {
+            if e.upstream != node || e.upstream == e.downstream {
                 continue;
             }
             match &keyed_admission[idx] {
@@ -746,6 +861,7 @@ pub fn required_inputs(
     if period.is_empty() {
         return Ok(RequiredSlices::default());
     }
+    let self_clamps = self_edges(edges)?;
     let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, [target])?;
 
@@ -761,11 +877,29 @@ pub fn required_inputs(
     // consumer already contributed) before it is pushed up its inbound
     // edges.
     for node in order.iter().rev() {
-        let Some(node_required) = required.get(*node).cloned() else {
+        let Some(mut node_required) = required.get(*node).cloned() else {
             continue;
         };
+        // A time-unrolled self-edge's own backward reach: `[s, e)` widens to
+        // `∪ [s − before, e)`, applied once (this node is visited exactly
+        // once by the reverse topo walk — no fixed point) before the
+        // widened requirement is pushed up the node's inbound edges
+        // (`incremental_models.md` §"Time-unrolled self-edges" — "backward
+        // … additionally requires the model's own basis").
+        if let Some(&before) = self_clamps.get(*node) {
+            let widened: Vec<DayInterval> = node_required
+                .iter()
+                .map(|iv| DayInterval {
+                    start: iv.start - before,
+                    end: iv.end,
+                })
+                .collect();
+            node_required.extend(widened);
+            node_required = normalize(node_required);
+            required.insert((*node).to_string(), node_required.clone());
+        }
         for (idx, e) in edges.iter().enumerate() {
-            if e.downstream != *node {
+            if e.downstream != *node || e.upstream == e.downstream {
                 continue;
             }
             // An admitted keyed edge has no partition axis to clamp
