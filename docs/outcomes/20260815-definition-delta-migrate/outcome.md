@@ -315,7 +315,7 @@ open — not that the excluded bullets themselves are gone.
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | done |
 | 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | done |
 | 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | done |
-| 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | pending |
+| 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | planned |
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | pending |
 | 18 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 19 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
@@ -693,6 +693,19 @@ open — not that the excluded bullets themselves are gone.
   failed, 2 of them pre-existing and unmodified by this phase, with "table gold does not exist").
   Fixed with an explicit `drop(lookup_backend)` before the run loop. Full detail in
   `phases/15-summary.md`.
+
+- **2026-09-03 (phase 16 planning) — no reshape.** Phase 15's summary surfaced no
+  success-criterion work without an owner: its one forward-looking caution (never hold two live
+  DuckDB connections to the same target across the run loop) is a constraint on future pre-run
+  probes, and phase 16 adds no pre-run probe — its recording happens inside the existing write
+  path's own connection. The remaining rows stand as written. Phase 16 scopes the settle-bound ×
+  observed-delta composition as a **reporting** leg: an empty recorded delta whose window is
+  provably behind the derived settle bound is a *settled* no-op rather than an empty-this-run one.
+  It does not prune further work, because the empty-delta arm of
+  `plan_since_upstream_with_observed_deltas` already propagates nothing — the settle bound supplies
+  the provable horizon the spec claims (§"Observed deltas on model edges"), not extra skipping.
+  `Grade::Additive` keyed folds (ledger-interleaved via `fold_ledger_delta`) stay unrecorded this
+  phase; if that leaves a real gap it belongs to phase 19's proof-residue sweep, not a new row.
 
 ## Blocked
 
