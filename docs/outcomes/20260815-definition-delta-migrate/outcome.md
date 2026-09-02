@@ -330,7 +330,12 @@ open — not that the excluded bullets themselves are gone.
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | planned |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
-| 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
+| 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
+| 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | pending |
+| 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | pending |
+| 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism | pending |
+| 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | pending |
+| 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -946,6 +951,19 @@ open — not that the excluded bullets themselves are gone.
   profile: an append-only insert into an `EXCEPT` right arm still deletes an output row. A
   mixed-op chain, a nested compound arm and an arity mismatch keep today's whole-model collapse,
   each with its own named reason.
+
+- **2026-09-03 (phase 27a planning)** — reshape: row 27 was a six-clause grab-bag sweep, too wide
+  for one implement step and spanning unrelated code (preview rendering, a new emitter family, a
+  new frontmatter pin, source-delta admission, a property-walk verdict). Split into rows 27a–27f,
+  one clause each, in dependency order — 27a first because it makes the forms the later rows add
+  inspectable, and because it is independent of rows 26a–26d. Nothing left the outcome; the
+  bullet's remaining "non-DuckDB targets keep the widened-scan recompute" clause is a backend-
+  capability fact, not a gap, and each sub-row trims only its own clause from
+  `incremental_models.md` §Known Divergences "Conditional-maintenance gaps" and
+  `model_transforms.md`'s matching bullets. Also noted for 27b: `emit_staged_candidate_
+  conditional_recompute` already exists in `smelt-logical::maintenance::emit`, so that row's real
+  scope is establishing which half (admission vs. emission) is unwired rather than assuming both.
+
 
 ## Blocked
 
