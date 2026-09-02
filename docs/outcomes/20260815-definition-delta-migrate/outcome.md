@@ -318,7 +318,8 @@ open — not that the excluded bullets themselves are gone.
 | 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | done |
 | 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | done |
 | 18 | Consume the declared guardrail/preference config: `scan_bounds.on_violation: warn` admits the plan and reports a Warning; the `prefer`/`technique` choice ladder is consulted by the ordinary region path (`resolve_incremental_strategy`); the absent-cost-model fallback preference order is stated in the spec | done |
-| 19 | Mutation quadrant: a horizon-clamped partition-local mutation fixture reachable from a real workspace; dispatch distinguishes "a mutation genuinely happened" from re-derivation; `AppendOnly` sources get an `UpstreamMutation` cell | pending |
+| 19 | Mutation-cell reachability: trigger derivation moves to a pure `smelt-logical` function and covers clocked explicitly-mutable sources plus aggregate-sensitive `AppendOnly` sources, so the horizon-clamped `PartitionLocal::Yes` corner is reachable from `examples/timeseries` through the production wrapper | planned |
+| 19b | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | pending |
 | 20 | Graph-layer gaps: bare `grain: key` node past `MaintenanceGraphUnsupportedNode`, time-unrolled self-edges, a key-level dirt representation, `examples/web_analytics` fully `--since-upstream`-compatible end to end, `--select` scoping | pending |
 | 21 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 22 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
@@ -329,6 +330,14 @@ open — not that the excluded bullets themselves are gone.
 | 27 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–26 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase-19 planning — table reshape.** Row 19 bundled three independent clauses of
+  the same `incremental_models.md` "Plan-consumer gaps" bullet, two of which are plan-derivation
+  work in `smelt-logical`/`smelt-db` (which sources get an `UpstreamMutation` trigger at all) and
+  one of which is run-time state work in `smelt-runtime`/`smelt-state` (has the source actually
+  changed since the last run). Split into 19 (trigger derivation + real-workspace reachability)
+  and 19b (mutation-happened discrimination). Nothing left the outcome — both rows close clauses
+  of success criterion 15, and the bullet is only fully removed once 19b lands.
 
 - **2026-09-03, phase-18 planning — table reshape.** The single row 18 bundled ~10 independent
   items spanning two distinct `incremental_models.md` §Known Divergences bullets (Plan-consumer
