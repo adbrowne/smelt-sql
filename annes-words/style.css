@@ -13,7 +13,8 @@ html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  display: flex; flex-direction: column; height: 100dvh;
+  display: flex; flex-direction: column;
+  height: 100vh; height: 100dvh;  /* dvh fallback: pre-15.4 iOS Safari drops the 2nd rule */
   -webkit-user-select: none; user-select: none;
 }
 header {
@@ -22,10 +23,22 @@ header {
 }
 h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: .01em; }
 main { flex: 1; display: flex; flex-direction: column; align-items: center;
-       justify-content: space-between; padding: 8px; overflow: hidden; }
+       justify-content: space-between; padding: 8px;
+       /* Never let a too-tall layout silently swallow #footer: scroll instead of clipping.
+          Horizontal overflow stays clipped (nothing here should ever need it). */
+       overflow-x: hidden; overflow-y: auto;
+       /* viewport-fit=cover (see <meta name=viewport> in index.html) lets content run under
+          the iOS home indicator / Safari bottom bar; #footer is the last flex child, so give
+          it clearance instead of letting it sit underneath. env() with a 0px fallback is a
+          no-op on browsers without safe-area support. */
+       padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+       padding-left: calc(8px + env(safe-area-inset-left, 0px));
+       padding-right: calc(8px + env(safe-area-inset-right, 0px)); }
 
 #board { display: grid; grid-template-rows: repeat(6, 1fr); gap: 5px;
-         padding: 10px; width: 350px; height: 420px; max-width: 100%; }
+         padding: 10px; width: auto; height: 420px; max-height: 420px;
+         max-width: min(350px, 100%); aspect-ratio: 350 / 420;
+         flex: 0 1 auto; min-height: 0; }
 .row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
 .tile {
   display: flex; align-items: center; justify-content: center;
@@ -44,7 +57,7 @@ main { flex: 1; display: flex; flex-direction: column; align-items: center;
                    30%,50%,70% { transform: translateX(-4px); } 40%,60% { transform: translateX(4px); } }
 .row.shake { animation: shake .6s; }
 
-#keyboard { width: 500px; max-width: 100%; margin-bottom: 8px; }
+#keyboard { width: 500px; max-width: 100%; margin-bottom: 8px; flex: none; }
 .kb-row { display: flex; gap: 6px; margin-bottom: 8px; touch-action: manipulation; }
 .kb-row .spacer { flex: .5; }
 button.key {
@@ -64,20 +77,41 @@ button.key[data-state="absent"]  { background: var(--absent);  color: #fff; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 500px) {
-  #board { width: 100%; height: min(60dvh, 420px); }
+  #board { width: 100%; height: min(60vh, 420px); height: min(60dvh, 420px); }
   button.key { height: 48px; }
   .header-right { gap: 6px; font-size: .7rem; }
   #mode-label { max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* Short-viewport compaction (landscape phones, e.g. 844x320 rotated iPhone 13): the
+   width-keyed query above never fires here (landscape phones are wide, not narrow), and a
+   `dvh`-derived board height still over-commits the tiny vertical budget. Shrink every fixed
+   cost, then let #board take whatever is left via flex/min-height:0 rather than any
+   fixed/dvh-derived height — `main`'s overflow-y:auto (above) is the safety net if it still
+   doesn't all fit. */
+@media (max-height: 600px) {
+  header { height: 36px; }
+  h1 { font-size: 20px; }
+  #board { width: auto; height: auto; max-height: none; flex: 1 1 0; min-height: 0; }
+  .tile { font-size: 1.3rem; }
+  button.key { height: 32px; }
+  .kb-row { gap: 4px; margin-bottom: 4px; }
+  #keyboard { margin-bottom: 4px; }
+  #footer { min-height: 0; gap: 4px; }
+  #practice-btn, #daily-btn { padding: 6px 12px; }
 }
 
 header { position: relative; }
 .header-right { position: absolute; right: 12px; display: flex; align-items: center;
                  gap: 10px; font-size: .8rem; color: var(--absent); }
 #footer { min-height: 42px; display: flex; flex-direction: column; align-items: center;
-          gap: 6px; font-size: .85rem; }
+          gap: 6px; font-size: .85rem; flex: none; }
 #countdown { font-variant-numeric: tabular-nums; color: var(--absent); }
 #practice-btn { border: 0; border-radius: 4px; background: var(--fg); color: #fff;
                 font-family: inherit; font-weight: 700; padding: 10px 16px; cursor: pointer; }
+#daily-btn { border: 1px solid var(--border-filled); border-radius: 4px; background: none;
+             color: var(--fg); font-family: inherit; font-weight: 700; padding: 9px 16px;
+             cursor: pointer; }
 
 #stats-btn { background: none; border: 0; font-size: 1.1rem; cursor: pointer; padding: 0; }
 
