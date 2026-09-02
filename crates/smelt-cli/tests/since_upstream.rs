@@ -874,3 +874,109 @@ fn absent_observed_delta_falls_back_to_the_declared_window() {
          unnarrowed"
     );
 }
+
+/// Phase 21 (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+/// a chain of two bare `grain: key` models — `keyed_a` (a real declared
+/// `timeseries:` source feeds it, admitting a `KeyedUpsert` output-delta
+/// shape) feeding `keyed_b`, itself also admitting `KeyedUpsert` — runs end
+/// to end under `--since-upstream`, past the graph layer's keyed dirt-set
+/// cascade (`smelt_logical::maintenance::propagate::propagate`) and the
+/// runtime's consumption of it (`smelt_runtime::propagation::
+/// plan_since_upstream_with_observed_deltas`). `keyed_a` is the delta origin
+/// (already materialized — its own completed run wrote it); `keyed_b` is
+/// scheduled as a keyed (whole-table) run and actually built by this
+/// invocation, exercising the same "node dirtied only through the keyed
+/// channel" cascade `bare_keyed_model_with_readers_is_scheduled`
+/// (`crates/smelt-runtime/tests/since_upstream_propagation.rs`) pins at the
+/// assembly level.
+fn stage_bare_keyed_chain_workspace(parent: &Path) -> PathBuf {
+    let root = parent.join("proj");
+    write(
+        &root,
+        "smelt.yml",
+        "name: bare_keyed_chain_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    );
+    write(
+        &root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        &root,
+        "models/keyed_a.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id\n",
+    );
+    write(
+        &root,
+        "models/keyed_b.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         unique_key: [user_id]\n---\n\
+         SELECT user_id, ANY_VALUE(total) AS grand_total FROM smelt.keyed_a GROUP BY user_id\n",
+    );
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    root
+}
+
+/// Pre-populate `main.keyed_a` — the delta origin's own completed run.
+fn seed_keyed_a(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE TABLE main.keyed_a (user_id INTEGER, total DECIMAL(10,2));\n\
+         INSERT INTO main.keyed_a VALUES (1, 10.0), (2, 20.0), (3, 30.0);\n",
+    )
+    .expect("seed keyed_a");
+}
+
+#[test]
+fn since_upstream_over_a_bare_keyed_chain_runs_end_to_end() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_bare_keyed_chain_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_keyed_a(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "keyed_a",
+            "--landed",
+            "2026-01-03..2026-01-04",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the bare keyed chain must run end to end: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Dirty set (--since-upstream):"),
+        "must print the dirty set before acting: {stdout}"
+    );
+    assert!(
+        stdout.contains("keyed_b <-(keyed) keyed_a"),
+        "the dirty set must show the keyed edge: {stdout}"
+    );
+    assert!(
+        stdout.contains("RUN keyed_b: keyed"),
+        "keyed_b must be scheduled as a keyed (whole-table) run: {stdout}"
+    );
+    assert!(
+        !stdout.contains("RUN keyed_a"),
+        "the delta origin must not be re-run: {stdout}"
+    );
+
+    let conn = Connection::open(&db_path).expect("open duckdb");
+    let keyed_b_rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM main.keyed_b", [], |row| row.get(0))
+        .expect("keyed_b must have been built");
+    assert!(keyed_b_rows > 0, "keyed_b must be rebuilt with rows");
+}

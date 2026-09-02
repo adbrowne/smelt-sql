@@ -603,6 +603,120 @@ fn required_inputs_over_a_keyed_ancestor_requires_the_whole_table() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Phase 21 (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+// the keyed dirt-set channel cascades past a node dirtied ONLY through it —
+// before this phase, a node with `keyed_dirty` but no `dirty` entry (both
+// endpoints of its own inbound edge keyed-grain) was a one-hop dead end:
+// `propagate`'s own node walk skipped it, so its own outbound edges were
+// never classified or reflected.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn keyed_dirt_cascades_past_one_hop() {
+    // "source" plays the keyed-grain-origin role `adjoint_property_holds_
+    // with_keyed_edges_present` already establishes for "agg": fed directly
+    // as a delta, per the real graph shape where a bare keyed node's own
+    // inbound edges are never assembled.
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    let mut a_to_b = edge("A", "B", 0, 0);
+    a_to_b.upstream_grain = PartitionGrain::Keyed;
+    a_to_b.downstream_grain = PartitionGrain::Keyed;
+    a_to_b.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, a_to_b];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    assert!(
+        !result
+            .keyed_dirty
+            .get("A")
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "A must carry keyed dirt from source: {result:?}"
+    );
+    assert!(
+        !result
+            .keyed_dirty
+            .get("B")
+            .map(Vec::is_empty)
+            .unwrap_or(true),
+        "B must carry keyed dirt cascaded through A, not just A: {result:?}"
+    );
+}
+
+#[test]
+fn keyed_only_node_widens_to_whole_table_for_a_clocked_reader() {
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    // A -> C: A is keyed-grain upstream, C is an ordinary clocked (Day
+    // grain) reader.
+    let mut a_to_c = edge("A", "C", 0, 0);
+    a_to_c.upstream_grain = PartitionGrain::Keyed;
+    a_to_c.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, a_to_c];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    assert!(
+        !result.dirty.contains_key("A"),
+        "A itself carries no interval dirt — only keyed dirt: {result:?}"
+    );
+    let c_dirty = result.dirty.get("C").expect("C must be dirty");
+    assert!(
+        c_dirty.iter().any(|d| d.is_whole()),
+        "a clocked reader of a keyed-only-dirty node must get whole-table dirt: {c_dirty:?}"
+    );
+}
+
+#[test]
+fn keyed_cascade_terminates_on_a_cycle_free_graph() {
+    // Diamond: source -> A, source -> B, A -> D, B -> D. Each node is
+    // visited once by the topological walk; D's keyed_dirty must carry
+    // exactly the two (deduplicated) records from A and B, not an
+    // exponential fan-out.
+    let mut source_to_a = edge("source", "A", 0, 0);
+    source_to_a.upstream_grain = PartitionGrain::Keyed;
+    source_to_a.downstream_grain = PartitionGrain::Keyed;
+    source_to_a.components = vec![keyed_component(&["user_id"])];
+
+    let mut source_to_b = edge("source", "B", 0, 0);
+    source_to_b.upstream_grain = PartitionGrain::Keyed;
+    source_to_b.downstream_grain = PartitionGrain::Keyed;
+    source_to_b.components = vec![keyed_component(&["user_id"])];
+
+    let mut a_to_d = edge("A", "D", 0, 0);
+    a_to_d.upstream_grain = PartitionGrain::Keyed;
+    a_to_d.downstream_grain = PartitionGrain::Keyed;
+    a_to_d.components = vec![keyed_component(&["user_id"])];
+
+    let mut b_to_d = edge("B", "D", 0, 0);
+    b_to_d.upstream_grain = PartitionGrain::Keyed;
+    b_to_d.downstream_grain = PartitionGrain::Keyed;
+    b_to_d.components = vec![keyed_component(&["user_id"])];
+
+    let edges = vec![source_to_a, source_to_b, a_to_d, b_to_d];
+    let result = propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("propagate");
+
+    let d_dirt = result.keyed_dirty.get("D").expect("D must be keyed-dirty");
+    assert_eq!(
+        d_dirt.len(),
+        2,
+        "D must carry exactly one deduplicated record per inbound edge (A and B), not an \
+         exponential fan-out: {d_dirt:?}"
+    );
+    let froms: std::collections::BTreeSet<&str> =
+        d_dirt.iter().map(|kd| kd.from.as_str()).collect();
+    assert_eq!(froms, std::collections::BTreeSet::from(["A", "B"]));
+}
+
 /// The adjointness law over a graph mixing a window-addressed edge and a
 /// keyed-addressed edge: `bronze -> silver` (ordinary interval math) feeds
 /// `silver`'s own dirt, while `agg` (a separate keyed-grain origin, fed

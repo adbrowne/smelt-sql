@@ -615,7 +615,16 @@ pub fn propagate(
 
     for node in order {
         let node_dirty = result.dirty.get(node).cloned().unwrap_or_default();
-        if node_dirty.is_empty() {
+        let node_has_keyed_dirt = result.keyed_dirty.get(node).is_some_and(|v| !v.is_empty());
+        // A node dirtied ONLY through the keyed channel (no interval `dirty`
+        // entry — both endpoints of its own inbound edge were keyed-grain,
+        // so nothing widened it) is still a dirty node whose own outbound
+        // edges must be walked (`incremental_models.md` §"The graph layer" →
+        // "Keyed dirt-sets and the narrowed refusal": a keyed dirt-set
+        // cascades). Without `node_has_keyed_dirt` here, such a node is a
+        // one-hop dead end: its own keyed_dirty entry exists, but nothing
+        // downstream of it is ever visited.
+        if node_dirty.is_empty() && !node_has_keyed_dirt {
             continue;
         }
         for (idx, e) in edges.iter().enumerate() {
@@ -628,16 +637,17 @@ pub fn propagate(
                         keys: keys.clone(),
                         from: e.upstream.clone(),
                     };
-                    result
-                        .per_edge_keys
-                        .entry((e.downstream.clone(), e.upstream.clone()))
-                        .or_default()
-                        .push(kd.clone());
-                    result
-                        .keyed_dirty
-                        .entry(e.downstream.clone())
-                        .or_default()
-                        .push(kd);
+                    push_keyed_dirt(
+                        result
+                            .per_edge_keys
+                            .entry((e.downstream.clone(), e.upstream.clone()))
+                            .or_default(),
+                        kd.clone(),
+                    );
+                    push_keyed_dirt(
+                        result.keyed_dirty.entry(e.downstream.clone()).or_default(),
+                        kd,
+                    );
                     // A downstream that is itself keyed-grain stays on the
                     // keyed channel alone; a clocked (or unclocked) consumer
                     // of a keyed node gets whole-table interval dirt so it
@@ -656,6 +666,16 @@ pub fn propagate(
                     }
                 }
                 KeyedAdmission::NotKeyed => {
+                    // A node reached only via the keyed channel has no
+                    // interval dirt to reflect through a non-keyed outbound
+                    // edge (structurally unreachable: a Keyed-grain node's
+                    // own edges are always classified `Admitted` by
+                    // `keyed_endpoint` checking the upstream side first —
+                    // guarded anyway per this function's "never panics on
+                    // its inputs" contract).
+                    if node_dirty.is_empty() {
+                        continue;
+                    }
                     let reflected: Vec<DayInterval> =
                         node_dirty.iter().map(|iv| e.reflect(iv)).collect();
                     let per_edge = result
@@ -673,7 +693,21 @@ pub fn propagate(
     }
     // Drop models that ended up with no dirt (reachable but untouched).
     result.dirty.retain(|_, v| !v.is_empty());
+    result.keyed_dirty.retain(|_, v| !v.is_empty());
     Ok(result)
+}
+
+/// Push a [`KeyedDirt`] record onto `list` unless an identical `(keys,
+/// from)` record is already present — a diamond over keyed nodes must not
+/// accumulate duplicate entries (`propagate`'s own "no exponential
+/// fan-out" property; each node is still visited exactly once by the
+/// topological walk, so this only guards against the same edge's record
+/// being pushed onto the SAME list twice, not a distinct up/downstream
+/// pair).
+fn push_keyed_dirt(list: &mut Vec<KeyedDirt>, kd: KeyedDirt) {
+    if !list.contains(&kd) {
+        list.push(kd);
+    }
 }
 
 /// The backward resolution: everything that must *exist* for a target

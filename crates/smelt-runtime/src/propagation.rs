@@ -1284,6 +1284,19 @@ pub fn plan_since_upstream_with_observed_deltas(
             ));
         }
     }
+    // The keyed channel's per-edge counterpart (`incremental_models.md`
+    // §"The graph layer" → "Keyed dirt-sets and the narrowed refusal"):
+    // rendered distinguishably from an interval line, naming the affected
+    // key columns rather than a day range (the keyed channel has no
+    // interval axis).
+    for ((downstream, upstream), records) in &prop.per_edge_keys {
+        for kd in records {
+            report.push_str(&format!(
+                "  {downstream} <-(keyed) {upstream} [keys: {}]\n",
+                kd.keys.join(", ")
+            ));
+        }
+    }
     // Only real models (nodes in the caller's topological `order`) are ever
     // run — `prop.dirty` also carries the seeded deltas themselves (a delta
     // origin is its own "dirty" entry before any edge reflects it). A raw
@@ -1304,29 +1317,65 @@ pub fn plan_since_upstream_with_observed_deltas(
             report.push_str(&format!("  RUN {model}: {}\n", render_interval(iv)));
         }
     }
+    // A node carrying keyed dirt but no interval dirt (both endpoints of its
+    // own inbound edge keyed-grain — `smelt_logical::maintenance::propagate::
+    // propagate`'s own cascade) is still a dirty node: report it as a
+    // whole-table keyed run, naming the affected key columns, distinct from
+    // an interval `RUN` line. A node that ALSO carries interval dirt is
+    // already reported/scheduled above — this only ever adds the
+    // keyed-only case.
+    for (model, records) in &prop.keyed_dirty {
+        if !order_set.contains(model.as_str())
+            || origin_names.contains(model.as_str())
+            || prop.dirty.contains_key(model)
+        {
+            continue;
+        }
+        let keys: BTreeSet<&str> = records
+            .iter()
+            .flat_map(|kd| kd.keys.iter().map(|k| k.as_str()))
+            .collect();
+        report.push_str(&format!(
+            "  RUN {model}: keyed (keys: {})\n",
+            keys.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
 
     let mut runs = Vec::new();
     for name in order {
         if origin_names.contains(name.as_str()) {
             continue;
         }
-        let Some(intervals) = prop.dirty.get(name) else {
-            continue;
-        };
-        for iv in intervals {
-            if iv.is_whole() {
-                runs.push(PropagatedRun {
-                    model: name.clone(),
-                    start: None,
-                    end: None,
-                });
-            } else {
-                runs.push(PropagatedRun {
-                    model: name.clone(),
-                    start: Some(ordinal_to_iso(iv.start)),
-                    end: Some(ordinal_to_iso(iv.end)),
-                });
+        let mut scheduled = false;
+        if let Some(intervals) = prop.dirty.get(name) {
+            for iv in intervals {
+                scheduled = true;
+                if iv.is_whole() {
+                    runs.push(PropagatedRun {
+                        model: name.clone(),
+                        start: None,
+                        end: None,
+                    });
+                } else {
+                    runs.push(PropagatedRun {
+                        model: name.clone(),
+                        start: Some(ordinal_to_iso(iv.start)),
+                        end: Some(ordinal_to_iso(iv.end)),
+                    });
+                }
             }
+        }
+        // A keyed-only-dirty node (no interval `dirty` entry at all) is
+        // still scheduled — a single whole-table run (the keyed channel has
+        // no interval axis to bound it by), deduplicated against an
+        // interval-dirt run already pushed above so a node carrying both
+        // never gets two `PropagatedRun`s.
+        if !scheduled && prop.keyed_dirty.contains_key(name) {
+            runs.push(PropagatedRun {
+                model: name.clone(),
+                start: None,
+                end: None,
+            });
         }
     }
 

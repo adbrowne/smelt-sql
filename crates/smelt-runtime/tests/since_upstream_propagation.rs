@@ -1597,3 +1597,166 @@ async fn load_observed_delta_lookup_is_empty_on_a_non_duckdb_target() {
         "a non-DuckDB target's lookup must be empty, not an error: {lookup:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 21 (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+// the keyed dirt-set channel reaches the real per-workspace assembly — a
+// chain of two bare `grain: key` models (`keyed_a`, admitted `KeyedUpsert`
+// over an append-only source; `keyed_b`, reading `keyed_a`'s own output)
+// feeding a Day-grain reader. Before this phase, `keyed_b` (dirtied only
+// through the keyed channel — both its own inbound edge's endpoints are
+// keyed-grain) was a one-hop dead end at the pure-math layer
+// (`smelt_logical::maintenance::propagate::propagate`), so `reader` never
+// saw any dirt at all and `plan_since_upstream` scheduled nothing.
+// ---------------------------------------------------------------------------
+
+fn write_bare_keyed_chain_workspace(root: &std::path::Path) {
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/keyed_a.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/keyed_b.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(total) AS grand_total FROM smelt.keyed_a GROUP BY user_id\n",
+    );
+    write(
+        root,
+        "models/reader.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         unique_key: [user_id]\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT user_id, grand_total, CURRENT_DATE AS d FROM smelt.keyed_b\n",
+    );
+}
+
+/// A bare `grain: key` model (`keyed_a`) whose landed delta cascades through
+/// a second bare keyed model (`keyed_b`) to a Day-grain reader:
+/// `plan_since_upstream` must schedule BOTH `keyed_b` (keyed-only dirt, no
+/// interval axis — a whole-table run) and `reader` (widened to whole-table
+/// by the keyed-to-clocked edge), never refusing with
+/// `MaintenanceGraphUnsupportedNode`. The origin (`keyed_a`) is not itself
+/// re-run — its landed delta is the window a completed run already wrote.
+#[test]
+fn bare_keyed_model_with_readers_is_scheduled() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    write_bare_keyed_chain_workspace(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build: keyed_a and keyed_b both admit a KeyedUpsert output-delta \
+         shape over their GROUP BY user_id",
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.upstream == "keyed_a" && e.downstream == "keyed_b"),
+        "expected a keyed_a -> keyed_b edge: {edges:?}"
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.upstream == "keyed_b" && e.downstream == "reader"),
+        "expected a keyed_b -> reader edge: {edges:?}"
+    );
+
+    let order = vec![
+        "keyed_a".to_string(),
+        "keyed_b".to_string(),
+        "reader".to_string(),
+    ];
+    let deltas = vec![SourceDelta {
+        source: "keyed_a".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect(
+        "a landed delta on a bare keyed origin must cascade past keyed_b to reader without \
+         refusing",
+    );
+
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "keyed_a"),
+        "the delta origin must NOT be re-run: {:?}",
+        plan.runs
+    );
+    assert!(
+        plan.runs.iter().any(|r| r.model == "keyed_b"),
+        "keyed_b must be scheduled — it carries keyed dirt cascaded from keyed_a: {:?}",
+        plan.runs
+    );
+    assert!(
+        plan.runs.iter().any(|r| r.model == "reader"),
+        "reader must be scheduled — a clocked reader of a keyed-dirty node gets whole-table \
+         dirt: {:?}",
+        plan.runs
+    );
+    // Dependency order: keyed_b before reader.
+    let keyed_b_pos = plan.runs.iter().position(|r| r.model == "keyed_b").unwrap();
+    let reader_pos = plan.runs.iter().position(|r| r.model == "reader").unwrap();
+    assert!(
+        keyed_b_pos < reader_pos,
+        "keyed_b must be scheduled before reader: {:?}",
+        plan.runs
+    );
+}
+
+/// The rendered dirty-set report names a keyed-only-dirty node distinctly
+/// from an interval `RUN` line, naming its key columns and upstream.
+#[test]
+fn keyed_dirt_appears_in_the_dirty_set_report() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    write_bare_keyed_chain_workspace(root);
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let order = vec![
+        "keyed_a".to_string(),
+        "keyed_b".to_string(),
+        "reader".to_string(),
+    ];
+    let deltas = vec![SourceDelta {
+        source: "keyed_a".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect("plan");
+
+    assert!(
+        plan.dirty_set_report.contains("keyed_b <-(keyed) keyed_a"),
+        "the dirty set must name the keyed edge distinctly from an interval line: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains("user_id"),
+        "the dirty set must name the affected key column: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains("RUN keyed_b: keyed"),
+        "keyed_b's own scheduled run must be reported as a keyed (not interval) run: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        plan.dirty_set_report.contains("RUN reader:"),
+        "reader's scheduled run must still be reported: {}",
+        plan.dirty_set_report
+    );
+}

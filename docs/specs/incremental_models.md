@@ -1382,6 +1382,18 @@ interval. The `MaintenanceGraphUnsupportedNode` refusal below fires only where t
 delta signature degrades all the way to `general`, and its message names the operator that
 degraded the type.
 
+A keyed dirt-set is not a dead end once seeded: a node carrying keyed dirt is a dirty node in
+exactly the same sense an interval-dirty node is, so its own outbound edges are walked too, and
+its outbound contribution follows the same widen-never-narrow law as an interval-addressed
+node's does — a downstream that is itself keyed-grain stays on the keyed channel (the affected
+key set composes forward unchanged, since a key-addressed downstream has no interval axis to
+project it through), while a clocked or unclocked downstream widens to whole-table interval
+dirt (there is no key→interval projection to narrow it by). `smelt run --since-upstream`
+schedules a node reached only through the keyed channel as a whole-table run — the keyed
+channel has no interval axis to bound a partial run by — and its printed dirty-set report names
+the affected key columns and the upstream that produced them, distinguishably from an interval
+line.
+
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
 validated `timeseries:` declaration supplies the clock the downstream creation cell is clamped
