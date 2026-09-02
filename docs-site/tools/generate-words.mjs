@@ -6,7 +6,10 @@
 // Sources (fetched over HTTPS; all permissively licensed):
 //   - Word list:        https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt (Unlicense)
 //   - Frequency corpus:  https://norvig.com/ngrams/count_1w.txt (word<TAB>count, most-frequent-first)
-//   - Profanity list:    https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en
+//   - Profanity lists (three, unioned for ANSWERS only — see below):
+//       https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en
+//       https://raw.githubusercontent.com/coffee-and-fun/google-profanity-words/main/data/en.txt
+//       https://raw.githubusercontent.com/zacanger/profane-words/master/words.json
 //   - Local dictionaries: /usr/share/dict/american-english, /usr/share/dict/british-english (SCOWL)
 //
 // Two separate pools:
@@ -25,20 +28,28 @@
 //       3. AND it appears in the frequency corpus (for ranking);
 //       4. AND it contains at least one vowel [aeiou] (removes non-words like
 //          Roman numerals, e.g. "xxvii");
-//       5. AND it does not end in "s" (plurals), is not on the LDNOOBW
-//          profanity list, and is not capitalised in either system dictionary
-//          (proper-noun heuristic).
+//       5. AND it does not end in "s" (plurals), is not on the union of all
+//          three profanity lists, and is not capitalised in either system
+//          dictionary (proper-noun heuristic). ANSWERS uses the union of all
+//          three lists (broader, since a false positive here costs nothing
+//          but a false negative gets published); ALLOWED uses only LDNOOBW,
+//          since the guess list's job is to accept legitimate words like
+//          "abuse"/"moron"/"naked" that the broader lists flag.
 //     Answer-eligible words are ranked by frequency-corpus rank (most frequent
 //     first); the top 2000 become ANSWERS, shuffled once with Fisher-Yates
 //     driven by a mulberry32 PRNG seeded 0x9e3779b9 (documented seed, carried
 //     over from the original list).
 //
-//   MANUAL_EXCLUSIONS: a small hand-maintained list of vulgar or otherwise
-//   unsuitable words that slip past the LDNOOBW list (e.g. "cunny"). Applied
-//   to both ANSWERS and ALLOWED. Add stragglers here as they're found.
+//   MANUAL_EXCLUSIONS: a small hand-maintained list of vulgar, non-word
+//   (acronyms/abbreviations that source lists carry as lowercase entries,
+//   e.g. "ascii", "cobol"), or otherwise unsuitable words that slip past the
+//   automated filters (all three profanity lists, proper-noun heuristic,
+//   vowel check) — including regional slurs/offensive terms none of the
+//   three lists carry (e.g. "nonce", "queer"). Applied to both ANSWERS and
+//   ALLOWED. Add stragglers here as they're found.
 //
 //   ALLOWED = every candidate-pool (guess pool) word NOT in ANSWERS, minus
-//   the profanity list and MANUAL_EXCLUSIONS.
+//   the LDNOOBW profanity list (only) and MANUAL_EXCLUSIONS.
 //
 // Output: a plain ES module exporting `ANSWERS` and `ALLOWED` arrays of
 // lowercase 5-letter words, consumed as-is by ui.js (VALID = union of both).
@@ -54,16 +65,40 @@ const DWYL_URL = 'https://raw.githubusercontent.com/dwyl/english-words/master/wo
 const FREQ_URL = 'https://norvig.com/ngrams/count_1w.txt';
 const PROFANITY_URL =
   'https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en';
+// Two broader profanity lists, unioned with PROFANITY_URL for ANSWERS only
+// (never applied to ALLOWED — see the pipeline comment above).
+const GOOGLE_PROFANITY_URL =
+  'https://raw.githubusercontent.com/coffee-and-fun/google-profanity-words/main/data/en.txt';
+const ZACANGER_PROFANITY_URL =
+  'https://raw.githubusercontent.com/zacanger/profane-words/master/words.json';
 const AMERICAN_DICT = '/usr/share/dict/american-english';
 const BRITISH_DICT = '/usr/share/dict/british-english';
 
 const SEED = 0x9e3779b9;
 const ANSWER_COUNT = 2000;
 
-// Hand-maintained exclusions for vulgar or otherwise unsuitable words that
-// slip past the LDNOOBW profanity list. Applied to both ANSWERS and ALLOWED.
-// Add stragglers here as they're discovered.
-const MANUAL_EXCLUSIONS = new Set(['cunny']);
+// Hand-maintained exclusions for vulgar, non-word, or otherwise unsuitable
+// words that slip past the automated filters. Applied to both ANSWERS and
+// ALLOWED. Add stragglers here as they're discovered.
+//   - cunny: vulgar slang, not on the LDNOOBW profanity list.
+//   - mccoy, mckay: proper nouns (surnames) that dwyl's word list itself
+//     carries as lowercase entries, independent of local-dict capitalisation.
+//   - ascii, cobol: acronyms that dwyl's word list carries as lowercase
+//     entries.
+//   - xxvii: a Roman numeral present as a lowercase entry in the local
+//     system dictionaries; not a word.
+//   - nonce, queer: offensive in British/Australian usage but not carried by
+//     any of the three fetched profanity lists.
+const MANUAL_EXCLUSIONS = new Set([
+  'cunny',
+  'mccoy',
+  'mckay',
+  'ascii',
+  'cobol',
+  'xxvii',
+  'nonce',
+  'queer',
+]);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,11 +135,17 @@ function fisherYatesShuffle(arr, rng) {
 
 async function main() {
   console.error('Fetching sources...');
-  const [dwylText, freqText, profanityText] = await Promise.all([
-    fetchText(DWYL_URL),
-    fetchText(FREQ_URL),
-    fetchText(PROFANITY_URL),
-  ]);
+  // Promise.all rejects (and main().catch below exits non-zero) if ANY
+  // fetch fails, including the two broader profanity lists — a silent
+  // fallback here is exactly how an unfiltered word could reach ANSWERS.
+  const [dwylText, freqText, profanityText, googleProfanityText, zacangerProfanityText] =
+    await Promise.all([
+      fetchText(DWYL_URL),
+      fetchText(FREQ_URL),
+      fetchText(PROFANITY_URL),
+      fetchText(GOOGLE_PROFANITY_URL),
+      fetchText(ZACANGER_PROFANITY_URL),
+    ]);
 
   const americanText = readFileSync(AMERICAN_DICT, 'utf8');
   const britishText = readFileSync(BRITISH_DICT, 'utf8');
@@ -136,7 +177,10 @@ async function main() {
     }
   }
 
-  // --- profanity list ---
+  // --- profanity lists ---
+  // Narrow (LDNOOBW only) — applied to ALLOWED, since the guess list's job
+  // is to accept legitimate words like "abuse"/"moron"/"naked" that the
+  // broader lists below flag.
   const profanitySet = new Set(
     profanityText
       .split('\n')
@@ -144,20 +188,48 @@ async function main() {
       .filter(Boolean)
   );
 
-  // --- local dictionaries: capitalised entries = proper nouns; all entries (lowercased) = candidates ---
+  const googleProfanitySet = new Set(
+    googleProfanityText
+      .split('\n')
+      .map((w) => w.replace(/\r$/, '').trim().toLowerCase())
+      .filter(Boolean)
+  );
+
+  const zacangerWords = JSON.parse(zacangerProfanityText);
+  if (!Array.isArray(zacangerWords)) {
+    throw new Error('Expected zacanger/profane-words words.json to be a JSON array');
+  }
+  const zacangerProfanitySet = new Set(
+    zacangerWords.map((w) => String(w).trim().toLowerCase()).filter(Boolean)
+  );
+
+  // Broad (union of all three) — applied to ANSWERS only. Over-filtering
+  // costs nothing here (answer-eligibility is ~2,770, only 2,000 are
+  // needed); a false negative would get published as a daily puzzle.
+  const broadProfanitySet = new Set([
+    ...profanitySet,
+    ...googleProfanitySet,
+    ...zacangerProfanitySet,
+  ]);
+
+  // --- local dictionaries: any entry containing an uppercase letter (acronyms
+  //     like ASCII/COBOL, internal-cap names like McCoy/McKay) is a proper
+  //     noun, never a candidate word. Only already-lowercase entries are
+  //     admitted to localWordSet — do NOT lowercase before testing, or
+  //     acronyms/names silently become ordinary lowercase "words". ---
   const properNounSet = new Set();
   const localWordSet = new Set();
-  const CAP_PROPER_NOUN = /^[A-Z][a-z]{4}$/;
+  const HAS_UPPERCASE = /[A-Z]/;
   for (const text of [americanText, britishText]) {
     for (const rawLine of text.split('\n')) {
       const line = rawLine.replace(/\r$/, '');
       if (!line) continue;
-      if (CAP_PROPER_NOUN.test(line)) {
+      if (HAS_UPPERCASE.test(line)) {
         properNounSet.add(line.toLowerCase());
+        continue;
       }
-      const lower = line.toLowerCase();
-      if (FIVE_LETTER_LOWER.test(lower)) {
-        localWordSet.add(lower);
+      if (FIVE_LETTER_LOWER.test(line)) {
+        localWordSet.add(line);
       }
     }
   }
@@ -180,7 +252,7 @@ async function main() {
     if (!freqRank.has(w)) return false;
     if (!HAS_VOWEL.test(w)) return false;
     if (w.endsWith('s')) return false;
-    if (profanitySet.has(w)) return false;
+    if (broadProfanitySet.has(w)) return false;
     if (properNounSet.has(w)) return false;
     if (MANUAL_EXCLUSIONS.has(w)) return false;
     return true;
@@ -213,22 +285,25 @@ async function main() {
 // Regenerate with: node docs-site/tools/generate-words.mjs
 //
 // Sources: dwyl/english-words (words_alpha.txt, Unlicense), Norvig's Google
-// Books ngram unigram frequency corpus (count_1w.txt), LDNOOBW profanity list
-// (en), and the local SCOWL american-english/british-english dictionaries
-// (used for extra candidates and proper-noun detection).
+// Books ngram unigram frequency corpus (count_1w.txt), three profanity lists
+// (LDNOOBW's en list, coffee-and-fun/google-profanity-words en.txt, and
+// zacanger/profane-words words.json), and the local SCOWL
+// american-english/british-english dictionaries (used for extra candidates
+// and proper-noun detection).
 //
 // GUESS pool (ALLOWED ∪ ANSWERS) = 5-letter lowercase words in
 // (dwyl ∩ frequency corpus) ∪ (american-english ∪ british-english).
 //
 // ANSWER pool: a word is answer-eligible only if it is in the system
 // dictionary AND in dwyl AND in the frequency corpus AND contains a vowel
-// AND does not end in "s" AND is not profanity-listed AND is not
-// capitalised in either system dictionary (proper-noun heuristic) AND is
-// not in the hand-maintained MANUAL_EXCLUSIONS list.
+// AND does not end in "s" AND is not on the union of all three profanity
+// lists AND is not capitalised in either system dictionary (proper-noun
+// heuristic) AND is not in the hand-maintained MANUAL_EXCLUSIONS list.
 // ANSWERS = top ${ANSWER_COUNT} answer-eligible words by frequency rank,
 // Fisher-Yates shuffled with a mulberry32 PRNG seeded 0x9e3779b9 (shuffled
 // once, at generation time).
-// ALLOWED = guess pool minus ANSWERS minus profanity minus MANUAL_EXCLUSIONS.
+// ALLOWED = guess pool minus ANSWERS minus the LDNOOBW profanity list (only)
+// minus MANUAL_EXCLUSIONS.
 `;
 
   const body =

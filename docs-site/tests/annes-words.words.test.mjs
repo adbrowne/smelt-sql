@@ -43,9 +43,44 @@ test('every answer contains a vowel (excludes non-words like Roman numerals)', (
   assert.ok(ANSWERS.every(w => /[aeiou]/.test(w)));
 });
 
-test('manually excluded words never appear as answers', () => {
-  // Words that slip past the LDNOOBW profanity list; see MANUAL_EXCLUSIONS
+test('manually excluded words never appear as answers or allowed guesses', () => {
+  // Words that slip past all automated filters; see MANUAL_EXCLUSIONS in
+  // docs-site/tools/generate-words.mjs. "cunny" is vulgar slang the
+  // profanity lists miss; "nonce" and "queer" are offensive in
+  // British/Australian usage but aren't carried by any of the three
+  // fetched profanity lists.
+  const manuallyExcluded = ['cunny', 'nonce', 'queer'];
+  for (const word of manuallyExcluded) {
+    assert.ok(!ANSWERS.includes(word), `expected "${word}" to be excluded from ANSWERS`);
+    assert.ok(!ALLOWED.includes(word), `expected "${word}" to be excluded from ALLOWED`);
+  }
+});
+
+test('known-bad non-words never appear in ANSWERS or ALLOWED', () => {
+  // Regression coverage for words that previously leaked through: acronyms
+  // and internally-capitalised names (McCoy, ASCII, McKay, COBOL) that
+  // upstream word lists carry as lowercase entries, and a Roman numeral
+  // (xxvii) present in the local system dictionary. See MANUAL_EXCLUSIONS
   // in docs-site/tools/generate-words.mjs.
-  assert.ok(!ANSWERS.includes('cunny'));
-  assert.ok(!ALLOWED.includes('cunny'));
+  const knownBad = ['mccoy', 'ascii', 'mckay', 'cobol', 'xxvii'];
+  const combined = new Set([...ANSWERS, ...ALLOWED]);
+  for (const word of knownBad) {
+    assert.ok(!combined.has(word), `expected "${word}" to be excluded from both ANSWERS and ALLOWED`);
+  }
+});
+
+test('offensive/vulgar words caught by the broader profanity lists never appear as answers', () => {
+  // These are legitimate words a player can still GUESS (ALLOWED stays wide
+  // and only excludes the narrow LDNOOBW list plus MANUAL_EXCLUSIONS), but
+  // they must never be a daily puzzle ANSWER. Caught by unioning
+  // coffee-and-fun/google-profanity-words and zacanger/profane-words with
+  // LDNOOBW for answer-eligibility only. See generate-words.mjs.
+  const offensiveAnswers = [
+    'cocky', 'moron', 'lusty', 'prick', 'sissy', 'pubic', 'vixen', 'squaw',
+    'bimbo', 'wench', 'junky', 'abuse', 'labia', 'sperm', 'snuff', 'raped',
+    'jihad', 'boned', 'paddy', 'spank', 'enema', 'naked',
+  ];
+  for (const word of offensiveAnswers) {
+    assert.ok(!ANSWERS.includes(word), `expected "${word}" to be excluded from ANSWERS`);
+  }
 });
