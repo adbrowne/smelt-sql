@@ -1367,10 +1367,18 @@ instantiates the affected groups' entries at `S = ∅` over every existing regio
 **Edges.** A dependency edge is `downstream reads upstream` under the downstream cell's
 derived scan clamp, between two partition axes whose grain is the declared
 `timeseries.granularity` of each node — never per-edge, never derived from the SQL (the
-classifier only *checks* the declaration, e.g. against a `date_trunc` grouping). Clamp margins
-ceil **outward** to whole partitions; each hop aligns its result outward to the receiving
-axis's grain. Outward maps are monotone, so sufficiency composes; narrowing never does.
-**Widen-never-narrow** is the graph layer's composition law.
+classifier only *checks* the declaration, e.g. against a `date_trunc` grouping). Every declared
+granularity (`hour` through `year`) has a graph axis; an edge cannot be built without both
+endpoints' declared grains. Intervals are half-open instants — exact seconds on the node's own
+declared axis, not day ordinals — and clamp margins apply **exactly**; it is the *receiving*
+axis's own outward alignment, not a blanket day ceiling, that widens a touched interval to
+whole partitions of that axis's grain (an hour-grain node widens to whole hours, a day-grain
+node to whole days, and so on through week — aligned to the declared `week_start`, default
+Monday — month, quarter, and year, each to real civil boundaries). Outward maps are monotone,
+so sufficiency composes; narrowing never does. **Widen-never-narrow** is the graph layer's
+composition law. A propagated interval rendered into a `smelt run` window still aligns outward
+to whole days, because the run-window surface is date-valued even when the underlying dirt is
+sub-day.
 
 **Typed edges.** An edge carries a **vector** of typed components, one per column group the
 downstream consumer reads: `(delta shape × addressing × column set)` — the upstream's delta
@@ -2025,11 +2033,10 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Locality and diagnostic residues on the maintenance-plan proofs**:
-  column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
-  is declared surface but propagation is day-ordinal; the built grain-alignment check
-  validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
-  graph edges still take the declaration directly. Refs: `model_properties.md` §Known
-  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
+  column-group-scoped dirt coarsens to whole-partition (safe, over-running); the built
+  grain-alignment check validates only the declaration (widen-never-narrow,
+  `MaintenanceGranularityMismatch`). Refs: `model_properties.md` §Known Divergences;
+  `docs/plans/20260808-derived-maintenance-proofs.md`.
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the

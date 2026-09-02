@@ -25,7 +25,7 @@ use tempfile::TempDir;
 
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_logical::maintenance::edge_type::Addressing;
-use smelt_logical::maintenance::propagate::{day_ordinal, DayInterval};
+use smelt_logical::maintenance::propagate::{day_ordinal, day_start, PartitionInterval};
 use smelt_maintenance_testkit::dag::{
     chain_dag, classify_node, diamond_dag, fetch_node_multiset, insert_rows, keyed_chain_dag,
     keyed_partition_sink_dag, keyed_sink_dag, leak_dag, stage_dag, DagRecipe,
@@ -82,9 +82,13 @@ struct WindowRows {
 fn landed_delta(source: &str, w: &WindowRows) -> SourceDelta {
     SourceDelta {
         source: source.to_string(),
-        landed: DayInterval::new(
-            day_ordinal(w.start.year() as i64, w.start.month(), w.start.day()),
-            day_ordinal(w.end.year() as i64, w.end.month(), w.end.day()),
+        landed: PartitionInterval::new(
+            day_start(day_ordinal(
+                w.start.year() as i64,
+                w.start.month(),
+                w.start.day(),
+            )),
+            day_start(day_ordinal(w.end.year() as i64, w.end.month(), w.end.day())),
         ),
     }
 }
@@ -328,17 +332,17 @@ fn include_upstreams_resolved_slices_suffice() {
         let (partial, full) = stage_pair(&dag, &tmp, i).expect("stage pair");
 
         let (models, source_infos) = discover(&partial.project_dir).expect("discover partial");
-        let period_interval = DayInterval::new(
-            day_ordinal(
+        let period_interval = PartitionInterval::new(
+            day_start(day_ordinal(
                 period.start.year() as i64,
                 period.start.month(),
                 period.start.day(),
-            ),
-            day_ordinal(
+            )),
+            day_start(day_ordinal(
                 period.end.year() as i64,
                 period.end.month(),
                 period.end.day(),
-            ),
+            )),
         );
         let resolved = resolve_build_plan(&models, &source_infos, "dag_chain_b", period_interval)
             .unwrap_or_else(|e| panic!("case {i}: resolve_build_plan failed: {e}"));

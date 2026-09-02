@@ -6396,9 +6396,13 @@ async fn empty_delta_cascade_is_a_no_op() {
         "expected all three real fixture models to be discovered: {order:?}"
     );
 
-    let window_interval = smelt_logical::maintenance::propagate::DayInterval::new(
-        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 1),
-        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 2),
+    let window_interval = smelt_logical::maintenance::propagate::PartitionInterval::new(
+        smelt_logical::maintenance::propagate::day_start(
+            smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 1),
+        ),
+        smelt_logical::maintenance::propagate::day_start(
+            smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 2),
+        ),
     );
     let deltas = vec![smelt_runtime::propagation::SourceDelta {
         source: "user_daily_spend".to_string(),

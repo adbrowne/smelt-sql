@@ -328,7 +328,7 @@ open — not that the excluded bullets themselves are gone.
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
 | 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | done |
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | done |
-| 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | planned |
+| 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | done |
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
@@ -354,6 +354,21 @@ open — not that the excluded bullets themselves are gone.
   alphabetical-by-alias column ordering a repair-recipe write pin exact-matches against — only
   `cargo test --workspace` surfaced it, not any of the phase's own named test targets. See
   `phases/26b-summary.md`.
+
+- **2026-09-03, phase 26c — propagation intervals move from day ordinals to exact seconds.**
+  `PartitionInterval` (renamed from `DayInterval`) now stores exact seconds since the civil
+  epoch, not day ordinals; `PartitionGrain` gained `Hour`, `Week { start_dow }`, `Quarter`, and
+  `Year` alongside `Day`/`Month`, each with real civil-boundary `align_outward`. The margin/
+  footprint split moved with it: an `Edge`'s `before_seconds`/`after_seconds`/`footprint_seconds`
+  (renamed from the `_days` fields) now carry the clamp's EXACT margin, never pre-ceiled to whole
+  days — ceiling to the receiving axis's own partition boundary happens once, in
+  `align_outward`, not twice (once at margin capture, once at alignment). `smelt-runtime`'s
+  `granularity_grain` is now total over every `Granularity` variant (no more
+  `MaintenanceGraphUnsupportedNode` for `hour`/`week`/`quarter`/`year`), threading the declared
+  `week_start` through a new `smelt_core::config::Weekday` → `chrono::Weekday` conversion point.
+  A rendering seam (`iso_floor`/`iso_ceil` in `smelt-runtime::propagation`) aligns a propagated
+  interval outward to whole days only at the CLI-facing boundary (`smelt run` windows are
+  date-valued even when the underlying dirt is sub-day). See `phases/26c-summary.md`.
 
 - **2026-09-03, phase 26d planning — group-scoped dirt is licensed by the existing
   closure-prune proof, not by a new one.** `grouping.rs` already proves, per enrichment source,

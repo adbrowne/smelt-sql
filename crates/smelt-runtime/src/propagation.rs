@@ -31,7 +31,8 @@ use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::output_delta::{self, OutputDelta, OutputDeltaFacts};
 use smelt_logical::maintenance::edge_type::type_edge;
 use smelt_logical::maintenance::propagate::{
-    day_ordinal, ordinal_to_iso, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+    day_ordinal, day_start, ordinal_to_iso, propagate, required_inputs, Edge, PartitionGrain,
+    PartitionInterval, DAY_SECONDS,
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
@@ -44,7 +45,7 @@ use smelt_logical::maintenance::{
 #[derive(Debug, Clone)]
 pub struct SourceDelta {
     pub source: String,
-    pub landed: DayInterval,
+    pub landed: PartitionInterval,
 }
 
 /// Bare name matching `smelt-db::queries::maintenance::source_facts`'s own
@@ -73,9 +74,10 @@ pub fn normalize_source_address(addr: &str) -> String {
 }
 
 /// Parse a `--landed <start>..<end>` value (ISO `YYYY-MM-DD..YYYY-MM-DD`,
-/// end exclusive) into a [`DayInterval`] of day ordinals. A named CLI error
-/// (never a panic) on a malformed range.
-pub fn parse_landed_range(value: &str) -> Result<DayInterval> {
+/// end exclusive) into a [`PartitionInterval`] of exact seconds, at the two
+/// dates' own midnight boundaries. A named CLI error (never a panic) on a
+/// malformed range.
+pub fn parse_landed_range(value: &str) -> Result<PartitionInterval> {
     let (start, end) = value
         .split_once("..")
         .with_context(|| format!("malformed --landed range '{value}': expected <start>..<end>"))?;
@@ -86,13 +88,17 @@ pub fn parse_landed_range(value: &str) -> Result<DayInterval> {
     if end_date < start_date {
         bail!("malformed --landed range '{value}': end is before start");
     }
-    Ok(DayInterval::new(
-        day_ordinal(
+    Ok(PartitionInterval::new(
+        day_start(day_ordinal(
             start_date.year() as i64,
             start_date.month(),
             start_date.day(),
-        ),
-        day_ordinal(end_date.year() as i64, end_date.month(), end_date.day()),
+        )),
+        day_start(day_ordinal(
+            end_date.year() as i64,
+            end_date.month(),
+            end_date.day(),
+        )),
     ))
 }
 
@@ -121,27 +127,49 @@ pub fn pair_source_deltas(sources: &[String], landed: &[String]) -> Result<Vec<S
         .collect()
 }
 
-/// Map a declared `timeseries.granularity` to the propagation graph's own
-/// grain axis. Only `day`/`month` have a graph axis today — sub-day and
-/// coarser-than-month axes are deferred (`incremental_models.md` §Known
-/// Divergences: "Hour granularity is declared surface... the propagation
-/// layer is day-ordinal; sub-day axes are deferred"). Fails loud
-/// (`MaintenanceGraphUnsupportedNode`) rather than silently mis-widening a
-/// granularity this module doesn't understand.
-fn granularity_grain(g: Granularity) -> Result<PartitionGrain> {
-    match g {
-        Granularity::Day => Ok(PartitionGrain::Day),
-        Granularity::Month => Ok(PartitionGrain::Month),
-        other => bail!(
-            "MaintenanceGraphUnsupportedNode: declared granularity {other:?} has no day/month \
-             propagation-graph axis yet — sub-day and >month axes are deferred"
-        ),
+/// [`smelt_core::config::Weekday`] (the declared `week_start` surface) to
+/// [`chrono::Weekday`] (`PartitionGrain::Week`'s own alignment type) — the
+/// two enums name the same seven days; this is the single conversion point.
+fn chrono_weekday(w: &smelt_core::config::Weekday) -> chrono::Weekday {
+    use smelt_core::config::Weekday as W;
+    match w {
+        W::Monday => chrono::Weekday::Mon,
+        W::Tuesday => chrono::Weekday::Tue,
+        W::Wednesday => chrono::Weekday::Wed,
+        W::Thursday => chrono::Weekday::Thu,
+        W::Friday => chrono::Weekday::Fri,
+        W::Saturday => chrono::Weekday::Sat,
+        W::Sunday => chrono::Weekday::Sun,
     }
+}
+
+/// Map a declared `timeseries.granularity` to the propagation graph's own
+/// grain axis — total over every [`Granularity`] variant (`hour`…`year`),
+/// each with a real graph axis (`incremental_models.md` §"The graph
+/// layer"). `week_start` sources `PartitionGrain::Week`'s own alignment
+/// boundary from the SAME `TimeseriesConfig.week_start` declaration (or its
+/// default, Monday) — never a second, independently-defaulted value.
+fn granularity_grain(
+    g: Granularity,
+    week_start: Option<&smelt_core::config::Weekday>,
+) -> Result<PartitionGrain> {
+    Ok(match g {
+        Granularity::Hour => PartitionGrain::Hour,
+        Granularity::Day => PartitionGrain::Day,
+        Granularity::Week => PartitionGrain::Week {
+            start_dow: week_start
+                .map(chrono_weekday)
+                .unwrap_or(chrono::Weekday::Mon),
+        },
+        Granularity::Month => PartitionGrain::Month,
+        Granularity::Quarter => PartitionGrain::Quarter,
+        Granularity::Year => PartitionGrain::Year,
+    })
 }
 
 fn source_grain(info: &SourceInfo) -> Result<PartitionGrain> {
     match &info.timeseries {
-        Some(ts) => granularity_grain(ts.granularity),
+        Some(ts) => granularity_grain(ts.granularity, ts.week_start.as_ref()),
         None => Ok(PartitionGrain::Unclocked),
     }
 }
@@ -180,7 +208,7 @@ fn model_grain(
                 .unwrap_or(false);
             if admitted {
                 match metadata.timeseries.as_ref() {
-                    Some(ts) => granularity_grain(ts.granularity),
+                    Some(ts) => granularity_grain(ts.granularity, ts.week_start.as_ref()),
                     // Unreachable in practice: locality admission requires a
                     // declared `timeseries:` block. Fail closed to `Keyed`
                     // (refused) rather than assume a grain.
@@ -191,7 +219,7 @@ fn model_grain(
             }
         }
         _ => match metadata.timeseries.as_ref() {
-            Some(ts) => granularity_grain(ts.granularity),
+            Some(ts) => granularity_grain(ts.granularity, ts.week_start.as_ref()),
             None => Ok(PartitionGrain::Unclocked),
         },
     }
@@ -343,8 +371,8 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         models.iter().map(|m| (m.canonical_path(), m)).collect();
 
     let ClampAndLocality {
-        clamp_days,
-        footprint_days,
+        clamp_seconds,
+        footprint_seconds,
         locality_admitted,
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
@@ -355,8 +383,8 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     let mut consumer_facts_cache: BTreeMap<String, (BTreeSet<String>, Vec<ColumnGroup>)> =
         BTreeMap::new();
 
-    let mut edges = Vec::with_capacity(clamp_days.len());
-    for ((upstream, downstream), (before_days, after_days)) in clamp_days {
+    let mut edges = Vec::with_capacity(clamp_seconds.len());
+    for ((upstream, downstream), (before_seconds, after_seconds)) in clamp_seconds {
         let upstream_grain = if let Some(info) = source_infos
             .iter()
             .find(|s| bare_name(&s.address_segments) == upstream)
@@ -394,7 +422,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &consumer_groups,
         );
 
-        let footprint = footprint_days
+        let footprint = footprint_seconds
             .get(&(upstream.clone(), downstream.clone()))
             .copied()
             .flatten();
@@ -402,9 +430,9 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         edges.push(Edge {
             upstream,
             downstream,
-            before_days,
-            after_days,
-            footprint_days: footprint,
+            before_seconds,
+            after_seconds,
+            footprint_seconds: footprint,
             upstream_grain,
             downstream_grain,
             components,
@@ -423,15 +451,15 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
 /// `build_forward_graph`'s own `Vec<Edge>` return type (which several
 /// existing callers, including tests, already destructure directly).
 struct ClampAndLocality {
-    clamp_days: BTreeMap<(String, String), (i64, i64)>,
+    clamp_seconds: BTreeMap<(String, String), (i64, i64)>,
     /// The derived write footprint in whole days per `(upstream, downstream)`
-    /// pair, folded the same widen-never-narrow way `clamp_days` is —
+    /// pair, folded the same widen-never-narrow way `clamp_seconds` is —
     /// `Some((before, after))` widened across every contributing
     /// `ScanClamp::write_footprint`, downgrading to `None` the moment any
     /// contributing cell for that pair carried no derived footprint at all
     /// (`ScanClamp::write_footprint`'s own doc comment: absence is a claim
     /// too, never silently patched over by a sibling cell's derived number).
-    footprint_days: BTreeMap<(String, String), Option<(i64, i64)>>,
+    footprint_seconds: BTreeMap<(String, String), Option<(i64, i64)>>,
     locality_admitted: BTreeMap<String, bool>,
     /// The established [`smelt_logical::maintenance::locality::LocalitySlice`]
     /// route for every `grain: key` model this workspace admits key temporal
@@ -502,8 +530,8 @@ fn derive_clamp_and_locality(
 
     for _pass in 0..max_passes {
         let ClampAndLocality {
-            clamp_days,
-            footprint_days,
+            clamp_seconds,
+            footprint_seconds,
             locality_admitted,
             key_locality_slice,
             key_locality_settle_bound,
@@ -557,8 +585,8 @@ fn derive_clamp_and_locality(
         };
         if sig(&next_composed_sources) == sig(&composed_sources) {
             return Ok(ClampAndLocality {
-                clamp_days,
-                footprint_days,
+                clamp_seconds,
+                footprint_seconds,
                 locality_admitted,
                 key_locality_slice,
                 key_locality_settle_bound,
@@ -591,30 +619,31 @@ fn derive_clamp_and_locality_pass(
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
 
-    // (upstream, downstream) -> widest (before_days, after_days) seen across
+    // (upstream, downstream) -> widest (before_seconds, after_seconds) seen across
     // every cell that derives a clamp for that pair.
-    let mut clamp_days: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
+    let mut clamp_seconds: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
     // (upstream, downstream) -> the derived write footprint in whole days,
     // widened the same way, downgrading to `None` the moment any
     // contributing cell for that pair carried no derived footprint
-    // (`ClampAndLocality::footprint_days`'s own doc comment).
-    let mut footprint_days: BTreeMap<(String, String), Option<(i64, i64)>> = BTreeMap::new();
-    // Fold a clamp's derived footprint into `footprint_days` for `key`:
+    // (`ClampAndLocality::footprint_seconds`'s own doc comment).
+    let mut footprint_seconds: BTreeMap<(String, String), Option<(i64, i64)>> = BTreeMap::new();
+    // Fold a clamp's derived footprint into `footprint_seconds` for `key`:
     // widen-never-narrow when both sides have derived a footprint, and
     // fail-closed to `None` forever once any contributing cell has none.
-    let fold_footprint = |footprint_days: &mut BTreeMap<(String, String), Option<(i64, i64)>>,
-                          key: (String, String),
-                          new: Option<(i64, i64)>| {
-        footprint_days
-            .entry(key)
-            .and_modify(|existing| {
-                *existing = match (*existing, new) {
-                    (Some((eb, ea)), Some((nb, na))) => Some((eb.max(nb), ea.max(na))),
-                    _ => None,
-                };
-            })
-            .or_insert(new);
-    };
+    let fold_footprint =
+        |footprint_seconds: &mut BTreeMap<(String, String), Option<(i64, i64)>>,
+         key: (String, String),
+         new: Option<(i64, i64)>| {
+            footprint_seconds
+                .entry(key)
+                .and_modify(|existing| {
+                    *existing = match (*existing, new) {
+                        (Some((eb, ea)), Some((nb, na))) => Some((eb.max(nb), ea.max(na))),
+                        _ => None,
+                    };
+                })
+                .or_insert(new);
+        };
 
     // Per-address key-temporal-locality verdict for every `grain: key`
     // model this workspace derives a plan for — folded from the SAME
@@ -711,16 +740,20 @@ fn derive_clamp_and_locality_pass(
                     &sql,
                 ) {
                     Ok(before_days) => {
-                        let entry = clamp_days
+                        // `self_edge_clamp` returns whole days (ceiled
+                        // outward) — scale to the graph's own exact-seconds
+                        // representation.
+                        let before_seconds = before_days * DAY_SECONDS;
+                        let entry = clamp_seconds
                             .entry((table.clone(), table.clone()))
                             .or_insert((0, 0));
-                        entry.0 = entry.0.max(before_days);
+                        entry.0 = entry.0.max(before_seconds);
                         // Out of this phase's derivation scope (26a is about
                         // the keyed/partition-addressed clamp footprint, not
                         // the self-edge margin) — mirror the read margin
                         // exactly as `reflect` always has, unchanged.
                         fold_footprint(
-                            &mut footprint_days,
+                            &mut footprint_seconds,
                             (table.clone(), table.clone()),
                             Some((entry.1, entry.0)),
                         );
@@ -955,15 +988,15 @@ fn derive_clamp_and_locality_pass(
             }
             for clamp in &cell.scans {
                 let e = Edge::from_clamp(&table, clamp);
-                let entry = clamp_days
+                let entry = clamp_seconds
                     .entry((clamp.source.clone(), table.clone()))
                     .or_insert((0, 0));
-                entry.0 = entry.0.max(e.before_days);
-                entry.1 = entry.1.max(e.after_days);
+                entry.0 = entry.0.max(e.before_seconds);
+                entry.1 = entry.1.max(e.after_seconds);
                 fold_footprint(
-                    &mut footprint_days,
+                    &mut footprint_seconds,
                     (clamp.source.clone(), table.clone()),
-                    e.footprint_days,
+                    e.footprint_seconds,
                 );
             }
             // A read the derivation could not bound (`PartitionLocal::No`)
@@ -975,13 +1008,13 @@ fn derive_clamp_and_locality_pass(
             // walk to at all; the source's own grain (`Unclocked` for an
             // undeclared-timeseries source or model — see `source_grain`/
             // `model_grain` below) is what actually widens every dirty/
-            // required interval through it to `DayInterval::WHOLE` via
+            // required interval through it to `PartitionInterval::WHOLE` via
             // `PartitionGrain::align_outward`, never this margin.
             // `incremental_models.md` §"Backward resolution — what must
             // exist": "The required slice of an unclocked source is the
             // whole table."
             if let PartitionLocal::No { source, .. } = &cell.partition_local {
-                clamp_days
+                clamp_seconds
                     .entry((source.clone(), table.clone()))
                     .or_insert((0, 0));
                 // No `ScanClamp` exists here at all — out of this phase's
@@ -989,7 +1022,7 @@ fn derive_clamp_and_locality_pass(
                 // zero-margin exact behaviour rather than introducing a new
                 // widen-to-`WHOLE` path this branch never had.
                 fold_footprint(
-                    &mut footprint_days,
+                    &mut footprint_seconds,
                     (source.clone(), table.clone()),
                     Some((0, 0)),
                 );
@@ -1005,7 +1038,7 @@ fn derive_clamp_and_locality_pass(
             // projection through composed nodes") is derived from the SAME
             // admitted `KeyLocality` verdict `locality_admitted` above was
             // folded from — `smelt_logical::maintenance::propagate::
-            // locality_margin_days` maps the verdict's route (exact for
+            // locality_margin_seconds` maps the verdict's route (exact for
             // routes 1–2, widened by `r` + margins for route 3) to the day
             // margin this edge carries, so the composed node participates
             // in the graph as a clocked node with a REAL inbound edge
@@ -1023,15 +1056,15 @@ fn derive_clamp_and_locality_pass(
                         "locality_admitted[table] == Some(true) is set (a few lines above) from \
                          result.plan.key_locality.is_some(), so key_locality must be Some here",
                     );
-                    let (before_days, after_days) =
-                        smelt_logical::maintenance::propagate::locality_margin_days(
+                    let (before_seconds, after_seconds) =
+                        smelt_logical::maintenance::propagate::locality_margin_seconds(
                             &key_locality.slice,
                         );
-                    let entry = clamp_days
+                    let entry = clamp_seconds
                         .entry((source.clone(), table.clone()))
                         .or_insert((0, 0));
-                    entry.0 = entry.0.max(before_days);
-                    entry.1 = entry.1.max(after_days);
+                    entry.0 = entry.0.max(before_seconds);
+                    entry.1 = entry.1.max(after_seconds);
                     // A locality-admitted composed node is a CLOCKED node
                     // (`model_grain` returns its declared granularity, not
                     // `Keyed`, once locality is admitted) — `Edge::reflect`
@@ -1042,7 +1075,7 @@ fn derive_clamp_and_locality_pass(
                     // exactly as `reflect` always has for this edge, never
                     // widening it to `WHOLE`.
                     fold_footprint(
-                        &mut footprint_days,
+                        &mut footprint_seconds,
                         (source.clone(), table.clone()),
                         Some((entry.1, entry.0)),
                     );
@@ -1052,8 +1085,8 @@ fn derive_clamp_and_locality_pass(
     }
 
     Ok(ClampAndLocality {
-        clamp_days,
-        footprint_days,
+        clamp_seconds,
+        footprint_seconds,
         locality_admitted,
         key_locality_slice,
         key_locality_settle_bound,
@@ -1162,13 +1195,35 @@ pub struct SinceUpstreamPlan {
     pub dirty_set_report: String,
 }
 
-fn render_interval(iv: &DayInterval) -> String {
+/// The day ordinal at or before `secs` — the rendering seam's own outward
+/// alignment (`smelt_logical::maintenance::propagate`'s module doc: "A
+/// `smelt run` window rendered from a propagated interval still aligns
+/// outward to whole days... because the run-window surface is
+/// date-valued"). A propagated interval already aligned to Day (or
+/// coarser) grain floors/ceils to itself here — a no-op.
+fn iso_floor(secs: i64) -> String {
+    ordinal_to_iso(secs.div_euclid(DAY_SECONDS))
+}
+
+/// The day ordinal at or after `secs` — the exclusive-end half of the
+/// rendering seam's outward alignment; see [`iso_floor`].
+fn iso_ceil(secs: i64) -> String {
+    let floor = secs.div_euclid(DAY_SECONDS);
+    let ordinal = if floor * DAY_SECONDS == secs {
+        floor
+    } else {
+        floor + 1
+    };
+    ordinal_to_iso(ordinal)
+}
+
+fn render_interval(iv: &PartitionInterval) -> String {
     if iv.is_whole() {
         "whole table".to_string()
     } else if iv.is_open_ended() {
-        format!("[{}, →)", ordinal_to_iso(iv.start))
+        format!("[{}, →)", iso_floor(iv.start))
     } else {
-        format!("[{}, {})", ordinal_to_iso(iv.start), ordinal_to_iso(iv.end))
+        format!("[{}, {})", iso_floor(iv.start), iso_ceil(iv.end))
     }
 }
 
@@ -1246,8 +1301,8 @@ pub async fn load_observed_delta_lookup(
         if !model_names.contains(&delta.source) {
             continue;
         }
-        let window_start = ordinal_to_iso(delta.landed.start);
-        let window_end = ordinal_to_iso(delta.landed.end);
+        let window_start = iso_floor(delta.landed.start);
+        let window_end = iso_ceil(delta.landed.end);
         let observed = crate::maintenance_driver::read_observed_delta(
             backend,
             schema,
@@ -1308,7 +1363,7 @@ pub fn plan_since_upstream_with_observed_deltas(
         ..
     } = derive_clamp_and_locality(models, source_infos)?;
 
-    let mut source_deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut source_deltas: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     // The settle-bound × observed-delta composition's reporting leg
     // (`docs/specs/incremental_models.md` §"Observed deltas on model
     // edges"): a present-and-empty delta whose window lies behind the
@@ -1318,10 +1373,10 @@ pub fn plan_since_upstream_with_observed_deltas(
     // prunes further work).
     let mut empty_delta_notes: Vec<String> = Vec::new();
     for d in deltas {
-        let projected: Vec<DayInterval> = match key_locality_slice.get(&d.source) {
+        let projected: Vec<PartitionInterval> = match key_locality_slice.get(&d.source) {
             Some(slice) => {
-                let window_start = ordinal_to_iso(d.landed.start);
-                let window_end = ordinal_to_iso(d.landed.end);
+                let window_start = iso_floor(d.landed.start);
+                let window_end = iso_ceil(d.landed.end);
                 let key = (d.source.clone(), window_start.clone(), window_end.clone());
                 match observed.get(&key) {
                     // Present and empty: a fully-suppressed run recorded
@@ -1474,14 +1529,14 @@ pub fn plan_since_upstream_with_observed_deltas(
                 } else if iv.is_open_ended() {
                     runs.push(PropagatedRun {
                         model: name.clone(),
-                        start: Some(ordinal_to_iso(iv.start)),
+                        start: Some(iso_floor(iv.start)),
                         end: None,
                     });
                 } else {
                     runs.push(PropagatedRun {
                         model: name.clone(),
-                        start: Some(ordinal_to_iso(iv.start)),
-                        end: Some(ordinal_to_iso(iv.end)),
+                        start: Some(iso_floor(iv.start)),
+                        end: Some(iso_ceil(iv.end)),
                     });
                 }
             }
@@ -1651,7 +1706,7 @@ pub fn resolve_build_plan(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
     target: &str,
-    period: DayInterval,
+    period: PartitionInterval,
 ) -> Result<ResolvedBuildPlan> {
     let edges = build_forward_graph(models, source_infos)?;
 
@@ -1692,8 +1747,8 @@ pub fn resolve_build_plan(
             } else {
                 build_order.push(PropagatedRun {
                     model: name.clone(),
-                    start: Some(ordinal_to_iso(iv.start)),
-                    end: Some(ordinal_to_iso(iv.end)),
+                    start: Some(iso_floor(iv.start)),
+                    end: Some(iso_ceil(iv.end)),
                 });
             }
         }
@@ -1720,7 +1775,7 @@ mod tests {
     #[test]
     fn parse_landed_range_parses_iso_dates() {
         let iv = parse_landed_range("2026-01-03..2026-01-04").expect("parse");
-        assert_eq!(iv.start + 1, iv.end);
+        assert_eq!(iv.start + DAY_SECONDS, iv.end);
     }
 
     #[test]

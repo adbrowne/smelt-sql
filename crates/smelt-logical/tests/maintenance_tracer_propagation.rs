@@ -12,36 +12,45 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::propagate::{
-    civil_from_ordinal, day_ordinal, normalize, ordinal_to_iso, propagate, required_inputs,
-    DayInterval, Edge, PartitionGrain,
+    civil_from_ordinal, day_ordinal, day_start, normalize, ordinal_to_iso, propagate,
+    required_inputs, Edge, PartitionGrain, PartitionInterval, DAY_SECONDS,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Trigger,
 };
 use smelt_logical::Seconds;
 
-fn iv(start: i64, end: i64) -> DayInterval {
-    DayInterval::new(start, end)
+/// Day-ordinal fixture helper — `iv(a, b)` reads as "day `a` to day `b`",
+/// scaled to the exact-seconds representation `PartitionInterval` actually
+/// carries. Every edge in this file defaults to Day grain, so the scaling
+/// is a no-op through `align_outward` and every existing (day-scale)
+/// assertion in this file holds unchanged.
+fn iv(start_day: i64, end_day: i64) -> PartitionInterval {
+    PartitionInterval::new(day_start(start_day), day_start(end_day))
 }
 
-fn deltas(items: &[(&str, DayInterval)]) -> BTreeMap<String, Vec<DayInterval>> {
-    let mut m: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+fn deltas(items: &[(&str, PartitionInterval)]) -> BTreeMap<String, Vec<PartitionInterval>> {
+    let mut m: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for (name, interval) in items {
         m.entry(name.to_string()).or_default().push(*interval);
     }
     m
 }
 
+/// `before_days`/`after_days` in whole days, scaled to exact seconds — see
+/// `iv`'s own doc comment.
 fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> Edge {
+    let before_seconds = before_days * DAY_SECONDS;
+    let after_seconds = after_days * DAY_SECONDS;
     Edge {
         upstream: upstream.to_string(),
         downstream: downstream.to_string(),
-        before_days,
-        after_days,
+        before_seconds,
+        after_seconds,
         upstream_grain: PartitionGrain::Day,
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
-        footprint_days: Some((after_days, before_days)),
+        footprint_seconds: Some((after_seconds, before_seconds)),
     }
 }
 
@@ -105,7 +114,7 @@ fn derived_conversions_clamp_drives_the_propagation() {
     assert_eq!(clamp.after, Seconds::days(14));
 
     let e = Edge::from_clamp("silver_events", clamp);
-    assert_eq!((e.before_days, e.after_days), (0, 14));
+    assert_eq!((e.before_seconds, e.after_seconds), (0, 14 * DAY_SECONDS));
 
     // One new conversions day D (= day 20) dirties silver [D − 14, D + 1).
     let result = propagate(&[e], &deltas(&[("conversions", iv(20, 21))])).expect("propagate");
@@ -210,8 +219,10 @@ fn fan_out_and_diamond_propagate_correctly() {
 
 #[test]
 fn partial_day_clamps_ceil_outward() {
-    // A 36h clamp must dirty 2 whole partitions — widening is safe,
-    // narrowing never is.
+    // `Edge::from_clamp` carries the clamp's EXACT seconds — a 36h margin
+    // is 36h, not pre-ceiled to 2 days. Ceiling to whole partitions is the
+    // RECEIVING axis's job (`PartitionGrain::align_outward`, exercised via
+    // `require`/`reflect` below), never a margin-side ceiling.
     let clamp = smelt_logical::maintenance::ScanClamp {
         source: "src".to_string(),
         column: "d".to_string(),
@@ -220,7 +231,13 @@ fn partial_day_clamps_ceil_outward() {
         write_footprint: None,
     };
     let e = Edge::from_clamp("m", &clamp);
-    assert_eq!(e.before_days, 2);
+    assert_eq!(e.before_seconds, 36 * 3600);
+
+    // `required_inputs` (which uses `require`, unaffected by the missing
+    // write footprint) still widens the 36h margin to 2 whole days at the
+    // Day-grain upstream axis.
+    let result = required_inputs(&[e], "m", iv(10, 11)).expect("resolve");
+    assert_eq!(result.required["src"], vec![iv(8, 11)]);
 }
 
 #[test]
@@ -341,7 +358,7 @@ fn forward_of_backward_covers_the_requested_period() {
     let period = iv(4, 7);
     let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
     // Replay the resolved *source* slices as forward deltas.
-    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut replay: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for src in ["bronze", "conversions"] {
         replay.insert(src.to_string(), resolved.required[src].clone());
     }
@@ -371,7 +388,7 @@ fn a_model_region_recompute_cascades_as_a_delta() {
         edge("rollup", "report", 7, 0),
     ];
     // silver [4, 7) is being recomputed (a backfill); what must follow?
-    let mut deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut deltas: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     deltas.insert("silver".to_string(), vec![iv(4, 7)]);
     let result = propagate(&edges, &deltas).expect("propagate");
     assert_eq!(result.dirty["rollup"], vec![iv(4, 7)]);
@@ -405,8 +422,8 @@ fn deltas_nothing_reads_propagate_nothing() {
 #[test]
 fn backward_bounded_self_edge_is_admitted_as_a_time_unrolled_edge() {
     // A self-referential model is a cycle in the *table* graph but a DAG in
-    // time: a strictly time-backward self-edge (`after_days == 0`,
-    // `before_days > 0`) is admitted as a day-unrolled edge, not refused
+    // time: a strictly time-backward self-edge (`after_seconds == 0`,
+    // `before_seconds > 0`) is admitted as a day-unrolled edge, not refused
     // (`incremental_models.md` §"Time-unrolled self-edges" — the unrolling
     // designed in `10-dependency-propagation.md` §6).
     let edges = vec![edge("rolling", "rolling", 1, 0)];
@@ -416,7 +433,7 @@ fn backward_bounded_self_edge_is_admitted_as_a_time_unrolled_edge() {
 
 #[test]
 fn same_partition_self_edge_is_still_refused() {
-    // A self-edge with no backward margin at all (`before_days == 0`) reads
+    // A self-edge with no backward margin at all (`before_seconds == 0`) reads
     // exactly the partition it is itself writing — not strictly
     // time-backward, so it is still a genuine cycle, refused fail-loud.
     let edges = vec![edge("rolling", "rolling", 0, 0)];
@@ -438,7 +455,7 @@ fn empty_period_resolves_to_nothing() {
 // a coarse axis aligns them outward per hop.
 // ---------------------------------------------------------------------------
 
-fn month(y: i64, m: u32) -> DayInterval {
+fn month(y: i64, m: u32) -> PartitionInterval {
     let (ny, nm) = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
     iv(day_ordinal(y, m, 1), day_ordinal(ny, nm, 1))
 }
@@ -572,12 +589,12 @@ fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
     Edge {
         upstream: upstream.to_string(),
         downstream: downstream.to_string(),
-        before_days: 0,
-        after_days: 0,
+        before_seconds: 0,
+        after_seconds: 0,
         upstream_grain: PartitionGrain::Unclocked,
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
-        footprint_days: Some((0, 0)),
+        footprint_seconds: Some((0, 0)),
     }
 }
 
@@ -636,7 +653,7 @@ fn s12_keyed_node_refuses_in_both_directions() {
 
 // ---------------------------------------------------------------------------
 // Phase 26a: `Edge::reflect` uses the clamp's derived write footprint, never
-// a re-mirror of its own read-side `(before_days, after_days)`
+// a re-mirror of its own read-side `(before_seconds, after_seconds)`
 // (`docs/specs/model_properties.md` §"Footprint reflection / bounded write
 // footprint").
 // ---------------------------------------------------------------------------
@@ -647,8 +664,8 @@ fn edge_reflects_the_derived_footprint_not_the_read_mirror() {
     use smelt_logical::Seconds;
 
     // A clamp whose derived write footprint (2d, 0) differs from its own
-    // read margins (1d, 1d) — if `reflect` mirrored `before_days`/
-    // `after_days` directly instead of consulting `footprint_days`, this
+    // read margins (1d, 1d) — if `reflect` mirrored `before_seconds`/
+    // `after_seconds` directly instead of consulting `footprint_seconds`, this
     // edge would dirty `[a-1, b+1)` instead of `[a-2, b+0)`.
     let clamp = ScanClamp {
         source: "src".to_string(),
@@ -658,7 +675,7 @@ fn edge_reflects_the_derived_footprint_not_the_read_mirror() {
         write_footprint: Some((Seconds::days(2), Seconds::ZERO)),
     };
     let e = Edge::from_clamp("m", &clamp);
-    assert_eq!(e.footprint_days, Some((2, 0)));
+    assert_eq!(e.footprint_seconds, Some((2 * DAY_SECONDS, 0)));
 
     let result = propagate(&[e], &deltas(&[("src", iv(10, 12))])).expect("propagate");
     assert_eq!(
@@ -681,7 +698,7 @@ fn edge_without_a_derived_footprint_dirties_the_whole_downstream() {
         write_footprint: None,
     };
     let e = Edge::from_clamp("m", &clamp);
-    assert_eq!(e.footprint_days, None);
+    assert_eq!(e.footprint_seconds, None);
 
     let result = propagate(&[e], &deltas(&[("src", iv(10, 12))])).expect("propagate");
     assert!(
@@ -691,7 +708,7 @@ fn edge_without_a_derived_footprint_dirties_the_whole_downstream() {
     );
 
     // `require` (the read direction) is unchanged — it never consults
-    // `footprint_days`.
+    // `footprint_seconds`.
     let edges = vec![Edge::from_clamp(
         "m",
         &ScanClamp {

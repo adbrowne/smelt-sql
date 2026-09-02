@@ -196,7 +196,7 @@ fn landed_delta_on_raw_events_propagates_through_composed_node_to_sessions() {
     // `events_deduped`'s route-3 `KeyLocality::RecurrenceBounded` derives
     // `margin_before = 3d` (the declared `key_recurrence.window` itself) and
     // `margin_after = 0d` (no derived self-scan bound) — reflected FORWARD
-    // through `DayInterval::reflect`'s swapped convention
+    // through `PartitionInterval::reflect`'s swapped convention
     // (`start: delta.start - after_days, end: delta.end + before_days`,
     // `crates/smelt-logical/src/maintenance/propagate.rs`), a one-day delta
     // landed on 2026-03-22 dirties `events_deduped`'s own output axis over

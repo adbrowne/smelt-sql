@@ -18,46 +18,55 @@ use smelt_logical::analysis::output_delta::OutputDelta;
 use smelt_logical::maintenance::edge_type::{Addressing, EdgeComponent};
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::propagate::{
-    project_observed_delta, propagate, required_inputs, DayInterval, Edge, KeyedDirt,
-    PartitionGrain,
+    project_observed_delta, propagate, required_inputs, Edge, KeyedDirt, PartitionGrain,
+    PartitionInterval, DAY_SECONDS,
 };
 
-fn iv(start: i64, end: i64) -> DayInterval {
-    DayInterval::new(start, end)
+/// Day-ordinal fixture helper — `iv(a, b)` reads as "day `a` to day `b`",
+/// scaled to the exact-seconds representation `PartitionInterval` actually
+/// carries. Every edge in this file defaults to Day grain, so the scaling
+/// is a no-op through `align_outward` and every existing (day-scale)
+/// assertion in this file holds unchanged.
+fn iv(start_day: i64, end_day: i64) -> PartitionInterval {
+    PartitionInterval::new(start_day * DAY_SECONDS, end_day * DAY_SECONDS)
 }
 
-fn deltas(items: &[(&str, DayInterval)]) -> BTreeMap<String, Vec<DayInterval>> {
-    let mut m: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+fn deltas(items: &[(&str, PartitionInterval)]) -> BTreeMap<String, Vec<PartitionInterval>> {
+    let mut m: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for (name, interval) in items {
         m.entry(name.to_string()).or_default().push(*interval);
     }
     m
 }
 
+/// `before_days`/`after_days` in whole days, scaled to exact seconds — see
+/// `iv`'s own doc comment.
 fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> Edge {
+    let before_seconds = before_days * DAY_SECONDS;
+    let after_seconds = after_days * DAY_SECONDS;
     Edge {
         upstream: upstream.to_string(),
         downstream: downstream.to_string(),
-        before_days,
-        after_days,
+        before_seconds,
+        after_seconds,
         upstream_grain: Default::default(),
         downstream_grain: Default::default(),
         components: Vec::new(),
-        footprint_days: Some((after_days, before_days)),
+        footprint_seconds: Some((after_seconds, before_seconds)),
     }
 }
 
 /// Resolve `required_inputs` for `target`/`period`, replay every raw
 /// source's resolved slice as a forward delta, and assert the forward
 /// result's dirt on `target` contains `period`.
-fn assert_forward_backward_containment(edges: &[Edge], target: &str, period: DayInterval) {
+fn assert_forward_backward_containment(edges: &[Edge], target: &str, period: PartitionInterval) {
     let resolved = required_inputs(edges, target, period).expect("resolve");
 
     // Raw sources are exactly the required nodes that never appear as a
     // downstream of any edge.
     let downstreams: std::collections::BTreeSet<&str> =
         edges.iter().map(|e| e.downstream.as_str()).collect();
-    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut replay: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for (node, intervals) in &resolved.required {
         if !downstreams.contains(node.as_str()) {
             replay.insert(node.clone(), intervals.clone());
@@ -260,8 +269,8 @@ fn two_composed_stages_adjoint_with_a_widened_first_hop() {
 /// law, through the same `source -> composed -> rollup` chain shape.
 #[test]
 fn composed_projection_adjoint() {
-    for (before_days, after_days) in [(0, 0), (3, 1)] {
-        let into_composed = edge("source", "composed", before_days, after_days);
+    for (before_seconds, after_seconds) in [(0, 0), (3, 1)] {
+        let into_composed = edge("source", "composed", before_seconds, after_seconds);
         let out_of_composed = edge("composed", "rollup", 0, 0);
         let edges = vec![into_composed, out_of_composed];
         assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
@@ -327,7 +336,7 @@ fn bare_keyed_node_still_refuses_with_refined_message() {
 // ---------------------------------------------------------------------------
 // Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 // the adjointness law extended over an observed-delta-fed composed edge —
-// the origin's own delta is no longer a hand-typed `DayInterval`, but
+// the origin's own delta is no longer a hand-typed `PartitionInterval`, but
 // `project_observed_delta`'s own output (a composed model's recorded
 // key-level observed delta, projected to partition-day intervals via its
 // established locality route). `forward(backward(P)) ⊇ P` must still hold
@@ -376,7 +385,7 @@ fn observed_delta_fed_composed_edge_satisfies_adjointness_exact_route() {
             .get("composed")
             .cloned()
             .unwrap_or_default();
-        let replay: BTreeMap<String, Vec<DayInterval>> =
+        let replay: BTreeMap<String, Vec<PartitionInterval>> =
             [("composed".to_string(), composed_required)]
                 .into_iter()
                 .collect();
@@ -428,9 +437,10 @@ fn observed_delta_fed_composed_edge_satisfies_adjointness_widened_route() {
         .get("composed")
         .cloned()
         .unwrap_or_default();
-    let replay: BTreeMap<String, Vec<DayInterval>> = [("composed".to_string(), composed_required)]
-        .into_iter()
-        .collect();
+    let replay: BTreeMap<String, Vec<PartitionInterval>> =
+        [("composed".to_string(), composed_required)]
+            .into_iter()
+            .collect();
     let forward = propagate(&edges, &replay).expect("propagate");
     let dirty = forward
         .dirty
@@ -737,7 +747,7 @@ fn adjoint_property_holds_with_keyed_edges_present() {
     let period = iv(20, 21);
     let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
 
-    let mut replay: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut replay: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     for node in ["bronze", "agg"] {
         if let Some(required) = resolved.required.get(node) {
             replay.insert(node.to_string(), required.clone());
@@ -798,7 +808,8 @@ fn self_edge_widens_forward_dirt_to_the_frontier() {
         "expected a single merged interval: {n_dirty:?}"
     );
     assert_eq!(
-        n_dirty[0].start, 10,
+        n_dirty[0].start,
+        10 * DAY_SECONDS,
         "the interval's start must be unchanged"
     );
     assert!(
@@ -854,7 +865,9 @@ fn required_inputs_self_edge_reaches_the_basis_once() {
         .get("n")
         .expect("n must have a requirement");
     assert!(
-        n_required.iter().any(|iv| iv.start <= 48 && iv.end >= 51),
+        n_required
+            .iter()
+            .any(|iv| iv.start <= 48 * DAY_SECONDS && iv.end >= 51 * DAY_SECONDS),
         "n's own requirement must widen backward by the self-edge's clamp: {n_required:?}"
     );
 
@@ -863,7 +876,9 @@ fn required_inputs_self_edge_reaches_the_basis_once() {
         .get("src")
         .expect("src must inherit the widened requirement through n's inbound edge");
     assert!(
-        src_required.iter().any(|iv| iv.start <= 48 && iv.end >= 51),
+        src_required
+            .iter()
+            .any(|iv| iv.start <= 48 * DAY_SECONDS && iv.end >= 51 * DAY_SECONDS),
         "the widened requirement must flow up n's inbound source edge: {src_required:?}"
     );
 }

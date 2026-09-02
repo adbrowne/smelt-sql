@@ -7,7 +7,7 @@ use std::path::Path;
 
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_logical::maintenance::edge_type::Addressing;
-use smelt_logical::maintenance::propagate::{propagate, DayInterval};
+use smelt_logical::maintenance::propagate::{propagate, PartitionInterval};
 use smelt_runtime::propagation::build_forward_graph;
 
 fn write(dir: &Path, rel: &str, content: &str) {
@@ -157,7 +157,7 @@ fn component_population_does_not_change_interval_dirt() {
     }
 
     let mut deltas = std::collections::BTreeMap::new();
-    deltas.insert("bronze".to_string(), vec![DayInterval::new(20, 21)]);
+    deltas.insert("bronze".to_string(), vec![PartitionInterval::new(20, 21)]);
 
     let typed = propagate(&typed_edges, &deltas).expect("propagate typed");
     let untyped = propagate(&untyped_edges, &deltas).expect("propagate untyped");
@@ -224,7 +224,7 @@ fn keyed_upstream_model_propagates_on_the_real_graph() {
     );
 
     let mut deltas = std::collections::BTreeMap::new();
-    deltas.insert("agg".to_string(), vec![DayInterval::new(1, 2)]);
+    deltas.insert("agg".to_string(), vec![PartitionInterval::new(1, 2)]);
     propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
 }
 
@@ -286,6 +286,6 @@ fn clockless_keyed_upstream_is_walkable_on_the_real_graph() {
     );
 
     let mut deltas = std::collections::BTreeMap::new();
-    deltas.insert("agg".to_string(), vec![DayInterval::new(1, 2)]);
+    deltas.insert("agg".to_string(), vec![PartitionInterval::new(1, 2)]);
     propagate(&edges, &deltas).expect("an admitted keyed edge must propagate without refusing");
 }

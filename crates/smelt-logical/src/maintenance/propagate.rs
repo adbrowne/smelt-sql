@@ -21,59 +21,84 @@
 //! consumers see, recursively (topological order).
 //!
 //! Known boundaries (`incremental_models.md` §Known Divergences):
-//! - **Day-ordinal intervals, Day/Month grains**: intervals are whole days
-//!   (clamp seconds ceiled *outward* — a 36h lookback dirties 2 whole
-//!   partitions; widening is safe, narrowing never is), anchored to the
-//!   civil calendar so a coarse axis ([`PartitionGrain::Month`]) can align
-//!   them outward to real month boundaries per hop. Edge grains are
-//!   *declared* by the caller; deriving Month from a `date_trunc` grouping
-//!   is future classifier work, as is an hourly (sub-day) axis.
 //! - **Whole-partition dirt**: a dirty partition is dirty for every column
 //!   group; per-edge results let the caller pick the right trigger cell
 //!   (recompute-region for a driving-source delta, column-scoped merge for
 //!   an enrichment delta), but column-group-scoped dirt is future work.
+//!
+//! Intervals ([`PartitionInterval`]) are stored as **exact seconds** since
+//! the civil epoch (1970-01-01T00:00:00), not day ordinals — an edge's own
+//! clamp margins (`before_seconds`/`after_seconds`) apply exactly, and it is
+//! the **receiving axis's** outward alignment ([`PartitionGrain::align_outward`])
+//! that widens a touched interval to whole partitions of that axis's own
+//! declared grain, never a blanket day ceiling applied at the edge. A
+//! `smelt run` window rendered from a propagated interval still aligns
+//! outward to whole days at the rendering seam (`ordinal_to_iso` call
+//! sites in `smelt-runtime::propagation`), because the run-window surface
+//! is date-valued even when the underlying dirt is sub-day.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::edge_type::{Addressing, EdgeComponent};
 use super::{locality, ScanClamp};
+#[cfg(test)]
 use crate::analysis::source_bounds::Seconds;
 
-const DAY_SECONDS: u64 = 86_400;
+const HOUR_SECONDS: i64 = 3_600;
+pub const DAY_SECONDS: i64 = 86_400;
 
-/// Ceil a clamp margin to whole days — a partial-day margin must widen to
-/// the whole partition it touches.
-fn clamp_days(s: Seconds) -> i64 {
-    s.0.div_ceil(DAY_SECONDS) as i64
+/// Floor `x` to the nearest multiple of `m` at or below `x` (`m > 0`).
+fn floor_to(x: i64, m: i64) -> i64 {
+    x.div_euclid(m) * m
 }
 
-/// A half-open interval `[start, end)` of day ordinals on some table's
-/// partition axis (the caller picks the epoch; tests use days since the
-/// scenario's first date).
+/// Ceil `x` to the nearest multiple of `m` at or above `x` (`m > 0`).
+fn ceil_to(x: i64, m: i64) -> i64 {
+    let floored = floor_to(x, m);
+    if floored == x {
+        floored
+    } else {
+        floored + m
+    }
+}
+
+/// A half-open interval `[start, end)` of **seconds since the civil epoch**
+/// on some table's partition axis (the caller picks the epoch; tests use
+/// seconds since the scenario's first date).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DayInterval {
+pub struct PartitionInterval {
     pub start: i64,
     pub end: i64,
 }
 
-impl DayInterval {
+impl PartitionInterval {
     /// The whole-axis sentinel: dirt or a requirement with no interval
     /// bound (an unclocked source's delta or slice — ratified P6). Chosen
     /// far outside any civil date a pipeline touches (±1,000,000 days ≈
-    /// ±2700 years) yet safely inside `i64` for clamp shifts and calendar
-    /// math. Consumers check [`DayInterval::is_whole`], never the raw
-    /// bounds.
-    pub const WHOLE: DayInterval = DayInterval {
-        start: -1_000_000,
-        end: 1_000_000,
+    /// ±2700 years, in seconds) yet safely inside `i64` for clamp shifts and
+    /// calendar math. Consumers check [`PartitionInterval::is_whole`], never
+    /// the raw bounds.
+    pub const WHOLE: PartitionInterval = PartitionInterval {
+        start: -1_000_000 * DAY_SECONDS,
+        end: 1_000_000 * DAY_SECONDS,
     };
 
     pub fn new(start: i64, end: i64) -> Self {
-        DayInterval { start, end }
+        PartitionInterval { start, end }
+    }
+
+    /// The whole day `[day_start(ordinal), day_start(ordinal) + 1 day)` —
+    /// migration helper for callers that still think in day ordinals.
+    pub fn whole_day(ordinal: i64) -> Self {
+        PartitionInterval {
+            start: day_start(ordinal),
+            end: day_start(ordinal) + DAY_SECONDS,
+        }
     }
 
     /// Whether this interval means "the whole table" — it contains the
-    /// [`DayInterval::WHOLE`] sentinel (clamp shifts only ever widen it).
+    /// [`PartitionInterval::WHOLE`] sentinel (clamp shifts only ever widen
+    /// it).
     pub fn is_whole(&self) -> bool {
         self.start <= Self::WHOLE.start && self.end >= Self::WHOLE.end
     }
@@ -105,15 +130,15 @@ mod day_interval_tests {
     #[test]
     fn is_whole_requires_both_bounds_to_have_widened() {
         assert!(
-            !DayInterval::new(DayInterval::WHOLE.start, 0).is_whole(),
+            !PartitionInterval::new(PartitionInterval::WHOLE.start, 0).is_whole(),
             "a widened start with a finite end must not read as whole"
         );
         assert!(
-            !DayInterval::new(0, DayInterval::WHOLE.end).is_whole(),
+            !PartitionInterval::new(0, PartitionInterval::WHOLE.end).is_whole(),
             "a widened end with a finite start must not read as whole"
         );
         assert!(
-            DayInterval::WHOLE.is_whole(),
+            PartitionInterval::WHOLE.is_whole(),
             "an interval widened on both sides must read as whole"
         );
     }
@@ -121,29 +146,30 @@ mod day_interval_tests {
     #[test]
     fn is_open_ended_requires_a_finite_start_and_a_widened_end() {
         assert!(
-            DayInterval::new(5, DayInterval::WHOLE.end).is_open_ended(),
+            PartitionInterval::new(5, PartitionInterval::WHOLE.end).is_open_ended(),
             "a finite start with a widened end is open-ended"
         );
         assert!(
-            !DayInterval::new(5, 10).is_open_ended(),
+            !PartitionInterval::new(5, 10).is_open_ended(),
             "both bounds finite is not open-ended"
         );
         assert!(
-            !DayInterval::WHOLE.is_open_ended(),
+            !PartitionInterval::WHOLE.is_open_ended(),
             "a fully-whole interval is not open-ended (it is whole)"
         );
         assert!(
-            !DayInterval::new(DayInterval::WHOLE.start, DayInterval::WHOLE.end).is_open_ended(),
+            !PartitionInterval::new(PartitionInterval::WHOLE.start, PartitionInterval::WHOLE.end)
+                .is_open_ended(),
             "a widened start disqualifies open-ended even with a widened end"
         );
     }
 }
 
 /// Sort and merge overlapping/adjacent intervals into a normal form.
-pub fn normalize(mut intervals: Vec<DayInterval>) -> Vec<DayInterval> {
+pub fn normalize(mut intervals: Vec<PartitionInterval>) -> Vec<PartitionInterval> {
     intervals.retain(|i| !i.is_empty());
     intervals.sort();
-    let mut merged: Vec<DayInterval> = Vec::new();
+    let mut merged: Vec<PartitionInterval> = Vec::new();
     for iv in intervals {
         match merged.last_mut() {
             Some(last) if iv.start <= last.end => last.end = last.end.max(iv.end),
@@ -191,14 +217,36 @@ pub fn ordinal_to_iso(ordinal: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// The grain of a table's partition axis. Intervals are always stored in
-/// day ordinals; a coarser grain constrains them to aligned boundaries.
+/// Seconds-since-epoch of a day ordinal's own midnight boundary — the
+/// bridge between the civil-calendar (day-ordinal) helpers above and
+/// [`PartitionInterval`]'s exact-seconds representation.
+pub fn day_start(ordinal: i64) -> i64 {
+    ordinal * DAY_SECONDS
+}
+
+/// The day ordinal whose midnight boundary is at or before `secs` (floor
+/// division — the inverse of [`day_start`] for a non-boundary instant).
+fn ordinal_of(secs: i64) -> i64 {
+    secs.div_euclid(DAY_SECONDS)
+}
+
+/// The grain of a table's partition axis. [`PartitionInterval`] bounds are
+/// always exact seconds; a coarser grain constrains them to aligned
+/// boundaries via [`PartitionGrain::align_outward`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PartitionGrain {
+    /// One partition per hour.
+    Hour,
     #[default]
     Day,
+    /// One partition per calendar week, starting on `start_dow`.
+    Week { start_dow: chrono::Weekday },
     /// One partition per calendar month.
     Month,
+    /// One partition per calendar quarter.
+    Quarter,
+    /// One partition per calendar year.
+    Year,
     /// No clock at all (an unclocked lookup/dim): every delta on and every
     /// requirement of this axis is the whole table (ratified P6) — there is
     /// no interval structure to be finer against.
@@ -214,20 +262,70 @@ impl PartitionGrain {
     /// Align an interval **outward** to this grain's boundaries — a touched
     /// month is a whole dirty (or required) month; an unclocked axis is
     /// all-or-nothing. Outward maps are monotone, so sufficiency composes
-    /// hop by hop; narrowing never would.
-    fn align_outward(&self, iv: &DayInterval) -> DayInterval {
+    /// hop by hop; narrowing never would. The [`PartitionInterval::WHOLE`]
+    /// sentinel short-circuits before any civil-calendar arithmetic — civil
+    /// math over ±2700-year bounds is meaningless and unnecessary since the
+    /// sentinel is already the outward-aligned fixed point of every grain.
+    fn align_outward(&self, iv: &PartitionInterval) -> PartitionInterval {
+        if iv.is_whole() {
+            return PartitionInterval::WHOLE;
+        }
         match self {
-            PartitionGrain::Day => *iv,
-            PartitionGrain::Month => {
-                let (sy, sm, _) = civil_from_ordinal(iv.start);
-                let (ey, em, _) = civil_from_ordinal(iv.end - 1);
-                let (ny, nm) = if em == 12 { (ey + 1, 1) } else { (ey, em + 1) };
-                DayInterval {
-                    start: day_ordinal(sy, sm, 1),
-                    end: day_ordinal(ny, nm, 1),
+            PartitionGrain::Hour => PartitionInterval {
+                start: floor_to(iv.start, HOUR_SECONDS),
+                end: ceil_to(iv.end, HOUR_SECONDS),
+            },
+            PartitionGrain::Day => PartitionInterval {
+                start: floor_to(iv.start, DAY_SECONDS),
+                end: ceil_to(iv.end, DAY_SECONDS),
+            },
+            PartitionGrain::Week { start_dow } => {
+                let start_day = ordinal_of(iv.start);
+                let end_day = ordinal_of(iv.end - 1);
+                let dow_idx = |ordinal: i64| (ordinal.rem_euclid(7) + 3).rem_euclid(7);
+                let target = start_dow.num_days_from_monday() as i64;
+                let back = |day: i64| day - (dow_idx(day) - target).rem_euclid(7);
+                let aligned_start = back(start_day);
+                let aligned_end = back(end_day) + 7;
+                PartitionInterval {
+                    start: day_start(aligned_start),
+                    end: day_start(aligned_end),
                 }
             }
-            PartitionGrain::Unclocked => DayInterval::WHOLE,
+            PartitionGrain::Month => {
+                let (sy, sm, _) = civil_from_ordinal(ordinal_of(iv.start));
+                let (ey, em, _) = civil_from_ordinal(ordinal_of(iv.end - 1));
+                let (ny, nm) = if em == 12 { (ey + 1, 1) } else { (ey, em + 1) };
+                PartitionInterval {
+                    start: day_start(day_ordinal(sy, sm, 1)),
+                    end: day_start(day_ordinal(ny, nm, 1)),
+                }
+            }
+            PartitionGrain::Quarter => {
+                let quarter_start_month = |m: u32| ((m - 1) / 3) * 3 + 1;
+                let (sy, sm, _) = civil_from_ordinal(ordinal_of(iv.start));
+                let (ey, em, _) = civil_from_ordinal(ordinal_of(iv.end - 1));
+                let sqm = quarter_start_month(sm);
+                let eqm = quarter_start_month(em);
+                let (ny, nqm) = if eqm == 10 {
+                    (ey + 1, 1)
+                } else {
+                    (ey, eqm + 3)
+                };
+                PartitionInterval {
+                    start: day_start(day_ordinal(sy, sqm, 1)),
+                    end: day_start(day_ordinal(ny, nqm, 1)),
+                }
+            }
+            PartitionGrain::Year => {
+                let (sy, _, _) = civil_from_ordinal(ordinal_of(iv.start));
+                let (ey, _, _) = civil_from_ordinal(ordinal_of(iv.end - 1));
+                PartitionInterval {
+                    start: day_start(day_ordinal(sy, 1, 1)),
+                    end: day_start(day_ordinal(ey + 1, 1, 1)),
+                }
+            }
+            PartitionGrain::Unclocked => PartitionInterval::WHOLE,
             // A keyed-grain node has no partition axis to align outward to —
             // an admitted keyed origin's seeded interval is never itself
             // interpreted spatially (`classify_keyed_edges` routes every
@@ -240,8 +338,8 @@ impl PartitionGrain {
     }
 }
 
-/// Route-aware day-margin projection for a locality-admitted composed
-/// node's own inbound (driving-source → composed-output) edge
+/// Route-aware exact-seconds margin projection for a locality-admitted
+/// composed node's own inbound (driving-source → composed-output) edge
 /// (`incremental_shapes.md` §"What the composed shape uniquely enables"):
 /// routes 1–2 project **exactly** — [`locality::LocalitySlice::DeltaValues`]
 /// (route 2, key-determined) carries no margin at all, and
@@ -254,7 +352,11 @@ impl PartitionGrain {
 /// `locality::establish_locality`'s route-3 derivation, so no separate `r`
 /// arithmetic is needed here. Never narrows — a route this function doesn't
 /// recognize is a compile error (exhaustive match), not a silent default.
-pub fn locality_margin_days(slice: &locality::LocalitySlice) -> (i64, i64) {
+/// Returns **exact** seconds, never ceiled to whole days — a receiving Day
+/// (or coarser) axis performs that widening itself, in
+/// [`PartitionGrain::align_outward`], once this margin is applied to an
+/// [`Edge`]'s own `before_seconds`/`after_seconds`.
+pub fn locality_margin_seconds(slice: &locality::LocalitySlice) -> (i64, i64) {
     use locality::LocalitySlice;
     match slice {
         LocalitySlice::DeltaValues { .. } => (0, 0),
@@ -267,7 +369,7 @@ pub fn locality_margin_days(slice: &locality::LocalitySlice) -> (i64, i64) {
             margin_before,
             margin_after,
             ..
-        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+        } => (margin_before.0 as i64, margin_after.0 as i64),
     }
 }
 
@@ -330,7 +432,7 @@ fn parse_iso_day(s: &str) -> Option<i64> {
 pub fn project_observed_delta(
     slice: &locality::LocalitySlice,
     partitions: &[String],
-) -> Vec<DayInterval> {
+) -> Vec<PartitionInterval> {
     use locality::LocalitySlice;
     let (before, after) = match slice {
         LocalitySlice::DeltaValues { .. } => (0, 0),
@@ -343,17 +445,22 @@ pub fn project_observed_delta(
             margin_after,
             recurrence_bounded: true,
             ..
-        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+        } => (margin_before.0 as i64, margin_after.0 as i64),
         LocalitySlice::RecurrenceBounded {
             margin_before,
             margin_after,
             ..
-        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+        } => (margin_before.0 as i64, margin_after.0 as i64),
     };
-    let intervals: Vec<DayInterval> = partitions
+    let intervals: Vec<PartitionInterval> = partitions
         .iter()
         .filter_map(|p| parse_iso_day(p))
-        .map(|day| DayInterval::new(day - before, day + 1 + after))
+        .map(|day| {
+            PartitionInterval::new(
+                day_start(day) - before,
+                day_start(day) + DAY_SECONDS + after,
+            )
+        })
         .collect();
     normalize(intervals)
 }
@@ -464,16 +571,18 @@ fn classify_keyed_edges(edges: &[Edge]) -> Result<Vec<KeyedAdmission>, String> {
 }
 
 /// One dependency edge: `downstream` reads `upstream` under a derived scan
-/// clamp of `(before_days, after_days)` whole days, between axes of the
-/// stated grains. The clamp applies in days; each hop then aligns outward
-/// to the receiving axis's grain (`10-dependency-propagation.md` §7:
-/// `align_outward ∘ reflect ∘ align_outward`).
+/// clamp of `(before_seconds, after_seconds)` **exact** seconds, between
+/// axes of the stated grains. The clamp applies exactly; each hop then
+/// aligns outward to the receiving axis's grain (`10-dependency-propagation.md`
+/// §7: `align_outward ∘ reflect ∘ align_outward`) — a partial-day margin on
+/// a Day-grain axis still widens to whole days there, but the same margin on
+/// an Hour-grain axis widens only to whole hours.
 #[derive(Debug, Clone)]
 pub struct Edge {
     pub upstream: String,
     pub downstream: String,
-    pub before_days: i64,
-    pub after_days: i64,
+    pub before_seconds: i64,
+    pub after_seconds: i64,
     pub upstream_grain: PartitionGrain,
     pub downstream_grain: PartitionGrain,
     /// The typed component vector for this edge (`incremental_models.md`
@@ -488,33 +597,32 @@ pub struct Edge {
     /// refusal. Empty on [`Edge::from_clamp`] (today's untyped-edge
     /// behaviour); populate via [`Edge::with_components`].
     pub components: Vec<EdgeComponent>,
-    /// The derived write footprint in whole days, ceiled outward exactly as
-    /// `before_days`/`after_days` are, or `None` when the clamp it was
-    /// built from carried no derived footprint at all
+    /// The derived write footprint in exact seconds, or `None` when the
+    /// clamp it was built from carried no derived footprint at all
     /// (`ScanClamp::write_footprint`'s own doc comment). `reflect` uses this
     /// pair when present; a `None` here dirties the whole downstream axis
-    /// (`DayInterval::WHOLE`) rather than silently reusing the read-side
-    /// `(before_days, after_days)` mirror as a stand-in.
-    pub footprint_days: Option<(i64, i64)>,
+    /// (`PartitionInterval::WHOLE`) rather than silently reusing the
+    /// read-side `(before_seconds, after_seconds)` mirror as a stand-in.
+    pub footprint_seconds: Option<(i64, i64)>,
 }
 
 impl Edge {
     /// Build the edge from a cell's derived [`ScanClamp`] — the same number
     /// that sizes the maintenance SQL sizes the propagation. Day grain on
-    /// both axes; override the grain fields for coarser tables. Carries no
-    /// typed components — today's untyped-edge behaviour.
+    /// both axes; override the grain fields for coarser/finer tables.
+    /// Carries no typed components — today's untyped-edge behaviour.
     pub fn from_clamp(downstream: &str, clamp: &ScanClamp) -> Self {
         Edge {
             upstream: clamp.source.clone(),
             downstream: downstream.to_string(),
-            before_days: clamp_days(clamp.before),
-            after_days: clamp_days(clamp.after),
+            before_seconds: clamp.before.0 as i64,
+            after_seconds: clamp.after.0 as i64,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
-            footprint_days: clamp
+            footprint_seconds: clamp
                 .footprint()
-                .map(|(before, after)| (clamp_days(before), clamp_days(after))),
+                .map(|(before, after)| (before.0 as i64, after.0 as i64)),
         }
     }
 
@@ -528,14 +636,14 @@ impl Edge {
     /// The downstream partitions an upstream delta of `[a, b)` dirties:
     /// the scan reflection `[a − after, b + before)`, aligned outward to
     /// the downstream axis's grain.
-    fn reflect(&self, delta: &DayInterval) -> DayInterval {
-        let Some((footprint_before, footprint_after)) = self.footprint_days else {
+    fn reflect(&self, delta: &PartitionInterval) -> PartitionInterval {
+        let Some((footprint_before, footprint_after)) = self.footprint_seconds else {
             // No derived footprint to reflect through — widen to the whole
             // downstream axis rather than guessing (`ScanClamp::
             // write_footprint`'s doc comment).
-            return DayInterval::WHOLE;
+            return PartitionInterval::WHOLE;
         };
-        self.downstream_grain.align_outward(&DayInterval {
+        self.downstream_grain.align_outward(&PartitionInterval {
             start: delta.start - footprint_before,
             end: delta.end + footprint_after,
         })
@@ -544,10 +652,10 @@ impl Edge {
     /// The upstream partitions a downstream requirement of `[s, e)` needs:
     /// the scan clamp directly `[s − before, e + after)`, aligned outward
     /// to the upstream axis's grain.
-    fn require(&self, requirement: &DayInterval) -> DayInterval {
-        self.upstream_grain.align_outward(&DayInterval {
-            start: requirement.start - self.before_days,
-            end: requirement.end + self.after_days,
+    fn require(&self, requirement: &PartitionInterval) -> PartitionInterval {
+        self.upstream_grain.align_outward(&PartitionInterval {
+            start: requirement.start - self.before_seconds,
+            end: requirement.end + self.after_seconds,
         })
     }
 }
@@ -558,10 +666,10 @@ pub struct Propagation {
     /// `(model, upstream)` → merged dirty intervals of `model` caused by
     /// that inbound edge. This is the trigger-cell key: the caller runs the
     /// plan cell for `Trigger::…{ source: upstream }` over these regions.
-    pub per_edge: BTreeMap<(String, String), Vec<DayInterval>>,
+    pub per_edge: BTreeMap<(String, String), Vec<PartitionInterval>>,
     /// `model` → merged dirty intervals across all inbound edges — what the
     /// model's own consumers see as *their* upstream delta.
-    pub dirty: BTreeMap<String, Vec<DayInterval>>,
+    pub dirty: BTreeMap<String, Vec<PartitionInterval>>,
     /// `(model, upstream)` → the keyed dirt-set records that edge produced
     /// (`incremental_models.md` §"The graph layer" → "Keyed dirt-sets and
     /// the narrowed refusal") — the keyed-channel counterpart to `per_edge`,
@@ -647,8 +755,8 @@ fn topo_order<'a>(
 /// return its backward reach in whole days, keyed by node name
 /// (`incremental_models.md` §"Time-unrolled self-edges"). Admitted iff the
 /// self-edge is a day/month partition axis on both sides, reads no forward
-/// margin (`after_days == 0`), and carries a positive backward margin
-/// (`before_days > 0` — the same "strictly time-backward" proof
+/// margin (`after_seconds == 0`), and carries a positive backward margin
+/// (`before_seconds > 0` — the same "strictly time-backward" proof
 /// `smelt_logical::analysis::window_independence::self_edge_clamp`
 /// derives). Every other self-edge shape (a `Keyed` axis, a forward reach,
 /// or a zero/negative backward margin) is refused fail-loud, naming the
@@ -673,22 +781,22 @@ fn self_edges(edges: &[Edge]) -> Result<BTreeMap<&str, i64>, String> {
                 e.upstream, e.upstream_grain, e.downstream_grain
             ));
         }
-        if e.after_days != 0 {
+        if e.after_seconds != 0 {
             return Err(format!(
                 "MaintenanceGraphUnsupportedNode: '{}' is self-referential and reads {} day(s) \
                  forward of the current partition — not provably convergent, time-unrolling \
                  refused",
-                e.upstream, e.after_days
+                e.upstream, e.after_seconds
             ));
         }
-        if e.before_days <= 0 {
+        if e.before_seconds <= 0 {
             return Err(format!(
                 "MaintenanceGraphUnsupportedNode: '{}' is self-referential with no derivable \
                  backward bound — time-unrolling refused",
                 e.upstream
             ));
         }
-        result.insert(e.upstream.as_str(), e.before_days);
+        result.insert(e.upstream.as_str(), e.before_seconds);
     }
     Ok(result)
 }
@@ -699,7 +807,7 @@ fn self_edges(edges: &[Edge]) -> Result<BTreeMap<&str, i64>, String> {
 /// on a cycle.
 pub fn propagate(
     edges: &[Edge],
-    source_deltas: &BTreeMap<String, Vec<DayInterval>>,
+    source_deltas: &BTreeMap<String, Vec<PartitionInterval>>,
 ) -> Result<Propagation, String> {
     let self_clamps = self_edges(edges)?;
     let keyed_admission = classify_keyed_edges(edges)?;
@@ -730,12 +838,12 @@ pub fn propagate(
         if self_clamps.contains_key(node) {
             if let Some(existing) = result.dirty.get(node).cloned() {
                 if !existing.is_empty() {
-                    let widened: Vec<DayInterval> = normalize(
+                    let widened: Vec<PartitionInterval> = normalize(
                         existing
                             .iter()
-                            .map(|iv| DayInterval {
+                            .map(|iv| PartitionInterval {
                                 start: iv.start,
-                                end: DayInterval::WHOLE.end,
+                                end: PartitionInterval::WHOLE.end,
                             })
                             .collect(),
                     );
@@ -790,10 +898,10 @@ pub fn propagate(
                             .per_edge
                             .entry((e.downstream.clone(), e.upstream.clone()))
                             .or_default();
-                        per_edge.push(DayInterval::WHOLE);
+                        per_edge.push(PartitionInterval::WHOLE);
                         *per_edge = normalize(per_edge.clone());
                         let model_dirty = result.dirty.entry(e.downstream.clone()).or_default();
-                        model_dirty.push(DayInterval::WHOLE);
+                        model_dirty.push(PartitionInterval::WHOLE);
                         *model_dirty = normalize(model_dirty.clone());
                     }
                 }
@@ -808,7 +916,7 @@ pub fn propagate(
                     if node_dirty.is_empty() {
                         continue;
                     }
-                    let reflected: Vec<DayInterval> =
+                    let reflected: Vec<PartitionInterval> =
                         node_dirty.iter().map(|iv| e.reflect(iv)).collect();
                     let per_edge = result
                         .per_edge
@@ -850,7 +958,7 @@ pub struct RequiredSlices {
     /// the target (raw sources *and* intermediate models) plus the target
     /// itself. For a raw source this is the data prerequisite (the slice to
     /// stage or verify); for a model it is the region to build.
-    pub required: BTreeMap<String, Vec<DayInterval>>,
+    pub required: BTreeMap<String, Vec<PartitionInterval>>,
     /// The required **models** (nodes with at least one inbound edge) in
     /// dependency order, ending with the target — the order a bounded
     /// test/validation build materializes them.
@@ -873,7 +981,7 @@ pub struct RequiredSlices {
 pub fn required_inputs(
     edges: &[Edge],
     target: &str,
-    period: DayInterval,
+    period: PartitionInterval,
 ) -> Result<RequiredSlices, String> {
     if period.is_empty() {
         return Ok(RequiredSlices::default());
@@ -882,7 +990,7 @@ pub fn required_inputs(
     let keyed_admission = classify_keyed_edges(edges)?;
     let order = topo_order(edges, [target])?;
 
-    let mut required: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    let mut required: BTreeMap<String, Vec<PartitionInterval>> = BTreeMap::new();
     // A request for part of a coarse partition is a request for the whole
     // partition — align the period outward to the target's grain.
     required.insert(
@@ -904,9 +1012,9 @@ pub fn required_inputs(
         // (`incremental_models.md` §"Time-unrolled self-edges" — "backward
         // … additionally requires the model's own basis").
         if let Some(&before) = self_clamps.get(*node) {
-            let widened: Vec<DayInterval> = node_required
+            let widened: Vec<PartitionInterval> = node_required
                 .iter()
-                .map(|iv| DayInterval {
+                .map(|iv| PartitionInterval {
                     start: iv.start - before,
                     end: iv.end,
                 })
@@ -922,8 +1030,8 @@ pub fn required_inputs(
             // An admitted keyed edge has no partition axis to clamp
             // against — the upstream (keyed) ancestor requires the whole
             // table, never clamp arithmetic on a nonexistent axis.
-            let widened: Vec<DayInterval> = match &keyed_admission[idx] {
-                KeyedAdmission::Admitted(_) => vec![DayInterval::WHOLE],
+            let widened: Vec<PartitionInterval> = match &keyed_admission[idx] {
+                KeyedAdmission::Admitted(_) => vec![PartitionInterval::WHOLE],
                 KeyedAdmission::NotKeyed => node_required.iter().map(|iv| e.require(iv)).collect(),
             };
             let upstream_required = required.entry(e.upstream.clone()).or_default();
@@ -954,9 +1062,9 @@ pub fn required_inputs(
 
 // ---------------------------------------------------------------------------
 // Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
-// `locality_margin_days`'s route-aware mapping, and the composed-node
+// `locality_margin_seconds`'s route-aware mapping, and the composed-node
 // forward/backward projection it feeds (`propagate`/`required_inputs`
-// already generically apply an edge's `(before_days, after_days)` margin —
+// already generically apply an edge's `(before_seconds, after_seconds)` margin —
 // this module's own composition math — so these tests exercise that SAME
 // machinery with margins actually derived from a [`locality::LocalitySlice`]
 // rather than a hand-typed clamp, pinning that routes 1–2 project exactly
@@ -966,16 +1074,21 @@ pub fn required_inputs(
 mod locality_margin_tests {
     use super::*;
 
+    /// `before_days`/`after_days` in whole days, scaled to exact seconds —
+    /// keeps this module's existing day-scale fixtures readable while the
+    /// underlying `Edge` fields are exact seconds.
     fn edge(before_days: i64, after_days: i64) -> Edge {
+        let before_seconds = before_days * DAY_SECONDS;
+        let after_seconds = after_days * DAY_SECONDS;
         Edge {
             upstream: "source".to_string(),
             downstream: "composed".to_string(),
-            before_days,
-            after_days,
+            before_seconds,
+            after_seconds,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
-            footprint_days: Some((after_days, before_days)),
+            footprint_seconds: Some((after_seconds, before_seconds)),
         }
     }
 
@@ -984,7 +1097,7 @@ mod locality_margin_tests {
         let slice = locality::LocalitySlice::DeltaValues {
             partition_column: "d".to_string(),
         };
-        assert_eq!(locality_margin_days(&slice), (0, 0));
+        assert_eq!(locality_margin_seconds(&slice), (0, 0));
     }
 
     #[test]
@@ -995,34 +1108,37 @@ mod locality_margin_tests {
             margin_after: Seconds::days(1),
             recurrence_bounded: true,
         };
-        assert_eq!(locality_margin_days(&slice), (2, 1));
+        assert_eq!(
+            locality_margin_seconds(&slice),
+            (2 * DAY_SECONDS, DAY_SECONDS)
+        );
     }
 
     #[test]
-    fn window_route_projects_ceil_of_a_partial_day_margin() {
-        // A 36h backward margin must widen to 2 whole days — a partial-day
-        // margin widens to the whole partition it touches (this module's
-        // own `clamp_days` rule, reused here rather than reimplemented).
+    fn window_route_projects_exact_seconds_not_ceiled_days() {
+        // A 36h backward margin projects as exact seconds — ceiling to a
+        // whole-day (or whole-hour, ...) partition is the RECEIVING axis's
+        // job (`PartitionGrain::align_outward`), not this margin projection.
         let slice = locality::LocalitySlice::Window {
             partition_column: "d".to_string(),
             margin_before: Seconds(36 * 3600),
             margin_after: Seconds::ZERO,
             recurrence_bounded: true,
         };
-        assert_eq!(locality_margin_days(&slice), (2, 0));
+        assert_eq!(locality_margin_seconds(&slice), (36 * 3600, 0));
     }
 
     #[test]
     fn recurrence_bounded_route_3_declared_projects_the_folded_margin() {
         // `margin_before` already has `r` folded in per the variant's own
-        // doc comment — no separate `r` arithmetic in `locality_margin_days`.
+        // doc comment — no separate `r` arithmetic in `locality_margin_seconds`.
         let slice = locality::LocalitySlice::RecurrenceBounded {
             partition_column: "d".to_string(),
             margin_before: Seconds::days(7),
             margin_after: Seconds::ZERO,
             r: Seconds::days(5),
         };
-        assert_eq!(locality_margin_days(&slice), (7, 0));
+        assert_eq!(locality_margin_seconds(&slice), (7 * DAY_SECONDS, 0));
     }
 
     /// An upstream delta `[a, b)` through a zero-margin (route 1/2, no
@@ -1031,7 +1147,7 @@ mod locality_margin_tests {
     #[test]
     fn zero_margin_edge_projects_the_exact_delta_forward() {
         let e = edge(0, 0);
-        let delta = DayInterval::new(10, 12);
+        let delta = PartitionInterval::new(10 * DAY_SECONDS, 12 * DAY_SECONDS);
         assert_eq!(e.reflect(&delta), delta);
     }
 
@@ -1040,9 +1156,12 @@ mod locality_margin_tests {
     #[test]
     fn nonzero_margin_edge_widens_the_delta_forward() {
         let e = edge(3, 1);
-        let delta = DayInterval::new(10, 12);
+        let delta = PartitionInterval::new(10 * DAY_SECONDS, 12 * DAY_SECONDS);
         let widened = e.reflect(&delta);
-        assert_eq!(widened, DayInterval::new(9, 15));
+        assert_eq!(
+            widened,
+            PartitionInterval::new(9 * DAY_SECONDS, 15 * DAY_SECONDS)
+        );
         assert!(widened.start <= delta.start && delta.end <= widened.end);
         assert_ne!(widened, delta, "a nonzero margin must actually widen");
     }
@@ -1053,7 +1172,7 @@ mod locality_margin_tests {
     /// route derives.
     #[test]
     fn forward_projection_always_contains_the_exact_delta() {
-        let delta = DayInterval::new(100, 103);
+        let delta = PartitionInterval::new(100 * DAY_SECONDS, 103 * DAY_SECONDS);
         for (before, after) in [(0, 0), (1, 0), (0, 1), (2, 3), (7, 5)] {
             let e = edge(before, after);
             let projected = e.reflect(&delta);
@@ -1070,7 +1189,7 @@ mod locality_margin_tests {
     /// slice.
     #[test]
     fn required_inputs_resolves_route_aware_through_a_composed_edge() {
-        let period = DayInterval::new(20, 21);
+        let period = PartitionInterval::new(20 * DAY_SECONDS, 21 * DAY_SECONDS);
 
         let exact_edges = vec![edge(0, 0)];
         let exact = required_inputs(&exact_edges, "composed", period).expect("resolve");
@@ -1080,7 +1199,10 @@ mod locality_margin_tests {
         let widened = required_inputs(&widened_edges, "composed", period).expect("resolve");
         assert_eq!(
             widened.required.get("source"),
-            Some(&vec![DayInterval::new(17, 22)])
+            Some(&vec![PartitionInterval::new(
+                17 * DAY_SECONDS,
+                22 * DAY_SECONDS
+            )])
         );
     }
 }
@@ -1140,8 +1262,8 @@ mod project_observed_delta_tests {
         assert_eq!(
             projected,
             vec![
-                DayInterval::new(day_ordinal(2026, 1, 10), day_ordinal(2026, 1, 11)),
-                DayInterval::new(day_ordinal(2026, 1, 12), day_ordinal(2026, 1, 13)),
+                PartitionInterval::whole_day(day_ordinal(2026, 1, 10)),
+                PartitionInterval::whole_day(day_ordinal(2026, 1, 12)),
             ],
             "route 1 (Window, recurrence_bounded: false) must project each observed partition \
              to its own exact day, ignoring the slice's own read-side lateness margin"
@@ -1160,10 +1282,13 @@ mod project_observed_delta_tests {
         // project exactly).
         let partitions = vec!["2026-01-10".to_string()];
         let projected = project_observed_delta(&static_recurrence_window_slice(), &partitions);
-        let day = day_ordinal(2026, 1, 10);
+        let day = day_start(day_ordinal(2026, 1, 10));
         assert_eq!(
             projected,
-            vec![DayInterval::new(day - 3, day + 1)],
+            vec![PartitionInterval::new(
+                day - 3 * DAY_SECONDS,
+                day + DAY_SECONDS
+            )],
             "a statically-derived route-3 Window (recurrence_bounded: true) must widen backward \
              by its folded margin, not project the observed partition exactly"
         );
@@ -1175,10 +1300,7 @@ mod project_observed_delta_tests {
         let projected = project_observed_delta(&delta_values_slice(), &partitions);
         assert_eq!(
             projected,
-            vec![DayInterval::new(
-                day_ordinal(2026, 1, 10),
-                day_ordinal(2026, 1, 11)
-            )]
+            vec![PartitionInterval::whole_day(day_ordinal(2026, 1, 10))]
         );
     }
 
@@ -1186,10 +1308,13 @@ mod project_observed_delta_tests {
     fn route_3_recurrence_bounded_widens_backward_by_r_and_margins() {
         let partitions = vec!["2026-01-10".to_string()];
         let projected = project_observed_delta(&recurrence_bounded_slice(), &partitions);
-        let day = day_ordinal(2026, 1, 10);
+        let day = day_start(day_ordinal(2026, 1, 10));
         assert_eq!(
             projected,
-            vec![DayInterval::new(day - 5, day + 1)],
+            vec![PartitionInterval::new(
+                day - 5 * DAY_SECONDS,
+                day + DAY_SECONDS
+            )],
             "route 3's declared r (already folded into margin_before) must widen the observed \
              partition backward, not just project it exactly"
         );
@@ -1210,10 +1335,13 @@ mod project_observed_delta_tests {
         };
         let partitions = vec!["2026-01-10".to_string()];
         let projected = project_observed_delta(&slice, &partitions);
-        let day = day_ordinal(2026, 1, 10);
+        let day = day_start(day_ordinal(2026, 1, 10));
         assert_eq!(
             projected,
-            vec![DayInterval::new(day - 5, day + 3)],
+            vec![PartitionInterval::new(
+                day - 5 * DAY_SECONDS,
+                day + 3 * DAY_SECONDS
+            )],
             "a nonzero margin_after must widen the projected interval forward beyond day + 1"
         );
     }
@@ -1233,10 +1361,7 @@ mod project_observed_delta_tests {
         let projected = project_observed_delta(&window_slice(), &partitions);
         assert_eq!(
             projected,
-            vec![DayInterval::new(
-                day_ordinal(2026, 1, 10),
-                day_ordinal(2026, 1, 11)
-            )]
+            vec![PartitionInterval::whole_day(day_ordinal(2026, 1, 10))]
         );
     }
 
@@ -1259,7 +1384,7 @@ mod project_observed_delta_tests {
             let projected = project_observed_delta(&slice, &partitions);
             for p in &partitions {
                 let day = parse_iso_day(p).expect("valid test date");
-                let observed = DayInterval::new(day, day + 1);
+                let observed = PartitionInterval::whole_day(day);
                 assert!(
                     projected
                         .iter()
@@ -1275,7 +1400,7 @@ mod project_observed_delta_tests {
 // ---------------------------------------------------------------------------
 // Phase 3 (`docs/outcomes/20260809-output-delta-typing/outcome.md`): typed
 // `Edge::components` are advisory this phase — `propagate`/`required_inputs`
-// read only `before_days`/`after_days`/the grain fields, unchanged by
+// read only `before_seconds`/`after_seconds`/the grain fields, unchanged by
 // whether a component vector is attached. These tests pin that an edge's
 // interval-math behaviour is byte-identical with or without components, for
 // both a window-addressed component and a degraded `WholeModel` one.
@@ -1312,20 +1437,26 @@ mod typed_edge_advisory_tests {
         }
     }
 
+    /// `before_days`/`after_days` in whole days, scaled to exact seconds.
     fn base_edge(before_days: i64, after_days: i64) -> Edge {
+        let before_seconds = before_days * DAY_SECONDS;
+        let after_seconds = after_days * DAY_SECONDS;
         Edge {
             upstream: "source".to_string(),
             downstream: "downstream".to_string(),
-            before_days,
-            after_days,
+            before_seconds,
+            after_seconds,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
-            footprint_days: Some((after_days, before_days)),
+            footprint_seconds: Some((after_seconds, before_seconds)),
         }
     }
 
-    fn source_deltas(source: &str, iv: DayInterval) -> BTreeMap<String, Vec<DayInterval>> {
+    fn source_deltas(
+        source: &str,
+        iv: PartitionInterval,
+    ) -> BTreeMap<String, Vec<PartitionInterval>> {
         let mut m = BTreeMap::new();
         m.insert(source.to_string(), vec![iv]);
         m
@@ -1335,7 +1466,10 @@ mod typed_edge_advisory_tests {
     fn typed_edge_forward_matches_untyped_for_window_components() {
         let untyped = base_edge(1, 2);
         let typed = base_edge(1, 2).with_components(vec![window_component()]);
-        let delta = source_deltas("source", DayInterval::new(10, 12));
+        let delta = source_deltas(
+            "source",
+            PartitionInterval::new(10 * DAY_SECONDS, 12 * DAY_SECONDS),
+        );
 
         let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
         let typed_result = propagate(&[typed], &delta).expect("typed propagates");
@@ -1354,26 +1488,26 @@ mod typed_edge_advisory_tests {
         let e1 = Edge {
             upstream: "source".to_string(),
             downstream: "mid".to_string(),
-            before_days: 1,
-            after_days: 0,
+            before_seconds: DAY_SECONDS,
+            after_seconds: 0,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
-            footprint_days: Some((0, 1)),
+            footprint_seconds: Some((0, DAY_SECONDS)),
         };
         let e2 = Edge {
             upstream: "mid".to_string(),
             downstream: "target".to_string(),
-            before_days: 0,
-            after_days: 1,
+            before_seconds: 0,
+            after_seconds: DAY_SECONDS,
             upstream_grain: PartitionGrain::Day,
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
-            footprint_days: Some((1, 0)),
+            footprint_seconds: Some((DAY_SECONDS, 0)),
         };
         let edges = vec![e1, e2];
 
-        let period = DayInterval::new(20, 21);
+        let period = PartitionInterval::new(20 * DAY_SECONDS, 21 * DAY_SECONDS);
         let required = required_inputs(&edges, "target", period).expect("resolve");
         let source_required = required.required.get("source").cloned().unwrap_or_default();
 
@@ -1394,7 +1528,10 @@ mod typed_edge_advisory_tests {
     fn whole_model_component_does_not_narrow_dirt() {
         let untyped = base_edge(1, 2);
         let typed = base_edge(1, 2).with_components(vec![whole_model_component()]);
-        let delta = source_deltas("source", DayInterval::new(10, 12));
+        let delta = source_deltas(
+            "source",
+            PartitionInterval::new(10 * DAY_SECONDS, 12 * DAY_SECONDS),
+        );
 
         let untyped_result = propagate(&[untyped], &delta).expect("untyped propagates");
         let typed_result = propagate(&[typed], &delta).expect("typed propagates");
@@ -1414,6 +1551,170 @@ mod typed_edge_advisory_tests {
             untyped_dirty, typed_dirty,
             "a WholeModel-degraded component must not narrow interval dirt below the untyped \
              edge's own result this phase (components are advisory, not yet acted on)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 26c (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+// propagation intervals at the node's own declared granularity, not a
+// blanket day ordinal — every `PartitionGrain` variant's `align_outward`,
+// and the exact-seconds (never ceiled-to-days) margin an edge carries.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod grain_alignment_tests {
+    use super::*;
+
+    /// `footprint_before`/`footprint_after` become both this edge's own
+    /// read-side margin (`before_seconds`/`after_seconds`, unused by these
+    /// `reflect`-only tests) and its write footprint (used by `reflect`) —
+    /// no before/after swap, unlike the composed-node fixtures elsewhere in
+    /// this file.
+    fn edge_at(grain: PartitionGrain, footprint_before: i64, footprint_after: i64) -> Edge {
+        Edge {
+            upstream: "source".to_string(),
+            downstream: "downstream".to_string(),
+            before_seconds: footprint_before,
+            after_seconds: footprint_after,
+            upstream_grain: grain,
+            downstream_grain: grain,
+            components: Vec::new(),
+            footprint_seconds: Some((footprint_before, footprint_after)),
+        }
+    }
+
+    #[test]
+    fn hour_grain_aligns_outward_to_the_hour() {
+        // A sub-hour delta must widen to exactly one hour, not one day.
+        let iv = PartitionInterval::new(10 * 60, 40 * 60); // [00:10, 00:40)
+        let aligned = PartitionGrain::Hour.align_outward(&iv);
+        assert_eq!(aligned, PartitionInterval::new(0, HOUR_SECONDS));
+    }
+
+    #[test]
+    fn hour_edge_chain_does_not_coarsen_to_days() {
+        // A 2h clamp over an Hour-grain chain dirties hours, strictly
+        // narrower than a whole-day result.
+        let e = edge_at(PartitionGrain::Hour, 0, 2 * HOUR_SECONDS);
+        let delta = PartitionInterval::new(0, HOUR_SECONDS);
+        let dirtied = e.reflect(&delta);
+        assert_eq!(dirtied, PartitionInterval::new(0, 3 * HOUR_SECONDS));
+        assert!(
+            dirtied.end - dirtied.start < DAY_SECONDS,
+            "an hour-grain reflection must not coarsen to a whole day: {dirtied:?}"
+        );
+    }
+
+    #[test]
+    fn week_grain_aligns_to_the_declared_week_start() {
+        // 2026-01-08 is a Thursday; a same-day delta aligned to a
+        // Monday-start week must land on Monday 2026-01-05, but aligned to
+        // a Sunday-start week must land on Sunday 2026-01-04 — different
+        // boundaries for the same delta.
+        let thursday = day_ordinal(2026, 1, 8);
+        let iv = PartitionInterval::whole_day(thursday);
+
+        let monday_start = PartitionGrain::Week {
+            start_dow: chrono::Weekday::Mon,
+        }
+        .align_outward(&iv);
+        assert_eq!(monday_start.start, day_start(day_ordinal(2026, 1, 5)));
+        assert_eq!(monday_start.end, day_start(day_ordinal(2026, 1, 12)));
+
+        let sunday_start = PartitionGrain::Week {
+            start_dow: chrono::Weekday::Sun,
+        }
+        .align_outward(&iv);
+        assert_eq!(sunday_start.start, day_start(day_ordinal(2026, 1, 4)));
+        assert_eq!(sunday_start.end, day_start(day_ordinal(2026, 1, 11)));
+        assert_ne!(monday_start, sunday_start);
+    }
+
+    #[test]
+    fn quarter_and_year_align_to_civil_boundaries() {
+        let iv = PartitionInterval::whole_day(day_ordinal(2026, 5, 15));
+        let quarter = PartitionGrain::Quarter.align_outward(&iv);
+        assert_eq!(quarter.start, day_start(day_ordinal(2026, 4, 1)));
+        assert_eq!(quarter.end, day_start(day_ordinal(2026, 7, 1)));
+
+        let year = PartitionGrain::Year.align_outward(&iv);
+        assert_eq!(year.start, day_start(day_ordinal(2026, 1, 1)));
+        assert_eq!(year.end, day_start(day_ordinal(2027, 1, 1)));
+
+        // A quarter spanning a year boundary (Q4 -> next Jan).
+        let q4 = PartitionInterval::whole_day(day_ordinal(2026, 11, 20));
+        let q4_aligned = PartitionGrain::Quarter.align_outward(&q4);
+        assert_eq!(q4_aligned.start, day_start(day_ordinal(2026, 10, 1)));
+        assert_eq!(q4_aligned.end, day_start(day_ordinal(2027, 1, 1)));
+    }
+
+    #[test]
+    fn clamp_margins_are_exact_seconds_not_ceiled_days() {
+        // A 36h clamp on an hour axis widens by exactly 36h; the SAME clamp
+        // on a day axis still widens to 2 whole days — via the receiving
+        // axis's own alignment, never a margin-side ceiling.
+        let margin = 36 * HOUR_SECONDS;
+        let delta = PartitionInterval::new(0, HOUR_SECONDS);
+
+        let hour_edge = edge_at(PartitionGrain::Hour, 0, margin);
+        let hour_dirtied = hour_edge.reflect(&delta);
+        assert_eq!(hour_dirtied.end - delta.start, HOUR_SECONDS + margin);
+
+        let day_edge = edge_at(PartitionGrain::Day, 0, margin);
+        let day_dirtied = day_edge.reflect(&delta);
+        assert_eq!(day_dirtied, PartitionInterval::new(0, 2 * DAY_SECONDS));
+    }
+
+    #[test]
+    fn whole_axis_sentinel_survives_alignment_at_every_grain() {
+        for grain in [
+            PartitionGrain::Hour,
+            PartitionGrain::Day,
+            PartitionGrain::Week {
+                start_dow: chrono::Weekday::Mon,
+            },
+            PartitionGrain::Month,
+            PartitionGrain::Quarter,
+            PartitionGrain::Year,
+            PartitionGrain::Unclocked,
+        ] {
+            let aligned = grain.align_outward(&PartitionInterval::WHOLE);
+            assert!(
+                aligned.is_whole(),
+                "{grain:?} must leave the WHOLE sentinel whole, got {aligned:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_grain_hop_widens_to_the_coarser_receiving_axis() {
+        let mut e = edge_at(PartitionGrain::Month, 0, 0);
+        e.upstream_grain = PartitionGrain::Hour;
+        e.downstream_grain = PartitionGrain::Month;
+        let delta = PartitionInterval::whole_day(day_ordinal(2026, 3, 15));
+        let dirtied = e.reflect(&delta);
+        assert_eq!(dirtied.start, day_start(day_ordinal(2026, 3, 1)));
+        assert_eq!(dirtied.end, day_start(day_ordinal(2026, 4, 1)));
+    }
+
+    /// Regression anchor: an existing day-only scenario's `Propagation` is
+    /// identical to today's — day-grain graphs are unchanged by this phase.
+    #[test]
+    fn day_grain_graphs_are_unchanged() {
+        let e = edge_at(PartitionGrain::Day, DAY_SECONDS, 0);
+        let mut source_deltas = BTreeMap::new();
+        source_deltas.insert(
+            "source".to_string(),
+            vec![PartitionInterval::whole_day(day_ordinal(2026, 1, 10))],
+        );
+        let prop = propagate(&[e], &source_deltas).expect("propagate");
+        let dirty = prop.dirty.get("downstream").cloned().unwrap_or_default();
+        assert_eq!(
+            dirty,
+            vec![PartitionInterval::new(
+                day_start(day_ordinal(2026, 1, 9)),
+                day_start(day_ordinal(2026, 1, 11))
+            )]
         );
     }
 }
