@@ -68,7 +68,8 @@ fs.writeFileSync("words.js",
   fmt("ANSWERS", answers) + fmt("ALLOWED", allowed));
 console.log(answers.length, allowed.length, answers.slice(0,3));
 '
-cp /tmp/words.js docs-site/docs/annes-words/words.js
+# copy into the repo using an ABSOLUTE path (the script above left you in /tmp)
+cp /tmp/words.js "$(git -C ~/smelt-sql rev-parse --show-toplevel)/docs-site/docs/annes-words/words.js"
 ```
 
 (Create the directory first: `mkdir -p docs-site/docs/annes-words docs-site/tests`.)
@@ -960,7 +961,7 @@ and add before the closing `</body>`:
 ```html
 <div id="modal-backdrop" hidden>
   <div id="stats-modal" role="dialog" aria-modal="true" aria-label="Statistics">
-    <button id="modal-close" type="button" aria-label="Close">&times;</button>
+    <button id="modal-close" class="modal-close" type="button" aria-label="Close">&times;</button>
     <h2>Statistics</h2>
     <div id="stat-numbers"></div>
     <h2>Guess Distribution</h2>
@@ -984,6 +985,9 @@ and add before the closing `</body>`:
 
 #modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5);
                   display: flex; align-items: center; justify-content: center; z-index: 20; }
+/* An explicit display beats the UA rule for [hidden], so restore it by hand.
+   Without this line the modal can never be hidden. */
+#modal-backdrop[hidden] { display: none; }
 #stats-modal { position: relative; background: var(--bg); border-radius: 8px; padding: 16px;
                width: 320px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
 #stats-modal h2 { font-size: .9rem; text-transform: uppercase; text-align: center;
