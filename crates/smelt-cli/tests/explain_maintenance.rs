@@ -1005,3 +1005,38 @@ fn explain_key_addressed_cell_prints_upstream_sidecar_discovery() {
          {report}"
     );
 }
+
+/// Phase 24b (`docs/outcomes/20260815-definition-delta-migrate/phases/
+/// 24b-plan.md`): `silver.device_user_edges` regroups
+/// `silver.events_deduped`'s rows onto `device_id, user_id` — real columns
+/// of the upstream relation, not `events_deduped`'s own `KeyedUpsert` key
+/// (`event_id`). The grain-over-upstream discovery route admits this: the
+/// cell must resolve with no `RepairKeysNotDiscoverable` refusal, and the
+/// report must name the grain-over-upstream route.
+#[test]
+fn device_user_edges_admits_a_key_addressed_cell() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let report = build_report_for(&project_dir, "silver.device_user_edges")
+        .expect("silver.device_user_edges has a maintenance plan");
+
+    assert!(
+        !report.contains("RepairKeysNotDiscoverable"),
+        "device_user_edges must no longer refuse key-addressed admission: {report}"
+    );
+    assert!(
+        report.contains("technique: PerGroupRecompute"),
+        "expected a key-addressed PerGroupRecompute cell: {report}"
+    );
+    assert!(
+        report.contains(
+            "affected-key discovery: group-grain fingerprint-sidecar diff over the upstream's \
+             own output table (keyed at the downstream's own grain, projected over the upstream \
+             relation)"
+        ),
+        "expected the grain-over-upstream discovery route to be named: {report}"
+    );
+}

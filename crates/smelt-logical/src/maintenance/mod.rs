@@ -347,6 +347,28 @@ pub struct PlanCell {
 pub struct KeyScope {
     pub keys: Vec<String>,
     pub from: String,
+    /// Which of [`crate::maintenance::repair::admit_key_addressed_recompute`]'s
+    /// two discovery routes admitted this cell — plan data, not re-derived by
+    /// the runtime (maintenance-plan purity).
+    pub discovery: KeyDiscovery,
+}
+
+/// The discovery route [`crate::maintenance::repair::admit_key_addressed_recompute`]
+/// used to resolve a key-addressed model edge's affected-key set
+/// (`docs/specs/incremental_models.md` §"Upstream model edges").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum KeyDiscovery {
+    /// The downstream's own grain resolves through the upstream's own
+    /// `KeyedUpsert` key columns directly — the group-grain sidecar groups
+    /// at the upstream's key columns, and changed upstream keys are
+    /// projected forward onto the downstream's own key columns.
+    UpstreamKeyed,
+    /// The downstream's grain columns are columns of the upstream relation
+    /// itself (not the upstream's own key columns) — the group-grain
+    /// sidecar groups directly at the downstream's own grain, projected
+    /// over the upstream relation, and the diff's own changed-key set is
+    /// the downstream's affected-key set with no forward projection.
+    DownstreamGrainOverUpstream,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting

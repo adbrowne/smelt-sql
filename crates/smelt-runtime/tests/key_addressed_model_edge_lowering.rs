@@ -72,7 +72,7 @@ fn key_addressed_cell_resolves_live_from_the_real_plan() {
     .expect("resolution must not error")
     .expect("a live key-addressed cell must resolve");
 
-    let (edge_name, cell, key_scope, upstream_keys, digest_columns, _write) = resolved;
+    let (edge_name, cell, key_scope, upstream_keys, group_key, digest_columns, _write) = resolved;
     assert_eq!(edge_name, "agg");
     assert_eq!(
         cell.technique,
@@ -80,7 +80,12 @@ fn key_addressed_cell_resolves_live_from_the_real_plan() {
     );
     assert_eq!(key_scope.keys, vec!["user_id".to_string()]);
     assert_eq!(key_scope.from, "agg");
+    assert_eq!(
+        key_scope.discovery,
+        smelt_logical::maintenance::KeyDiscovery::UpstreamKeyed
+    );
     assert_eq!(upstream_keys, vec!["user_id".to_string()]);
+    assert_eq!(group_key, vec!["user_id".to_string()]);
     assert!(
         !digest_columns.is_empty(),
         "the digest column set must never be empty — it is the group-grain sidecar's own hash \
@@ -137,7 +142,7 @@ fn partition_grain_downstream_resolves_the_key_addressed_cell() {
          downstream's own grain (`docs/specs/incremental_models.md` §\"Upstream model edges\")",
     );
 
-    let (edge_name, cell, key_scope, upstream_keys, _digest_columns, _write) = resolved;
+    let (edge_name, cell, key_scope, upstream_keys, _group_key, _digest_columns, _write) = resolved;
     assert_eq!(edge_name, "agg");
     assert_eq!(
         cell.technique,
@@ -145,6 +150,59 @@ fn partition_grain_downstream_resolves_the_key_addressed_cell() {
     );
     assert_eq!(key_scope.keys, vec!["user_id".to_string()]);
     assert_eq!(upstream_keys, vec!["user_id".to_string()]);
+}
+
+// ── 1c (Phase 24b, `docs/outcomes/20260815-definition-delta-migrate/phases/
+//        24b-plan.md`) ─────────────────────────────────────────────────
+/// The downstream regroups the upstream's rows onto `device_id` — a real
+/// column of the upstream relation, but not the upstream's own `KeyedUpsert`
+/// key (`event_id`). The grain-over-upstream route admits this and the
+/// group-grain sidecar it resolves groups at the downstream's own grain
+/// (`device_id`), not the upstream's key.
+const DOWNSTREAM_GRAIN_MODEL_FILE: &str = "---\n\
+     materialization: table\n\
+     refresh: incremental\n\
+     grain: key\n\
+     unique_key: device_id\n\
+     ---\n";
+
+const DOWNSTREAM_GRAIN_MODEL_SQL: &str =
+    "SELECT device_id, SUM(amount) AS total FROM smelt.models.agg GROUP BY device_id";
+
+#[test]
+fn grain_route_groups_sidecar_at_downstream_grain() {
+    let text = format!("{DOWNSTREAM_GRAIN_MODEL_FILE}{DOWNSTREAM_GRAIN_MODEL_SQL}\n");
+    let (metadata, sql) = metadata_and_sql(&text);
+    let edges = vec![keyed_edge("agg", &["event_id"])];
+
+    let resolved = resolve_live_key_addressed_model_edge_cell(
+        &sql,
+        "downstream",
+        &metadata,
+        &[],
+        &HashSet::new(),
+        &edges,
+        SqlDialect::DuckDB,
+    )
+    .expect("resolution must not error")
+    .expect("a grain-over-upstream cell must resolve");
+
+    let (edge_name, cell, key_scope, upstream_keys, group_key, _digest_columns, _write) = resolved;
+    assert_eq!(edge_name, "agg");
+    assert_eq!(
+        cell.technique,
+        smelt_logical::maintenance::Technique::PerGroupRecompute
+    );
+    assert_eq!(key_scope.keys, vec!["device_id".to_string()]);
+    assert_eq!(
+        key_scope.discovery,
+        smelt_logical::maintenance::KeyDiscovery::DownstreamGrainOverUpstream
+    );
+    // The upstream's own KeyedUpsert key columns stay `event_id` — the
+    // sidecar's own grouping key (`group_key`) is what differs, and it must
+    // be the downstream's grain, never re-derived from `upstream_keys`.
+    assert_eq!(upstream_keys, vec!["event_id".to_string()]);
+    assert_eq!(group_key, vec!["device_id".to_string()]);
 }
 
 // ── 2 ────────────────────────────────────────────────────────────────────
@@ -249,6 +307,28 @@ fn affected_keys_select_is_a_well_typed_empty_relation_for_no_changed_keys() {
         sql.contains("WHERE FALSE"),
         "an empty changed-key set must yield a well-typed empty relation, got: {sql}"
     );
+}
+
+/// Phase 24b: the upstream-keyed route's own affected-keys shape
+/// (`emit_key_addressed_affected_keys_select`'s forward-projection `SELECT`)
+/// is byte-for-byte unchanged by the new grain-over-upstream route existing
+/// alongside it — same assertions as
+/// `affected_keys_select_restricts_to_the_changed_upstream_keys` above,
+/// pinned again here under this phase's own name since that emitter is the
+/// exact function `resolve_key_addressed_affected_keys`'s `UpstreamKeyed`
+/// arm still delegates to, unmodified.
+#[test]
+fn equal_key_route_is_unchanged() {
+    let sql = smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
+        "main.agg",
+        &["user_id".to_string()],
+        &["user_id".to_string()],
+        &["1".to_string(), "2".to_string()],
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    assert!(sql.starts_with("SELECT DISTINCT"));
+    assert!(sql.contains("FROM main.agg"));
+    assert!(sql.contains("IN ('1', '2')"));
 }
 
 // ── 5 (real DuckDB end-to-end chain) ───────────────────────────────────
@@ -808,5 +888,214 @@ mod chain {
         )
         .await;
         assert_eq!(total_user_1, "150.00");
+    }
+
+    // Phase 24b: a grain-over-upstream chain — `downstream` regroups
+    // `agg`'s rows onto `device_id`, a real column of `agg` but not `agg`'s
+    // own `KeyedUpsert` key (`event_id`).
+    fn stage_grain_over_upstream_chain_project(project_dir: &std::path::Path) {
+        write(
+            project_dir,
+            "smelt.yml",
+            "name: grain_over_upstream_chain\nversion: 1\npaths:\n  - models\n\
+             targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+             default_materialization: view\n",
+        );
+        write(
+            project_dir,
+            "models/sources/events.yml",
+            "description: events\ncolumns:\n- name: event_id\n  type: INTEGER\n\
+             - name: device_id\n  type: VARCHAR\n- name: amount\n  type: DECIMAL(10,2)\n\
+             - name: d\n  type: DATE\n\
+             mutation_profile:\n  kind: append_only\n\
+             timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+        );
+        // `events` declares its own `timeseries:` clock, so `agg`'s driving
+        // source is clocked — the window-forward shape, which refuses the
+        // plain-overwrite (`ANY_VALUE`) combinator family. `MAX` (a
+        // catalogued fold-family aggregator) is deterministic here anyway:
+        // every `event_id` group is a singleton.
+        write(
+            project_dir,
+            "models/agg.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: event_id\nmaintenance:\n  scan_bounds:\n    per_source:\n      \
+             events:\n        allow_full_scan: true\n---\n\
+             SELECT event_id, MAX(device_id) AS device_id, MAX(amount) AS amount\n\
+             FROM smelt.sources.events\nGROUP BY event_id\n",
+        );
+        // No clock anywhere in this chain (`agg` declares no `timeseries:`),
+        // so both `agg` and `downstream` are snapshot-reconcile-shaped:
+        // every non-key column must be a plain-overwrite (`ANY_VALUE`)
+        // combinator, never an additive fold — matching
+        // `stage_chain_project`'s own `ANY_VALUE(total)` downstream above.
+        write(
+            project_dir,
+            "models/downstream.sql",
+            "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+             unique_key: device_id\n---\n\
+             SELECT device_id, ANY_VALUE(amount) AS amount FROM smelt.agg GROUP BY device_id\n",
+        );
+    }
+
+    async fn seed_events(backend: &dyn smelt_backend::Backend) {
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_events (event_id INTEGER, device_id VARCHAR, \
+                 amount DECIMAL(10,2), d DATE)",
+            )
+            .await
+            .expect("create events source table");
+        // One event per device — each downstream group starts as a
+        // singleton, so `ANY_VALUE(amount)` is deterministic both before and
+        // after the move below (never picking arbitrarily among ties).
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_events VALUES \
+                 (1, 'A', 10.00, DATE '2025-01-01'), (2, 'B', 20.00, DATE '2025-01-01')",
+            )
+            .await
+            .expect("seed events");
+    }
+
+    // ── 9 ────────────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn moved_grain_value_repairs_both_groups() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("run.duckdb");
+        stage_grain_over_upstream_chain_project(&project_dir);
+        let config =
+            Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            seed_events(&backend).await;
+        }
+
+        // Run 1: creation. `device_id = 'A'` groups event 1 alone (amount
+        // 10.00); `device_id = 'B'` groups event 2 alone (amount 20.00).
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            smelt_runtime::execute_project(
+                "grain-over-upstream-run-1".to_string(),
+                select_request(&["agg", "downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("first run (create) must succeed");
+        }
+
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            assert_eq!(
+                scalar_text(
+                    &backend,
+                    "SELECT amount FROM main.downstream WHERE device_id = 'A'"
+                )
+                .await,
+                "10.00"
+            );
+            assert_eq!(
+                scalar_text(
+                    &backend,
+                    "SELECT amount FROM main.downstream WHERE device_id = 'B'"
+                )
+                .await,
+                "20.00"
+            );
+        }
+
+        // Move event 1 from device A to a brand-new device C directly on
+        // `agg`'s own output table — the group-grain sidecar `downstream`
+        // diffs against is `agg`'s output, not `events`, so this is the
+        // same shape a real reconcile of `agg` would have produced. Device A
+        // is now vacated (0 members); device C is a newly arriving group;
+        // device B is untouched.
+        {
+            let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("UPDATE main.agg SET device_id = 'C' WHERE event_id = 1")
+                .await
+                .expect("move event 1 to device C");
+        }
+
+        // Run 2: only `downstream` — `agg` is not re-run. `downstream`
+        // resolves a grain-over-upstream key-addressed cell and must
+        // recompute BOTH device A (vacated) and device C (arriving).
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = smelt_runtime::execute_project(
+                "grain-over-upstream-run-2".to_string(),
+                select_request(&["downstream"]),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &DuckDbBackendFactory {
+                    db_path: db_path.clone(),
+                },
+                &smelt_runtime::NoOpReporter,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .expect("second run (grain-over-upstream recompute) must succeed");
+            let record = outcome.models.get("downstream").expect("downstream ran");
+            assert_eq!(
+                record.strategy, "per_group_recompute",
+                "the grain-over-upstream fold must dispatch the repair family"
+            );
+        }
+
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        let batches = {
+            use smelt_backend::Backend;
+            backend
+                .execute_sql("SELECT amount FROM main.downstream WHERE device_id = 'A'")
+                .await
+                .expect("query device A")
+        };
+        let device_a_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            device_a_rows, 0,
+            "device A must be vacated — its only member (event 1) moved to device C, and the \
+             group's own recompute must actually delete the now-memberless row rather than \
+             leaving a stale one behind"
+        );
+        let amount_c = scalar_text(
+            &backend,
+            "SELECT amount FROM main.downstream WHERE device_id = 'C'",
+        )
+        .await;
+        assert_eq!(
+            amount_c, "10.00",
+            "device C must reflect event 1's arrival — the arriving group's own recompute"
+        );
+        let amount_b = scalar_text(
+            &backend,
+            "SELECT amount FROM main.downstream WHERE device_id = 'B'",
+        )
+        .await;
+        assert_eq!(
+            amount_b, "20.00",
+            "device B's own group is bit-identical — it was never in the affected-key set"
+        );
     }
 }

@@ -1430,9 +1430,16 @@ delta is exactly "recompute and write only the affected key groups", the repair 
 definition). `MaintenanceReachNotDerivable` narrows accordingly: it fires only for a clockless
 upstream whose derived shape is *not* key-addressed (`append-only within window` or `general`)
 — a clockless `keyed upsert` upstream is admitted via the key-addressed route rather than
-refused. The fail-closed leg is explicit: when the downstream's own SQL does not carry the
-upstream's key columns (they cannot be resolved through the downstream's own grain), the edge
-is refused by name (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a
+refused. Two discovery routes attempt this admission, either sufficient on its own: **upstream-
+keyed** — the downstream's own grain resolves through the upstream's own `KeyedUpsert` key
+columns directly — and **grain-over-upstream** — the downstream's grain columns are columns of
+the upstream relation itself, reached through a plain single-relation `FROM` with no fan-out
+join, even when they are not the upstream's own key columns (the common shape when a downstream
+regroups an upstream's rows onto a different, coarser or unrelated key than the upstream folds
+by). The fail-closed leg is explicit: when the downstream's grain does not resolve against the
+upstream relation under either route — because the grain columns are not columns of that
+relation at all, or because a fan-out join stands between the downstream and the upstream — the
+edge is refused by name (`MaintenanceRepairKeysNotDiscoverable`) rather than falling back to a
 silent whole-table cell. A live key-addressed cell is dispatched irrespective of the
 downstream's own grain — a `grain: partition` downstream takes it in place of its ordinary
 window-forward batch loop for that run, because the cell's bounded read is the affected key
@@ -1440,15 +1447,30 @@ set and has no partition-interval axis to compose with a run window.
 
 A key-addressed cell's affected-key set is discovered from the **group-grain fingerprint
 sidecar diff** over the upstream's own output table (§"The repair family" — "Obligation 7 over
-a `mutable_snapshot` source"), keyed at the upstream's key columns: a clockless keyed upstream
-is, from the consumer's own view, exactly a mutable snapshot with no clock to clamp a scan by,
-so the sidecar's stored comparandum is what bounds the read instead — a clamp-less
-`SELECT DISTINCT` over the upstream would degenerate to a full-table rescan, which the
-per-group recompute technique this cell admits exists specifically to avoid. The
-changed upstream keys are then projected through the upstream relation onto the downstream's
-own key columns (the key columns this cell's key scope names, `KeyScope::keys`):
-`SELECT DISTINCT <key_expr(key_scope.keys)> FROM <upstream_table> WHERE <upstream key expr> IN
-(<changed keys>)`. The candidate recompute is the downstream's full (unwindowed) SQL
+a `mutable_snapshot` source"): a clockless keyed upstream is, from the consumer's own view,
+exactly a mutable snapshot with no clock to clamp a scan by, so the sidecar's stored comparandum
+is what bounds the read instead — a clamp-less `SELECT DISTINCT` over the upstream would
+degenerate to a full-table rescan, which the per-group recompute technique this cell admits
+exists specifically to avoid. Which columns the sidecar groups by, and how the diff's own
+changed-key set becomes the downstream's affected-key relation, depends on which route admitted
+the cell:
+
+- **Upstream-keyed.** The sidecar groups at the upstream's own key columns. The changed upstream
+  keys are then projected through the upstream relation onto the downstream's own key columns
+  (the key columns this cell's key scope names, `KeyScope::keys`):
+  `SELECT DISTINCT <key_expr(key_scope.keys)> FROM <upstream_table> WHERE <upstream key expr> IN
+  (<changed keys>)`.
+- **Grain-over-upstream.** The sidecar groups directly at the downstream's own grain columns,
+  projected over the upstream relation — the diff's own changed-key set *is* the downstream's
+  affected-key set, so no forward-projection `SELECT` runs. This is not merely an optimization:
+  a row whose grain value moves from one downstream group to another between diffs flips the
+  order-insensitive digest of both the vacated and the arriving group, so the diff surfaces
+  both. Projecting forward from a set of changed *upstream* keys (the upstream-keyed route's own
+  `IN (...)` query) reads only the upstream's post-change state and would surface the arriving
+  group alone, silently missing the vacated one — an under-approximation the equivalence
+  invariant forbids. Grouping the sidecar at the downstream's own grain is what avoids that gap.
+
+The candidate recompute is the downstream's full (unwindowed) SQL
 semi-joined to that key relation, and the write is the repair family's own targeted
 `DELETE`+`INSERT` (or the `write: diff_patch` write leg, when pinned) — identical to any other
 per-group-recompute cell's lowering once its affected-key relation and candidate
@@ -1465,8 +1487,10 @@ by `sources.md` §"The fingerprint sidecar", which upholds this requirement).
 This discovery route is
 DuckDB-only, matching the sidecar's existing posture elsewhere in this spec — a non-DuckDB
 target dialect refuses by name before any backend call, never a silent widening to a
-full-table read. A `key_scope` key the upstream relation does not carry is a fail-loud
-refusal, never a widening to every key.
+full-table read. Under the upstream-keyed route, a `key_scope` key the upstream relation does
+not carry is a fail-loud refusal, never a widening to every key; the grain-over-upstream route
+poses no such subset obligation (its `key_scope` is the downstream's own grain, validated by
+admission rather than checked against the upstream's key columns).
 
 **Forward propagation — what must run.** Runs are driven by **what landed**, per source, as
 partition intervals on that source's own axis; a cron tick is only the poller. Processing
@@ -2015,11 +2039,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   until a real Spark-targeted incremental workload demands one — on a ledger-less backend the
   recorded downgrade is the intended behaviour, not a stopgap (decision record:
   `docs/research/20260816-open-questions-triage.md`).
-- **Graph-layer gaps**: bare `grain: key` nodes with no admitted locality refuse
-  (`MaintenanceGraphUnsupportedNode`); no key-level dirt representation exists (intervals are
-  the graph's only currency); the `examples/web_analytics` workspace is not fully
-  `--since-upstream`-compatible end to end (a bare-keyed model with readers refuses the
-  whole-workspace graph).
+- **Graph-layer gaps**: a `grain: key` model that also declares `timeseries:` but cannot
+  establish key temporal locality still refuses (`MaintenanceGraphUnsupportedNode`) — key-
+  temporal-locality establishment (§"Key temporal locality") is a separate proof from
+  key-addressed model-edge admission and is not extended by either of that admission's discovery
+  routes.
 - **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
   landed deltas on the command line; no persisted per-source watermark or automatic diffing
   is consumed (§Future Extensions).

@@ -647,11 +647,20 @@ pub fn build_maintenance_plan_report(
                 // source's mutation profile, so `find_source_info` (which
                 // only resolves a declared `sources.*` name) is never
                 // consulted for this branch.
-                if cell.key_scope.is_some() {
+                if let Some(scope) = &cell.key_scope {
+                    let route = match scope.discovery {
+                        smelt_logical::maintenance::KeyDiscovery::UpstreamKeyed => {
+                            "keyed at the upstream's own KeyedUpsert key columns"
+                        }
+                        smelt_logical::maintenance::KeyDiscovery::DownstreamGrainOverUpstream => {
+                            "keyed at the downstream's own grain, projected over the upstream \
+                             relation"
+                        }
+                    };
                     let _ = writeln!(
                         out,
                         "      affected-key discovery: group-grain fingerprint-sidecar diff \
-                         over the upstream's own output table"
+                         over the upstream's own output table ({route})"
                     );
                 } else {
                     match trigger_source

@@ -44,8 +44,9 @@ use smelt_logical::maintenance::emit::{
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation, ScanClamp,
-    SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
+    KeyDiscovery, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowPreservation,
+    ScanClamp, SkeletonSourceClosure, SourceFacts, Technique, Trigger, WritePattern,
+    WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -2489,15 +2490,20 @@ pub async fn execute_diff_patch(
 /// [`resolve_live_key_addressed_model_edge_cell`] returns it: the upstream
 /// edge's own name (`== key_scope.from`), the cell itself, its `KeyScope`
 /// (the downstream's own key columns to restrict the recompute to), the
-/// upstream's own `KeyedUpsert` key columns (the group-grain sidecar's own
-/// `group_key`), the digest column set the sidecar hashes (derived from the
-/// downstream's own CLEAN sql — never recomputed against compiled SQL, which
-/// carries physical table names rather than `smelt.*` refs the walk-backed
-/// fingerprint classifier matches against), and the resolved write leg.
+/// upstream's own `KeyedUpsert` key columns, the group-grain sidecar's
+/// **own** grouping key (`key_scope.keys` for
+/// [`KeyDiscovery::DownstreamGrainOverUpstream`], the upstream's own key
+/// columns for [`KeyDiscovery::UpstreamKeyed`] — the two coincide only for
+/// the upstream-keyed route), the digest column set the sidecar hashes
+/// (derived from the downstream's own CLEAN sql — never recomputed against
+/// compiled SQL, which carries physical table names rather than `smelt.*`
+/// refs the walk-backed fingerprint classifier matches against), and the
+/// resolved write leg.
 pub type LiveKeyAddressedModelEdgeCell = (
     String,
     PlanCell,
     smelt_logical::maintenance::KeyScope,
+    Vec<String>,
     Vec<String>,
     Vec<String>,
     RepairWrite,
@@ -2591,10 +2597,19 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             )
             .into());
         }
-        if !key_scope
-            .keys
-            .iter()
-            .all(|k| upstream_keys.iter().any(|u| u.eq_ignore_ascii_case(k)))
+        // The upstream-keyed route's own subset obligation: `key_scope.keys`
+        // was resolved by projecting through the upstream's own key
+        // columns, so it must literally be a subset of them. The
+        // grain-over-upstream route poses no such obligation — its
+        // `key_scope` is the downstream's own grain, admitted by
+        // `admit_key_addressed_recompute` against the upstream relation's
+        // columns directly, not against `upstream_keys`
+        // (`docs/specs/incremental_models.md` §"Upstream model edges").
+        if key_scope.discovery == KeyDiscovery::UpstreamKeyed
+            && !key_scope
+                .keys
+                .iter()
+                .all(|k| upstream_keys.iter().any(|u| u.eq_ignore_ascii_case(k)))
         {
             bail!(
                 "MaintenanceKeyScopeColumnMissing: a key-addressed model-edge cell for upstream \
@@ -2606,6 +2621,16 @@ pub fn resolve_live_key_addressed_model_edge_cell(
                 upstream_keys,
             );
         }
+        // The group-grain sidecar's own grouping key: the upstream's key
+        // columns for the upstream-keyed route (unchanged from before this
+        // discovery route existed), or the downstream's own grain
+        // (`key_scope.keys`) for the grain-over-upstream route — the sidecar
+        // must diff at whichever grain the cell was actually admitted
+        // against, never a re-derived one.
+        let group_key = match key_scope.discovery {
+            KeyDiscovery::UpstreamKeyed => upstream_keys.clone(),
+            KeyDiscovery::DownstreamGrainOverUpstream => key_scope.keys.clone(),
+        };
         let comparability = model_property_vector(sql, &JoinContext::new())
             .map(|v| v.comparability)
             .unwrap_or_default();
@@ -2652,6 +2677,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
             cell.clone(),
             key_scope,
             upstream_keys.clone(),
+            group_key,
             digest_columns,
             write,
         )));
@@ -2662,15 +2688,21 @@ pub fn resolve_live_key_addressed_model_edge_cell(
 /// The affected-key relation a key-addressed model-edge cell reads
 /// (`docs/specs/incremental_models.md` §"Upstream model edges"): the
 /// group-grain fingerprint sidecar diff over the upstream's own output
-/// table, at the upstream's `KeyedUpsert` key grain, projected onto the
-/// downstream's own key columns
-/// ([`smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select`]).
-/// A DuckDB-only discovery route — `resolve_live_key_addressed_model_edge_cell`
-/// already refused a non-DuckDB dialect before any backend call is reached.
+/// table, grouped at `group_key` — the upstream's own `KeyedUpsert` key
+/// columns for [`KeyDiscovery::UpstreamKeyed`] (whose changed keys are then
+/// forward-projected onto the downstream's own key columns via
+/// [`smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select`]),
+/// or the downstream's own grain for
+/// [`KeyDiscovery::DownstreamGrainOverUpstream`] (whose diff's own
+/// changed-key set already **is** the downstream's affected-key set, so no
+/// forward-projection `SELECT` runs — [`repair_keys_literal_select`] wraps
+/// the resolved literals directly). A DuckDB-only discovery route —
+/// `resolve_live_key_addressed_model_edge_cell` already refused a
+/// non-DuckDB dialect before any backend call is reached.
 ///
 /// Returns an empty resolved key list when the sidecar diff discovers no
-/// changed upstream keys — the caller reports a no-op rather than executing
-/// an empty-but-real write.
+/// changed keys — the caller reports a no-op rather than executing an
+/// empty-but-real write.
 #[allow(clippy::too_many_arguments)]
 pub async fn resolve_key_addressed_affected_keys(
     backend: &dyn Backend,
@@ -2678,9 +2710,10 @@ pub async fn resolve_key_addressed_affected_keys(
     upstream_source_address: &str,
     upstream_table: &str,
     upstream_output_table: &str,
-    upstream_keys: &[String],
+    group_key: &[String],
     digest_columns: &[String],
     downstream_keys: &[String],
+    discovery: KeyDiscovery,
     model_sql: &str,
 ) -> std::result::Result<(Vec<String>, String), BackendError> {
     let changed_keys = diff_repair_group_sidecar_changed_keys(
@@ -2689,20 +2722,26 @@ pub async fn resolve_key_addressed_affected_keys(
         upstream_source_address,
         upstream_table,
         upstream_output_table,
-        upstream_keys,
+        group_key,
         digest_columns,
         model_sql,
     )
     .await?;
     let dialect = maintenance_dialect(backend.dialect());
-    let affected_keys_select =
-        smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
-            upstream_table,
-            upstream_keys,
-            downstream_keys,
-            &changed_keys,
-            dialect,
-        );
+    let affected_keys_select = match discovery {
+        KeyDiscovery::UpstreamKeyed => {
+            smelt_logical::maintenance::emit::emit_key_addressed_affected_keys_select(
+                upstream_table,
+                group_key,
+                downstream_keys,
+                &changed_keys,
+                dialect,
+            )
+        }
+        KeyDiscovery::DownstreamGrainOverUpstream => {
+            repair_keys_literal_select(&changed_keys, dialect)
+        }
+    };
     Ok((changed_keys, affected_keys_select))
 }
 
@@ -2731,9 +2770,10 @@ pub async fn execute_key_addressed_model_edge_cell(
     table: &str,
     upstream_source_address: &str,
     upstream_table: &str,
-    upstream_keys: &[String],
+    group_key: &[String],
     digest_columns: &[String],
     downstream_keys: &[String],
+    discovery: KeyDiscovery,
     clean_model_sql: &str,
     compiled_model_sql: &str,
     write: &RepairWrite,
@@ -2746,9 +2786,10 @@ pub async fn execute_key_addressed_model_edge_cell(
         upstream_source_address,
         upstream_table,
         &full_table,
-        upstream_keys,
+        group_key,
         digest_columns,
         downstream_keys,
+        discovery,
         clean_model_sql,
     )
     .await
@@ -2767,7 +2808,7 @@ pub async fn execute_key_addressed_model_edge_cell(
         schema,
         source_address: upstream_source_address,
         source_table: upstream_table,
-        group_key: upstream_keys,
+        group_key,
         digest_columns,
         model_sql: clean_model_sql,
     };

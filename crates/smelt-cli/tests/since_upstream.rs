@@ -1205,6 +1205,16 @@ fn web_analytics_whole_workspace_since_upstream_dry_run_completes() {
         "the printed dirty-set report must still show the open-ended form for the self-edge \
          chain: {combined}"
     );
+    // Phase 24b: `silver.device_user_edges` — a bare-keyed model whose
+    // upstream (`silver.events_deduped`) is a clocked, differently-keyed
+    // model edge — is scheduled via the keyed dirt channel, and its own
+    // key-addressed model-edge cell now admits (`grain-over-upstream`
+    // discovery) rather than silently having no cell to dispatch at real
+    // run time.
+    assert!(
+        combined.contains("RUN silver.device_user_edges: keyed"),
+        "silver.device_user_edges must appear in the RUN set: {combined}"
+    );
 }
 
 /// The same whole-workspace run under `--verbose` names the resolved closed

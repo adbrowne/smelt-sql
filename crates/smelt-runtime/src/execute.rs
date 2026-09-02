@@ -5256,7 +5256,7 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
     let Some(metadata) = model_file.metadata.as_deref() else {
         return Ok(None);
     };
-    let Some((edge_name, _cell, key_scope, upstream_keys, digest_columns, write)) =
+    let Some((edge_name, _cell, key_scope, _upstream_keys, group_key, digest_columns, write)) =
         crate::maintenance_driver::resolve_live_key_addressed_model_edge_cell(
             clean_sql,
             db_table_name,
@@ -5302,9 +5302,10 @@ async fn resolve_and_dispatch_key_addressed_edge_cell(
         db_table_name,
         &upstream_source_address,
         &upstream_table,
-        &upstream_keys,
+        &group_key,
         &digest_columns,
         &key_scope.keys,
+        key_scope.discovery,
         clean_sql,
         &compiled.sql,
         &write,

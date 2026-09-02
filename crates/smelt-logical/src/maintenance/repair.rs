@@ -33,14 +33,15 @@ use std::collections::BTreeSet;
 
 use super::derive::{project_source_link, LocalityInputs, SourceLink};
 use super::{
-    Corner, KeyScope, MutationProfile, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict,
-    ScanClamp, SourceFacts, Technique, Trigger,
+    Corner, KeyDiscovery, KeyScope, MutationProfile, PartitionLocal, PlanCell, RowIdentity,
+    RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::affected_keys::{
     derive_affected_keys, AffectedKeyContext, AffectedKeys, DeltaShape,
 };
 use crate::analysis::fingerprint::{fingerprint_projection, Projection};
 use crate::analysis::join_shape::JoinContext;
+use crate::analysis::walk::model_property_vector;
 
 /// The admitted per-group repair verdict: the group key to recompute over
 /// and the bounded per-group read slice.
@@ -132,11 +133,20 @@ pub fn admit_per_group_recompute(
 /// [`derive_affected_keys`] exactly as [`admit_per_group_recompute`] does.
 /// `edge_keys` is the upstream's own change-feed identity
 /// (`OutputDelta::KeyedUpsert`'s `keys`, verbatim) — the [`DeltaShape`]'s
-/// row shape this proof projects through `sql`'s own grain. Fail-closed:
-/// when `sql` cannot resolve its own grain through `edge_keys` (the
-/// downstream does not carry the upstream's key columns, or has no
-/// derivable grain of its own at all), this refuses by name rather than
-/// admitting an unbounded key scope.
+/// row shape the first (**upstream-keyed**) route projects through `sql`'s
+/// own grain. When that route cannot resolve (the downstream does not carry
+/// the upstream's key columns), a second (**grain-over-upstream**) route is
+/// attempted: the downstream's grain columns may instead be columns of the
+/// upstream relation itself, discovered via
+/// [`fingerprint_projection`]'s already-derived read-column set for
+/// `edge_name` — gated explicitly on no fan-out join standing between the
+/// downstream and the upstream (`resolve_grain`'s own fan-out gate
+/// short-circuits when a `unique_key` is declared, which is not sufficient
+/// for this second, upstream-relation-specific obligation). Fail-closed:
+/// when neither route resolves, or the second route's own projection is a
+/// fail-closed [`Projection::FullRow`], this refuses by name rather than
+/// admitting an unbounded key scope. `docs/specs/incremental_models.md`
+/// §"Upstream model edges" documents both routes normatively.
 pub fn admit_key_addressed_recompute(
     sql: &str,
     declared_unique_key: &[String],
@@ -148,24 +158,60 @@ pub fn admit_key_addressed_recompute(
         unique_key: declared_unique_key.to_vec(),
         join: join.clone(),
     };
-    let delta = DeltaShape {
+    let upstream_keyed_delta = DeltaShape {
         source: edge_name.to_string(),
         columns: edge_keys.iter().cloned().collect(),
         keyed: true,
     };
-    let keys = match derive_affected_keys(&delta, sql, &affected_ctx) {
-        AffectedKeys::Keys { cols } => cols,
-        AffectedKeys::NotDiscoverable { reason } => {
+    let route1_refusal = match derive_affected_keys(&upstream_keyed_delta, sql, &affected_ctx) {
+        AffectedKeys::Keys { cols } => {
+            return Ok(KeyScope {
+                keys: cols,
+                from: edge_name.to_string(),
+                discovery: KeyDiscovery::UpstreamKeyed,
+            });
+        }
+        AffectedKeys::NotDiscoverable { reason } => reason,
+    };
+
+    let grain_over_upstream_cols = match fingerprint_projection(sql, edge_name) {
+        Projection::Columns(cols) => cols,
+        Projection::FullRow { .. } => {
             return Err(RepairRefusal::KeysNotDiscoverable {
                 source: edge_name.to_string(),
-                why: reason,
+                why: route1_refusal,
             });
         }
     };
-    Ok(KeyScope {
-        keys,
-        from: edge_name.to_string(),
-    })
+    let has_fan_out_join = model_property_vector(sql, join)
+        .map(|v| v.has_fan_out_join)
+        .unwrap_or(true);
+    if has_fan_out_join {
+        return Err(RepairRefusal::KeysNotDiscoverable {
+            source: edge_name.to_string(),
+            why: format!(
+                "grain-over-upstream discovery requires a single-relation reach to '{edge_name}' \
+                 with no fan-out join, but the downstream's own SQL joins in a way that cannot \
+                 be proven one-to-one"
+            ),
+        });
+    }
+    let grain_over_upstream_delta = DeltaShape {
+        source: edge_name.to_string(),
+        columns: grain_over_upstream_cols,
+        keyed: true,
+    };
+    match derive_affected_keys(&grain_over_upstream_delta, sql, &affected_ctx) {
+        AffectedKeys::Keys { cols } => Ok(KeyScope {
+            keys: cols,
+            from: edge_name.to_string(),
+            discovery: KeyDiscovery::DownstreamGrainOverUpstream,
+        }),
+        AffectedKeys::NotDiscoverable { reason } => Err(RepairRefusal::KeysNotDiscoverable {
+            source: edge_name.to_string(),
+            why: reason,
+        }),
+    }
 }
 
 /// Derive the [`DeltaShape`] a `MutationProfile::MutableSnapshot` source's
