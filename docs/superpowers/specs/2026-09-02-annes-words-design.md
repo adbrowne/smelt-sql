@@ -18,11 +18,44 @@ touches no Rust crate.
 
 | Decision | Choice |
 |---|---|
-| Word list | Standard English 5-letter: canonical 2,315-word answer list + 10,657 extra accepted guesses |
+| Word list | Freshly derived English 5-letter list with clean provenance: 2,000-word answer list + ~7,700 extra accepted guesses (see Word list provenance) |
 | Puzzle mode | Daily puzzle (date-derived, same for everyone) with a practice toggle after finishing |
 | Extras | Share result as emoji grid; stats with streaks and guess distribution |
 | Style | Near-pixel-perfect clone: original palette, tile flip, shake on invalid, on-screen keyboard, toasts, modals |
 | Out of scope | Hard mode, dark mode, accounts, server, analytics, build step, npm dependencies |
+
+## Word list provenance
+
+`words.js` is generated, not hand-curated, by `docs-site/tools/generate-words.mjs`
+(zero npm dependencies, run manually: `node docs-site/tools/generate-words.mjs`).
+Regenerating overwrites `docs-site/docs/annes-words/words.js`; the script is
+deterministic — the same upstream sources always produce byte-identical output.
+
+Sources (all permissively licensed):
+
+- **Word list** — [dwyl/english-words `words_alpha.txt`](https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt) (Unlicense).
+- **Frequency corpus** — [Norvig's `count_1w.txt`](https://norvig.com/ngrams/count_1w.txt), a tab-separated `word<TAB>count` list already ordered most-frequent-first.
+- **Profanity exclusions** — [LDNOOBW's English bad-word list](https://raw.githubusercontent.com/LDNOOBW/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en).
+- **Local dictionaries** — the SCOWL-derived `/usr/share/dict/american-english` and `/usr/share/dict/british-english`, used both as extra guess candidates and to detect proper nouns (a word counts as a proper noun if it appears capitalised, e.g. matching `^[A-Z][a-z]{4}$`, in either file).
+
+Pipeline:
+
+1. **Candidate pool** = all 5-letter lowercase words in (dwyl ∩ frequency
+   corpus) ∪ (american-english ∪ british-english). Intersecting dwyl with the
+   frequency corpus removes dwyl entries that are technically words but never
+   appear in real text (e.g. `arioi`, `kanap`).
+2. **Answer-eligible** = candidate pool, ordered by frequency-corpus rank
+   (most frequent first), excluding words ending in `s` (plurals), words on
+   the profanity list, and proper nouns as defined above.
+3. **`ANSWERS`** = the top 2,000 answer-eligible words, shuffled once at
+   generation time with a Fisher-Yates shuffle driven by a mulberry32 PRNG
+   seeded `0x9e3779b9` (the same documented seed the original list used).
+4. **`ALLOWED`** = every candidate-pool word not in `ANSWERS`, minus the
+   profanity list (roughly 7,700 words).
+
+`words.js` keeps the same export contract `ui.js` already depends on: plain
+`ANSWERS` and `ALLOWED` arrays of lowercase 5-letter words; consumers union
+the two for guess validation, so `ALLOWED` holds only non-answer words.
 
 ## Publishing
 
