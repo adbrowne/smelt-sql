@@ -281,7 +281,8 @@ mod chain {
             project_dir,
             "models/agg.sql",
             "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
-             unique_key: user_id\n---\n\
+             unique_key: user_id\nmaintenance:\n  scan_bounds:\n    per_source:\n      \
+             payments:\n        allow_full_scan: true\n---\n\
              SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
              GROUP BY user_id\n",
         );
@@ -373,7 +374,8 @@ mod chain {
             project_dir,
             "models/agg.sql",
             "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
-             unique_key: user_id\n---\n\
+             unique_key: user_id\nmaintenance:\n  scan_bounds:\n    per_source:\n      \
+             payments:\n        allow_full_scan: true\n---\n\
              SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
              GROUP BY user_id\n",
         );

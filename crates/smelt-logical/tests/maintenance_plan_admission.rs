@@ -6,9 +6,11 @@
 //! contribution) — and either failing alone refuses the fold family, never
 //! only in combination.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
-use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
+use smelt_logical::maintenance::derive::{
+    derive_maintenance_plan, derive_triggers, FoldSpec, ModelInputs,
+};
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Trigger,
 };
@@ -312,5 +314,138 @@ fn once_write_waives_algebra_only_not_source_posture() {
     assert!(
         why.contains("append-only") || why.contains("retract"),
         "refusal should cite the source-posture obligation, got: {why}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `derive_triggers` — the pure "which changed inputs get a mutation cell"
+// derivation (`incremental_models.md` §"Per-cell admission").
+
+fn mutable_source(name: &str, clocked: bool) -> SourceFacts {
+    SourceFacts {
+        name: name.to_string(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: clocked.then(|| "updated_at".to_string()),
+        unique_key: vec![],
+        allow_full_scan: false,
+    }
+}
+
+fn append_only_source(name: &str) -> SourceFacts {
+    SourceFacts {
+        name: name.to_string(),
+        mutation: MutationProfile::AppendOnly,
+        partition_col: None,
+        unique_key: vec![],
+        allow_full_scan: false,
+    }
+}
+
+/// A **clocked** explicitly-mutable source still gets an `UpstreamMutation`
+/// trigger — the clock is not part of the derivation rule (only the
+/// downstream locality/admission proof consults it).
+#[test]
+fn clocked_mutable_source_gets_a_mutation_trigger() {
+    let sources = vec![mutable_source("raw.user_status", true)];
+    let explicitly_mutable: HashSet<String> = ["raw.user_status".to_string()].into_iter().collect();
+    let triggers = derive_triggers(&sources, &[], &explicitly_mutable, &[]);
+    assert!(
+        triggers.contains(&Trigger::UpstreamMutation {
+            source: "raw.user_status".to_string()
+        }),
+        "expected an UpstreamMutation trigger for a clocked explicitly-mutable source, got {triggers:?}"
+    );
+}
+
+/// The fail-closed default: `MutableSnapshot` facts alone, absent from the
+/// explicitly-mutable set, yield only `NewData` — declaring
+/// `mutation_profile: mutable_snapshot` is opt-in, never inferred.
+#[test]
+fn undeclared_mutable_source_gets_no_mutation_trigger() {
+    let sources = vec![mutable_source("raw.dim_customer", false)];
+    let triggers = derive_triggers(&sources, &[], &HashSet::new(), &[]);
+    assert_eq!(
+        triggers,
+        vec![
+            Trigger::NewData {
+                source: "raw.dim_customer".to_string()
+            },
+            Trigger::Backfill,
+        ]
+    );
+}
+
+/// An `AppendOnly` source named in some column group's `mutation_sensitivity`
+/// (an aggregate that is value-sensitive to late-arriving rows) gets a
+/// mutation trigger of its own.
+#[test]
+fn append_only_source_in_a_value_sensitive_group_gets_a_mutation_trigger() {
+    let sources = vec![append_only_source("events")];
+    let column_groups = vec![ColumnGroup {
+        columns: vec!["event_count".to_string()],
+        mutation_sensitivity: ["events".to_string()].into_iter().collect(),
+        membership_sensitivity: BTreeSet::new(),
+    }];
+    let triggers = derive_triggers(&sources, &column_groups, &HashSet::new(), &[]);
+    assert!(
+        triggers.contains(&Trigger::UpstreamMutation {
+            source: "events".to_string()
+        }),
+        "expected an UpstreamMutation trigger for an aggregate-sensitive append-only source, got \
+         {triggers:?}"
+    );
+}
+
+/// A pass-through append-only read with no value-sensitivity gets no
+/// mutation trigger.
+#[test]
+fn append_only_source_with_no_value_sensitivity_gets_no_mutation_trigger() {
+    let sources = vec![append_only_source("events")];
+    let column_groups = vec![ColumnGroup {
+        columns: vec!["event_id".to_string()],
+        mutation_sensitivity: BTreeSet::new(),
+        membership_sensitivity: BTreeSet::new(),
+    }];
+    let triggers = derive_triggers(&sources, &column_groups, &HashSet::new(), &[]);
+    assert_eq!(
+        triggers,
+        vec![
+            Trigger::NewData {
+                source: "events".to_string()
+            },
+            Trigger::Backfill,
+        ]
+    );
+}
+
+/// One trigger per source, deterministic order — repeats of the same source
+/// name (e.g. read under more than one alias) are deduplicated, not
+/// double-counted.
+#[test]
+fn trigger_derivation_is_order_stable_and_deduplicated() {
+    let sources = vec![
+        append_only_source("a"),
+        mutable_source("b", false),
+        append_only_source("a"),
+    ];
+    let explicitly_mutable: HashSet<String> = ["b".to_string()].into_iter().collect();
+    let triggers = derive_triggers(&sources, &[], &explicitly_mutable, &["new_col".to_string()]);
+    assert_eq!(
+        triggers,
+        vec![
+            Trigger::NewData {
+                source: "a".to_string()
+            },
+            Trigger::NewData {
+                source: "b".to_string()
+            },
+            Trigger::UpstreamMutation {
+                source: "b".to_string()
+            },
+            Trigger::Backfill,
+            Trigger::ColumnAdded {
+                columns: vec!["new_col".to_string()]
+            },
+        ]
     );
 }

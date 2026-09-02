@@ -6,7 +6,7 @@
 //! classifiers that do not exist yet (column groups, skeleton roles) — see
 //! the module doc in [`super`].
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr};
@@ -100,6 +100,68 @@ pub fn row_identity_with_context(
             proven_mismatch: None,
         },
     }
+}
+
+/// Derive a model's full [`Trigger`] set from pure facts — the single
+/// derivation `docs/specs/incremental_models.md` §"Per-cell admission"'s
+/// "Which changed inputs get a mutation cell" paragraph describes. One
+/// `Trigger::NewData` per distinct source (declaration order,
+/// first-occurrence deduplicated — a source repeated in `sources`, e.g. once
+/// per alias, contributes exactly one creation trigger), one
+/// `Trigger::UpstreamMutation` per source the rule below admits, always
+/// `Trigger::Backfill`, and `Trigger::ColumnAdded` iff `added_columns` is
+/// non-empty.
+///
+/// A source gets an `UpstreamMutation` cell iff it **explicitly** declares
+/// `mutation_profile: mutable_snapshot` (named in `explicitly_mutable` — the
+/// fail-closed admission default alone never synthesises one; an undeclared
+/// source is not silently treated as mutable) **or** it is `AppendOnly` and
+/// named in some [`ColumnGroup::mutation_sensitivity`] (a late append into an
+/// already-written region changes stored values, so that region is
+/// maintained, not left stale).
+///
+/// The source's clock (`SourceFacts::partition_col`) is deliberately not
+/// part of this rule: whether the resulting cell's scan can be clamped to
+/// the output partition axis is a downstream *admission* question
+/// (`project_source_link`'s locality proof), not a derivation-time gate. A
+/// clocked mutable source whose scan the locality proof cannot clamp
+/// surfaces the ordinary `MaintenanceScanUnbounded` refusal — escapable by
+/// `allow_full_scan` / `scan_bounds.on_violation: warn` — the same loud path
+/// an unclocked one already takes, never a silently-dropped cell.
+pub fn derive_triggers(
+    sources: &[SourceFacts],
+    column_groups: &[ColumnGroup],
+    explicitly_mutable: &HashSet<String>,
+    added_columns: &[String],
+) -> Vec<Trigger> {
+    let mut triggers = Vec::new();
+    let mut seen = BTreeSet::new();
+    for s in sources {
+        if !seen.insert(s.name.clone()) {
+            continue;
+        }
+        triggers.push(Trigger::NewData {
+            source: s.name.clone(),
+        });
+        let gets_mutation_cell = match s.mutation {
+            MutationProfile::MutableSnapshot => explicitly_mutable.contains(&s.name),
+            MutationProfile::AppendOnly => column_groups
+                .iter()
+                .any(|g| g.mutation_sensitivity.contains(&s.name)),
+        };
+        if gets_mutation_cell {
+            triggers.push(Trigger::UpstreamMutation {
+                source: s.name.clone(),
+            });
+        }
+    }
+    triggers.push(Trigger::Backfill);
+    if !added_columns.is_empty() {
+        triggers.push(Trigger::ColumnAdded {
+            columns: added_columns.to_vec(),
+        });
+    }
+    triggers
 }
 
 /// Order-independent, case-insensitive key-set equality — the same
@@ -1412,6 +1474,29 @@ fn derive_mutation(
     for group in inputs.column_groups.iter().filter(|g| {
         g.mutation_sensitivity.contains(source) || g.membership_sensitivity.contains(source)
     }) {
+        // A `Trigger::NewData { source }` repair cell (`Technique::
+        // PerGroupRecompute`, `incremental_models.md` §"The repair family")
+        // already recomputes this exact group's bounded, per-key-affected
+        // scope every run — including a value change to an already-created
+        // row, the SAME thing an `UpstreamMutation` cell would exist to
+        // catch. Deriving both would double-write the same group from the
+        // same source in the same run (phase 19,
+        // `docs/outcomes/20260815-definition-delta-migrate`: widening
+        // `UpstreamMutation` derivation to a clocked `MutableSnapshot`
+        // source newly makes this collision reachable — the repair family
+        // is only ever admitted for exactly the retracting-source shape
+        // this trigger also now covers). `triggers` always orders a
+        // source's `NewData` before its `UpstreamMutation`
+        // (`derive_triggers`), so the repair cell, if any, is already in
+        // `plan.cells` by the time this loop runs.
+        let already_repaired = plan.cells.iter().any(|c| {
+            c.group == group.name()
+                && c.technique == Technique::PerGroupRecompute
+                && matches!(&c.trigger, Trigger::NewData { source: s } if s == source)
+        });
+        if already_repaired {
+            continue;
+        }
         // Membership sensitivity (`docs/specs/incremental_models.md` §"The
         // plan matrix"): a group governed by a row-admission read of
         // `source` must be repaired by a technique that can create and

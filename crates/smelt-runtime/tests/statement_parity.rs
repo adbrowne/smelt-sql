@@ -667,6 +667,11 @@ async fn self_referential_bootstrap_statements_come_from_the_emitter() {
          \x20\x20partition_column: d\n\
          \x20\x20event_time_column: d\n\
          \x20\x20granularity: day\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20transactions:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
          ---\n\
          SELECT d, balance FROM (\n\
          \x20\x20SELECT\n\
@@ -1282,6 +1287,11 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
          \x20\x20event_time_column: event_date\n\
          \x20\x20partition_column: event_date\n\
          \x20\x20granularity: day\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20events:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
          ---\n\
          SELECT device_id, event_date, MAX(amount) AS max_amount \
          FROM smelt.sources.events GROUP BY device_id, event_date",
@@ -1911,6 +1921,8 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
            scan_bounds:\n    \
              per_source:\n      \
                raw.users:\n        \
+                 allow_full_scan: true\n      \
+               raw.transactions:\n        \
                  allow_full_scan: true\n\
          ---\n";
 
@@ -2355,7 +2367,8 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
         &project_dir,
         "agg",
         "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
-         unique_key: user_id\n---\n\
+         unique_key: user_id\nmaintenance:\n  scan_bounds:\n    per_source:\n      \
+         payments:\n        allow_full_scan: true\n---\n\
          SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\n\
          GROUP BY user_id\n",
     );

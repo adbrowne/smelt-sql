@@ -412,6 +412,8 @@ maintenance:
     per_source:
       users:
         allow_full_scan: true
+      transactions:
+        allow_full_scan: true
   cells:
     - columns: [event_count]
       on: users

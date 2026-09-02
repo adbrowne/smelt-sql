@@ -2278,12 +2278,21 @@ impl KeyedEnrichedRecipe {
     /// mirroring `crates/smelt-runtime/tests/technique_lowering.rs`'s
     /// `keyed_column_scoped_merge_e2e::MODEL_FILE`.
     fn model_file(&self) -> String {
+        // `keyed_enrich_fact` is this model's own fold-driving source (a
+        // `COUNT` aggregate) — phase 19 (`docs/outcomes/
+        // 20260815-definition-delta-migrate`) now derives an
+        // `UpstreamMutation` cell for it too (an `AppendOnly` source named
+        // in a value-sensitive column group), with no statically derivable
+        // scan bound, so it needs the same `allow_full_scan` escape hatch
+        // the dimension already declares.
         format!(
             "---\nrefresh: incremental\ngrain: key\nunique_key: {id}\nmaintenance:\n  \
-             scan_bounds:\n    per_source:\n      {dim}:\n        allow_full_scan: true\n---\n\
+             scan_bounds:\n    per_source:\n      {dim}:\n        allow_full_scan: true\n      \
+             {fact}:\n        allow_full_scan: true\n---\n\
              {body}\n",
             id = self.fact.key_column,
             dim = self.dimension.name,
+            fact = self.fact.name,
             body = self.model_body(),
         )
     }

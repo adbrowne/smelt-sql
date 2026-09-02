@@ -110,6 +110,11 @@ timeseries:
   event_time_column: first_seen_date
   partition_column: first_seen_date
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.events:
+        allow_full_scan: true
 ---
 SELECT
     event_id,
@@ -148,7 +153,7 @@ smelt explain silver.events_deduped
 ```text
 Maintenance plan: silver.events_deduped
 
-Cells (2):
+Cells (3):
   - group {device_id, user_id, amplitude_id, event_ts, first_seen_date, utm_campaign, event_name, platform, url} on trigger NewData { source: "raw.events" }
       corner:    FoldDelta
       technique: KeyedFold
@@ -160,6 +165,18 @@ Cells (2):
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
       write pin: (none)
       write variant: unconditional (not admitted — the cell's column group is empty — there is nothing to compare)
+  - group {amplitude_id, device_id, event_name, event_ts, platform, url, user_id, utm_campaign} on trigger UpstreamMutation { source: "raw.events" }
+      corner:    ColumnMerge
+      technique: ColumnScopedMerge
+      ledger_catch_up: false
+      contract:  default
+      region key: Key(["event_id"])
+      locality:  NOT partition_local (source: raw.events, why: no predicate links 'event_date' to the output partition axis — the scan cannot be partition-pruned)
+      scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate, diff_patch
+      write pin: (none)
+      observed-delta recording: yes (change-suppressed column-scoped MERGE)
+      write variant: suppressed (preference — steady-state trigger over prior state)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
@@ -234,6 +251,11 @@ SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS devic
 --
 --
 --
+--
+--
+--
+--
+--
 -- The composed shape — key-addressed (one row per `event_id`, via
 -- `unique_key:`, which derives `grain: key`) *and* time-partitioned
 -- (`first_seen_date`, via `timeseries:`). Locality is
@@ -295,6 +317,9 @@ FROM (SELECT * FROM raw.events WHERE event_date >= '2026-04-10' AND event_date <
 GROUP BY event_id
 
 ) _smelt_typed) AS delta ON target.event_id = delta.event_id WHEN MATCHED THEN UPDATE SET device_id = LEAST(target.device_id, delta.device_id), user_id = LEAST(target.user_id, delta.user_id), amplitude_id = LEAST(target.amplitude_id, delta.amplitude_id), event_ts = LEAST(target.event_ts, delta.event_ts), first_seen_date = LEAST(target.first_seen_date, delta.first_seen_date), utm_campaign = LEAST(target.utm_campaign, delta.utm_campaign), event_name = LEAST(target.event_name, delta.event_name), platform = LEAST(target.platform, delta.platform), url = LEAST(target.url, delta.url) WHEN NOT MATCHED THEN INSERT *
+
+-- trigger: UpstreamMutation { source: "raw.events" }
+-- (no statements: the admitted technique preview has no statements)
 
 -- trigger: Backfill
 BEGIN

@@ -55,6 +55,42 @@ fn diagnostics_for_in(
     smelt_db::file_diagnostics(&db, ws, file)
 }
 
+/// Like [`diagnostics_for`], but returns the derived
+/// [`smelt_db::queries::maintenance::MaintenancePlanResult`] itself
+/// (`smelt_db::maintenance_plan_report`) rather than diagnostics — for
+/// asserting cell-level shape (technique, locality, scans) through the SAME
+/// production Salsa wrapper `file_diagnostics` consumes.
+fn plan_for(
+    files: &[(&str, &str)],
+    model_file: &str,
+) -> smelt_db::queries::maintenance::MaintenancePlanResult {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    for (rel, content) in files {
+        let path = root.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+    }
+
+    let loaded = load_workspace(&root);
+    let mut db = smelt_db::Database::default();
+    let ingested = ingest_loaded_workspace(&mut db, &loaded);
+    db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
+    let ws = db.workspace();
+
+    let target_path = root.join("models").join(format!("{model_file}.sql"));
+    let file = ingested
+        .source_files
+        .iter()
+        .zip(ingested.paths.iter())
+        .find(|(_, p)| **p == target_path)
+        .map(|(f, _)| *f)
+        .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
+
+    smelt_db::maintenance_plan_report(&db, ws, file)
+        .unwrap_or_else(|| panic!("model {model_file} has no maintenance plan"))
+}
+
 const SMELT_YML: &str = r#"
 name: maintenance_diagnostics_fixture
 version: 1
@@ -1380,5 +1416,163 @@ fn register_deployed_schemas_from_disk_reads_target_schemas() {
     assert_eq!(
         input.model_sql(&db).as_ref().map(|s| s.as_ref()),
         Some("SELECT 1")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 19 (`docs/outcomes/20260815-definition-delta-migrate`): a CLOCKED
+// explicitly-mutable source now derives an `UpstreamMutation` cell through
+// the production wrapper (`smelt_logical::maintenance::derive::
+// derive_triggers`), reachable from a real fact/dimension fixture mirroring
+// `examples/timeseries/models/daily_events_status.sql` (fact `raw.events` ×
+// a clocked, mutable `raw.user_status` joined on an explicit window
+// predicate).
+
+const STATUS_FIXTURE_EVENTS_SOURCE: &str = r#"
+description: Raw events, append-only, clocked.
+mutation_profile: append_only
+columns:
+  - { name: event_id, type: INTEGER, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: event_timestamp, type: TIMESTAMP, nullable: false }
+unique_key: [event_id]
+"#;
+
+const STATUS_FIXTURE_USER_STATUS_SOURCE: &str = r#"
+description: Time-varying user status, clocked, mutable.
+mutation_profile:
+  kind: mutable_snapshot
+timeseries:
+  partition_column: changed_at
+  event_time_column: changed_at
+  granularity: day
+unique_key: [user_id]
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: status, type: VARCHAR, nullable: true }
+  - { name: changed_at, type: TIMESTAMP, nullable: false }
+"#;
+
+const STATUS_FIXTURE_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  partition_column: event_date
+  event_time_column: event_timestamp
+  granularity: day
+---
+SELECT
+    e.event_id,
+    date_trunc('day', e.event_timestamp) AS event_date,
+    e.user_id,
+    s.status
+FROM smelt.sources.raw.events e
+JOIN smelt.sources.raw.user_status s
+  ON e.user_id = s.user_id
+ AND s.changed_at BETWEEN e.event_timestamp - INTERVAL '1 day'
+                       AND e.event_timestamp + INTERVAL '1 day'
+"#;
+
+fn status_fixture_files() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("smelt.yml", SMELT_YML),
+        (
+            "models/sources/raw/events.yml",
+            STATUS_FIXTURE_EVENTS_SOURCE,
+        ),
+        (
+            "models/sources/raw/user_status.yml",
+            STATUS_FIXTURE_USER_STATUS_SOURCE,
+        ),
+        ("models/daily_events_status.sql", STATUS_FIXTURE_MODEL),
+    ]
+}
+
+/// The production wrapper (`smelt_db::maintenance_plan_report`, the same
+/// Salsa query `file_diagnostics` and `smelt explain` consume) derives a
+/// `{status}` `UpstreamMutation{raw.user_status}` cell with no admission
+/// refusals, `PartitionLocal::Yes` (a genuine scan clamp on `changed_at`,
+/// per the fixture's explicit `BETWEEN` predicate), and `Technique::
+/// DeleteInsert` — `raw.user_status` is read in the join's own `ON`
+/// predicate, a row-admission position, so the `{status}` group is
+/// membership- (not merely value-) sensitive and must admit the recompute
+/// family, never a column-scoped `MERGE` (`docs/specs/incremental_models.md`
+/// §"The plan matrix").
+#[test]
+fn daily_events_status_derives_a_status_mutation_cell_through_the_wrapper() {
+    let result = plan_for(&status_fixture_files(), "daily_events_status");
+    assert!(
+        result.plan.refusals.is_empty(),
+        "expected no admission refusals: {:?}",
+        result.plan.refusals
+    );
+
+    let mutation_trigger = smelt_logical::maintenance::Trigger::UpstreamMutation {
+        source: "raw.user_status".to_string(),
+    };
+    let cell = result
+        .plan
+        .cells
+        .iter()
+        .find(|c| c.trigger == mutation_trigger && c.group == "{status}")
+        .unwrap_or_else(|| {
+            panic!(
+                "no {{status}} cell admitted for {mutation_trigger:?}: {:#?}",
+                result.plan
+            )
+        });
+    assert_eq!(
+        cell.technique,
+        smelt_logical::maintenance::Technique::DeleteInsert
+    );
+    assert_eq!(
+        cell.corner,
+        smelt_logical::maintenance::Corner::RecomputeRegion
+    );
+    assert_eq!(
+        cell.partition_local,
+        smelt_logical::maintenance::PartitionLocal::Yes
+    );
+    let scan = cell
+        .scans
+        .iter()
+        .find(|s| s.source == "raw.user_status")
+        .unwrap_or_else(|| panic!("no scan clamp for 'raw.user_status': {:?}", cell.scans));
+    assert_eq!(scan.column, "changed_at");
+}
+
+/// The same fixture, minus the fact's own window predicate against
+/// `raw.user_status` — the clocked mutable source's scan cannot be clamped
+/// to the output partition axis, so it must refuse loudly
+/// (`Refusal::ScanUnbounded`) rather than silently dropping the cell.
+#[test]
+fn clocked_mutable_source_with_no_derivable_clamp_refuses_scan_unbounded() {
+    let unclamped_model = STATUS_FIXTURE_MODEL.replace(
+        "JOIN smelt.sources.raw.user_status s\n  ON e.user_id = s.user_id\n AND s.changed_at BETWEEN e.event_timestamp - INTERVAL '1 day'\n                       AND e.event_timestamp + INTERVAL '1 day'\n",
+        "JOIN smelt.sources.raw.user_status s\n  ON e.user_id = s.user_id\n",
+    );
+    assert_ne!(
+        unclamped_model, STATUS_FIXTURE_MODEL,
+        "the replace must actually strip the window predicate"
+    );
+
+    let mut files = status_fixture_files();
+    let model_idx = files
+        .iter()
+        .position(|(rel, _)| *rel == "models/daily_events_status.sql")
+        .unwrap();
+    let leaked: &'static str = Box::leak(unclamped_model.into_boxed_str());
+    files[model_idx].1 = leaked;
+
+    let result = plan_for(&files, "daily_events_status");
+    assert!(
+        result
+            .plan
+            .refusals
+            .iter()
+            .any(|r| matches!(r, smelt_logical::maintenance::Refusal::ScanUnbounded { .. })),
+        "expected a ScanUnbounded refusal naming raw.user_status, got {:?}",
+        result.plan.refusals
     );
 }

@@ -839,6 +839,43 @@ fn derive_clamp_and_locality_pass(
         }
 
         for cell in &result.plan.cells {
+            // A `grain: key` model's `UpstreamMutation` cell over an
+            // `AppendOnly` source (phase 19, `docs/outcomes/
+            // 20260815-definition-delta-migrate`: newly derivable for a
+            // fold-driving `AppendOnly` source, not only an
+            // explicitly-declared `MutableSnapshot` one) is key-addressed
+            // maintenance dispatched by the live-cell resolvers
+            // (`resolve_live_column_scoped_cell`/
+            // `resolve_live_membership_recompute_cell`), never a
+            // forward-propagation graph edge — a bare keyed model
+            // participates in propagation only through its `Trigger::
+            // NewData` creation cell's established key-locality verdict
+            // (handled below, ~L893), exactly like the bare-keyed-creation-
+            // cell exclusion this loop already documents. Without this
+            // skip, a bare keyed fold (the common case — no partition axis
+            // to bound the fold-driving source's own mutation cell against)
+            // would register a spurious zero-margin edge via the generic
+            // `PartitionLocal::No` fallback below, breaking the "a
+            // keyed-grain model never derives an edge" invariant this graph
+            // upholds for a model with no time axis. Scoped to `AppendOnly`
+            // only — an unclocked, explicitly-declared `MutableSnapshot`
+            // ENRICHMENT source's `UpstreamMutation` cell (e.g. a dimension
+            // read in a keyed model's own JOIN) already derived and
+            // contributed an edge before this phase, unaffected by it, and
+            // is exactly what degrades this model's output-delta shape to
+            // `General` for the bare-keyed-origin refusal to catch.
+            if metadata.grain == Some(ConfigGrain::Key) {
+                if let smelt_logical::maintenance::Trigger::UpstreamMutation { source } =
+                    &cell.trigger
+                {
+                    let is_append_only = sources.iter().any(|s| {
+                        &s.name == source && s.mutation == PlanMutationProfile::AppendOnly
+                    });
+                    if is_append_only {
+                        continue;
+                    }
+                }
+            }
             for clamp in &cell.scans {
                 let e = Edge::from_clamp(&table, clamp);
                 let entry = clamp_days

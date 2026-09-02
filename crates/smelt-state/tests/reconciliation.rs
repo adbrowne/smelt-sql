@@ -340,6 +340,11 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
 ---
 SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
 "#,

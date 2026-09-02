@@ -6,6 +6,16 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.events:
+        # A late-arriving event into an already-processed day's partition
+        # genuinely changes the stored COUNT(DISTINCT ...) aggregates — the
+        # mutation cell this model now (correctly) derives for `raw.events`
+        # has no statically derivable scan bound, so a full-table op is
+        # accepted here rather than bounded.
+        allow_full_scan: true
 ---
 -- Composed: cube split + incremental materialization
 -- The planner detects both annotations and composes them:

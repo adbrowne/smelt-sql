@@ -3,6 +3,15 @@ materialization: table
 refresh: incremental
 grain: key
 unique_key: [device_id, user_id]
+maintenance:
+  scan_bounds:
+    per_source:
+      silver.events_deduped:
+        # `silver.events_deduped` is a composed upstream model, treated as
+        # an append-only source here — its own mutation cell has no
+        # statically derivable scan bound, so a full-table op is accepted
+        # rather than bounded.
+        allow_full_scan: true
 ---
 -- Cumulative (device_id, user_id) co-occurrence evidence — every signed-in
 -- event contributes one observation, combined across all source partitions

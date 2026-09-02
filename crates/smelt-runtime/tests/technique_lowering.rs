@@ -1242,29 +1242,17 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
 /// unclocked `raw.users`, which only ever derives the accepted-full-scan
 /// corner (`PartitionLocal::No`).
 ///
-/// **Known production gap** (documented here, not silently worked around):
-/// `smelt_db::queries::maintenance::derive_model_maintenance_plan`'s own
-/// trigger-list construction only ever emits a `Trigger::UpstreamMutation`
-/// for a source with `partition_col.is_none()` (see that function's doc
-/// comment: "a clocked enrichment join's own scan-bound derivation is
-/// deferred") — so a clocked source's `UpstreamMutation` cell is never
-/// derived through the production wrapper today, regardless of how the
-/// runtime dispatches on it. `crates/smelt-db` is outside this phase's
-/// allowed files. This test therefore reconstructs the SAME
-/// `ModelInputs` the wrapper builds (`build_source_facts`,
-/// `skeleton_columns`, `derive_column_groups` — all public
-/// `smelt-logical`/`smelt-db` functions, no logic reimplemented) and calls
-/// `smelt_logical::maintenance::derive::derive_maintenance_plan` directly
-/// with the fuller trigger list the wrapper does not yet construct,
-/// proving: (a) this fixture is correctly engineered to derive
-/// `PartitionLocal::Yes` once that trigger-list gate is lifted, and (b) the
-/// runtime dispatch mechanism this phase wires
-/// (`maintenance_driver::decide_column_merge_dispatch`/
-/// `execute_column_scoped_merge`, exercised end-to-end against a real
-/// DuckDB backend in `yes_corner_matches_full_refresh_after_dimension_mutation`
-/// below) is fed the correct shape the moment that gap closes.
+/// Obtains the plan from the production wrapper
+/// (`smelt_db::queries::maintenance::derive_model_maintenance_plan`), which
+/// now derives its trigger list via the pure, clock-blind
+/// `smelt_logical::maintenance::derive::derive_triggers`
+/// (`docs/outcomes/20260815-definition-delta-migrate` phase 19) — a clocked
+/// explicitly-mutable source gets an `UpstreamMutation` cell exactly like an
+/// unclocked one, so this corner is reachable through the real production
+/// path, not only by hand-building a fuller trigger list than the wrapper
+/// constructs.
 #[test]
-fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
+fn real_fixture_daily_events_status_admits_partition_local_yes_cell() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../examples/timeseries")
         .canonicalize()
@@ -1306,55 +1294,32 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
         .and_then(|m| m.scan_bounds.as_ref());
     let (sources, _scan_bounds_warnings) =
         smelt_db::queries::maintenance::build_source_facts(&source_refs, model_scan_bounds, None);
+    let explicitly_mutable: std::collections::HashSet<String> = source_refs
+        .iter()
+        .filter(|(_, info)| {
+            info.as_ref().is_some_and(|i| {
+                i.mutation_profile
+                    .as_ref()
+                    .is_some_and(|m| m.kind == smelt_core::sources::MutationProfile::Mutable)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
 
-    let partition_col = metadata
-        .timeseries
-        .as_ref()
-        .map(|t| t.partition_column.clone());
-    let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql_body,
+        "daily_events_status",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        None,
         &[],
-        partition_col.as_deref(),
-    );
-    let grouping =
-        smelt_logical::maintenance::grouping::derive_column_groups(sql_body, &sources, &skeleton);
-    assert!(
-        grouping.degenerate.is_empty(),
-        "expected no degenerate column-group collapses: {:?}",
-        grouping.degenerate
-    );
-
-    let inputs = smelt_logical::maintenance::derive::ModelInputs {
-        sql: sql_body,
-        output: smelt_logical::maintenance::OutputSpec {
-            table: "daily_events_status".to_string(),
-            grain: smelt_logical::maintenance::Grain::Partition {
-                partition_col: partition_col.clone().unwrap_or_default(),
-            },
-            skeleton_columns: skeleton,
-        },
-        sources: sources.clone(),
-        column_groups: grouping.groups.clone(),
-        fold: None,
-        old_columns: Vec::new(),
-        old_sql: None,
-    };
-
-    let plan = smelt_logical::maintenance::derive::derive_maintenance_plan(
-        &inputs,
-        &[
-            Trigger::NewData {
-                source: "raw.events".to_string(),
-            },
-            Trigger::NewData {
-                source: "raw.user_status".to_string(),
-            },
-            Trigger::UpstreamMutation {
-                source: "raw.user_status".to_string(),
-            },
-            Trigger::Backfill,
-        ],
-    );
+        &[],
+        &std::collections::BTreeMap::new(),
+        None,
+    )
+    .expect("daily_events_status has a maintenance plan (refresh: incremental + grain set)");
+    let plan = result.plan;
 
     assert!(
         plan.refusals.is_empty(),
@@ -1987,6 +1952,8 @@ mod keyed_membership_recompute_e2e {
            scan_bounds:\n    \
              per_source:\n      \
                raw.users:\n        \
+                 allow_full_scan: true\n      \
+               raw.transactions:\n        \
                  allow_full_scan: true\n\
          ---\n";
 
@@ -2410,6 +2377,8 @@ mod keyed_membership_recompute_e2e {
            scan_bounds:\n    \
              per_source:\n      \
                raw.users:\n        \
+                 allow_full_scan: true\n      \
+               raw.transactions:\n        \
                  allow_full_scan: true\n  \
            cells:\n    \
              - columns: [event_count]\n      \

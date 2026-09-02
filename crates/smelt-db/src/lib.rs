@@ -1381,10 +1381,24 @@ fn ref_source_info(
 /// granularity-equality structural precondition (mirroring
 /// [`crate::queries::maintenance::single_clocked_source_granularity`]'s
 /// role for declared sources).
+/// `model_scan_bounds`/`project_scan_bounds` are the DOWNSTREAM (referencing)
+/// model's own `maintenance.scan_bounds` declarations — the same two configs
+/// [`crate::queries::maintenance::build_source_facts`] already threads for a
+/// declared `sources:` entry — consulted here so a model-edge candidate can
+/// be granted `allow_full_scan` too (keyed by its bare, `smelt.`-stripped
+/// name, exactly like a declared source's `per_source` key): before this,
+/// there was no way to declare the K8 escape hatch for an upstream
+/// maintained-model source at all, which phase 19
+/// (`docs/outcomes/20260815-definition-delta-migrate`) newly needs — an
+/// `UpstreamMutation` cell is now genuinely derivable for one of these
+/// candidates too (an `AppendOnly` composed source in a value-sensitive
+/// aggregate column group), not only for a declared `sources:` entry.
 fn ref_model_source_facts(
     db: &dyn salsa::Database,
     workspace: Workspace,
     ref_str: &str,
+    model_scan_bounds: Option<&smelt_core::config::ScanBoundsConfig>,
+    project_scan_bounds: Option<&smelt_core::config::ScanBoundsConfig>,
 ) -> Option<(
     smelt_logical::maintenance::SourceFacts,
     smelt_core::config::Granularity,
@@ -1405,6 +1419,12 @@ fn ref_model_source_facts(
         ref_str,
     )?
     .granularity;
+    let (allow_full_scan, _require, _on_violation) =
+        crate::queries::maintenance::effective_scan_bounds(
+            stripped,
+            model_scan_bounds,
+            project_scan_bounds,
+        );
     Some((
         smelt_logical::maintenance::SourceFacts {
             name: stripped.to_string(),
@@ -1417,7 +1437,7 @@ fn ref_model_source_facts(
             mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
             partition_col: Some(locality.slice.partition_column().to_string()),
             unique_key: Vec::new(),
-            allow_full_scan: false,
+            allow_full_scan,
         },
         granularity,
     ))
@@ -1741,12 +1761,24 @@ pub fn maintenance_plan(
     // wiring below: a `grain: key` model's driving source may be another
     // maintained model's locality-admitted composed output, not just a
     // declared `sources:` entry.
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
     let extra_model_sources: Vec<(
         smelt_logical::maintenance::SourceFacts,
         smelt_core::config::Granularity,
     )> = if resolved_grain == Some(smelt_core::config::Grain::Key) {
         refs.iter()
-            .filter_map(|r| ref_model_source_facts(db, workspace, r))
+            .filter_map(|r| {
+                ref_model_source_facts(
+                    db,
+                    workspace,
+                    r,
+                    model_scan_bounds,
+                    project_scan_bounds.as_ref(),
+                )
+            })
             .collect()
     } else {
         Vec::new()
@@ -1887,7 +1919,13 @@ pub fn maintenance_plan_report(
     let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
     if resolved_grain == Some(smelt_core::config::Grain::Key) {
         for r in &refs {
-            if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
+            if let Some((facts, granularity)) = ref_model_source_facts(
+                db,
+                workspace,
+                r,
+                model_scan_bounds,
+                project_scan_bounds.as_ref(),
+            ) {
                 if !sources.iter().any(|s| s.name == facts.name) {
                     sources.push(facts);
                     model_source_granularities.push(granularity);

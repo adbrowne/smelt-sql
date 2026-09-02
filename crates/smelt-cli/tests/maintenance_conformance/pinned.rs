@@ -520,6 +520,11 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
 ---
 SELECT
     device_id,

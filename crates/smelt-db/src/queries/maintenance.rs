@@ -588,54 +588,16 @@ pub fn derive_model_maintenance_plan(
         old_sql: deployed_model_sql,
     };
 
-    let mut triggers = Vec::new();
-    for s in sources {
-        triggers.push(Trigger::NewData {
-            source: s.name.clone(),
-        });
-        // A mutation trigger is derived only for a source that (a) is
-        // unclocked (`partition_col: None` — a pure lookup join no clocked
-        // read window ever bounds) and (b) **explicitly** declares
-        // `mutation_profile: mutable_snapshot` on its own source YAML — not
-        // merely the fail-closed default `source_facts` assigns an
-        // undeclared source for admission purposes elsewhere. A source that
-        // hasn't declared any posture at all is the common case for a
-        // pre-existing model with no maintenance-plan awareness yet;
-        // treating "undeclared" as "declared mutable" here would newly
-        // refuse builds that never opted into the K8 guardrail's scope.
-        // Two further cases are deliberately NOT derived here yet:
-        //   - An `AppendOnly` source's rows never change once written — the
-        //     aggregate-window sensitivity `grouping::derive_column_groups`
-        //     marks it with describes the *creation* cell's still-open
-        //     window, not a mutation trigger of its own.
-        //   - A **clocked** `MutableSnapshot` source (the driving source
-        //     itself, or an enrichment join with its own `timeseries:`)
-        //     would need the runtime-injected incremental read window to
-        //     link a static bound — invisible to `derive_model_bounds`'s
-        //     text-level scan — so deriving an `UpstreamMutation` trigger
-        //     for it here would spuriously refuse under the K8 guardrail
-        //     whenever the model's raw SQL has no literal date predicate
-        //     (the normal, correct shape for a window-forward incremental
-        //     model). Scoping this trigger to unclocked, explicitly-mutable
-        //     sources only is this phase's deliberately narrow slice of
-        //     obligation 4 (`incremental_models.md` §"Per-cell admission"); a
-        //     clocked enrichment join's own scan-bound derivation is
-        //     deferred.
-        if s.partition_col.is_none()
-            && s.mutation == PlanMutationProfile::MutableSnapshot
-            && explicitly_mutable.contains(&s.name)
-        {
-            triggers.push(Trigger::UpstreamMutation {
-                source: s.name.clone(),
-            });
-        }
-    }
-    triggers.push(Trigger::Backfill);
-    if !added_columns.is_empty() {
-        triggers.push(Trigger::ColumnAdded {
-            columns: added_columns,
-        });
-    }
+    // Trigger derivation itself is a pure `smelt-logical` function
+    // (`derive::derive_triggers`, `incremental_models.md` §"Per-cell
+    // admission" → "Which changed inputs get a mutation cell") — this
+    // wrapper only assembles the facts (Salsa purity rule).
+    let triggers = smelt_logical::maintenance::derive::derive_triggers(
+        sources,
+        &grouping.groups,
+        explicitly_mutable,
+        &added_columns,
+    );
 
     let mut plan = derive_maintenance_plan_with_referential_integrity(
         &inputs,

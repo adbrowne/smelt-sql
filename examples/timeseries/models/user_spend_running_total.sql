@@ -6,6 +6,15 @@ timeseries:
   event_time_column: spend_date
   partition_column: spend_date
   granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      user_daily_spend:
+        # `user_daily_spend` is a composed upstream model, treated as an
+        # append-only source here — its own mutation cell (a late upstream
+        # correction reaching this model's SUM) has no statically derivable
+        # scan bound, so a full-table op is accepted rather than bounded.
+        allow_full_scan: true
 ---
 -- A downstream **keyed** model whose driving source is the composed
 -- `user_daily_spend` model's own output — not a declared `sources:` entry

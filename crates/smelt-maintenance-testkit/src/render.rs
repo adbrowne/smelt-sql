@@ -689,14 +689,19 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
 /// same source (`derive_mutation`) requires it, the source having no
 /// partition-local proof of its own (unclocked).
 pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
-    let scan_bounds = match recipe.source.posture {
-        SourcePosture::MutableSnapshot => format!(
-            "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
-             allow_full_scan: true\n",
-            name = recipe.source.name,
-        ),
-        SourcePosture::AppendOnly => String::new(),
-    };
+    // Every `KeyedRecipe`'s own `source` is its fold-driving input — an
+    // aggregate over it, so `derive_column_groups` always marks it
+    // value-sensitive regardless of posture (`docs/outcomes/
+    // 20260815-definition-delta-migrate` phase 19: an `AppendOnly` source
+    // named in a value-sensitive column group now derives an
+    // `UpstreamMutation` cell too, not only a `MutableSnapshot` one). That
+    // cell's scan has no statically derivable bound for either posture, so
+    // both accept the full-table op the same way.
+    let scan_bounds = format!(
+        "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
+         allow_full_scan: true\n",
+        name = recipe.source.name,
+    );
     // The once-write family's provenance proof (`incremental_models.md`
     // §"The column-family catalogue"): a declared `key -> <source payload
     // column>` functional dependency. `determines` names the SOURCE column
@@ -1047,8 +1052,17 @@ pub fn render_composed_model_file(recipe: &ComposedKeyedRecipe) -> String {
         ),
         None => String::new(),
     };
+    // `recipe.source` is this model's own fold-driving source — phase 19
+    // (`docs/outcomes/20260815-definition-delta-migrate`) now derives an
+    // `UpstreamMutation` cell for it too, with no statically derivable scan
+    // bound (mirrors `render_keyed_model_file`'s own `scan_bounds` block).
+    let scan_bounds = format!(
+        "maintenance:\n  scan_bounds:\n    per_source:\n      {name}:\n        \
+         allow_full_scan: true\n",
+        name = recipe.source.name,
+    );
     format!(
-        "---\ntimeseries:\n  event_time_column: {pc}\n  partition_column: {pc}\n  granularity: day\nrefresh: incremental\ngrain: key\n{fd_block}---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {pc}\n  partition_column: {pc}\n  granularity: day\nrefresh: incremental\ngrain: key\n{fd_block}{scan_bounds}---\n{body}\n",
         pc = partition_column,
         body = render_composed_model_body(recipe),
     )
