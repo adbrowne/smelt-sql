@@ -49,3 +49,16 @@ test('manually excluded words never appear as answers', () => {
   assert.ok(!ANSWERS.includes('cunny'));
   assert.ok(!ALLOWED.includes('cunny'));
 });
+
+test('known-bad non-words never appear in ANSWERS or ALLOWED', () => {
+  // Regression coverage for words that previously leaked through: acronyms
+  // and internally-capitalised names (McCoy, ASCII, McKay, COBOL) that
+  // upstream word lists carry as lowercase entries, and a Roman numeral
+  // (xxvii) present in the local system dictionary. See MANUAL_EXCLUSIONS
+  // in docs-site/tools/generate-words.mjs.
+  const knownBad = ['mccoy', 'ascii', 'mckay', 'cobol', 'xxvii'];
+  const combined = new Set([...ANSWERS, ...ALLOWED]);
+  for (const word of knownBad) {
+    assert.ok(!combined.has(word), `expected "${word}" to be excluded from both ANSWERS and ALLOWED`);
+  }
+});

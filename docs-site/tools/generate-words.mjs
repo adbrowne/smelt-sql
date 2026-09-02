@@ -33,9 +33,12 @@
 //     driven by a mulberry32 PRNG seeded 0x9e3779b9 (documented seed, carried
 //     over from the original list).
 //
-//   MANUAL_EXCLUSIONS: a small hand-maintained list of vulgar or otherwise
-//   unsuitable words that slip past the LDNOOBW list (e.g. "cunny"). Applied
-//   to both ANSWERS and ALLOWED. Add stragglers here as they're found.
+//   MANUAL_EXCLUSIONS: a small hand-maintained list of vulgar, non-word
+//   (acronyms/abbreviations that source lists carry as lowercase entries,
+//   e.g. "ascii", "cobol"), or otherwise unsuitable words that slip past the
+//   automated filters (LDNOOBW profanity list, proper-noun heuristic, vowel
+//   check). Applied to both ANSWERS and ALLOWED. Add stragglers here as
+//   they're found.
 //
 //   ALLOWED = every candidate-pool (guess pool) word NOT in ANSWERS, minus
 //   the profanity list and MANUAL_EXCLUSIONS.
@@ -60,10 +63,17 @@ const BRITISH_DICT = '/usr/share/dict/british-english';
 const SEED = 0x9e3779b9;
 const ANSWER_COUNT = 2000;
 
-// Hand-maintained exclusions for vulgar or otherwise unsuitable words that
-// slip past the LDNOOBW profanity list. Applied to both ANSWERS and ALLOWED.
-// Add stragglers here as they're discovered.
-const MANUAL_EXCLUSIONS = new Set(['cunny']);
+// Hand-maintained exclusions for vulgar, non-word, or otherwise unsuitable
+// words that slip past the automated filters. Applied to both ANSWERS and
+// ALLOWED. Add stragglers here as they're discovered.
+//   - cunny: vulgar slang, not on the LDNOOBW profanity list.
+//   - mccoy, mckay: proper nouns (surnames) that dwyl's word list itself
+//     carries as lowercase entries, independent of local-dict capitalisation.
+//   - ascii, cobol: acronyms that dwyl's word list carries as lowercase
+//     entries.
+//   - xxvii: a Roman numeral present as a lowercase entry in the local
+//     system dictionaries; not a word.
+const MANUAL_EXCLUSIONS = new Set(['cunny', 'mccoy', 'mckay', 'ascii', 'cobol', 'xxvii']);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -144,20 +154,24 @@ async function main() {
       .filter(Boolean)
   );
 
-  // --- local dictionaries: capitalised entries = proper nouns; all entries (lowercased) = candidates ---
+  // --- local dictionaries: any entry containing an uppercase letter (acronyms
+  //     like ASCII/COBOL, internal-cap names like McCoy/McKay) is a proper
+  //     noun, never a candidate word. Only already-lowercase entries are
+  //     admitted to localWordSet — do NOT lowercase before testing, or
+  //     acronyms/names silently become ordinary lowercase "words". ---
   const properNounSet = new Set();
   const localWordSet = new Set();
-  const CAP_PROPER_NOUN = /^[A-Z][a-z]{4}$/;
+  const HAS_UPPERCASE = /[A-Z]/;
   for (const text of [americanText, britishText]) {
     for (const rawLine of text.split('\n')) {
       const line = rawLine.replace(/\r$/, '');
       if (!line) continue;
-      if (CAP_PROPER_NOUN.test(line)) {
+      if (HAS_UPPERCASE.test(line)) {
         properNounSet.add(line.toLowerCase());
+        continue;
       }
-      const lower = line.toLowerCase();
-      if (FIVE_LETTER_LOWER.test(lower)) {
-        localWordSet.add(lower);
+      if (FIVE_LETTER_LOWER.test(line)) {
+        localWordSet.add(line);
       }
     }
   }
