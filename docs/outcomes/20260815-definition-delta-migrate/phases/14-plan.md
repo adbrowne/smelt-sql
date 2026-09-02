@@ -1,4 +1,4 @@
-# Phase 13b plan — Per-cell `deferral` dispatch on the plain fold
+# Phase 14 plan (renumbered from 13b) — Per-cell `deferral` dispatch on the plain fold
 
 ## Objective
 

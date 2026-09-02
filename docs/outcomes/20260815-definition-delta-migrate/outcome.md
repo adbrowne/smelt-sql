@@ -199,7 +199,7 @@ accurately described as open.
     on a key-addressed model is not a hard error"). Both bullets are removed from
     `incremental_shapes.md` §Known Divergences.
 20. `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` are run and
-    every Known Divergences bullet this outcome's phases 11–20 close is actually removed from the
+    every Known Divergences bullet this outcome's phases 11–23 close is actually removed from the
     respective spec (not just addressed in code) — the same discipline success criterion 8
     already applies to `definition_deltas.md`. Bullets this outcome deliberately does not close
     (the "Out of scope" list) stay, worded accurately rather than pointing at a done outcome as if
@@ -210,7 +210,7 @@ accurately described as open.
 `docs/outcomes/` is the only currently-live tracking layer — every `docs/plans/*` file predating
 it is either fully done, superseded by a later outcome/spec, or (rarely) genuinely orphaned.
 Genuinely orphaned bullets that are within the three anchor specs, and closeable *without* a new
-product decision, are pulled into scope (phases 10–19 above, plus the two spawned outcomes below)
+product decision, are pulled into scope (phases 10–23 above, plus the two spawned outcomes below)
 — not excluded. What's left here is either (a) material each spec itself frames as
 deliberately-undecided future work (its own `§Future Extensions`, or a bullet naming a not-yet-
 scoped next ladder rung / lattice point), which "implemented" cannot honestly mean for ideas the
@@ -251,7 +251,7 @@ open — not that the excluded bullets themselves are gone.
 - **Eclipse-detection breadth** (algebraic identities, join reorderings) and **row-local
   derivation for mid-catch-up groups** — `definition_deltas.md` §Future Extensions.
 - **Retraction handling / change-feed consumption as a first-class delta shape** —
-  `definition_deltas.md` §"What stays data-side". (Phase 18 does give `change_feed` sources an
+  `definition_deltas.md` §"What stays data-side". (Phase 21 does give `change_feed` sources an
   `UpstreamMutation` cell for consistency with every other mutation-sensitive source — that's a
   small, decidable admission-rule fix, not building retraction/change-feed folding.)
 - **Ladder rungs 3–4** (group-rung retraction, the bounded-domain multiset) —
@@ -291,7 +291,7 @@ open — not that the excluded bullets themselves are gone.
   `NOW()`/`CURRENT_*` in keyed models (today a deliberate hard refusal,
   `KeyedForbidsNondeterministic`, not merely an unfilled gap)** — all real design decisions with
   behavioural consequences (admission width, correctness posture, or a new surface keyword), not
-  a small in-spec call like phase 18's list. Recommend scoping these as their own outcome(s) once
+  a small in-spec call like phase 21's list. Recommend scoping these as their own outcome(s) once
   a product owner is ready to decide them, rather than folding a design pass into an
   implementation-only outcome.
 
@@ -313,18 +313,37 @@ open — not that the excluded bullets themselves are gone.
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | done |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | done |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | done |
-| 13b | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | planned |
-| 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
-| 15 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | pending |
-| 16 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
-| 17 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
-| 18 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
-| 19 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
-| 20 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
-| 20b | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
-| 21 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–20 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
+| 14 | Per-cell `deferral` dispatch: wire `deferral_cell_decisions` into the plain `Trigger::NewData` incremental fold dispatch (the only trigger family where `contract.cells[].deferral` is validly declarable), populating `deferred_cells`/`cell_frontiers` and narrowing the remaining half of the per-cell-deferral divergence | planned |
+| 15 | Observed-delta consumption (read side): live `--since-upstream` read of the recorded `_smelt_observed_delta` table; decide and record the backward-resolution clause (existence is not a change question — currency belongs to the ledger/`--auto`) | planned |
+| 16 | Observed-delta consumption (write side): keyed-fold and staged-candidate write families record their observed delta; the settle-bound × observed-delta composition gets its live "delta empty" leg | pending |
+| 17 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity; fix the empty-key derivation `group_by_unique_key` returns for a `GROUP BY` column named `order_id` (phase 13 summary: confirmed keyword/substring collision on `ORDER`, silently breaks `grain: key` admission) | pending |
+| 18 | Plan-consumer + graph-layer gap sweep: horizon-clamped quadrant fixture, mutation-vs-rederivation dispatch distinction, `prefer`/`scan_bounds.on_violation` consumption, `AppendOnly` `UpstreamMutation` cell, bare-keyed-node fixture, time-unrolled self-edges, key-level graph dirt, full `--since-upstream` web_analytics compatibility, `--select` scoping; reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
+| 19 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 20 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption | pending |
+| 21 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 22 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 23 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
+| 24 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–23 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-02, phase-15 planning — table reshape.** Renumbered every lettered phase row to a
+  plain integer (`13b` → 14, `20b` → 23, everything after shifted): the loop's own row scanner
+  (`.claude/scripts/outcome-loop.sh`, `next_step`) skips any row whose number does not match
+  `^[0-9]+$`, so `13b` was invisible and its already-written plan would never have been
+  implemented. `phases/13b-plan.md` renamed to `phases/14-plan.md`. Future rows use plain
+  integers only. Also split the old observed-delta row in two: read side (15) and write side
+  (16) — the read leg is CLI/propagation wiring, the write leg is `maintenance_driver` recording
+  plus the settle-bound composition, and they share no code seam.
+
+- **2026-09-02, phase 15.** Backward resolution (`smelt build --include-upstreams`) will NOT
+  consume observed deltas, and that clause of the divergence bullet is closed as a stated
+  non-goal rather than as unbuilt work. Backward resolution answers "what must **exist** over
+  this period" — an existence question a change record cannot soundly narrow: a present-and-empty
+  observed delta says a past run changed nothing, not that the region is current with respect to
+  inputs that landed since. Currency is the reconciliation ledger's question (§"The frontier
+  record", `smelt run --auto`), and skipping a required build on delta evidence alone would
+  under-cover the resolved period, violating `forward(backward(P)) ⊇ P`.
 
 - **2026-08-15, phase 1.** Plan-hash scope: hash the plan data structure the emitters consume
   (verdicts, techniques, input facts — source declarations, backend capabilities), not only
