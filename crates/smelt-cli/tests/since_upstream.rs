@@ -980,3 +980,172 @@ fn since_upstream_over_a_bare_keyed_chain_runs_end_to_end() {
         .expect("keyed_b must have been built");
     assert!(keyed_b_rows > 0, "keyed_b must be rebuilt with rows");
 }
+
+/// Phase 23 (`docs/outcomes/20260815-definition-delta-migrate`): `--select`
+/// scoping for `--since-upstream` intersects the propagated plan with the
+/// ordinary CLI selector instead of ignoring it. All four tests reuse
+/// `stage_model_chain` (`sources.bronze -> silver -> gold`) with a
+/// `--source bronze --landed ...` delta, which dirties both `silver` and
+/// `gold` transitively (`silver -> gold` is a maintained-model edge).
+fn seed_bronze(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE TABLE main.sources_bronze (id INTEGER, d DATE);\n\
+         INSERT INTO main.sources_bronze \
+           SELECT i, DATE '2026-01-01' + CAST(i - 1 AS INTEGER) FROM range(1, 11) t(i);\n",
+    )
+    .expect("seed bronze table");
+}
+
+fn table_exists(db_path: &Path, table: &str) -> bool {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'main' AND table_name = ?",
+            [table],
+            |row| row.get(0),
+        )
+        .expect("query information_schema");
+    count > 0
+}
+
+/// `--select silver` (no `+`) with a `bronze` delta that dirties both
+/// `silver` and `gold`: only `silver` executes; `gold` is suppressed and
+/// its table is never created (untouched).
+#[test]
+fn select_narrows_the_since_upstream_run_set() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_bronze(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "sources.bronze",
+            "--landed",
+            "2026-01-03..2026-01-04",
+            "--select",
+            "silver",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "narrowed since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("SUPPRESSED (not selected): gold"),
+        "the report must name gold as suppressed: {stdout}"
+    );
+    assert!(table_exists(&db_path, "silver"), "silver must have run");
+    assert!(
+        !table_exists(&db_path, "gold"),
+        "gold must stay untouched (never created) when deselected"
+    );
+}
+
+/// `--select +gold` pulls `silver` in via the upstream operator — both
+/// models in the dirty chain execute.
+#[test]
+fn select_with_upstream_operator_keeps_the_dirty_chain() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_bronze(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "sources.bronze",
+            "--landed",
+            "2026-01-03..2026-01-04",
+            "--select",
+            "+gold",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "+gold since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(table_exists(&db_path, "silver"), "silver must have run");
+    assert!(table_exists(&db_path, "gold"), "gold must have run");
+}
+
+/// `--select gold` alone, with a `bronze` delta dirtying both `silver` and
+/// `gold`, drops gold's dirty direct upstream (`silver`) from the
+/// selection — refused fail-loud rather than run `gold` against a stale
+/// `silver`.
+#[test]
+fn select_dropping_a_dirty_upstream_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_bronze(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "sources.bronze",
+            "--landed",
+            "2026-01-03..2026-01-04",
+            "--select",
+            "gold",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "dropping a dirty upstream from the selection must refuse"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("gold"), "error must name gold: {stderr}");
+    assert!(
+        stderr.contains("silver"),
+        "error must name silver: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+}
+
+/// A selector matching no model in the propagated plan is a quiet no-op —
+/// exit `0`, nothing executed, per `cli.md`'s "no models matched" contract.
+#[test]
+fn select_matching_nothing_is_a_quiet_no_op() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_bronze(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "sources.bronze",
+            "--landed",
+            "2026-01-03..2026-01-04",
+            "--select",
+            "tag:does-not-exist",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "an empty intersection must exit 0: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no models matched the selector(s)"),
+        "{stderr}"
+    );
+    assert!(!table_exists(&db_path, "silver"), "nothing must execute");
+    assert!(!table_exists(&db_path, "gold"), "nothing must execute");
+}

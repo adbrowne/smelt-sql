@@ -8,7 +8,7 @@
 //! sized, over real fixture models on disk — never a hand-typed clamp
 //! number.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use arrow::array::RecordBatch;
@@ -19,7 +19,8 @@ use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, 
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
     build_forward_graph, load_observed_delta_lookup, plan_since_upstream,
-    plan_since_upstream_with_observed_deltas, resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+    plan_since_upstream_with_observed_deltas, resolve_build_plan, scope_plan_to_selection,
+    ObservedDeltaLookup, PropagatedRun, SinceUpstreamPlan, SourceDelta,
 };
 use smelt_state::ddl_duckdb::ObservedDelta;
 
@@ -1870,4 +1871,99 @@ fn keyed_dirt_appears_in_the_dirty_set_report() {
         "reader's scheduled run must still be reported: {}",
         plan.dirty_set_report
     );
+}
+
+// Phase 23 (`docs/outcomes/20260815-definition-delta-migrate`): `--select`
+// scoping intersects the propagated plan with the CLI selector — pure unit
+// tests over `scope_plan_to_selection`, no fixture workspace needed.
+
+fn run(model: &str) -> PropagatedRun {
+    PropagatedRun {
+        model: model.to_string(),
+        start: None,
+        end: None,
+    }
+}
+
+fn plan_with(models: &[&str]) -> SinceUpstreamPlan {
+    SinceUpstreamPlan {
+        runs: models.iter().map(|m| run(m)).collect(),
+        dirty_set_report: "Dirty set (--since-upstream):\n".to_string(),
+    }
+}
+
+fn selection(models: &[&str]) -> BTreeSet<String> {
+    models.iter().map(|m| m.to_string()).collect()
+}
+
+#[test]
+fn scoping_keeps_only_the_selected_runs() {
+    let plan = plan_with(&["b", "c"]);
+    let upstreams = BTreeMap::new();
+    let scoped = scope_plan_to_selection(&plan, &selection(&["b"]), &upstreams).expect("scope");
+    assert_eq!(
+        scoped
+            .runs
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+}
+
+#[test]
+fn scoping_suppressed_runs_are_still_reported() {
+    let plan = plan_with(&["b", "c"]);
+    let upstreams = BTreeMap::new();
+    let scoped = scope_plan_to_selection(&plan, &selection(&["b"]), &upstreams).expect("scope");
+    assert!(
+        scoped
+            .dirty_set_report
+            .contains("SUPPRESSED (not selected): c"),
+        "report must name the suppressed model: {}",
+        scoped.dirty_set_report
+    );
+}
+
+#[test]
+fn scoping_refuses_a_dirty_upstream_dropped_by_the_selector() {
+    let plan = plan_with(&["a", "b"]);
+    let mut upstreams = BTreeMap::new();
+    upstreams.insert("b".to_string(), selection(&["a"]));
+    let err = scope_plan_to_selection(&plan, &selection(&["b"]), &upstreams).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains('b'),
+        "error must name the retained model: {msg}"
+    );
+    assert!(
+        msg.contains('a'),
+        "error must name the dropped dirty upstream: {msg}"
+    );
+}
+
+#[test]
+fn scoping_admits_a_clean_upstream_outside_the_selection() {
+    // `a` is never in `plan.runs` (not dirty) — dropping it from the
+    // selection cannot stale `b`.
+    let plan = plan_with(&["b"]);
+    let mut upstreams = BTreeMap::new();
+    upstreams.insert("b".to_string(), selection(&["a"]));
+    let scoped = scope_plan_to_selection(&plan, &selection(&["b"]), &upstreams).expect("scope");
+    assert_eq!(
+        scoped
+            .runs
+            .iter()
+            .map(|r| r.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+}
+
+#[test]
+fn scoping_with_an_empty_selection_yields_no_runs() {
+    let plan = plan_with(&["a", "b"]);
+    let upstreams = BTreeMap::new();
+    let scoped = scope_plan_to_selection(&plan, &BTreeSet::new(), &upstreams).expect("scope");
+    assert!(scoped.runs.is_empty());
 }

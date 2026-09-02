@@ -322,7 +322,7 @@ open — not that the excluded bullets themselves are gone.
 | 20 | Mutation-happened discrimination: a recorded per-source fingerprint baseline decides whether an `UpstreamMutation` cell dispatches or is recorded as a no-op, so dispatch distinguishes a genuine mutation from re-derivation | done |
 | 21 | Keyed dirt cascades and is consumed: `propagate` walks a node dirtied only through the keyed channel, and `plan_since_upstream` schedules and reports keyed dirt — a bare `grain: key` model with readers propagates end to end past `MaintenanceGraphUnsupportedNode` | done |
 | 22 | Time-unrolled self-edges: a backward-bounded self-referential model (`examples/web_analytics`'s `silver.sessions_chained`) builds a day-unrolled self-edge instead of refusing the whole-workspace graph | done |
-| 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | planned |
+| 23 | `--select` scoping for `--since-upstream`: the propagated plan intersects with the selector instead of ignoring it | done |
 | 24 | `examples/web_analytics` fully `--since-upstream`-compatible end to end (whole-workspace graph, no refusal), including the bare-keyed→clocked-reader model-edge admission gap phase 21 surfaced (a `grain: partition` downstream reached only through a plain `FROM`, no `JOIN`, cannot resolve its grain for `admit_key_addressed_recompute`); plus an open-ended propagated window (`start: Some(_), end: None`) surviving `parse_run_window`'s "both or neither" guard in a real `execute_project` run; remove `incremental_models.md`'s "Graph-layer gaps" bullet | pending |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | pending |
 | 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
@@ -333,6 +333,14 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 23 — `--select` scoping lands.** `scope_plan_to_selection`
+  (`crates/smelt-runtime/src/propagation.rs`) intersects a computed `SinceUpstreamPlan` with the
+  ordinary CLI selector: propagation stays whole-workspace, only execution narrows. Reuses
+  `smelt_runtime::select::select_executable_models` for the selection pass and
+  `DependencyGraph::get_upstream` for the direct-upstream refusal check, rather than a bespoke
+  model-name filter — keeps `--select`/`--exclude` semantics identical to the ordinary run path.
+  `incremental_models.md`'s "Graph-layer gaps" bullet no longer names missing `--select` scoping.
 
 - **2026-09-03, phase 22 — time-unrolled self-edges land.** A strictly time-backward
   self-referential model (`after_days == 0`, `before_days > 0`, day/month axis) is admitted into

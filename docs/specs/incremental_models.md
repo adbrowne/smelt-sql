@@ -458,7 +458,16 @@ contract:
   model's landed delta is the output window a completed run wrote). No per-invocation delta is
   computed automatically — a source named without a matching `--landed` propagates nothing.
   Opt-in; the intended default posture once trusted. Prints the **dirty set** — the per-model
-  regions propagation says must run (§"The graph layer") — before acting.
+  regions propagation says must run (§"The graph layer") — before acting. Accepts the ordinary
+  `--select`/`--exclude` selectors (`model_selection.md` grammar, `+` upstream/downstream
+  operators included): propagation itself is always whole-workspace — dirt must compose through
+  unselected intermediates — but the selector narrows only which propagated runs execute. The
+  printed dirty set still shows the whole propagated set, with deselected lines marked
+  `SUPPRESSED (not selected)`. A retained dirty model whose direct upstream is itself dirty but
+  deselected is refused with a diagnostic naming both (the same posture as `cli.md`
+  §"`--exclude` and working-set consistency"); the fix is to add `+<model>` to pull the upstream
+  in, or drop the downstream from the selection. An intersection that selects nothing is a quiet
+  no-op (`smelt: no models matched the selector(s)`, exit `0`, per `cli.md`).
 - `smelt run --auto` — process only the intervals the run-state interval ledger
   (`run_state.md`) does not yet cover for the selected models; the keyed grain's staleness
   interaction is `incremental_shapes.md` §"Interaction with `--auto` / staleness".
@@ -2002,7 +2011,7 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   (`MaintenanceGraphUnsupportedNode`); no key-level dirt representation exists (intervals are
   the graph's only currency); the `examples/web_analytics` workspace is not fully
   `--since-upstream`-compatible end to end (a bare-keyed model with readers refuses the
-  whole-workspace graph); no `--select` scoping exists.
+  whole-workspace graph).
 - **Delta detection for `--since-upstream` is explicit-only in v1** — the runner supplies
   landed deltas on the command line; no persisted per-source watermark or automatic diffing
   is consumed (§Future Extensions).

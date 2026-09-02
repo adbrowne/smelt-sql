@@ -407,7 +407,7 @@ async fn run_since_upstream(
     drop(lookup_backend);
 
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string();
-    let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+    let mut plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
         models,
         &source_infos,
         &order,
@@ -416,6 +416,73 @@ async fn run_since_upstream(
         &now,
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    // `--select`/`--exclude` scoping (`incremental_models.md` §CLI):
+    // propagation itself stays whole-workspace above — dirt must compose
+    // through unselected intermediates — but only the selected models
+    // execute. Resolved through the SAME selector-resolution + selection
+    // pass the ordinary run path uses (`cli.md` §"Argument resolution"), not
+    // a parallel model-name filter.
+    if !args.select.is_empty() || !args.exclude.is_empty() {
+        let had_runs_before_scoping = !plan.runs.is_empty();
+
+        let sel_db = smelt_cli::init_db(project_dir, models);
+        let sel_ws = smelt_db::Workspace::try_get(&sel_db).ok_or_else(|| {
+            anyhow::anyhow!("workspace not initialized for --select/--exclude resolution")
+        })?;
+        let sel_project = sel_db.project_input(project_dir).ok_or_else(|| {
+            anyhow::anyhow!("project not initialized for --select/--exclude resolution")
+        })?;
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.to_path_buf());
+        let active_scope = compute_scope(project_dir, &cwd, &config.paths, None);
+        let resolved_select = resolve_selector_args(
+            &sel_db,
+            sel_ws,
+            sel_project,
+            active_scope.as_ref(),
+            &args.select,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let resolved_exclude = resolve_selector_args(
+            &sel_db,
+            sel_ws,
+            sel_project,
+            active_scope.as_ref(),
+            &args.exclude,
+        )
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        let selection_plan = smelt_runtime::select::select_executable_models(
+            &graph,
+            config,
+            &smelt_runtime::select::SelectionRequest {
+                select: resolved_select,
+                exclude: resolved_exclude,
+                target: args.target.clone(),
+            },
+        )?;
+        let selected: std::collections::BTreeSet<String> =
+            selection_plan.ordered_models.into_iter().collect();
+
+        let upstreams: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            graph
+                .all_model_names()
+                .into_iter()
+                .map(|m| {
+                    let ups = graph.get_upstream(&m).into_iter().collect();
+                    (m, ups)
+                })
+                .collect();
+
+        plan = smelt_runtime::propagation::scope_plan_to_selection(&plan, &selected, &upstreams)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        if had_runs_before_scoping && plan.runs.is_empty() {
+            print!("{}", plan.dirty_set_report);
+            eprintln!("smelt: no models matched the selector(s)");
+            return Ok(());
+        }
+    }
 
     print!("{}", plan.dirty_set_report);
     if plan.runs.is_empty() {

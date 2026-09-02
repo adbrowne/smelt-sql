@@ -343,6 +343,16 @@ smelt run --since-upstream \
   --source sources.raw.users --landed 2026-01-07..2026-01-08
 ```
 
+`--select`/`--exclude` narrow which propagated runs execute, without changing propagation itself: the dirty-set computation always walks the whole workspace graph — dirt must still compose through an unselected intermediate model — but only the selected models actually run. The printed dirty set lists every propagated model, marking the deselected ones `SUPPRESSED (not selected)`. Dropping a dirty model's direct upstream from the selection while still selecting the model itself is refused (add `+<model>` to pull the upstream in, or drop the downstream too); a selection that matches nothing propagated is a quiet no-op (`smelt: no models matched the selector(s)`, exit `0`).
+
+```bash
+# Only run marts.revenue, even though the delta also dirtied its upstream
+# staging models — those still get walked for propagation math, just not run.
+smelt run --since-upstream \
+  --source sources.raw.events --landed 2026-01-03..2026-01-04 \
+  --select +marts.revenue
+```
+
 ---
 
 ## smelt rebuild

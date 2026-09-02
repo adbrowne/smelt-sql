@@ -1430,6 +1430,73 @@ pub fn plan_since_upstream_with_observed_deltas(
     })
 }
 
+/// Narrow a [`SinceUpstreamPlan`] to `--select`/`--exclude` (`incremental_models.md`
+/// §CLI): propagation itself is always whole-workspace (dirt must compose
+/// through unselected intermediates), but only the `selected` models
+/// actually execute. `upstreams` is the direct (one-hop) model-dependency
+/// map (a model's own declared refs, not transitively expanded) — the same
+/// shape `DependencyGraph::get_upstream` returns per model.
+///
+/// A retained (selected and dirty) run whose direct upstream is ALSO dirty
+/// (present in `plan.runs`) but was dropped by the selector is refused
+/// fail-loud rather than silently run against a stale input — the same
+/// posture `cli.md` §"`--exclude` and working-set consistency" already
+/// takes for the ordinary selector path. A dirty-but-clean-upstream (an
+/// upstream that never appears in `plan.runs`) is never checked: dropping an
+/// already-current model from the selection cannot stale anything.
+///
+/// Deselected dirty models are not dropped silently — they are appended to
+/// the returned report as `SUPPRESSED (not selected)` lines, so the printed
+/// dirty set still shows the whole propagated set per `incremental_models.md`'s
+/// "prints the dirty set before acting" rule.
+pub fn scope_plan_to_selection(
+    plan: &SinceUpstreamPlan,
+    selected: &BTreeSet<String>,
+    upstreams: &BTreeMap<String, BTreeSet<String>>,
+) -> Result<SinceUpstreamPlan> {
+    let dirty_models: BTreeSet<&str> = plan.runs.iter().map(|r| r.model.as_str()).collect();
+
+    let mut retained: Vec<PropagatedRun> = Vec::new();
+    let mut suppressed: Vec<&str> = Vec::new();
+    for run in &plan.runs {
+        if selected.contains(&run.model) {
+            retained.push(run.clone());
+        } else {
+            suppressed.push(run.model.as_str());
+        }
+    }
+
+    for run in &retained {
+        let Some(ups) = upstreams.get(&run.model) else {
+            continue;
+        };
+        for up in ups {
+            if dirty_models.contains(up.as_str()) && !selected.contains(up) {
+                bail!(
+                    "'{model}' is dirty and retained by the selector, but its dirty upstream \
+                     '{upstream}' was dropped by the selector — add '+{model}' to pull the \
+                     upstream in, or drop '{model}' from the selection",
+                    model = run.model,
+                    upstream = up
+                );
+            }
+        }
+    }
+
+    let mut report = plan.dirty_set_report.clone();
+    if !suppressed.is_empty() {
+        report.push_str("Suppressed by selector:\n");
+        for model in &suppressed {
+            report.push_str(&format!("  SUPPRESSED (not selected): {model}\n"));
+        }
+    }
+
+    Ok(SinceUpstreamPlan {
+        runs: retained,
+        dirty_set_report: report,
+    })
+}
+
 /// The resolved backward-resolution plan for `smelt build --include-upstreams`:
 /// the per-ancestor required slices (raw sources to stage, model regions to
 /// build) plus the ancestor-first/target-last build order, and a
