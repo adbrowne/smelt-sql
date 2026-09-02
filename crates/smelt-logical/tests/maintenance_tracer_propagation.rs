@@ -51,6 +51,7 @@ fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> 
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
         footprint_seconds: Some((after_seconds, before_seconds)),
+        dirtied_groups: None,
     }
 }
 
@@ -595,6 +596,7 @@ fn unclocked_edge(upstream: &str, downstream: &str) -> Edge {
         downstream_grain: PartitionGrain::Day,
         components: Vec::new(),
         footprint_seconds: Some((0, 0)),
+        dirtied_groups: None,
     }
 }
 

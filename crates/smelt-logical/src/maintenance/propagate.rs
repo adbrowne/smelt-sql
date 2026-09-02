@@ -604,6 +604,15 @@ pub struct Edge {
     /// (`PartitionInterval::WHOLE`) rather than silently reusing the
     /// read-side `(before_seconds, after_seconds)` mirror as a stand-in.
     pub footprint_seconds: Option<(i64, i64)>,
+    /// The downstream's own column groups this edge's upstream delta
+    /// touches (`incremental_models.md` §"The graph layer" → "Column-group-
+    /// scoped dirt"), derived by
+    /// [`crate::maintenance::grouping::dirt_scope`] against the
+    /// **downstream's** own [`crate::maintenance::grouping::GroupingResult`].
+    /// `None` (the widen-never-narrow default) means the upstream's delta
+    /// dirties the whole downstream model — set on every existing
+    /// constructor unchanged.
+    pub dirtied_groups: Option<Vec<String>>,
 }
 
 impl Edge {
@@ -623,6 +632,7 @@ impl Edge {
             footprint_seconds: clamp
                 .footprint()
                 .map(|(before, after)| (before.0 as i64, after.0 as i64)),
+            dirtied_groups: None,
         }
     }
 
@@ -630,6 +640,13 @@ impl Edge {
     /// already-built edge.
     pub fn with_components(mut self, components: Vec<EdgeComponent>) -> Self {
         self.components = components;
+        self
+    }
+
+    /// Attach a column-group dirt scope (`super::grouping::dirt_scope`) to
+    /// an already-built edge.
+    pub fn with_dirtied_groups(mut self, dirtied_groups: Option<Vec<String>>) -> Self {
+        self.dirtied_groups = dirtied_groups;
         self
     }
 
@@ -678,6 +695,18 @@ pub struct Propagation {
     /// `model` → merged keyed dirt-set records across all admitted inbound
     /// keyed edges — the keyed-channel counterpart to `dirty`.
     pub keyed_dirty: BTreeMap<String, Vec<KeyedDirt>>,
+    /// `(model, upstream)` → the column-group dirt scope that inbound edge
+    /// carried (`incremental_models.md` §"The graph layer" → "Column-group-
+    /// scoped dirt"). Absent from this map means that edge's own dirt was
+    /// unscoped (whole-model) — the same widen-never-narrow default
+    /// `Edge::dirtied_groups: None` carries.
+    pub per_edge_groups: BTreeMap<(String, String), Vec<String>>,
+    /// `model` → the merged column-group scope of `model`'s own dirt across
+    /// all inbound edges, when every inbound edge (that contributed dirt)
+    /// carried a scope. A model absent from this map, or a node dirtied by
+    /// even one unscoped inbound edge, is whole-model dirty — the scope
+    /// never survives a merge with an unscoped contribution.
+    pub dirty_groups: BTreeMap<String, Vec<String>>,
 }
 
 /// The grain of `node`'s partition axis, read off any edge that touches it
@@ -814,6 +843,16 @@ pub fn propagate(
     let order = topo_order(edges, source_deltas.keys().map(|s| s.as_str()))?;
 
     let mut result = Propagation::default();
+    // Working accumulators for column-group-scoped dirt
+    // (`incremental_models.md` §"The graph layer" → "Column-group-scoped
+    // dirt"). `*_whole` remembers a node/edge that has been contaminated by
+    // an unscoped contribution so a later scoped contribution processed in
+    // a subsequent topological step never resurrects it — the scope must
+    // never survive a merge with an unscoped one (widen-never-narrow).
+    let mut dirty_groups_acc: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut whole_group_nodes: BTreeSet<String> = BTreeSet::new();
+    let mut per_edge_groups_acc: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut whole_group_edges: BTreeSet<(String, String)> = BTreeSet::new();
     // Seed: the source deltas are the sources' own "dirty" intervals,
     // aligned outward to each source's grain (a coarse-grained source's
     // delta is whole partitions by definition). A keyed-grain source's
@@ -867,10 +906,35 @@ pub fn propagate(
         if node_dirty.is_empty() && !node_has_keyed_dirt {
             continue;
         }
+        // This node's own column-group scope entering the outbound walk —
+        // fully merged already, since every inbound edge was processed in
+        // an earlier topological step. Absent means unscoped (whole-model),
+        // the same as a source node no group-scoping logic ever touched.
+        let node_group_scope = dirty_groups_acc.get(node).cloned();
         for (idx, e) in edges.iter().enumerate() {
             if e.upstream != node || e.upstream == e.downstream {
                 continue;
             }
+            // Column-group gating (`incremental_models.md` §"The graph
+            // layer" → "Column-group-scoped dirt"): a consumer whose typed
+            // components name only groups outside this node's own dirty
+            // scope reads nothing this delta touches — skip the edge
+            // entirely. An edge with no components is untyped and always
+            // propagates unscoped.
+            if let Some(scope) = &node_group_scope {
+                if !e.components.is_empty()
+                    && !e.components.iter().any(|c| scope.contains(&c.group))
+                {
+                    continue;
+                }
+            }
+            merge_edge_groups(
+                e,
+                &mut dirty_groups_acc,
+                &mut whole_group_nodes,
+                &mut per_edge_groups_acc,
+                &mut whole_group_edges,
+            );
             match &keyed_admission[idx] {
                 KeyedAdmission::Admitted(keys) => {
                     let kd = KeyedDirt {
@@ -931,10 +995,69 @@ pub fn propagate(
             }
         }
     }
+    for (node, groups) in dirty_groups_acc {
+        if !whole_group_nodes.contains(&node) && !groups.is_empty() {
+            result
+                .dirty_groups
+                .insert(node, groups.into_iter().collect());
+        }
+    }
+    for (pair, groups) in per_edge_groups_acc {
+        if !whole_group_edges.contains(&pair) && !groups.is_empty() {
+            result
+                .per_edge_groups
+                .insert(pair, groups.into_iter().collect());
+        }
+    }
     // Drop models that ended up with no dirt (reachable but untouched).
     result.dirty.retain(|_, v| !v.is_empty());
     result.keyed_dirty.retain(|_, v| !v.is_empty());
+    result
+        .dirty_groups
+        .retain(|node, _| result.dirty.contains_key(node));
+    result
+        .per_edge_groups
+        .retain(|(downstream, _), _| result.dirty.contains_key(downstream));
     Ok(result)
+}
+
+/// Merge one outbound edge's own `dirtied_groups` into the working
+/// per-edge and per-node column-group accumulators. An unscoped edge
+/// (`dirtied_groups: None`) permanently contaminates both its own
+/// `(downstream, upstream)` pair and the downstream node itself — the scope
+/// never survives a merge with an unscoped contribution, and a later scoped
+/// contribution processed in a subsequent topological step must not
+/// resurrect a node/pair already contaminated (`*_whole` remembers that).
+fn merge_edge_groups(
+    e: &Edge,
+    dirty_groups_acc: &mut BTreeMap<String, BTreeSet<String>>,
+    whole_group_nodes: &mut BTreeSet<String>,
+    per_edge_groups_acc: &mut BTreeMap<(String, String), BTreeSet<String>>,
+    whole_group_edges: &mut BTreeSet<(String, String)>,
+) {
+    let pair = (e.downstream.clone(), e.upstream.clone());
+    match &e.dirtied_groups {
+        Some(groups) => {
+            if !whole_group_nodes.contains(&e.downstream) {
+                dirty_groups_acc
+                    .entry(e.downstream.clone())
+                    .or_default()
+                    .extend(groups.iter().cloned());
+            }
+            if !whole_group_edges.contains(&pair) {
+                per_edge_groups_acc
+                    .entry(pair)
+                    .or_default()
+                    .extend(groups.iter().cloned());
+            }
+        }
+        None => {
+            whole_group_nodes.insert(e.downstream.clone());
+            dirty_groups_acc.remove(&e.downstream);
+            whole_group_edges.insert(pair.clone());
+            per_edge_groups_acc.remove(&pair);
+        }
+    }
 }
 
 /// Push a [`KeyedDirt`] record onto `list` unless an identical `(keys,
@@ -1089,6 +1212,7 @@ mod locality_margin_tests {
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
             footprint_seconds: Some((after_seconds, before_seconds)),
+            dirtied_groups: None,
         }
     }
 
@@ -1450,6 +1574,7 @@ mod typed_edge_advisory_tests {
             downstream_grain: PartitionGrain::Day,
             components: Vec::new(),
             footprint_seconds: Some((after_seconds, before_seconds)),
+            dirtied_groups: None,
         }
     }
 
@@ -1494,6 +1619,7 @@ mod typed_edge_advisory_tests {
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
             footprint_seconds: Some((0, DAY_SECONDS)),
+            dirtied_groups: None,
         };
         let e2 = Edge {
             upstream: "mid".to_string(),
@@ -1504,6 +1630,7 @@ mod typed_edge_advisory_tests {
             downstream_grain: PartitionGrain::Day,
             components: vec![window_component()],
             footprint_seconds: Some((DAY_SECONDS, 0)),
+            dirtied_groups: None,
         };
         let edges = vec![e1, e2];
 
@@ -1580,6 +1707,7 @@ mod grain_alignment_tests {
             downstream_grain: grain,
             components: Vec::new(),
             footprint_seconds: Some((footprint_before, footprint_after)),
+            dirtied_groups: None,
         }
     }
 
@@ -1714,6 +1842,228 @@ mod grain_alignment_tests {
             vec![PartitionInterval::new(
                 day_start(day_ordinal(2026, 1, 9)),
                 day_start(day_ordinal(2026, 1, 11))
+            )]
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Column-group-scoped dirt (`incremental_models.md` §"The graph layer" →
+// "Column-group-scoped dirt"): an edge whose upstream is a proven value-only
+// source of the downstream carries a `dirtied_groups` scope, narrowing
+// which of the downstream's own column groups the delta touches — and that
+// scope, once merged onto the node, gates which of the node's own outbound
+// edges even fire.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod column_group_scope_tests {
+    use super::*;
+    use crate::analysis::output_delta::OutputDelta;
+    use crate::maintenance::edge_type::{Addressing, EdgeComponent};
+
+    /// `before_days`/`after_days` in whole days, scaled to exact seconds.
+    fn edge(
+        upstream: &str,
+        downstream: &str,
+        before_days: i64,
+        after_days: i64,
+        dirtied_groups: Option<Vec<&str>>,
+        components: Vec<EdgeComponent>,
+    ) -> Edge {
+        let before_seconds = before_days * DAY_SECONDS;
+        let after_seconds = after_days * DAY_SECONDS;
+        Edge {
+            upstream: upstream.to_string(),
+            downstream: downstream.to_string(),
+            before_seconds,
+            after_seconds,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+            components,
+            footprint_seconds: Some((after_seconds, before_seconds)),
+            dirtied_groups: dirtied_groups
+                .map(|gs| gs.into_iter().map(|g| g.to_string()).collect()),
+        }
+    }
+
+    /// A component naming `group`, addressed by an arbitrary window axis —
+    /// only `.group` is exercised by the gating check these tests pin.
+    fn component(group: &str) -> EdgeComponent {
+        EdgeComponent {
+            group: group.to_string(),
+            shape: OutputDelta::AppendOnlyWindow {
+                axis: "d".to_string(),
+            },
+            addressing: Addressing::Window {
+                axis: "d".to_string(),
+            },
+            columns: vec![],
+        }
+    }
+
+    fn source_deltas(
+        source: &str,
+        iv: PartitionInterval,
+    ) -> BTreeMap<String, Vec<PartitionInterval>> {
+        let mut m = BTreeMap::new();
+        m.insert(source.to_string(), vec![iv]);
+        m
+    }
+
+    /// A scoped edge's dirt is recorded on both the node and the edge, and
+    /// the interval math (`dirty`/`per_edge`) is byte-identical to the same
+    /// edge with no group scope at all.
+    #[test]
+    fn scoped_dirt_records_its_groups_on_the_node_and_edge() {
+        let deltas = source_deltas("a", PartitionInterval::whole_day(day_ordinal(2026, 1, 10)));
+
+        let scoped = edge("a", "b", 1, 0, Some(vec!["{x}"]), Vec::new());
+        let unscoped = edge("a", "b", 1, 0, None, Vec::new());
+
+        let scoped_prop = propagate(&[scoped], &deltas).expect("propagate");
+        let unscoped_prop = propagate(&[unscoped], &deltas).expect("propagate");
+
+        assert_eq!(scoped_prop.dirty, unscoped_prop.dirty);
+        assert_eq!(scoped_prop.per_edge, unscoped_prop.per_edge);
+        assert_eq!(
+            scoped_prop.dirty_groups.get("b"),
+            Some(&vec!["{x}".to_string()])
+        );
+        assert_eq!(
+            scoped_prop
+                .per_edge_groups
+                .get(&("b".to_string(), "a".to_string())),
+            Some(&vec!["{x}".to_string()])
+        );
+        assert!(unscoped_prop.dirty_groups.is_empty());
+        assert!(unscoped_prop.per_edge_groups.is_empty());
+    }
+
+    /// The narrowing's payoff: a consumer whose outbound edge names only
+    /// groups outside the dirty scope contributes nothing downstream.
+    #[test]
+    fn a_consumer_reading_only_unscoped_groups_is_not_dirtied() {
+        let deltas = source_deltas("a", PartitionInterval::whole_day(day_ordinal(2026, 1, 10)));
+        let edges = vec![
+            edge("a", "b", 1, 0, Some(vec!["{x}"]), Vec::new()),
+            edge("b", "c", 0, 0, None, vec![component("{y}")]),
+        ];
+
+        let prop = propagate(&edges, &deltas).expect("propagate");
+
+        assert!(
+            !prop.dirty.contains_key("c"),
+            "a consumer reading only a non-dirty group must not be scheduled: {:?}",
+            prop.dirty
+        );
+    }
+
+    /// A consumer whose outbound edge names a group that IS in the dirty
+    /// scope is still dirtied, exactly as before.
+    #[test]
+    fn a_consumer_reading_a_dirty_group_is_dirtied_as_before() {
+        let deltas = source_deltas("a", PartitionInterval::whole_day(day_ordinal(2026, 1, 10)));
+        let edges = vec![
+            edge("a", "b", 1, 0, Some(vec!["{x}"]), Vec::new()),
+            edge("b", "c", 0, 0, None, vec![component("{x}")]),
+        ];
+
+        let prop = propagate(&edges, &deltas).expect("propagate");
+
+        assert!(
+            prop.dirty.contains_key("c"),
+            "a consumer reading a dirty group must still be scheduled: {:?}",
+            prop.dirty
+        );
+    }
+
+    /// An untyped outbound edge (no components at all) always propagates
+    /// unscoped, regardless of the node's own dirty scope.
+    #[test]
+    fn an_untyped_outbound_edge_propagates_unscoped() {
+        let deltas = source_deltas("a", PartitionInterval::whole_day(day_ordinal(2026, 1, 10)));
+        let edges = vec![
+            edge("a", "b", 1, 0, Some(vec!["{x}"]), Vec::new()),
+            edge("b", "c", 0, 0, None, Vec::new()),
+        ];
+
+        let prop = propagate(&edges, &deltas).expect("propagate");
+
+        assert!(
+            prop.dirty.contains_key("c"),
+            "an untyped outbound edge must not be gated: {:?}",
+            prop.dirty
+        );
+    }
+
+    /// A node dirtied by one scoped and one unscoped inbound edge is
+    /// whole-model dirty — the scope does not survive the merge. The
+    /// contaminating edge's own sibling pair keeps its own per-edge scope
+    /// (the whole-model contamination is a node-level fact, not retroactive
+    /// on the other edge's own record).
+    #[test]
+    fn whole_model_dirt_from_a_second_edge_defeats_the_scope() {
+        let mut deltas = source_deltas("a", PartitionInterval::whole_day(day_ordinal(2026, 1, 10)));
+        deltas.insert(
+            "z".to_string(),
+            vec![PartitionInterval::whole_day(day_ordinal(2026, 1, 10))],
+        );
+        let edges = vec![
+            edge("a", "d", 1, 0, Some(vec!["{x}"]), Vec::new()),
+            edge("z", "d", 1, 0, None, Vec::new()),
+        ];
+
+        let prop = propagate(&edges, &deltas).expect("propagate");
+
+        assert!(
+            !prop.dirty_groups.contains_key("d"),
+            "a node touched by even one unscoped edge must be whole-model: {:?}",
+            prop.dirty_groups
+        );
+        assert_eq!(
+            prop.per_edge_groups
+                .get(&("d".to_string(), "a".to_string())),
+            Some(&vec!["{x}".to_string()]),
+            "the other edge's own per-edge scope is unaffected by the sibling's contamination"
+        );
+    }
+
+    /// The backward resolution (`required_inputs`) ignores group scope
+    /// entirely — its result is identical whether or not edges carry a
+    /// `dirtied_groups` scope.
+    #[test]
+    fn required_inputs_is_unchanged_by_scoping() {
+        let scoped = vec![edge("a", "b", 1, 0, Some(vec!["{x}"]), Vec::new())];
+        let unscoped = vec![edge("a", "b", 1, 0, None, Vec::new())];
+        let period = PartitionInterval::whole_day(day_ordinal(2026, 1, 10));
+
+        let scoped_result = required_inputs(&scoped, "b", period).expect("required_inputs");
+        let unscoped_result = required_inputs(&unscoped, "b", period).expect("required_inputs");
+
+        assert_eq!(scoped_result.required, unscoped_result.required);
+        assert_eq!(scoped_result.build_order, unscoped_result.build_order);
+    }
+
+    /// Regression anchor: an existing day-only scenario with no group
+    /// scoping data anywhere produces an empty `dirty_groups`/
+    /// `per_edge_groups` and its `dirty`/`per_edge` results are unchanged.
+    #[test]
+    fn existing_day_graphs_are_unchanged() {
+        let e = edge("source", "downstream", 1, 0, None, Vec::new());
+        let deltas = source_deltas(
+            "source",
+            PartitionInterval::whole_day(day_ordinal(2026, 1, 10)),
+        );
+
+        let prop = propagate(&[e], &deltas).expect("propagate");
+
+        assert!(prop.dirty_groups.is_empty());
+        assert!(prop.per_edge_groups.is_empty());
+        assert_eq!(
+            prop.dirty.get("downstream").cloned().unwrap_or_default(),
+            vec![PartitionInterval::new(
+                day_start(day_ordinal(2026, 1, 10)),
+                day_start(day_ordinal(2026, 1, 12))
             )]
         );
     }

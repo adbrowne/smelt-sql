@@ -2209,3 +2209,134 @@ fn sub_day_dirt_renders_a_day_aligned_run_window() {
     chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").expect("valid ISO date");
     chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d").expect("valid ISO date");
 }
+
+/// Phase 26d (`docs/outcomes/20260815-definition-delta-migrate/outcome.md`):
+/// column-group-scoped dirt end to end. `silver` reads a driving append-only
+/// `bronze` source (payload columns `id`/`amount`) enriched by a
+/// closure-pruned `LEFT JOIN` against a one-to-one `dim` (payload column
+/// `attr`) — `dim`'s own `ON` read proves `Closed` exactly as
+/// `closed_outer_enrichment_join_prunes_membership` (`maintenance_grouping.rs`)
+/// pins, so `dim` is a value-only source of `silver`: its delta touches only
+/// the `{attr}` group. `gold` reads only `id`/`amount` — the OTHER group —
+/// so a `dim` delta must reach `silver` (whole-model dirt inside `silver`
+/// itself, since `dim` is unclocked) but never reflect onward to `gold`.
+#[test]
+fn an_enrichment_only_delta_does_not_schedule_an_unaffected_consumer() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         - name: amount\n  type: DECIMAL(10,2)\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/sources/dim.yml",
+        "description: dim\ncolumns:\n- name: id\n  type: INTEGER\n\
+         - name: attr\n  type: VARCHAR\n\
+         unique_key: [id]\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    );
+    write(
+        root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT b.id, b.d, b.amount, d.attr AS attr \
+         FROM smelt.sources.bronze b \
+         LEFT JOIN smelt.sources.dim d ON b.id = d.id\n",
+    );
+    write(
+        root,
+        "models/gold.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d, amount FROM smelt.silver\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let order = vec!["silver".to_string(), "gold".to_string()];
+    let deltas = vec![SourceDelta {
+        source: "dim".to_string(),
+        landed: smelt_logical::maintenance::propagate::PartitionInterval::new(
+            smelt_logical::maintenance::propagate::day_start(20),
+            smelt_logical::maintenance::propagate::day_start(21),
+        ),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect("plan");
+
+    assert!(
+        plan.runs.iter().any(|r| r.model == "silver"),
+        "the enrichment delta must still dirty silver: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "gold"),
+        "gold reads only the group unaffected by the enrichment source's delta and must not \
+         be scheduled: {:?}",
+        plan.runs
+    );
+}
+
+/// The plan report's per-edge line names the column-group scope
+/// (`incremental_models.md` §"The graph layer" → "Column-group-scoped
+/// dirt"), so `--since-upstream`'s printed dirty set explains why a
+/// downstream was (or wasn't) scheduled.
+#[test]
+fn the_plan_report_names_the_column_group_scope() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         - name: amount\n  type: DECIMAL(10,2)\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/sources/dim.yml",
+        "description: dim\ncolumns:\n- name: id\n  type: INTEGER\n\
+         - name: attr\n  type: VARCHAR\n\
+         unique_key: [id]\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    );
+    write(
+        root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT b.id, b.d, b.amount, d.attr AS attr \
+         FROM smelt.sources.bronze b \
+         LEFT JOIN smelt.sources.dim d ON b.id = d.id\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let order = vec!["silver".to_string()];
+    let deltas = vec![SourceDelta {
+        source: "dim".to_string(),
+        landed: smelt_logical::maintenance::propagate::PartitionInterval::new(
+            smelt_logical::maintenance::propagate::day_start(20),
+            smelt_logical::maintenance::propagate::day_start(21),
+        ),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect("plan");
+
+    assert!(
+        plan.dirty_set_report.contains("[groups: {attr}]"),
+        "the report must name the narrowed column-group scope: {}",
+        plan.dirty_set_report
+    );
+}

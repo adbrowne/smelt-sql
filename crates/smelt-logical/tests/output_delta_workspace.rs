@@ -15,6 +15,7 @@ fn source(name: &str, profile: MutationProfile, axis: Option<&str>) -> SourceFac
         axis: axis.map(|a| a.to_string()),
         mutation_profile: Some(profile),
         delta_identity: None,
+        unique_key: None,
     }
 }
 

@@ -97,6 +97,45 @@ pub struct DegenerateColumn {
 pub struct GroupingResult {
     pub groups: Vec<ColumnGroup>,
     pub degenerate: Vec<DegenerateColumn>,
+    /// Sources proven row-preserving at this model's top-level scope
+    /// (`closure_pruned_source`'s own proof, surfaced): their deltas revise
+    /// already-materialized rows' values but never add/remove rows, so a
+    /// downstream consumer of only the column groups such a source touches
+    /// need not treat its delta as whole-model dirt. Empty under any
+    /// degenerate collapse (fail-closed) and under a model with no
+    /// closure-pruned enrichment join at all.
+    pub value_only_sources: BTreeSet<String>,
+}
+
+/// Whether `upstream`'s delta can be scoped to fewer than all of `result`'s
+/// column groups, per the graph layer's column-group-scoped-dirt admission
+/// (`docs/specs/incremental_models.md` §"The graph layer" → "Column-group-
+/// scoped dirt"): `upstream` must be a proven value-only source of this
+/// model (in `result.value_only_sources`), and the groups sensitive to it
+/// (by either sensitivity kind — membership sensitivity attaches uniformly
+/// to every payload group, so a source contributing it anywhere shows up on
+/// every group here, correctly defeating the narrowing below) must be a
+/// non-empty, proper subset of `result.groups`. `None` (whole-model, the
+/// safe default) covers every other shape: a source not proven value-only, a
+/// source that (by this reading) touches no group at all — fail-closed,
+/// never reinterpreted as "no dirt" — or a source that touches every group,
+/// where carrying a scope is not worth it.
+pub fn dirt_scope(upstream: &str, result: &GroupingResult) -> Option<Vec<String>> {
+    if !result.value_only_sources.contains(upstream) {
+        return None;
+    }
+    let sensitive_groups: Vec<String> = result
+        .groups
+        .iter()
+        .filter(|g| {
+            g.mutation_sensitivity.contains(upstream) || g.membership_sensitivity.contains(upstream)
+        })
+        .map(|g| g.name())
+        .collect();
+    if sensitive_groups.is_empty() || sensitive_groups.len() == result.groups.len() {
+        return None;
+    }
+    Some(sensitive_groups)
 }
 
 /// Derive [`ColumnGroup`]s for `sql`'s non-skeleton output columns from
@@ -132,6 +171,7 @@ pub fn derive_column_groups(
                          per-column provenance could be derived"
                     .to_string(),
             }],
+            value_only_sources: BTreeSet::new(),
         };
     };
     let payload_columns: Vec<String> = items
@@ -223,6 +263,7 @@ pub fn derive_column_groups(
     GroupingResult {
         groups,
         degenerate: Vec::new(),
+        value_only_sources: arm.value_only_sources,
     }
 }
 
@@ -248,6 +289,10 @@ struct ArmClassification {
     /// Any column this arm could not resolve — non-empty means the caller
     /// must collapse the whole model, carrying these reasons.
     degenerate: Vec<DegenerateColumn>,
+    /// Sources whose row-admission read was proven closure-pruned in this
+    /// arm's own top-level scope (`GroupingResult::value_only_sources`'s doc
+    /// comment).
+    value_only_sources: BTreeSet<String>,
 }
 
 fn arm_degenerate(reason: impl Into<String>) -> ArmClassification {
@@ -259,6 +304,7 @@ fn arm_degenerate(reason: impl Into<String>) -> ArmClassification {
             column: "*".to_string(),
             reason: reason.into(),
         }],
+        value_only_sources: BTreeSet::new(),
     }
 }
 
@@ -282,9 +328,9 @@ fn classify_arm(
     };
 
     let arm_sql = select.syntax().text().to_string();
-    let membership_sensitivity =
+    let (membership_sensitivity, value_only_sources) =
         match membership_sensitivity_sources(&arm_sql, tree, source_by_name) {
-            Ok(set) => set,
+            Ok(result) => result,
             Err(reason) => return arm_degenerate(reason),
         };
 
@@ -356,6 +402,7 @@ fn classify_arm(
         referenced_sources,
         membership_sensitivity,
         degenerate,
+        value_only_sources,
     }
 }
 
@@ -495,6 +542,11 @@ fn derive_setop_column_groups(
         }
     }
 
+    let mut value_only_sources: BTreeSet<String> = BTreeSet::new();
+    for arm in &arms {
+        value_only_sources.extend(arm.value_only_sources.iter().cloned());
+    }
+
     let mut buckets: BTreeMap<BTreeSet<String>, Vec<String>> = BTreeMap::new();
     for (col, sens) in per_column {
         buckets.entry(sens).or_default().push(col);
@@ -511,6 +563,7 @@ fn derive_setop_column_groups(
     GroupingResult {
         groups,
         degenerate: Vec::new(),
+        value_only_sources,
     }
 }
 
@@ -565,8 +618,9 @@ fn membership_sensitivity_sources(
     sql: &str,
     tree: &QueryTree,
     source_by_name: &BTreeMap<&str, &SourceFacts>,
-) -> Result<BTreeSet<String>, String> {
+) -> Result<(BTreeSet<String>, BTreeSet<String>), String> {
     let mut sensitivity = BTreeSet::new();
+    let mut value_only_sources = BTreeSet::new();
     let top_level_range = match &tree.root {
         QueryNode::Select(sn) => Some(sn.select.syntax().text_range()),
         _ => None,
@@ -587,9 +641,10 @@ fn membership_sensitivity_sources(
             source_by_name,
             closure_scope,
             &mut sensitivity,
+            &mut value_only_sources,
         )?;
     }
-    Ok(sensitivity)
+    Ok((sensitivity, value_only_sources))
 }
 
 /// The [`JoinContext`] the closure-pruning check's one-to-one conjunct (3)
@@ -638,6 +693,7 @@ fn scan_scope_membership(
     source_by_name: &BTreeMap<&str, &SourceFacts>,
     closure_scope: Option<ClosureScope<'_>>,
     sensitivity: &mut BTreeSet<String>,
+    value_only_sources: &mut BTreeSet<String>,
 ) -> Result<(), String> {
     // Resolve one conjunct's column references into `sensitivity`,
     // fail-closed on an unresolvable reference. `position` names the
@@ -711,6 +767,9 @@ fn scan_scope_membership(
             let pruned_source = closure_scope
                 .as_ref()
                 .and_then(|cs| closure_pruned_source(cs, &join, source_by_name));
+            if let Some(pruned) = &pruned_source {
+                value_only_sources.insert(pruned.clone());
+            }
             let mut conjuncts = Vec::new();
             split_top_level_conjuncts(&on_expr, &mut conjuncts);
             for conjunct in &conjuncts {
@@ -811,6 +870,7 @@ fn degenerate_whole_model(
     GroupingResult {
         groups: vec![group],
         degenerate,
+        value_only_sources: BTreeSet::new(),
     }
 }
 
@@ -853,5 +913,178 @@ mod tests {
             setop_arm_trees(&tree).is_none(),
             "a branch that is itself a set operation must not be treated as a plain arm"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // `value_only_sources` / `dirt_scope` (`docs/specs/incremental_models.md`
+    // §"The graph layer" → "Column-group-scoped dirt").
+    // -----------------------------------------------------------------
+
+    fn set(items: &[&str]) -> BTreeSet<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn source(
+        name: &str,
+        mutation: MutationProfile,
+        partition_col: Option<&str>,
+        unique_key: &[&str],
+    ) -> SourceFacts {
+        SourceFacts {
+            name: name.to_string(),
+            mutation,
+            partition_col: partition_col.map(|s| s.to_string()),
+            unique_key: unique_key.iter().map(|s| s.to_string()).collect(),
+            allow_full_scan: false,
+        }
+    }
+
+    /// The same load-bearing pruning shape as `maintenance_grouping.rs`'s
+    /// `closed_outer_enrichment_join_prunes_membership`: a `LEFT JOIN`
+    /// against a one-to-one, payload-only, no-membership-predicate `dim`
+    /// proves `Closed`. That source must be reported in
+    /// `GroupingResult::value_only_sources`; the driving (append-only)
+    /// source `fact` must not.
+    #[test]
+    fn value_only_sources_names_the_closure_pruned_enrichment() {
+        let sources = vec![
+            source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+            source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+        ];
+        let sql = "SELECT f.id, f.amount, d.attr AS attr \
+                   FROM smelt.sources.fact f \
+                   LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+        let skeleton = set(&["id"]);
+        let result = derive_column_groups(sql, &sources, &skeleton);
+
+        assert!(
+            result.degenerate.is_empty(),
+            "degenerate: {:?}",
+            result.degenerate
+        );
+        assert_eq!(
+            result.value_only_sources,
+            set(&["dim"]),
+            "the closure-pruned enrichment source must be reported: {result:?}"
+        );
+    }
+
+    /// Fail-closed: a degenerate (whole-model collapse) result never carries
+    /// a value-only source, even when the SQL that triggered the collapse
+    /// also contains a closure-pruned-looking join.
+    #[test]
+    fn value_only_sources_is_empty_under_a_degenerate_collapse() {
+        let sources = vec![
+            source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+            source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+        ];
+        // A JOIN with no resolvable ON predicate (USING) collapses the
+        // whole model fail-closed.
+        let sql = "SELECT f.id, f.amount, d.attr AS attr \
+                   FROM smelt.sources.fact f \
+                   LEFT JOIN smelt.sources.dim d USING (id)";
+        let skeleton = set(&["id"]);
+        let result = derive_column_groups(sql, &sources, &skeleton);
+
+        assert!(
+            !result.degenerate.is_empty(),
+            "expected a degenerate collapse"
+        );
+        assert!(
+            result.value_only_sources.is_empty(),
+            "a degenerate collapse must not report any value-only source: {result:?}"
+        );
+    }
+
+    /// A value-only upstream naming one (of two) sensitive groups narrows.
+    #[test]
+    fn dirt_scope_narrows_to_the_sensitive_groups() {
+        let sources = vec![
+            source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+            source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+        ];
+        let sql = "SELECT f.id, f.amount, d.attr AS attr \
+                   FROM smelt.sources.fact f \
+                   LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+        let skeleton = set(&["id"]);
+        let result = derive_column_groups(sql, &sources, &skeleton);
+        assert_eq!(result.groups.len(), 2, "expected two groups: {result:?}");
+
+        let scope = dirt_scope("dim", &result).expect("dim must narrow");
+        assert_eq!(scope, vec!["{attr}".to_string()]);
+    }
+
+    /// The driving (never closure-pruned) source scopes to the whole model.
+    #[test]
+    fn dirt_scope_is_whole_for_a_creation_reaching_source() {
+        let sources = vec![
+            source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+            source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+        ];
+        let sql = "SELECT f.id, f.amount, d.attr AS attr \
+                   FROM smelt.sources.fact f \
+                   LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+        let skeleton = set(&["id"]);
+        let result = derive_column_groups(sql, &sources, &skeleton);
+
+        assert_eq!(dirt_scope("fact", &result), None);
+    }
+
+    /// A value-only source that touches every group is not worth narrowing
+    /// to — `dirt_scope` returns `None` (whole model) rather than a scope
+    /// that names every group. Built directly (not through
+    /// `derive_column_groups`) since the closure proof's own conjunct 2
+    /// ("per-column provenance confined to its own source") makes a real
+    /// closure-pruned join land in more than one *blended* group
+    /// unreachable through real SQL — this shape (one group solely
+    /// sensitive to the source, another blended with a second source) can
+    /// still arise from a non-closure-derived group set the walk composes
+    /// some other way, so `dirt_scope` itself must still handle it.
+    #[test]
+    fn dirt_scope_is_whole_when_every_group_is_sensitive() {
+        let result = GroupingResult {
+            groups: vec![
+                ColumnGroup {
+                    columns: vec!["a".to_string()],
+                    mutation_sensitivity: set(&["dim1"]),
+                    membership_sensitivity: BTreeSet::new(),
+                },
+                ColumnGroup {
+                    columns: vec!["b".to_string()],
+                    mutation_sensitivity: set(&["dim1", "dim2"]),
+                    membership_sensitivity: BTreeSet::new(),
+                },
+            ],
+            degenerate: Vec::new(),
+            value_only_sources: set(&["dim1"]),
+        };
+
+        assert_eq!(dirt_scope("dim1", &result), None);
+    }
+
+    /// Fail-closed: a value-only source that (by this reading) names no
+    /// group at all scopes to the whole model, never to "no dirt".
+    #[test]
+    fn dirt_scope_is_whole_when_the_upstream_names_no_group() {
+        let sources = vec![
+            source("fact", MutationProfile::AppendOnly, Some("event_date"), &[]),
+            source("dim", MutationProfile::MutableSnapshot, None, &["id"]),
+        ];
+        let sql = "SELECT f.id, f.amount \
+                   FROM smelt.sources.fact f \
+                   LEFT JOIN smelt.sources.dim d ON f.id = d.id";
+        let skeleton = set(&["id"]);
+        let mut result = derive_column_groups(sql, &sources, &skeleton);
+        assert!(
+            result.degenerate.is_empty(),
+            "degenerate: {:?}",
+            result.degenerate
+        );
+        // No select item reads `dim` at all — force `value_only_sources` to
+        // carry it anyway, simulating a value-only source whose join the
+        // model's payload never actually reads.
+        result.value_only_sources.insert("dim".to_string());
+
+        assert_eq!(dirt_scope("dim", &result), None);
     }
 }

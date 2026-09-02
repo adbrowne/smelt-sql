@@ -30,6 +30,7 @@ use smelt_core::ModelFile;
 use smelt_logical::analysis::join_shape::JoinContext;
 use smelt_logical::analysis::output_delta::{self, OutputDelta, OutputDeltaFacts};
 use smelt_logical::maintenance::edge_type::type_edge;
+use smelt_logical::maintenance::grouping::{dirt_scope, GroupingResult};
 use smelt_logical::maintenance::propagate::{
     day_ordinal, day_start, ordinal_to_iso, propagate, required_inputs, Edge, PartitionGrain,
     PartitionInterval, DAY_SECONDS,
@@ -343,6 +344,19 @@ fn consumer_output_delta_facts(
     (read_columns, groups)
 }
 
+/// The downstream consumer's own raw [`GroupingResult`], used only for
+/// [`smelt_logical::maintenance::grouping::dirt_scope`] (`incremental_models.md`
+/// §"The graph layer" → "Column-group-scoped dirt") — a separate cache from
+/// [`consumer_output_delta_facts`] since it needs the whole result
+/// (`value_only_sources` included), not just the `Vec<ColumnGroup>` that
+/// function's callers need.
+fn consumer_grouping_result(model: &ModelFile, source_infos: &[SourceInfo]) -> GroupingResult {
+    let sql = smelt_parser::strip_frontmatter(&model.content);
+    let sources = model_output_delta_sources(model, source_infos);
+    let skeleton = model_skeleton_columns(model, &sql);
+    output_delta::derive_consumer_grouping_result(&sql, &sources, &skeleton)
+}
+
 /// Build the real per-workspace propagation graph: one [`Edge`] per
 /// `(upstream, downstream)` pair a model's derived `MaintenancePlan` admits
 /// a `ScanClamp` for, widened to the maximum clamp margin across every cell
@@ -382,6 +396,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         BTreeMap::new();
     let mut consumer_facts_cache: BTreeMap<String, (BTreeSet<String>, Vec<ColumnGroup>)> =
         BTreeMap::new();
+    let mut consumer_grouping_cache: BTreeMap<String, GroupingResult> = BTreeMap::new();
 
     let mut edges = Vec::with_capacity(clamp_seconds.len());
     for ((upstream, downstream), (before_seconds, after_seconds)) in clamp_seconds {
@@ -422,6 +437,11 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &consumer_groups,
         );
 
+        let downstream_grouping = consumer_grouping_cache
+            .entry(downstream.clone())
+            .or_insert_with(|| consumer_grouping_result(downstream_model, source_infos));
+        let dirtied_groups = dirt_scope(&upstream, downstream_grouping);
+
         let footprint = footprint_seconds
             .get(&(upstream.clone(), downstream.clone()))
             .copied()
@@ -436,6 +456,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             upstream_grain,
             downstream_grain,
             components,
+            dirtied_groups,
         });
     }
     Ok(edges)
@@ -1440,15 +1461,24 @@ pub fn plan_since_upstream_with_observed_deltas(
         report.push_str("  (no source landed a delta that any model reads — nothing to run)\n");
     }
     for ((downstream, upstream), intervals) in &prop.per_edge {
+        // Column-group-scoped dirt (`incremental_models.md` §"The graph
+        // layer" → "Column-group-scoped dirt"): rendered only when this
+        // edge's own scope narrowed — an unscoped line stays byte-identical
+        // to before.
+        let groups_suffix = prop
+            .per_edge_groups
+            .get(&(downstream.clone(), upstream.clone()))
+            .map(|groups| format!(" [groups: {}]", groups.join(", ")))
+            .unwrap_or_default();
         for iv in intervals {
             if downstream == upstream {
                 report.push_str(&format!(
-                    "  {downstream} <-(self, unrolled) {upstream}: {}\n",
+                    "  {downstream} <-(self, unrolled) {upstream}: {}{groups_suffix}\n",
                     render_interval(iv)
                 ));
             } else {
                 report.push_str(&format!(
-                    "  {downstream} <- {upstream}: {}\n",
+                    "  {downstream} <- {upstream}: {}{groups_suffix}\n",
                     render_interval(iv)
                 ));
             }

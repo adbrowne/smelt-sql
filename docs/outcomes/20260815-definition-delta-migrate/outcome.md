@@ -329,7 +329,7 @@ open — not that the excluded bullets themselves are gone.
 | 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | done |
 | 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | done |
 | 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | done |
-| 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | planned |
+| 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | done |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
@@ -1080,6 +1080,17 @@ open — not that the excluded bullets themselves are gone.
   non-target production fold site (self-edge margin, the `PartitionLocal::No` fallback)
   keeps mirroring its pre-phase read-margin behaviour exactly, out of 26a's scope.
 
+- **2026-09-03, phase 26d — column-group-scoped dirt lands; fixed a real
+  `output_delta::SourceFacts` plumbing gap along the way.** `dirt_scope` (`smelt-logical`
+  `grouping.rs`) narrows a propagated edge to the downstream's own column groups a
+  closure-pruned enrichment source can actually touch; `propagate`'s forward walk gates an
+  outbound typed edge whose components name only groups outside the node's own dirty scope.
+  The end-to-end test exposed that `output_delta::SourceFacts` (used by `smelt-runtime`'s real
+  per-workspace graph assembly) never carried a source's declared `unique_key` — it mapped
+  `unique_key` from `delta_identity`, a change-feed-only fact — so closure-pruning was
+  structurally unreachable from `build_forward_graph` even though the underlying proof and
+  `smelt-db`'s plan-layer adapter were both already correct. Added the missing field; full
+  `cargo test --workspace` sweep green. See `phases/26d-summary.md`.
 
 ## Blocked
 

@@ -1411,6 +1411,31 @@ channel has no interval axis to bound a partial run by — and its printed dirty
 the affected key columns and the upstream that produced them, distinguishably from an interval
 line.
 
+**Column-group-scoped dirt.** Dirt carries an optional column-group scope alongside its
+interval or keyed-dirt-set payload: the subset of the downstream's own column groups
+(`model_properties.md` §"Per-column mutation-sensitivity / column provenance") a given inbound
+edge's delta can actually touch. The scope is admitted only when three conditions all hold —
+the upstream is a proven row-preserving (closure-pruned) enrichment source of the downstream
+(`model_properties.md` §"Semantics", the same closure proof that prunes membership
+sensitivity), the downstream's own column-group partition is non-degenerate, and the source
+names at least one but not all of the downstream's groups. Every other shape — a creation-
+reaching (driving) source, a degenerate collapse, or an upstream that (by this reading) names
+no group at all — is whole-model dirt, unchanged: this is a widen-never-narrow refinement of
+the graph layer's existing composition law, never a new way to under-dirty a node. An outbound
+edge carrying no typed components (§"Typed edges") propagates unscoped regardless of the
+node's own scope — the scope only ever gates a *typed* edge.
+
+The scope composes forward the same way interval dirt does: a node's own column-group scope is
+the union of every inbound edge's scope, and a node reached by even one unscoped inbound edge is
+whole-model dirty in the column-group sense too — the scope never survives a merge with an
+unscoped contribution. Once a node's own scope is known, it gates that node's *outbound* edges:
+a consumer whose typed components name only column groups outside the node's own dirty scope
+reads nothing the delta touches, and that edge contributes no dirt downstream at all — narrower
+than whole-model dirt reaching a consumer that structurally cannot be affected by it. The
+`--since-upstream` dirty-set report names a narrowed edge's scope on its own per-edge line
+(`  {downstream} <- {upstream}: {interval} [groups: {group}, …]`) when the edge carried one;
+an unscoped line is unchanged.
+
 **Upstream model edges.** A maintained model's ref to another maintained model in the same
 project is a plan edge of the same standing as a `sources.*` ref: the upstream model's own
 validated `timeseries:` declaration supplies the clock the downstream creation cell is clamped
@@ -2032,11 +2057,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Emission remainders**: the additive fold's MERGE-inside-ledger-transaction interior is
   not observable at the statement-group seam (its parity leg uses an idempotent fixture
   instead). Refs: `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Locality and diagnostic residues on the maintenance-plan proofs**:
-  column-group-scoped dirt coarsens to whole-partition (safe, over-running); the built
-  grain-alignment check validates only the declaration (widen-never-narrow,
-  `MaintenanceGranularityMismatch`). Refs: `model_properties.md` §Known Divergences;
-  `docs/plans/20260808-derived-maintenance-proofs.md`.
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the
