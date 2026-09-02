@@ -14,6 +14,7 @@ const modeLabel = document.getElementById('mode-label');
 const countdownEl = document.getElementById('countdown');
 const clockEl = document.getElementById('countdown-clock');
 const practiceBtn = document.getElementById('practice-btn');
+const dailyBtn = document.getElementById('daily-btn');
 
 const readSave = () => { try { return load(localStorage.getItem(KEY)); } catch { return load(null); } };
 const writeSave = data => { try { localStorage.setItem(KEY, serialize(data)); } catch { /* private mode */ } };
@@ -321,11 +322,12 @@ function persist() {
 function updateFooter() {
   const done = state.status !== 'playing';
   countdownEl.hidden = !(done && state.mode === 'daily');
-  practiceBtn.hidden = !done;
-  practiceBtn.textContent = state.mode === 'daily' ? 'Play a practice word' : 'Play another';
+  practiceBtn.textContent = state.mode === 'daily' ? 'Play a practice word' : 'Play another word';
+  dailyBtn.hidden = state.mode !== 'practice';
 }
 
 practiceBtn.addEventListener('click', startPractice);
+dailyBtn.addEventListener('click', startDaily);
 
 setInterval(() => {
   if (countdownEl.hidden && modalCountdown.hidden) return;
