@@ -326,7 +326,10 @@ open — not that the excluded bullets themselves are gone.
 | 24 | `examples/web_analytics` end-to-end under `--since-upstream`: an open-ended propagated window (`start: Some(_), end: None`, phase 22's self-edge frontier) is resolved to a finite run window before `execute_project` instead of dying on `parse_run_window`'s "both or neither" guard, so the whole-workspace run completes | done |
 | 24b | Bare-keyed→clocked-reader model-edge admission: `silver.device_user_edges`'s `RepairKeysNotDiscoverable` refusal (a grain column absent from a `KeyedUpsert` delta's row shape, discoverable by a key-projected lookup back into the upstream through a plain `FROM`), so every maintained `examples/web_analytics` model is scheduled; remove `incremental_models.md`'s "Graph-layer gaps" bullet | done |
 | 25 | Reconcile the pre-execution maintenance-plan gate's admission posture with `smelt-runtime`'s narrower dispatch so real `deployed_column_names` can be threaded outside the maintenance driver | done |
-| 26 | Maintenance-plan proof residues: derived (not assumed) keyed-locality write-footprint mirror, finer-than-partition column-group dirt, hour-granularity propagation, `INTERSECT`/`EXCEPT` per-arm classification | pending |
+| 26a | Derived (not assumed) write-footprint mirror: a `ScanClamp` carries the derived footprint or none; a keyed output's footprint is posed against its declared time axis, and propagation stops mirroring an underived clamp | planned |
+| 26b | `INTERSECT`/`EXCEPT` per-arm classification: a real per-arm-cardinality verdict instead of blanket whole-model mutation-sensitivity | pending |
+| 26c | Hour-granularity propagation: the graph layer's intervals match the declared `timeseries.granularity` surface instead of being day-ordinal, and edge grains derive from the model's declaration rather than the caller's | pending |
+| 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | pending |
 | 27 | Conditional-maintenance gap sweep: `--show-sql` suppressed-form rendering, region DELETE+INSERT conditional variant, keyless staged-candidate realisation, `write:` pin, external `mutable_snapshot` fingerprint-sidecar consumption, `window_independence`'s `Ordered` verdict admitting a same-partition self-read (`before == 0`) that the graph layer refuses | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
@@ -334,6 +337,16 @@ open — not that the excluded bullets themselves are gone.
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 26 reshape — split into 26a–26d (one residue each).** The single row
+  bundled four independent proof residues touching four different layers (clamp derivation,
+  set-operation classification, the propagation interval unit, column-group dirt scoping); each
+  carries its own spec delta and its own regression surface, and the hour-granularity change
+  rewrites the interval type the column-group work builds on. Ordered
+  footprint → set-ops → granularity → column-group dirt so the interval-type change lands before
+  the dirt scoping that composes with it. No work leaves the outcome: success criterion 16 still
+  requires all four, and the "Locality and diagnostic residues" bullet is narrowed clause by
+  clause (26a, 26c, 26d) rather than deleted early.
 
 - **2026-09-03, phase 24 — open-ended run windows resolve; whole-workspace
   `examples/web_analytics` under `--since-upstream` completes.**
