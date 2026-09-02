@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788344734213,
+  "lastUpdate": 1788344737597,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.721246,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0e69c303f5926502169f73d07b04a80d8a569a64",
+          "message": "fix(annes-words): corrected word list, always-visible practice button, mobile layout\n\nBrings the branch's remaining fixes onto main. The word list previously\nmerged via #183/#184 contained words unfit to be daily answers.\n\n- word list regenerated: answers are now restricted to entries that are\n  already lowercase in the SCOWL dictionaries and also present in dwyl's\n  list, with three profanity lists applied to the answer pool. Removes\n  nonce, queer, prick, raped, squaw, bimbo, labia, sperm, jihad and the\n  non-words mccoy, ascii, mckay, cobol. Guess list stays permissive.\n- practice button is always visible, with a \"Back to today's word\"\n  button to return to a saved daily game\n- mobile layout: safe-area insets (viewport-fit=cover was set with none),\n  a 100vh fallback before 100dvh, a max-height compaction block for\n  landscape phones, and main scrolls rather than clipping its own footer\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-02T20:22:22+10:00",
+          "tree_id": "1774c4d38da2351a9b82f95b73a22aaa8557b3f4",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0e69c303f5926502169f73d07b04a80d8a569a64"
+        },
+        "date": 1788344736394,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.123520123464008,
+            "unit": "MB/s"
           }
         ]
       }
