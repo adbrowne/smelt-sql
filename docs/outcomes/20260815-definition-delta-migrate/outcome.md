@@ -333,9 +333,10 @@ open — not that the excluded bullets themselves are gone.
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | planned |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | planned |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
-| 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism | pending |
+| 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | pending |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | pending |
+| 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -993,6 +994,16 @@ open — not that the excluded bullets themselves are gone.
   the table (it hinted phase 28 while `next_step()` over the committed file returns
   `implement 26a`). Whoever picks this outcome up next should run the IMPLEMENT step against 26a
   first — this planning run deliberately did not renumber or re-flip those rows.
+
+- **2026-09-03, phase 27d planning — split the pin-selection row in two.** Closing "no `write:` pin
+  selects between keyed MERGE and staged-candidate" is two separable jobs: a pure selection layer
+  (`choice::resolve_keyed_write_mechanism` today takes no pin and is called only from its own unit
+  tests) and a live runtime dispatch (`cumulative.rs::build_cumulative_merge_sql` emits `MERGE`
+  unconditionally and never sees the model's overrides). The second also needs a *folded* candidate
+  select — a keyed fold's staged candidate is `combiner(stored, delta)`, not the delta, so
+  substituting `emit_staged_candidate_conditional` over the fold's delta SQL would be silently
+  wrong. 27d owns the selection layer and the folded-candidate emitter; new row 27g owns the live
+  dispatch and the Known Divergences narrowing. Neither half leaves the outcome.
 
 
 ## Blocked
