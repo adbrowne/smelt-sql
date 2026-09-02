@@ -1,0 +1,123 @@
+# Anne's Words — Design
+
+**Date:** 2026-09-02
+**Status:** Approved
+
+## Goal
+
+A Wordle clone, published as a single self-contained page on the smelt docs
+site at `https://smeltsql.com/annes-words/`. Near-pixel-perfect clone of the
+original in look and feel; only the name differs.
+
+This is deliberately unrelated to smelt itself. It lives in the docs site
+purely because that site is already published to the internet. It is exempt
+from the repo's normal spec/plan/ROADMAP workflow and its CI gates — it
+touches no Rust crate.
+
+## Requirements
+
+| Decision | Choice |
+|---|---|
+| Word list | Standard English 5-letter: canonical 2,315-word answer list + 10,657 extra accepted guesses |
+| Puzzle mode | Daily puzzle (date-derived, same for everyone) with a practice toggle after finishing |
+| Extras | Share result as emoji grid; stats with streaks and guess distribution |
+| Style | Near-pixel-perfect clone: original palette, tile flip, shake on invalid, on-screen keyboard, toasts, modals |
+| Out of scope | Hard mode, dark mode, accounts, server, analytics, build step, npm dependencies |
+
+## Publishing
+
+MkDocs copies any non-markdown file under `docs-site/docs/` verbatim into
+`docs-site/site/`. Therefore `docs-site/docs/annes-words/index.html` publishes
+to `/annes-words/` with:
+
+- no entry in `mkdocs.yml` `nav`,
+- no markdown page (so no "page not in nav" noise),
+- no effect on `mkdocs build --strict`.
+
+The existing `Docs` workflow (`.github/workflows/docs.yml`) already triggers on
+`docs-site/**`, so a push to `main` publishes it with no CI changes.
+
+## Architecture
+
+Plain ES modules, no build step, no framework, no dependencies. Loaded by
+`index.html` via `<script type="module">`.
+
+```
+index.html   markup shell: header, board, keyboard, modals
+style.css    Wordle palette, board grid, flip/shake/pop keyframes
+words.js     data only: ANSWERS (shuffled, seeded), ALLOWED (Set source)
+game.js      pure logic, zero DOM — the only unit under test
+ui.js        all DOM + localStorage; imports game.js and words.js
+```
+
+The split exists so `game.js` can be imported by `node --test` with no DOM
+shim. Any function that touches `document`, `window`, `localStorage`, or the
+current time belongs in `ui.js`; `game.js` takes dates and state as arguments.
+
+### `game.js` interface
+
+```js
+scoreGuess(guess, answer) -> Array<'correct'|'present'|'absent'>  // length 5
+mergeKeyStates(prev, guess, marks) -> {letter: state}             // green > yellow > grey
+dailyIndex(date, listLength) -> number                            // local-midnight days since epoch
+shareText(puzzleNo, marks2d, won) -> string                       // emoji grid
+isValidGuess(word, allowedSet) -> boolean
+```
+
+`scoreGuess` uses the two-pass algorithm: mark exact matches first, decrement a
+letter-count pool, then mark presents only while the pool allows. This is the
+classic clone bug and is what the test suite exists for.
+
+### Daily selection
+
+`ANSWERS` is shuffled once at authoring time with a fixed seed, so the daily
+sequence is not alphabetical and not guessable from the source order. The
+puzzle number is the count of whole local days since the epoch
+`2026-01-01T00:00:00` local, and the answer is `ANSWERS[n % ANSWERS.length]`.
+Computing against local midnight (not UTC) means a player's day boundary
+matches their own midnight. The countdown targets the next local midnight.
+
+### Persistence
+
+One `localStorage` key, `annes-words:v1`, holding a versioned JSON object:
+
+```jsonc
+{
+  "version": 1,
+  "daily": { "puzzle": 244, "guesses": ["crane"], "status": "playing" },
+  "stats": { "played": 0, "wins": 0, "streak": 0, "maxStreak": 0,
+             "lastPuzzle": null, "dist": [0,0,0,0,0,0] }
+}
+```
+
+A stored `daily` whose `puzzle` is not today's is discarded on load. Practice
+games are never persisted and never touch `stats`. Any parse failure resets to
+defaults rather than throwing — a corrupt key must never brick the page.
+
+### Stats semantics
+
+`streak` increments on a daily win, resets to 0 on a daily loss. A skipped day
+is detected on load: if the stored `daily.puzzle` is older than
+`todayPuzzle - 1`, the streak resets. `dist[i]` counts daily wins in `i+1`
+guesses.
+
+## Testing
+
+`docs-site/tests/annes-words.test.mjs`, run with `node --test` — outside
+`docs/`, so it is not published. Zero npm dependencies.
+
+Covered: duplicate-letter scoring in both directions, key-state precedence,
+daily-index determinism and rollover, share-grid formatting, guess validation.
+UI behaviour is verified by playing it in a browser at each checkpoint.
+
+## Checkpoints
+
+Each is a commit pushed to the `annes-words` branch and is playable in a
+browser via `cd docs-site/docs && python3 -m http.server 8000`, then
+`http://localhost:8000/annes-words/`.
+
+1. Skeleton — board and keyboard render, typing shows letters, no scoring.
+2. Playable — scoring, flip reveal, invalid shake, win/lose. Practice game.
+3. Daily — date-derived word, refresh-resume, countdown, practice toggle.
+4. Stats & share — stats modal, streaks, distribution, emoji copy.
+5. Polish — help modal, mobile layout, `mkdocs build --strict` verified.
