@@ -19,13 +19,25 @@ use smelt_db::{workspace_ingest::ingest_loaded_workspace, DiagnosticCode};
 fn diagnostics_for(files: &[(&str, &str)], model_file: &str) -> Vec<smelt_db::Diagnostic> {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path().to_path_buf();
+    diagnostics_for_in(&root, files, model_file)
+}
+
+/// Like [`diagnostics_for`], but ingests against a caller-supplied root —
+/// lets a test stage a `.smelt/` deployed-schema snapshot at the same root
+/// before ingest sees it (`diagnostics_for` creates its own private tempdir,
+/// which a caller can never write into ahead of time).
+fn diagnostics_for_in(
+    root: &std::path::Path,
+    files: &[(&str, &str)],
+    model_file: &str,
+) -> Vec<smelt_db::Diagnostic> {
     for (rel, content) in files {
         let path = root.join(rel);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, content).unwrap();
     }
 
-    let loaded = load_workspace(&root);
+    let loaded = load_workspace(root);
     let mut db = smelt_db::Database::default();
     let ingested = ingest_loaded_workspace(&mut db, &loaded);
     db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
@@ -397,6 +409,7 @@ fn column_added_trigger_derived_from_deployed_schema() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        None,
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -460,6 +473,7 @@ fn column_added_trigger_skeleton_position_refuses() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        None,
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -548,6 +562,7 @@ fn column_added_trigger_rename_case_never_treated_as_in_place_update() {
         &[],
         &deployed_column_names,
         &std::collections::BTreeMap::new(),
+        None,
     )
     .expect("refresh: incremental model must derive a plan");
 
@@ -679,4 +694,373 @@ fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+// ============================================================================
+// Deployed-schema snapshot world-fact input (phase 9,
+// docs/outcomes/20260815-definition-delta-migrate)
+// ============================================================================
+//
+// `DeployedSchemaInput` is a Salsa world-fact input registered by
+// `workspace_ingest::register_deployed_schemas_from_disk` (called from
+// `ingest_loaded_workspace`, itself called by both the CLI's `init_db` and
+// the LSP's `initialize` — workspace-loading-parity rule). `maintenance_plan`
+// resolves it by table name and threads its columns + `model_sql` into
+// `derive_model_maintenance_plan`, so `MaintenanceSkeletonChanged` can now
+// surface ahead of any run.
+
+mod deployed_schema_world_fact {
+    use super::*;
+    use chrono::Utc;
+    use smelt_state::file_store::FileStore;
+    use smelt_state::schema_tracking::{DeployedColumn, DeployedSchema};
+
+    const KEYED_SMELT_YML: &str = r#"
+name: deployed_schema_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+
+    const DEVICE_SOURCE: &str = r#"
+description: Device events, append-only.
+mutation_profile: append_only
+columns:
+  - { name: device_id, type: INTEGER, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+"#;
+
+    fn write_schema(
+        root: &std::path::Path,
+        target: &str,
+        model: &str,
+        columns: &[&str],
+        model_sql: Option<&str>,
+    ) {
+        let store = FileStore::new(root, target);
+        store.init().expect("init .smelt");
+        let schema = DeployedSchema {
+            model: model.to_string(),
+            version: 1,
+            deployed_at: Utc::now(),
+            model_hash: "test-hash".to_string(),
+            model_sql: model_sql.map(|s| s.to_string()),
+            columns: columns
+                .iter()
+                .map(|c| DeployedColumn {
+                    name: c.to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                })
+                .collect(),
+        };
+        store.save_schema(&schema).expect("save deployed schema");
+    }
+
+    /// A registered snapshot whose `model_sql` groups only by `device_id`
+    /// (the current model additionally groups by `user_id`) makes
+    /// `file_diagnostics` emit `MaintenanceSkeletonChanged` — the skeleton
+    /// changed (a new GROUP BY key), proven by the clause-level diff rather
+    /// than by a `ColumnAdded` trigger landing in a skeleton position (the
+    /// current model's own SELECT list is unchanged: `device_id`, `n`).
+    #[test]
+    fn deployed_schema_input_surfaces_skeleton_changed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
+"#;
+        // The deployed snapshot groups by device_id AND user_id — the
+        // current model on disk dropped `user_id` from GROUP BY, a skeleton
+        // (grain) change.
+        let old_sql = "SELECT device_id, COUNT(*) AS n FROM smelt.sources.device \
+                        GROUP BY device_id, user_id";
+        write_schema(
+            &root,
+            "dev",
+            "device_counts",
+            &["device_id", "n"],
+            Some(old_sql),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", KEYED_SMELT_YML),
+                ("models/sources/device.yml", DEVICE_SOURCE),
+                ("models/device_counts.sql", model),
+            ],
+            "device_counts",
+        );
+
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "expected MaintenanceSkeletonChanged from the registered deployed-schema \
+             snapshot's skeleton-clause diff, got {diags:?}"
+        );
+    }
+
+    /// With no `.smelt/` snapshot registered at all, the diagnostic set is
+    /// byte-identical to today (fail-closed regression guard) — no
+    /// definition-change trigger is derivable without a world fact to
+    /// compare against.
+    #[test]
+    fn no_deployed_schema_derives_no_definition_trigger() {
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
+"#;
+        let diags = diagnostics_for(
+            &[
+                ("smelt.yml", KEYED_SMELT_YML),
+                ("models/sources/device.yml", DEVICE_SOURCE),
+                ("models/device_counts.sql", model),
+            ],
+            "device_counts",
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "no registered deployed schema must derive no MaintenanceSkeletonChanged, \
+             got {diags:?}"
+        );
+    }
+
+    /// A registered snapshot whose columns AND `model_sql` are identical to
+    /// the current model on disk is silent — no maintenance diagnostic.
+    #[test]
+    fn deployed_schema_matching_current_definition_is_silent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
+"#;
+        fs::write(root.join("smelt.yml"), KEYED_SMELT_YML).unwrap();
+        fs::create_dir_all(root.join("models/sources")).unwrap();
+        fs::write(root.join("models/sources/device.yml"), DEVICE_SOURCE).unwrap();
+        fs::write(root.join("models/device_counts.sql"), model).unwrap();
+
+        write_schema(
+            &root,
+            "dev",
+            "device_counts",
+            &["device_id", "n"],
+            Some(model),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", KEYED_SMELT_YML),
+                ("models/sources/device.yml", DEVICE_SOURCE),
+                ("models/device_counts.sql", model),
+            ],
+            "device_counts",
+        );
+        assert!(
+            diags
+                .iter()
+                .all(|d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "a snapshot matching the current definition must be silent, got {diags:?}"
+        );
+    }
+
+    /// The same column set (`category`, `total`) on both sides, but the
+    /// GROUP BY changed (an extra grouping key not itself projected) — the
+    /// refusal fires from the clause diff, not from a `ColumnAdded` trigger
+    /// (there is no added column here at all).
+    #[test]
+    fn skeleton_clause_change_surfaces_without_a_column_add() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let sales_source = r#"
+description: Sales, append-only.
+mutation_profile: append_only
+columns:
+  - { name: category, type: VARCHAR, nullable: false }
+  - { name: region, type: VARCHAR, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT category, SUM(amount) AS total FROM smelt.sources.sales GROUP BY category, region
+"#;
+        fs::write(root.join("smelt.yml"), KEYED_SMELT_YML).unwrap();
+        fs::create_dir_all(root.join("models/sources")).unwrap();
+        fs::write(root.join("models/sources/sales.yml"), sales_source).unwrap();
+        fs::write(root.join("models/category_totals.sql"), model).unwrap();
+
+        let old_sql = "SELECT category, SUM(amount) AS total FROM smelt.sources.sales \
+                        GROUP BY category";
+        write_schema(
+            &root,
+            "dev",
+            "category_totals",
+            &["category", "total"],
+            Some(old_sql),
+        );
+
+        let diags = diagnostics_for_in(
+            &root,
+            &[
+                ("smelt.yml", KEYED_SMELT_YML),
+                ("models/sources/sales.yml", sales_source),
+                ("models/category_totals.sql", model),
+            ],
+            "category_totals",
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "a changed GROUP BY with an unchanged column set must still refuse via the \
+             clause diff, got {diags:?}"
+        );
+    }
+
+    /// Re-setting an already-registered `DeployedSchemaInput`'s fields
+    /// within the SAME `Database` re-invalidates `maintenance_plan` — Salsa
+    /// invalidation is real here, not just a load-time snapshot.
+    #[test]
+    fn updating_the_deployed_schema_input_reinvalidates() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().to_path_buf();
+        let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
+"#;
+
+        fs::write(root.join("smelt.yml"), KEYED_SMELT_YML).unwrap();
+        fs::create_dir_all(root.join("models/sources")).unwrap();
+        fs::write(root.join("models/sources/device.yml"), DEVICE_SOURCE).unwrap();
+        fs::write(root.join("models/device_counts.sql"), model).unwrap();
+        let loaded = load_workspace(&root);
+
+        let mut db = smelt_db::Database::default();
+        let ingested = smelt_db::workspace_ingest::ingest_loaded_workspace(&mut db, &loaded);
+        db.set_workspace(ingested.source_files.clone(), vec![ingested.project]);
+        let ws = db.workspace();
+        let target_path = root.join("models/device_counts.sql");
+        let file = ingested
+            .source_files
+            .iter()
+            .zip(ingested.paths.iter())
+            .find(|(_, p)| **p == target_path)
+            .map(|(f, _)| *f)
+            .unwrap_or_else(|| panic!("model file {target_path:?} not ingested"));
+
+        // No snapshot registered yet — silent.
+        let diags_before = smelt_db::file_diagnostics(&db, ws, file);
+        assert!(
+            diags_before
+                .iter()
+                .all(|d| d.code != Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "no snapshot registered yet must be silent, got {diags_before:?}"
+        );
+
+        // Register a snapshot whose skeleton clause differs — the same
+        // Database instance must now re-derive the refusal.
+        let old_sql = "SELECT device_id, COUNT(*) AS n FROM smelt.sources.device \
+                        GROUP BY device_id, user_id";
+        db.set_deployed_schema(
+            std::sync::Arc::from("device_counts"),
+            root.clone(),
+            vec![std::sync::Arc::from("device_id"), std::sync::Arc::from("n")],
+            Some(std::sync::Arc::from(old_sql)),
+        );
+        let diags_after = smelt_db::file_diagnostics(&db, ws, file);
+        assert!(
+            diags_after
+                .iter()
+                .any(|d| d.code == Some(DiagnosticCode::MaintenanceSkeletonChanged)),
+            "setting the deployed-schema input must re-invalidate maintenance_plan \
+             within the same Database, got {diags_after:?}"
+        );
+    }
+}
+
+/// `register_deployed_schemas_from_disk` reads one `DeployedSchemaInput` per
+/// `.smelt/targets/<target>/schemas/<model>.json` file, and is a silent
+/// no-op for a missing/unreadable schemas directory (the loader-file
+/// precedent: a stale snapshot must never fail workspace load).
+#[test]
+fn register_deployed_schemas_from_disk_reads_target_schemas() {
+    use chrono::Utc;
+    use smelt_state::file_store::FileStore;
+    use smelt_state::schema_tracking::{DeployedColumn, DeployedSchema};
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+
+    // No .smelt/ at all yet — silent no-op.
+    let mut db = smelt_db::Database::default();
+    smelt_db::workspace_ingest::register_deployed_schemas_from_disk(&mut db, &root, "dev");
+    assert!(
+        db.deployed_schema(&root, "orders").is_none(),
+        "missing .smelt/ must register nothing"
+    );
+
+    let store = FileStore::new(&root, "dev");
+    store.init().expect("init .smelt");
+    let schema = DeployedSchema {
+        model: "orders".to_string(),
+        version: 1,
+        deployed_at: Utc::now(),
+        model_hash: "h".to_string(),
+        model_sql: Some("SELECT 1".to_string()),
+        columns: vec![DeployedColumn {
+            name: "order_id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: false,
+        }],
+    };
+    store.save_schema(&schema).expect("save schema");
+
+    let mut db = smelt_db::Database::default();
+    smelt_db::workspace_ingest::register_deployed_schemas_from_disk(&mut db, &root, "dev");
+    let input = db
+        .deployed_schema(&root, "orders")
+        .expect("orders schema registered");
+    assert_eq!(input.model(&db).as_ref(), "orders");
+    assert_eq!(
+        input
+            .columns(&db)
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>(),
+        vec!["order_id".to_string()]
+    );
+    assert_eq!(
+        input.model_sql(&db).as_ref().map(|s| s.as_ref()),
+        Some("SELECT 1")
+    );
 }

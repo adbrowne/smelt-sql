@@ -119,6 +119,7 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     // Both triggering sources land on the SAME merged group with the SAME
@@ -194,6 +195,7 @@ fn ex14_change_feed_sum_recompute_only() {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -317,6 +319,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
             add_columns: vec![("status".to_string(), SqlFunction::Max)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let fold_plan = derive_maintenance_plan(
@@ -388,6 +391,7 @@ fn ex27_row_number_dedup_refuses_today() {
         // honest to supply.
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let plan = derive_maintenance_plan(
@@ -450,6 +454,7 @@ fn ex35_correlated_first_value_fold_admitted() {
             add_columns: vec![("first_seen".to_string(), SqlFunction::ArgMax)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let fold_plan = derive_maintenance_plan(

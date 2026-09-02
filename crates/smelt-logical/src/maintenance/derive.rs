@@ -710,6 +710,13 @@ pub struct ModelInputs<'a> {
     /// `column_add_proof: None` did (`docs/plans/
     /// 20260808-derived-maintenance-proofs.md` Phase 4).
     pub old_columns: Vec<ColumnDef>,
+    /// The model's previously-deployed source SQL text (world-fact, from
+    /// the deployed-schema snapshot's `model_sql`, supplied by the caller —
+    /// this module does no I/O of its own). `None` means "no known deployed
+    /// SQL", which derives no [`Refusal::SkeletonClauseChanged`] at all —
+    /// fail-closed, the same posture `old_columns`/`deployed_column_names`
+    /// take (`docs/specs/definition_deltas.md` §"Detection").
+    pub old_sql: Option<&'a str>,
 }
 
 impl ModelInputs<'_> {
@@ -910,6 +917,10 @@ fn derive_maintenance_plan_impl(
     source_referential_integrity: &SourceReferentialIntegrity,
 ) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
+    if let Some(reason) = skeleton_clause_changed(inputs) {
+        plan.refusals
+            .push(Refusal::SkeletonClauseChanged { reason });
+    }
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
     // The write-scope dual of `bounds` (`model_properties.md` §"Footprint
     // reflection / bounded write footprint"), derived once per model and
@@ -1528,6 +1539,41 @@ pub fn diff_deployed_columns(
         }
     }
     Some((old_columns, added))
+}
+
+/// Prove (or refuse to prove) that `inputs.sql`'s skeleton clause — the
+/// FROM/JOIN tree, GROUP BY/DISTINCT, and the row-set/ordering/row-count
+/// post-processing clauses — is unchanged against `inputs.old_sql`, using
+/// the same clause-level factoring `smelt migrate` uses
+/// ([`crate::backbuild::diff::definition_diff`]). Returns `Some(reason)`
+/// when [`crate::backbuild::SkeletonDiff::Changed`] proves a clause
+/// difference — the `Refusal::SkeletonClauseChanged` this function's caller
+/// pushes. Returns `None` when there is no deployed SQL to compare
+/// (`inputs.old_sql` is `None`), when either version fails to parse as a
+/// plain `SELECT`, or when the diff proves the skeleton
+/// [`crate::backbuild::SkeletonDiff::Unchanged`] or only gained `LEFT
+/// JOIN`s (`AddedLeftJoins`, admissible — research §4's G0 class). A
+/// `DefinitionDiff::Opaque` diff (unparseable, or a changed `WITH`-prefix)
+/// is deliberately NOT treated as a skeleton change here — this check only
+/// ever *adds* a refusal on a positive proof, never on an inability to
+/// prove either way, matching every other `deployed_*`-gated derivation in
+/// this module.
+fn skeleton_clause_changed(inputs: &ModelInputs) -> Option<String> {
+    let old_sql = inputs.old_sql?;
+    let old_stripped = crate::types::Frontmatter::strip(old_sql);
+    let new_stripped = crate::types::Frontmatter::strip(inputs.sql);
+    let old_parse = smelt_parser::parse(old_stripped);
+    let new_parse = smelt_parser::parse(new_stripped);
+    let old_file = smelt_parser::File::cast(old_parse.syntax())?;
+    let new_file = smelt_parser::File::cast(new_parse.syntax())?;
+    match crate::backbuild::diff::definition_diff(&old_file, &new_file) {
+        crate::backbuild::DefinitionDiff::Comparable(diff) => match diff.skeleton {
+            crate::backbuild::SkeletonDiff::Changed { reason, .. } => Some(reason),
+            crate::backbuild::SkeletonDiff::Unchanged
+            | crate::backbuild::SkeletonDiff::AddedLeftJoins(_) => None,
+        },
+        crate::backbuild::DefinitionDiff::Opaque { .. } => None,
+    }
 }
 
 /// Definition change: the model gained fields. Skeleton adds are grain

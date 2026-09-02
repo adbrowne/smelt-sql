@@ -169,6 +169,7 @@ fn v1_without_lateness_clamp_is_not_partition_local() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -200,6 +201,7 @@ fn v2_lateness_clamp_derives_the_forward_arrival_scan() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -237,6 +239,7 @@ fn v3_dedup_keeps_the_v2_plan_shape() {
         column_groups: vec![base_group()],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -274,6 +277,7 @@ fn v4_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 
@@ -346,6 +350,7 @@ fn v4_without_the_explicit_partition_predicate_but_declared_full_scan_admits() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -400,6 +405,7 @@ fn v5_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 

@@ -1340,3 +1340,112 @@ async fn goto_def_on_function_call_stays_in_same_project() {
         locations,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Deployed-schema world-fact input (phase 9,
+// docs/outcomes/20260815-definition-delta-migrate) — parity leg: the LSP's
+// own `initialize` path (not a hand-built Salsa `Database`) publishes the
+// `MaintenanceSkeletonChanged` diagnostic derived from a registered
+// `.smelt/targets/<target>/schemas/<model>.json` snapshot.
+// ---------------------------------------------------------------------------
+
+const DEPLOYED_SCHEMA_SMELT_YML: &str = r#"
+name: deployed_schema_lsp_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+
+const DEPLOYED_SCHEMA_DEVICE_SOURCE: &str = r#"
+description: Device events, append-only.
+mutation_profile: append_only
+columns:
+  - { name: device_id, type: INTEGER, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+"#;
+
+const DEPLOYED_SCHEMA_MODEL: &str = r#"---
+materialization: table
+refresh: incremental
+grain: key
+---
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id
+"#;
+
+/// A deployed-schema snapshot whose `model_sql` groups by `device_id` AND
+/// `user_id` — the current model on disk dropped `user_id` from GROUP BY, a
+/// skeleton (grain) change — makes the real LSP publish
+/// `MaintenanceSkeletonChanged` (wire code `"maintenance-skeleton-changed"`)
+/// for the model, resolved via `Backend::initialize`'s own registration of
+/// the `DeployedSchemaInput` world fact, not a hand-built `smelt_db::Database`.
+#[tokio::test]
+async fn lsp_publishes_skeleton_changed_from_deployed_schema() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().to_path_buf();
+    std::fs::write(root.join("smelt.yml"), DEPLOYED_SCHEMA_SMELT_YML).unwrap();
+    std::fs::create_dir_all(root.join("models/sources")).unwrap();
+    std::fs::write(
+        root.join("models/sources/device.yml"),
+        DEPLOYED_SCHEMA_DEVICE_SOURCE,
+    )
+    .unwrap();
+    std::fs::write(root.join("models/device_counts.sql"), DEPLOYED_SCHEMA_MODEL).unwrap();
+
+    let store = smelt_state::file_store::FileStore::new(&root, "dev");
+    store.init().expect("init .smelt");
+    let old_sql = "SELECT device_id, COUNT(*) AS n FROM smelt.sources.device \
+                    GROUP BY device_id, user_id";
+    let schema = smelt_state::schema_tracking::DeployedSchema {
+        model: "device_counts".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "test-hash".to_string(),
+        model_sql: Some(old_sql.to_string()),
+        columns: vec![
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "device_id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            },
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "n".to_string(),
+                data_type: "BIGINT".to_string(),
+                nullable: false,
+            },
+        ],
+    };
+    store.save_schema(&schema).expect("save deployed schema");
+
+    let mut client = TestClient::open_workspace(&root).await;
+    client
+        .open_file(&root.join("models/device_counts.sql"))
+        .await
+        .expect("open device_counts.sql");
+    let diags = client.collect_diagnostics(3000).await;
+    client.shutdown().await;
+
+    let all_diags: Vec<_> = diags.iter().flat_map(|(_, ds)| ds.iter()).collect();
+    let has_skeleton_changed = all_diags.iter().any(|d| {
+        d.code.as_ref().is_some_and(
+            |c| matches!(c, lsp_types::NumberOrString::String(s) if s == "maintenance-skeleton-changed"),
+        )
+    });
+    assert!(
+        has_skeleton_changed,
+        "expected maintenance-skeleton-changed diagnostic via the real LSP initialize \
+         path from a registered deployed-schema snapshot, got: {:?}",
+        all_diags
+            .iter()
+            .map(|d| format!("{:?}: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+    );
+}

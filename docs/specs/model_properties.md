@@ -360,11 +360,6 @@ recorded here — history lives in git and §References → Plans.
   it, so a locality-admitted keyed model's clamps still carry the assumed write-footprint mirror
   into propagation. Cross-ref `incremental_models.md` §Known Divergences "The contract, plan, and
   graph layer".
-- **`MaintenanceSkeletonChanged` is not yet surfaced as an LSP/CLI diagnostic ahead of a run**
-  — reachable from the pure derivation and from `smelt-runtime`'s maintenance driver, but
-  `smelt-db`'s own diagnostics/`smelt explain` path always derives an empty trigger set. Cross-ref
-  `incremental_models.md` §Known Divergences "The contract, plan, and graph layer". Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7b.
 - **Skeleton-source closure v1 is restricted to non-aggregating enrichment scopes (Open Question)**
   — a join feeding a `GROUP BY`/window is `Open` regardless of the five conjuncts, since
   reasoning about a fold's own row-preservation is separate, harder work; widening past this

@@ -187,3 +187,80 @@ fn explain_omits_definition_delta_when_none() {
         "expected no definition-delta line: {text_stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Deployed-schema world-fact input (phase 9,
+// docs/outcomes/20260815-definition-delta-migrate): `smelt explain <model>`
+// names the `MaintenanceSkeletonChanged` refusal for a project whose
+// `.smelt/targets/<target>/schemas/<model>.json` snapshot predates the edit
+// — resolved via the Salsa `DeployedSchemaInput` world fact `init_db`
+// registers, with NO prior `smelt run` needed to populate it.
+// ---------------------------------------------------------------------------
+
+const KEYED_SMELT_YML_NO_RUN: &str =
+    "name: explain_skeleton_change_ws\nversion: 1\npaths:\n  - models\n\
+targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+default_materialization: view\n";
+
+const KEYED_DEVICE_SOURCE: &str = "description: Device events, append-only.\n\
+mutation_profile: append_only\ncolumns:\n\
+  - { name: device_id, type: INTEGER, nullable: false }\n\
+  - { name: user_id, type: INTEGER, nullable: false }\n";
+
+const KEYED_MODEL_NO_RUN: &str =
+    "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+SELECT device_id, COUNT(*) AS n FROM smelt.sources.device GROUP BY device_id\n";
+
+#[test]
+fn explain_reports_skeleton_change_from_deployed_schema() {
+    if skip_without_duckdb_lib() {
+        return;
+    }
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().join("proj");
+    write(&root, "smelt.yml", KEYED_SMELT_YML_NO_RUN);
+    write(&root, "models/sources/device.yml", KEYED_DEVICE_SOURCE);
+    write(&root, "models/device_counts.sql", KEYED_MODEL_NO_RUN);
+
+    // A `.smelt/targets/dev/schemas/device_counts.json` snapshot whose
+    // `model_sql` groups by `device_id` AND `user_id` — the current model
+    // on disk dropped `user_id` from GROUP BY, a skeleton (grain) change —
+    // staged directly with NO `smelt run` beforehand.
+    let store = smelt_state::file_store::FileStore::new(&root, "dev");
+    store.init().expect("init .smelt");
+    let old_sql = "SELECT device_id, COUNT(*) AS n FROM smelt.sources.device \
+                    GROUP BY device_id, user_id";
+    let schema = smelt_state::schema_tracking::DeployedSchema {
+        model: "device_counts".to_string(),
+        version: 1,
+        deployed_at: chrono::Utc::now(),
+        model_hash: "test-hash".to_string(),
+        model_sql: Some(old_sql.to_string()),
+        columns: vec![
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "device_id".to_string(),
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+            },
+            smelt_state::schema_tracking::DeployedColumn {
+                name: "n".to_string(),
+                data_type: "BIGINT".to_string(),
+                nullable: false,
+            },
+        ],
+    };
+    store.save_schema(&schema).expect("save deployed schema");
+
+    let out = run_smelt(&root, &["explain", "device_counts"]);
+    assert!(
+        out.status.success(),
+        "smelt explain should succeed regardless of the refusal.\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("SkeletonClauseChanged"),
+        "expected the SkeletonClauseChanged refusal in the Refusals section, no prior \
+         `smelt run` needed: {stdout}"
+    );
+}

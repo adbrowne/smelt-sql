@@ -805,6 +805,7 @@ fn derive_clamp_and_locality_pass(
             // `UpstreamMutation` cell's closure is real here too, never a
             // separately re-derived admission.
             &smelt_db::queries::maintenance::build_source_referential_integrity(&source_refs),
+            None,
         ) else {
             continue;
         };

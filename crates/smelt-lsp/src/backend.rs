@@ -1246,6 +1246,16 @@ impl LanguageServer for Backend {
                         &mut db,
                         &project_root,
                     );
+                    // The deployed-schema snapshot world-fact input
+                    // (symmetric with the CLI's `init_db` — Workspace
+                    // Loading Parity rule): `docs/specs/definition_deltas.md`
+                    // §"Detection".
+                    let effective_target = loaded.config.target.as_deref().unwrap_or("dev");
+                    smelt_db::workspace_ingest::register_deployed_schemas_from_disk(
+                        &mut db,
+                        &project_root,
+                        effective_target,
+                    );
 
                     // Register SQL files via register_sql_content so the LSP's
                     // multi-model line-offset tracking populates correctly.

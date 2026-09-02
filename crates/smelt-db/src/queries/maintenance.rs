@@ -358,6 +358,7 @@ pub fn derive_model_maintenance_plan(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
+    deployed_model_sql: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -543,6 +544,7 @@ pub fn derive_model_maintenance_plan(
         column_groups: grouping.groups.clone(),
         fold,
         old_columns,
+        old_sql: deployed_model_sql,
     };
 
     let mut triggers = Vec::new();
@@ -641,6 +643,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
     deployed_column_names: &[String],
     source_referential_integrity: &SourceReferentialIntegrity,
+    deployed_model_sql: Option<&str>,
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -652,6 +655,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         key_recurrences,
         deployed_column_names,
         source_referential_integrity,
+        deployed_model_sql,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred). Reads the
@@ -835,6 +839,17 @@ pub enum MaintenanceRefusal {
     /// than a column backfill (EX-39, `definition_deltas.md` §"The verdict per column group").
     SkeletonChanged {
         column: String,
+    },
+    /// `MaintenanceSkeletonChanged` — the model's skeleton *clause* itself
+    /// changed against a prior deployed snapshot (a changed `GROUP BY`, a
+    /// changed `FROM` target, a changed join shape), proven by
+    /// `smelt_logical::maintenance::derive::skeleton_clause_changed`'s
+    /// clause-level factoring rather than by a `ColumnAdded` trigger
+    /// landing in a skeleton position. Maps to the same
+    /// `MaintenanceSkeletonChanged` diagnostic code as `SkeletonChanged`
+    /// above — one code, two refusal shapes.
+    SkeletonClauseChanged {
+        reason: String,
     },
 }
 
@@ -1067,6 +1082,7 @@ pub fn write_pin_diagnostics(
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
 /// only gathers `source_refs`/`metadata`/`sql` and calls this.
+#[allow(clippy::too_many_arguments)]
 pub fn maintenance_plan_diagnostics(
     sql: &str,
     table: &str,
@@ -1075,6 +1091,8 @@ pub fn maintenance_plan_diagnostics(
     project_scan_bounds: Option<&ScanBoundsConfig>,
     extra_model_sources: &[(SourceFacts, Granularity)],
     active_backends: &[String],
+    deployed_column_names: &[String],
+    deployed_model_sql: Option<&str>,
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
@@ -1118,12 +1136,14 @@ pub fn maintenance_plan_diagnostics(
         &explicitly_mutable,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt-db` diagnostics/`smelt explain` have no I/O access to the
-        // deployed-schema snapshot (Salsa purity) — no `ColumnAdded`
-        // trigger is derivable here; `smelt-runtime`'s maintenance driver
-        // is the production caller that supplies a real snapshot.
-        &[],
+        // The deployed-schema snapshot is now a Salsa world-fact input
+        // (`workspace_ingest::register_deployed_schemas_from_disk`) the
+        // `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs` resolves and
+        // passes down here — `smelt-db` itself still does no I/O, per the
+        // Salsa-purity rule; it only forwards what the caller resolved.
+        deployed_column_names,
         &source_referential_integrity,
+        deployed_model_sql,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -1150,6 +1170,11 @@ pub fn maintenance_plan_diagnostics(
             smelt_logical::maintenance::Refusal::SkeletonChanged { column } => {
                 Some(MaintenanceRefusal::SkeletonChanged {
                     column: column.clone(),
+                })
+            }
+            smelt_logical::maintenance::Refusal::SkeletonClauseChanged { reason } => {
+                Some(MaintenanceRefusal::SkeletonClauseChanged {
+                    reason: reason.clone(),
                 })
             }
             // An underivable upstream-model clock. Recorded in the plan (and
@@ -1381,6 +1406,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -1437,6 +1463,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("grain: key model must derive a plan");
         assert!(
@@ -1483,6 +1510,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -1548,6 +1576,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -1642,6 +1671,7 @@ mod tests {
             &[],
             &[],
             &real_ri,
+            None,
         )
         .expect("model must derive a plan");
         let cell = with_real_ri
@@ -1666,6 +1696,7 @@ mod tests {
             &[],
             &[],
             &SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("model must derive a plan");
         let cell = with_empty_ri
@@ -1748,6 +1779,7 @@ mod tests {
             &[],
             &[],
             &smelt_logical::maintenance::derive::SourceReferentialIntegrity::new(),
+            None,
         )
         .expect("route 1 must derive a plan");
         assert!(

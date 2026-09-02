@@ -140,6 +140,7 @@ fn silver_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 
@@ -167,6 +168,7 @@ fn rollup_inputs() -> ModelInputs<'static> {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 
@@ -509,6 +511,7 @@ fn sb_silver_inputs(sql: &str) -> ModelInputs<'_> {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 

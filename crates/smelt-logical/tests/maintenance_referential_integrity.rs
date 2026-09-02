@@ -63,6 +63,7 @@ fn inputs() -> ModelInputs<'static> {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 

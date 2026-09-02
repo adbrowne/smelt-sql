@@ -403,6 +403,39 @@ pub struct Workspace {
     /// the `--target` CLI flag (override). Both CLI and LSP read the same
     /// config-derived default to keep discovery symmetric.
     pub active_target: Option<Arc<str>>,
+    /// All registered deployed-schema snapshot inputs. Kept here so that
+    /// Salsa-tracked queries (which receive `&dyn salsa::Database`, not the
+    /// concrete `Database`) can enumerate registered snapshots without
+    /// downcasting — mirrors `loader_files` above.
+    #[returns(ref)]
+    pub deployed_schemas: Vec<DeployedSchemaInput>,
+}
+
+// ============================================================================
+// Deployed-schema snapshot inputs
+// ============================================================================
+
+/// A model's previously-deployed schema snapshot, registered as a Salsa
+/// world-fact input (`docs/specs/definition_deltas.md` §"Detection": "the
+/// deployed-schema snapshot is a world fact both the LSP and the CLI
+/// register at workspace load"). One input per `(project_root, model)` pair
+/// — project-scoped, per the project-isolation rule, since two projects in
+/// the same workspace folder may each maintain a model of the same name.
+#[salsa::input]
+pub struct DeployedSchemaInput {
+    #[returns(ref)]
+    pub model: Arc<str>,
+    #[returns(ref)]
+    pub project_root: PathBuf,
+    /// The snapshot's deployed output column names.
+    #[returns(ref)]
+    pub columns: Vec<Arc<str>>,
+    /// The model's source SQL text at the time this schema was deployed —
+    /// `None` for a snapshot written before `DeployedSchema::model_sql`
+    /// existed. Consulted only by the skeleton-clause-changed check
+    /// (`smelt_logical::maintenance::derive::skeleton_clause_changed`).
+    #[returns(ref)]
+    pub model_sql: Option<Arc<str>>,
 }
 
 // ============================================================================
@@ -449,6 +482,8 @@ pub struct Database {
     projects: Arc<RwLock<HashMap<PathBuf, ProjectInput>>>,
     /// Per-loader-file inputs keyed by workspace-relative path.
     loader_files: Arc<RwLock<HashMap<String, LoaderFileInput>>>,
+    /// Per-deployed-schema inputs keyed by `(project_root, model)`.
+    deployed_schemas: Arc<RwLock<HashMap<(PathBuf, String), DeployedSchemaInput>>>,
 }
 
 #[salsa::db]
@@ -541,7 +576,7 @@ impl Database {
                 // set_loader_file and set_active_target respectively.
             }
             None => {
-                Workspace::new(self, files, projects, Vec::new(), None);
+                Workspace::new(self, files, projects, Vec::new(), None, Vec::new());
             }
         }
     }
@@ -550,7 +585,7 @@ impl Database {
     pub fn workspace(&mut self) -> Workspace {
         match Workspace::try_get(self) {
             Some(ws) => ws,
-            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None),
+            None => Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), None, Vec::new()),
         }
     }
 
@@ -564,7 +599,7 @@ impl Database {
         if let Some(ws) = Workspace::try_get(self) {
             ws.set_active_target(self).to(target);
         } else {
-            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target);
+            Workspace::new(self, Vec::new(), Vec::new(), Vec::new(), target, Vec::new());
         }
     }
 
@@ -611,6 +646,55 @@ impl Database {
     pub fn loader_file(&self, path: &str) -> Option<LoaderFileInput> {
         // invariant: same RwLock poisoning rationale as set_source_file.
         self.loader_files.read().unwrap().get(path).copied()
+    }
+
+    /// Create or update the `DeployedSchemaInput` for `(project_root, model)`.
+    ///
+    /// Called by [`workspace_ingest::register_deployed_schemas_from_disk`]
+    /// (CLI `init_db` / LSP `initialize`, workspace-loading-parity rule)
+    /// whenever a `.smelt/targets/<target>/schemas/<model>.json` snapshot is
+    /// discovered on disk. Salsa propagates invalidations to `maintenance_plan`
+    /// / `check_file_diagnostics` automatically — re-setting an already-
+    /// registered input's fields (a re-run `register_deployed_schemas_from_disk`
+    /// after a fresh deploy) re-invalidates within the same `Database`.
+    pub fn set_deployed_schema(
+        &mut self,
+        model: Arc<str>,
+        project_root: PathBuf,
+        columns: Vec<Arc<str>>,
+        model_sql: Option<Arc<str>>,
+    ) -> DeployedSchemaInput {
+        let key = (project_root.clone(), model.to_string());
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        let existing = self.deployed_schemas.read().unwrap().get(&key).copied();
+        match existing {
+            Some(input) => {
+                input.set_columns(self).to(columns);
+                input.set_model_sql(self).to(model_sql);
+                input
+            }
+            None => {
+                let input = DeployedSchemaInput::new(self, model, project_root, columns, model_sql);
+                self.deployed_schemas.write().unwrap().insert(key, input);
+                if let Some(ws) = Workspace::try_get(self) {
+                    let mut current = ws.deployed_schemas(self).to_vec();
+                    current.push(input);
+                    ws.set_deployed_schemas(self).to(current);
+                }
+                input
+            }
+        }
+    }
+
+    /// Look up an already-registered `DeployedSchemaInput` by
+    /// `(project_root, model)`.
+    pub fn deployed_schema(&self, project_root: &Path, model: &str) -> Option<DeployedSchemaInput> {
+        // invariant: same RwLock poisoning rationale as set_source_file.
+        self.deployed_schemas
+            .read()
+            .unwrap()
+            .get(&(project_root.to_path_buf(), model.to_string()))
+            .copied()
     }
 }
 
@@ -1677,6 +1761,28 @@ pub fn maintenance_plan(
         .and_then(|p| project_active_backends(db, p))
         .unwrap_or_default();
 
+    // The deployed-schema snapshot (`docs/specs/definition_deltas.md`
+    // §"Detection"): a Salsa world-fact input the CLI and LSP both register
+    // at workspace load (`workspace_ingest::register_deployed_schemas_from_disk`).
+    // Only `model_sql` is threaded through here, feeding the skeleton-clause
+    // check (`MaintenanceSkeletonChanged` via `Refusal::SkeletonClauseChanged`).
+    // `deployed_column_names` stays `&[]` — unchanged from before this input
+    // existed — because feeding it a real value here would additionally
+    // derive a live `Trigger::ColumnAdded` cell in this PRE-EXECUTION
+    // diagnostic gate; that cell's own backfill/scan-bound admission can
+    // refuse (`MaintenanceScanUnbounded`) for a column addition
+    // `smelt-runtime`'s narrower `resolve_live_in_place_update_cell` still
+    // executes safely, since that call derives the SAME full plan but only
+    // ever inspects the one cell it looks for — widening what blocks a
+    // build/LSP diagnostic ahead of a run is out of this phase's scope
+    // (`docs/outcomes/20260815-definition-delta-migrate/phases/09-plan.md`).
+    let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
+    let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
+        s.model_sql(db)
+            .as_ref()
+            .map(|sql: &Arc<str>| sql.to_string())
+    });
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
@@ -1685,6 +1791,8 @@ pub fn maintenance_plan(
         project_scan_bounds.as_ref(),
         &extra_model_sources,
         &active_backends,
+        &[],
+        deployed_model_sql.as_deref(),
     ))
 }
 
@@ -1818,6 +1926,16 @@ pub fn maintenance_plan_report(
         smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     let source_referential_integrity =
         crate::queries::maintenance::build_source_referential_integrity(&source_refs);
+    // The deployed-schema snapshot world-fact — see `maintenance_plan`'s own
+    // call site for the full rationale (`deployed_column_names` stays `&[]`;
+    // only `model_sql` feeds the skeleton-clause check; `smelt explain`'s
+    // report path reads the same registered Salsa input).
+    let deployed_schema = find_deployed_schema(db, workspace, &project_root, &table);
+    let deployed_model_sql: Option<String> = deployed_schema.and_then(|s| {
+        s.model_sql(db)
+            .as_ref()
+            .map(|sql: &Arc<str>| sql.to_string())
+    });
     let mut result = crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1827,11 +1945,9 @@ pub fn maintenance_plan_report(
         &model_edges,
         driving_source_granularity,
         &key_recurrences,
-        // `smelt explain`'s report path has no I/O access to the
-        // deployed-schema snapshot — see `maintenance_plan_diagnostics`'s
-        // own call site for the same rationale.
         &[],
         &source_referential_integrity,
+        deployed_model_sql.as_deref(),
     )?;
 
     // Decomposed-state summary (`docs/outcomes/20260809-rung2-state-shapes`
@@ -2528,6 +2644,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     format!(
                         "column '{column}' occupies a row-membership/identity (skeleton) \
                          position — a grain change, never a column backfill (EX-39, \
+                         docs/specs/incremental_models.md §\"The definition-change trigger\")",
+                    ),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::SkeletonClauseChanged {
+                    reason,
+                } => (
+                    DiagnosticCode::MaintenanceSkeletonChanged,
+                    format!(
+                        "the model's skeleton clause changed against its deployed schema \
+                         snapshot: {reason} — a grain change, never a column backfill (EX-39, \
                          docs/specs/incremental_models.md §\"The definition-change trigger\")",
                     ),
                 ),
@@ -3679,6 +3805,24 @@ pub fn find_project(
         .iter()
         .copied()
         .find(|p| p.root(db) == root)
+}
+
+/// Look up the registered [`DeployedSchemaInput`] for `(project_root, table)`
+/// via the `Workspace` singleton's `deployed_schemas` list — the enumeration
+/// seam a Salsa-tracked query (`&dyn salsa::Database`, no downcast to the
+/// concrete `Database`) must use, mirroring `workspace.loader_files(db)`'s
+/// lookup pattern in `queries/loader.rs`/`queries/project.rs`.
+fn find_deployed_schema(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project_root: &Path,
+    table: &str,
+) -> Option<DeployedSchemaInput> {
+    workspace
+        .deployed_schemas(db)
+        .iter()
+        .copied()
+        .find(|s| s.project_root(db) == project_root && &**s.model(db) == table)
 }
 
 fn count_from_sources(select_stmt: &smelt_parser::ast::SelectStmt) -> usize {

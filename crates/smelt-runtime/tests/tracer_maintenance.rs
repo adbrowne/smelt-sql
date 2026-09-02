@@ -251,6 +251,7 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -413,6 +414,7 @@ fn ex24_keyed_fold_of_a_delta_equals_full_refresh_at_the_advanced_s() {
             add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,

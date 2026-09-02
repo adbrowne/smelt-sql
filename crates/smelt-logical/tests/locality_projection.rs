@@ -158,6 +158,7 @@ fn cross_axis_source_without_predicate_is_not_local() {
         column_groups: vec![],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -345,6 +346,7 @@ fn verdicts_are_per_cell_per_source() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(&inputs, &[Trigger::Backfill]);
     let cell = &plan.cells[0];
@@ -400,6 +402,7 @@ fn keyed_fold_plan(sql: &str) -> smelt_logical::maintenance::MaintenancePlan {
             add_columns: vec![("total".to_string(), SqlFunction::Sum)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
     derive_maintenance_plan(
         &inputs,

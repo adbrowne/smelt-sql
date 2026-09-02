@@ -59,6 +59,7 @@ fn inputs(sql: &'static str, source: SourceFacts) -> ModelInputs<'static> {
             add_columns: vec![("max_amount".to_string(), SqlFunction::Max)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 

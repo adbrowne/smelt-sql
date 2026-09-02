@@ -1862,16 +1862,11 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
 - **Locality and diagnostic residues on the maintenance-plan proofs**: a keyed-grain output
   poses no partition-locality question, so a locality-admitted keyed model's clamps carry an
   assumed (underived) write-footprint mirror into propagation;
-  `MaintenanceSkeletonChanged` is reachable (unit coverage, and via `smelt-runtime`'s
-  maintenance driver, the only caller with I/O access to derive a real `ColumnAdded` trigger)
-  but not yet surfaced as an LSP/CLI diagnostic ahead of a run (`smelt-db`'s own
-  diagnostics/`smelt explain` path always derives an empty trigger set);
   column-group-scoped dirt coarsens to whole-partition (safe, over-running); hour granularity
   is declared surface but propagation is day-ordinal; the built grain-alignment check
   validates only the declaration (widen-never-narrow, `MaintenanceGranularityMismatch`), and
   graph edges still take the declaration directly. Refs: `model_properties.md` §Known
-  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`. The surfacing gap is
-  tracked: `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 7b.
+  Divergences; `docs/plans/20260808-derived-maintenance-proofs.md`.
 - **The ledger's warehouse substrate is DuckDB-only** — an additive-graded
   cell on another backend fails loudly today; `state.md` §"The degradation contract" specifies
   the intended behaviour instead (a recorded `MaintenanceStateDowngraded` downgrade to the

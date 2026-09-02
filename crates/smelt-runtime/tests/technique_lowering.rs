@@ -1189,6 +1189,7 @@ fn real_fixture_examples_timeseries_admits_membership_recompute_cell() {
         &[],
         &[],
         &std::collections::BTreeMap::new(),
+        None,
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -1336,6 +1337,7 @@ fn real_fixture_daily_events_status_would_admit_partition_local_yes_cell() {
         column_groups: grouping.groups.clone(),
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let plan = smelt_logical::maintenance::derive::derive_maintenance_plan(
@@ -3243,6 +3245,7 @@ mod external_source_point_lookup_recompute {
             column_groups: grouping.groups,
             fold: None,
             old_columns: Vec::new(),
+            old_sql: None,
         };
 
         let mut source_ri = BTreeMap::new();
@@ -3320,6 +3323,7 @@ mod external_source_point_lookup_recompute {
             column_groups: grouping.groups,
             fold: None,
             old_columns: Vec::new(),
+            old_sql: None,
         };
         let trigger = Trigger::UpstreamMutation {
             source: "raw.users".to_string(),

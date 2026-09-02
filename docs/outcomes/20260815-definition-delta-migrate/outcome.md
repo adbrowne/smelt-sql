@@ -308,7 +308,7 @@ open — not that the excluded bullets themselves are gone.
 | 6 | Close the atomicity divergence (unify the `schema_evolution` full-refresh escape with the migration gate, or land its repair path) | done |
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
-| 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | planned |
+| 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | done |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | pending |
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
@@ -336,6 +336,13 @@ open — not that the excluded bullets themselves are gone.
   sweep (`model_transforms.md`, `model_properties.md`, `incremental_models.md`,
   `schema_evolution.md`, `diagnostics.md`) are deferred to phase 7, since renaming a
   diagnostic code is itself a code change out of scope for this docs-only phase.
+- **2026-09-02, phase 9.** `DeployedSchemaInput` world-fact input threads only `model_sql` into
+  `maintenance_plan`/`maintenance_plan_report`, not `deployed_column_names` (kept `&[]`).
+  Threading real column names too would widen the pre-execution diagnostic gate to derive a live
+  `Trigger::ColumnAdded` cell whose own admission can refuse `MaintenanceScanUnbounded` for a
+  column add that `smelt-runtime`'s narrower live-cell resolution still executes safely —
+  confirmed via two real e2e regressions before scoping the fix down to the skeleton-clause
+  check alone.
 
 - **2026-08-30, phase 8.** `backbuild-synthesis.md` rewritten around the shipped `smelt migrate`
   verb; corrected the "enumerates options; it does not yet choose" claim to state precisely what

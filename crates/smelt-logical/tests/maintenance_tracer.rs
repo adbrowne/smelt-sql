@@ -100,6 +100,7 @@ fn ex02_inputs() -> ModelInputs<'static> {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 
@@ -234,6 +235,7 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     }
 }
 
@@ -348,6 +350,7 @@ fn ex13_new_day_is_partition_local_recompute_region() {
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -390,6 +393,7 @@ fn ex24_inputs(
             add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let trigger = Trigger::NewData {
         source: "payments".to_string(),
@@ -603,6 +607,7 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
         ],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -716,6 +721,7 @@ fn ex39b_underived_skeleton_add_in_sensitive_group_still_refuses() {
             column_def("pay_date", "pay_date"),
             column_def("revenue", "SUM(amount)"),
         ],
+        old_sql: None,
     };
     let plan = derive_maintenance_plan(
         &inputs,
@@ -800,6 +806,7 @@ fn keyed_enriched_dim_mutation_is_membership_sensitive_recompute_never_column_me
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let plan = derive_maintenance_plan(
@@ -888,6 +895,7 @@ fn closed_outer_enrichment_join_upstream_mutation_derives_column_scoped_merge() 
         column_groups: grouping.groups,
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let plan = derive_maintenance_plan(

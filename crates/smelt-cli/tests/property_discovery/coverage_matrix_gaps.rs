@@ -84,6 +84,7 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
         }],
         fold: None,
         old_columns: Vec::new(),
+        old_sql: None,
     };
 
     let plan = derive_maintenance_plan(
@@ -182,6 +183,7 @@ fn ex41_ex42_intersect_no_payload_column_still_delete_insert() {
             column_groups: vec![],
             fold: None,
             old_columns: Vec::new(),
+            old_sql: None,
         };
         let plan = derive_maintenance_plan(
             &inputs,

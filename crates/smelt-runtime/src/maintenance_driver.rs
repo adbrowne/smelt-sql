@@ -577,6 +577,7 @@ pub fn resolve_incremental_strategy(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     ) else {
         return backend_default;
     };
@@ -827,6 +828,7 @@ pub fn resolve_live_column_scoped_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     ) else {
         return Ok(None);
     };
@@ -1045,6 +1047,7 @@ pub fn resolve_live_in_place_update_cell(
         &[],
         deployed_column_names,
         &SourceReferentialIntegrity::new(),
+        None,
     )?;
     let cell = result
         .plan
@@ -1131,6 +1134,7 @@ pub fn resolve_live_membership_recompute_cell(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     ) else {
         return Ok(None);
     };
@@ -1535,6 +1539,7 @@ pub fn resolve_live_per_group_recompute_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     ) else {
         return Ok(None);
     };
@@ -2083,6 +2088,7 @@ pub fn resolve_live_key_addressed_model_edge_cell(
         &[],
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     ) else {
         return Ok(None);
     };
@@ -3432,6 +3438,7 @@ pub fn resolve_live_delta_restriction_facts(
         // snapshot is needed here.
         &[],
         &SourceReferentialIntegrity::new(),
+        None,
     )?;
     let cell = result.plan.cell_for(&Trigger::NewData {
         source: driving_edge.name.clone(),

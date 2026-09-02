@@ -356,6 +356,15 @@ pub enum Refusal {
     /// A field was added or changed in a skeleton position — a grain
     /// change, not a column backfill (EX-39).
     SkeletonChanged { column: String },
+    /// The model's skeleton *clause* itself changed against a prior
+    /// deployed snapshot (a changed `GROUP BY`, a changed `FROM` target, a
+    /// changed join shape) — a grain change proven by
+    /// [`crate::backbuild::diff::definition_diff`]'s clause-level factoring
+    /// rather than by a `Trigger::ColumnAdded` landing in a skeleton
+    /// position. Maps onto the same `MaintenanceSkeletonChanged` diagnostic
+    /// code as [`Refusal::SkeletonChanged`] — one code, two refusal shapes
+    /// (`docs/specs/definition_deltas.md` §"Detection").
+    SkeletonClauseChanged { reason: String },
     /// The derived scan/footprint cannot be partition-bounded and the K8
     /// guardrail (`require: partition_local`, the ratified default) refuses
     /// rather than shipping a silent full-table operation.

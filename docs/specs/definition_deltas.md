@@ -83,6 +83,16 @@ between that recorded definition and the model's current SQL is a **definition d
 is passive — editing a model never triggers work by itself; the delta is reported the next time
 the model is planned, explained, or run.
 
+The deployed-schema snapshot backing this detection is a **world fact**: both the LSP and the
+CLI register it as a Salsa input at workspace load (`architecture.md` §"Workspace loading
+parity rule (CLI ↔ LSP)"), reading every `.smelt/targets/<target>/schemas/<model>.json` snapshot
+on disk. This is what lets a skeleton-positioned definition change (a redefined `GROUP BY`, a
+changed `FROM` target) surface as `MaintenanceSkeletonChanged` in the editor and in
+`smelt explain <model>` ahead of any run — not only when a run's maintenance driver derives the
+trigger with its own direct I/O access to the snapshot. A model with no registered snapshot on
+record derives no definition-change trigger at all (fail-closed, unchanged from before this
+input existed).
+
 The refusal rule: a **maintained (incremental) model whose stored table already exists and
 carries a recorded `model_sql`**, run without `--full-refresh`, refuses to fold a data delta over
 a pending non-eclipsed definition delta rather than silently maintaining a table whose definition

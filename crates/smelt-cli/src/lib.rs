@@ -217,9 +217,22 @@ pub fn init_db(project_dir: &Path, models: &[ModelFile]) -> smelt_db::Database {
 
     // Set the active target from the project's smelt.yml `target:` field
     // (symmetric with ingest_loaded_workspace — Workspace Loading Parity rule).
+    let mut effective_target = "dev".to_string();
     if let Ok(cfg) = smelt_core::config::Config::load(project_dir) {
+        if let Some(t) = &cfg.target {
+            effective_target = t.clone();
+        }
         db.set_active_target(cfg.target.map(|t| std::sync::Arc::from(t.as_str())));
     }
+
+    // The deployed-schema snapshot world-fact input (symmetric with
+    // ingest_loaded_workspace — Workspace Loading Parity rule):
+    // `docs/specs/definition_deltas.md` §"Detection".
+    smelt_db::workspace_ingest::register_deployed_schemas_from_disk(
+        &mut db,
+        project_dir,
+        &effective_target,
+    );
 
     db
 }
