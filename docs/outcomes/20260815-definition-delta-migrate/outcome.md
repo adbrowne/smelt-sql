@@ -309,7 +309,7 @@ open — not that the excluded bullets themselves are gone.
 | 7 | Diagnostic rename lands in code (`MaintenanceSkeletonChanged`) plus the sibling-spec sweep | done |
 | 8 | docs-site migration guide: rewrite `guide/backbuild-synthesis.md` in place around `smelt migrate`/`--apply`, drop its stale "no CLI command yet" and naming-collision callouts; update `models.md`/`seeds.md`'s "no `smelt migrate`" bullets | done |
 | 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | done |
-| 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | planned |
+| 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | done |
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | pending |
 | 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | pending |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
@@ -600,6 +600,20 @@ open — not that the excluded bullets themselves are gone.
   (`definition_deltas.md`'s divergence bullet still cites the pre-renumber "phase 11" for per-cell
   frontier addressing, now phase 12; `last_reviewed` bump) and adds the first standing grep guard
   against the criterion-8 rename regressing.
+
+- **2026-09-02 (phase 10 implementation).** The validate sweep found two more drift items beyond
+  the two already-known corrections, both wording gaps in sibling specs (not `definition_deltas.md`
+  itself), both fixed in-phase: (a) `diagnostics.md`'s Known Divergences said
+  `MaintenanceSkeletonChanged` "only reaches its own `file_diagnostics()` mapping from a caller
+  that plumbs one in (today, none does...)" — stale since phase 9 wired the `DeployedSchemaInput`
+  world fact into exactly that caller; (b) `architecture.md`'s Known Divergences said "no
+  CLI/runtime consumer drives a backbuild script through a real backend yet" — stale since phase
+  2/3 shipped `smelt migrate --apply`, proven end to end by
+  `crates/smelt-cli/tests/migrate_apply.rs` against a real DuckDB. Both rewritten to state what's
+  actually still missing (the `statement_parity` byte-identical structural leg has not been
+  extended to backbuild specifically). No behavioral gap was found — everything else validate
+  checked (Surface, Semantics, invariants, cli.md/model_selection.md/models.md/seeds.md sibling
+  sweep, docs-site) was already correct from phases 1–9.
 
 ## Blocked
 

@@ -1,7 +1,7 @@
 ---
 feature: definition_deltas
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-02
 owners: [andrew]
 ---
 
@@ -473,7 +473,7 @@ Live gaps between this spec and the implementation as of `last_reviewed`.
   applied script whose chosen technique is not rerun-safe (the `BackbuildOption::rerun_safe` flag
   `crates/smelt-logical/src/backbuild/` classifiers already carry) therefore refuses on the next
   `--apply` rather than resuming — the honest route is a full refresh. Tracked:
-  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 11 ("Per-cell frontier
+  `docs/outcomes/20260815-definition-delta-migrate/outcome.md` phase 12 ("Per-cell frontier
   addressing").
 
 ## Future Extensions

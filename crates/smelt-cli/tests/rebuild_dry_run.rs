@@ -175,3 +175,69 @@ fn help_lists_rebuild() {
         "expected no mention of retired `backbuild` verb in --help output:\n{stdout}"
     );
 }
+
+/// The criterion-8 rename sweep (`smelt backbuild` → `smelt rebuild`) and the
+/// phase-1 diagnostic rename (the old skeleton-column-added spelling →
+/// `MaintenanceSkeletonChanged`) have no other standing gate over prose, so a
+/// spec or user-doc edit could silently reintroduce either stale name.
+/// Scoped to `docs/specs/` and `docs-site/docs/` only — `docs/plans/` and
+/// `docs/research/` are historical records that legitimately still name the
+/// retired verb/code, and this file's own negative tests above are the
+/// intentional exception (they assert the retired verb is rejected). The old
+/// diagnostic spelling is built via `concat!` rather than spelled literally
+/// so this very file does not trip `smelt-db`'s own
+/// `no_stale_skeleton_column_added_spelling` gate.
+#[test]
+fn no_stale_backbuild_verb_or_diagnostic_name_in_docs() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repo root exists");
+    let stale_diagnostic_spelling = ["Maintenance", "Skeleton", "Column", "Added"].concat();
+
+    let mut hits = Vec::new();
+    for dir in [
+        repo_root.join("docs/specs"),
+        repo_root.join("docs-site/docs"),
+    ] {
+        for entry in walk_markdown_files(&dir) {
+            let content = std::fs::read_to_string(&entry)
+                .unwrap_or_else(|e| panic!("read {}: {e}", entry.display()));
+            for (lineno, line) in content.lines().enumerate() {
+                if line.contains("smelt backbuild") || line.contains(&stale_diagnostic_spelling) {
+                    hits.push(format!(
+                        "{}:{}: {}",
+                        entry.display(),
+                        lineno + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        hits.is_empty(),
+        "stale `smelt backbuild`/skeleton-column-added-spelling mention(s):\n{}",
+        hits.join("\n")
+    );
+}
+
+fn walk_markdown_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(read_dir) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
