@@ -311,7 +311,7 @@ open — not that the excluded bullets themselves are gone.
 | 9 | Surface the definition-change diagnostic ahead of a run: plumb the deployed-schema snapshot into `smelt-db` as a Salsa world-fact input (CLI + LSP parity), so `MaintenanceSkeletonChanged` reaches LSP diagnostics and `smelt explain` without a run | done |
 | 10 | Validate + close out: `/smelt:validate definition_deltas` clean, Known Divergences bullets removed (including the sibling-spec sweep in success criterion 8), full standing-gate sweep | done |
 | 11 | Wire run-loop dispatch for a `KeyedUpsert`→`grain: partition` key-addressed repair cell (today derived but never dispatched outside the `grain: key` branch); narrow/remove the corresponding clause of `incremental_models.md`'s scheduler-currency divergence bullet | done |
-| 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | planned |
+| 12 | Per-cell frontier addressing: schedule per-cell `deferral`; runtime-lower `diff_patch` over the region `DeleteInsert` default | done |
 | 13 | Write-pin equivalence: thread real column-comparability into the per-cell equivalence hook; pre-execution refusal gate for an inadmissible write-variant pin | pending |
 | 14 | Observed-delta consumption: live `--since-upstream` read, backward resolution, keyed-fold + staged-candidate recording, settle-bound × observed-delta "delta empty" leg | pending |
 | 15 | Maintained-model-creation execution technique; frontmatter-time grain check for `GROUP BY`-derived `grain: key` identity | pending |
@@ -352,6 +352,17 @@ open — not that the excluded bullets themselves are gone.
   batch loop via a labeled block when the cell resolves live. A `grain: partition` downstream
   fed by a clockless `KeyedUpsert` upstream now dispatches `Technique::PerGroupRecompute`
   instead of falling back to the ordinary window-forward batch loop.
+
+- **2026-09-02, phase 12.** Shipped the `diff_patch` region-`DeleteInsert` runtime lowering
+  (scoped to `resolve_live_membership_recompute_cell`, the one dispatch site the plan named) and
+  the full per-cell-deferral pure/data-layer stack (`cell_address`, `IntervalStore.
+  cell_frontiers`, `deferral_cell_decisions`, `ModelRunRecord.deferred_cells`). Did NOT wire
+  per-cell deferral scheduling to any live dispatch site: `contract.cells[].deferral` is validly
+  declarable only over a clocked, interval-representable `on:`, but every currently-wired
+  per-cell resolver serves an `UpstreamMutation` trigger over a mutable/unclocked source — a
+  structural mismatch discovered mid-phase, not a design question the plan left open. A real
+  wiring needs the plain windowed-incremental/cumulative-fold dispatch (the `Trigger::NewData`
+  family), a materially bigger change deferred to a future phase (see phase 12's summary).
 
 - **2026-08-30, phase 8.** `backbuild-synthesis.md` rewritten around the shipped `smelt migrate`
   verb; corrected the "enumerates options; it does not yet choose" claim to state precisely what

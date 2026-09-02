@@ -1113,6 +1113,33 @@ pub fn resolve_live_in_place_update_cell(
 /// it has genuinely *departed* (e.g. the dimension row a fact joined on was
 /// itself deleted) rather than merely being out of a run's touched region,
 /// and the recompute variant's extra anti-join `DELETE` removes it.
+/// The write route a live membership-sensitive `Technique::DeleteInsert`
+/// cell ([`resolve_live_membership_recompute_cell`]) resolves to — the
+/// staged-candidate conditional recompute
+/// ([`execute_staged_membership_recompute`]), or a `write: diff_patch` pin
+/// over that same cell, routed through [`execute_diff_patch`] instead
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`).
+/// The `diff_patch` leg's delete-leg completeness is sound unconditionally:
+/// this resolver's candidate is always the model's own FULL (unwindowed)
+/// recompute — a region recompute's own coverage IS its slice, by
+/// construction, mirroring `resolve_cell_choice`'s `DeleteLeg::Complete`
+/// grant for the region `DeleteInsert` default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MembershipRecomputeWrite {
+    /// `emit_staged_candidate_conditional_recompute`'s change-suppressed
+    /// conditional `DELETE`+`INSERT`.
+    StagedRecompute { compared_columns: Vec<String> },
+    /// [`emit_diff_patch`]'s diff-then-patch pattern, admitted via
+    /// [`smelt_logical::maintenance::diff_patch::admit_diff_patch`].
+    DiffPatch { compared_columns: Vec<String> },
+}
+
+/// A live membership-recompute cell as
+/// [`resolve_live_membership_recompute_cell`] returns it: the trigger's
+/// source name, the cell itself, its column group's own derived columns,
+/// and the resolved write route.
+pub type LiveMembershipRecomputeCell = (String, PlanCell, Vec<String>, MembershipRecomputeWrite);
+
 pub fn resolve_live_membership_recompute_cell(
     sql: &str,
     table: &str,
@@ -1120,7 +1147,7 @@ pub fn resolve_live_membership_recompute_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     technique_overrides: &[crate::types::CellTechniqueOverride],
-) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+) -> Result<Option<LiveMembershipRecomputeCell>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
@@ -1246,33 +1273,82 @@ pub fn resolve_live_membership_recompute_cell(
                 false,
             )
             .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
-            if chosen != ChosenTechnique::Admitted(Technique::DeleteInsert) {
-                continue;
-            }
             let comparability = model_property_vector(sql, &JoinContext::new())
                 .map(|v| v.comparability)
                 .unwrap_or_default();
-            let raw_suppression =
-                resolve_write_suppression(group_columns, &comparability, &cell.row_identity);
-            let write_variant_result = resolve_write_variant(
-                &raw_suppression,
-                &cell.trigger,
-                cell.ledger_catch_up,
-                &overrides,
-            );
-            let Ok((suppression, _variant_reason)) = write_variant_result else {
-                continue;
-            };
-            // `emit_staged_candidate_conditional` has no unconditional
-            // counterpart (unlike `emit_column_scoped_merge`/`emit_column_
-            // scoped_merge_suppressed`) — an `Unconditional` verdict here has no
-            // sound lowering this resolver can hand the caller, so it is treated
-            // exactly like a refused write-variant: skip this source, fall
-            // through to the caller's safe default.
-            if !matches!(suppression, WriteSuppression::Suppressed { .. }) {
-                continue;
+            match chosen {
+                ChosenTechnique::Admitted(Technique::DeleteInsert) => {
+                    let raw_suppression = resolve_write_suppression(
+                        group_columns,
+                        &comparability,
+                        &cell.row_identity,
+                    );
+                    let write_variant_result = resolve_write_variant(
+                        &raw_suppression,
+                        &cell.trigger,
+                        cell.ledger_catch_up,
+                        &overrides,
+                    );
+                    let Ok((suppression, _variant_reason)) = write_variant_result else {
+                        continue;
+                    };
+                    // `emit_staged_candidate_conditional` has no
+                    // unconditional counterpart (unlike
+                    // `emit_column_scoped_merge`/`emit_column_scoped_merge_
+                    // suppressed`) — an `Unconditional` verdict here has no
+                    // sound lowering this resolver can hand the caller, so
+                    // it is treated exactly like a refused write-variant:
+                    // skip this source, fall through to the caller's safe
+                    // default.
+                    let WriteSuppression::Suppressed { compared_columns } = suppression else {
+                        continue;
+                    };
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::StagedRecompute { compared_columns },
+                    )));
+                }
+                ChosenTechnique::DiffPatch {
+                    recompute: Technique::DeleteInsert,
+                    delete_leg,
+                } => {
+                    // The candidate this resolver's caller writes is always
+                    // the model's own FULL unwindowed recompute — a region
+                    // recompute's own coverage IS its slice, so the delete
+                    // leg is sound regardless of what `resolve_cell_choice`
+                    // proved (it already grants `Complete` here too, but
+                    // this arm does not depend on that — it re-derives its
+                    // own completeness argument rather than trusting an
+                    // upstream `Omitted` it would otherwise have to refuse
+                    // on for no real reason).
+                    let _ = delete_leg;
+                    let admitted = smelt_logical::maintenance::diff_patch::admit_diff_patch(
+                        group_columns,
+                        &comparability,
+                        &cell.row_identity,
+                        Ok(()),
+                    )
+                    .map_err(|refusal| {
+                        anyhow::anyhow!(
+                            "MaintenanceDiffPatchRefused: a `write: diff_patch` pin over a \
+                             membership-sensitive Technique::DeleteInsert cell for group '{}' \
+                             could not be admitted: {refusal:?}",
+                            cell.group,
+                        )
+                    })?;
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::DiffPatch {
+                            compared_columns: admitted.compared_columns,
+                        },
+                    )));
+                }
+                _ => continue,
             }
-            return Ok(Some((source.clone(), cell.clone(), suppression)));
         }
     }
     Ok(None)

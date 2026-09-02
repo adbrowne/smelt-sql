@@ -93,6 +93,7 @@ mod tests {
                 retry_count: 0,
                 probes: Vec::new(),
                 subsumed: None,
+                deferred_cells: Vec::new(),
             },
         );
         RunManifest {

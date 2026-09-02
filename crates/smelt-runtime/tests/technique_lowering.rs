@@ -1955,10 +1955,11 @@ mod keyed_membership_recompute_e2e {
     use smelt_core::config::Config;
     use smelt_core::graph::DependencyGraph;
     use smelt_core::ModelDiscovery;
-    use smelt_logical::maintenance::choice::WriteSuppression;
     use smelt_logical::maintenance::{MutationProfile, SourceFacts};
     use smelt_runtime::execute::{BackendFactory, BackendFuture};
-    use smelt_runtime::maintenance_driver::resolve_live_membership_recompute_cell;
+    use smelt_runtime::maintenance_driver::{
+        resolve_live_membership_recompute_cell, MembershipRecomputeWrite,
+    };
     use smelt_runtime::types::ExecuteRequest;
     use smelt_runtime::{execute_project, NoOpReporter};
     use tokio_util::sync::CancellationToken;
@@ -2033,7 +2034,7 @@ mod keyed_membership_recompute_e2e {
         let mut explicitly_mutable = HashSet::new();
         explicitly_mutable.insert("raw.users".to_string());
 
-        let (source, cell, suppression) = resolve_live_membership_recompute_cell(
+        let (source, cell, _group_columns, write) = resolve_live_membership_recompute_cell(
             sql_body,
             "user_lifetime_status",
             &metadata,
@@ -2054,8 +2055,8 @@ mod keyed_membership_recompute_e2e {
             smelt_logical::maintenance::RowIdentity::Key(vec!["user_id".to_string()])
         );
         assert!(
-            matches!(suppression, WriteSuppression::Suppressed { .. }),
-            "expected the change-suppressed matched arm, got {suppression:?}"
+            matches!(write, MembershipRecomputeWrite::StagedRecompute { .. }),
+            "expected the change-suppressed matched arm, got {write:?}"
         );
     }
 
@@ -2387,6 +2388,232 @@ mod keyed_membership_recompute_e2e {
             (0, 0),
             "an unchanged redelivery must write zero rows through the change-suppressed \
              staged-candidate DELETE+INSERT"
+        );
+    }
+
+    /// `write: diff_patch` pin over the region `DeleteInsert` default
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`,
+    /// test 8): RED before this phase — the pin was silently ignored
+    /// (`resolve_live_membership_recompute_cell` `continue`d past a
+    /// `ChosenTechnique::DiffPatch` choice) and the run fell through to the
+    /// default `cumulative_aggregate` fold label with no membership-recompute
+    /// dispatch at all. GREEN after: the run's manifest records
+    /// `strategy == "diff_patch"`, and the diff-then-patch write leaves an
+    /// unchanged row's `event_count` untouched (only the genuinely differing
+    /// rows are ever candidates for the update leg).
+    const MODEL_FILE_DIFF_PATCH: &str = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: user_id\n\
+         maintenance:\n  \
+           scan_bounds:\n    \
+             per_source:\n      \
+               raw.users:\n        \
+                 allow_full_scan: true\n  \
+           cells:\n    \
+             - columns: [event_count]\n      \
+               on: raw.users\n      \
+               write: diff_patch\n\
+         ---\n";
+
+    fn model_file_text_diff_patch() -> String {
+        format!("{MODEL_FILE_DIFF_PATCH}{MODEL_SQL}\n")
+    }
+
+    #[tokio::test]
+    async fn diff_patch_pin_over_region_delete_insert_default_writes_only_the_difference() {
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        copy_dir_recursive(&source_dir, &project_dir);
+        std::fs::write(
+            project_dir.join("models/user_lifetime_status.sql"),
+            model_file_text_diff_patch(),
+        )
+        .expect("write diff_patch-pinned keyed model fixture");
+
+        let db_path = tmp.path().join("run.duckdb");
+        let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+        let backend_factory = DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        };
+
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_transactions (transaction_id INTEGER, \
+                     user_id INTEGER, amount DECIMAL(10,2), transaction_timestamp TIMESTAMP, \
+                     transaction_type VARCHAR)",
+                )
+                .await
+                .expect("create transactions source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_transactions VALUES \
+                     (1, 1, 10.00, TIMESTAMP '2025-01-10 08:00:00', 'purchase'), \
+                     (2, 2, 20.00, TIMESTAMP '2025-01-10 09:00:00', 'purchase')",
+                )
+                .await
+                .expect("seed transactions");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                     signup_date DATE)",
+                )
+                .await
+                .expect("create users source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_users VALUES \
+                     (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
+                )
+                .await
+                .expect("seed users");
+        }
+
+        // First run: creation via the ordinary KeyedFold path.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            execute_project(
+                "run-1".to_string(),
+                request_for_day("2025-01-10", "2025-01-11"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first run must succeed");
+        }
+
+        // Mutate the dimension so the `raw.users` `UpstreamMutation` cell is
+        // live for run 2 — same narrative as the sibling module test above.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1",
+                )
+                .await
+                .expect("mutate dimension");
+        }
+
+        // Second run: the diff_patch pin must be enforced, not silently
+        // ignored.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-2".to_string(),
+                request_for_day("2025-01-11", "2025-01-12"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(
+                record.strategy, "diff_patch",
+                "a `write: diff_patch` pin over the region DeleteInsert default must be \
+                 enforced, not silently ignored (RED before this phase: the run fell through \
+                 to the default `cumulative_aggregate` fold label)"
+            );
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+        let (user1_count, user2_count): (i64, i64) = {
+            let c1: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 1 event_count");
+            let c2: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 2 event_count");
+            (c1, c2)
+        };
+        assert_eq!(
+            (user1_count, user2_count),
+            (1, 1),
+            "the diff_patch write must not corrupt the fact-derived event_count — both users \
+             still show exactly the one event staged for them"
+        );
+
+        // Third run: no data change at all since run 2. The delete leg
+        // (`DeleteLeg::Complete`) must remove nothing genuinely unchanged,
+        // and the update leg's own comparison must write zero affected
+        // rows — the diff-then-patch pattern's entire reason for existing.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-3".to_string(),
+                request_for_day("2025-01-12", "2025-01-13"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("third run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(record.strategy, "diff_patch");
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect after run 3");
+        let (user1_count_after, user2_count_after): (i64, i64) = {
+            let c1: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 1 event_count");
+            let c2: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 2 event_count");
+            (c1, c2)
+        };
+        assert_eq!(
+            (user1_count_after, user2_count_after),
+            (1, 1),
+            "an unchanged redelivery through the diff_patch write must leave both rows exactly \
+             as they were — only a genuine difference is ever written"
         );
     }
 

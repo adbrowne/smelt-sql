@@ -1054,7 +1054,14 @@ set. It requires a declared `unique_key` for the insert/update legs and change c
 (`model_properties.md` §"Change comparability") for the update leg; the delete leg
 additionally requires **slice completeness** (the repair family's correctness premise, §"The
 repair family") and without it degrades explicitly to insert+update, a reduced-capability
-admission rather than a silently dropped delete leg. `diff_patch` is graded **Idempotent** (a
+admission rather than a silently dropped delete leg. A region recompute's own slice-completeness
+argument is its write scope itself: the candidate a region recompute writes IS the model's
+entire admitted state over that scope (the full model for an unwindowed recompute, the clamped
+write window for a windowed one) — nothing is excluded from the comparison, so a stored row
+inside that scope absent from the candidate has genuinely departed, never merely unscanned. The
+delete leg is therefore admitted `Complete` for the region `DeleteInsert` default the same way
+it already is for a `PerGroupRecompute` cell's own key-temporal-locality proof. `diff_patch` is
+graded **Idempotent** (a
 second run against unchanged input diffs to empty), making it the reconciliation and
 drift-repair write; its slice is the *candidate's own* — affected-key set for a per-group
 recompute, partition region for a windowed one — so it is not tied to a partition axis.
@@ -1825,13 +1832,28 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   the signature the first line; today's output leads with grain), nor the per-column guarantee
   summary or derived run shape. Tracked:
   `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 4.
-- **Per-cell `deferral` is not yet scheduled** — it parses, validates, and prints as declared,
-  but needs per-cell frontier addressing, which the frontier record tracks only per-region
-  today (a state-shape change, not a lattice-point change). Tracked:
-  `docs/outcomes/20260809-contract-lattice-v1/outcome.md`.
-- **`diff_patch` over the region `DeleteInsert` default has no runtime lowering** — the
-  resolver fails loud by name, but no caller today reaches it, so the pin is unenforced rather
-  than refused for that case. Tracked: `docs/outcomes/20260809-repair-family/outcome.md`.
+- **Per-cell `deferral` scheduling has a frontier record and a pure decision builder
+  (`smelt_logical::contract::deferral::cell_address`,
+  `smelt_runtime::contract_probes::deferral_cell_decisions`, `IntervalStore`'s per-model
+  `cell_frontiers` map) but no live dispatch site consults it yet** — a cell's own address is
+  addressable and its lag independently licensable, but every currently-wired dispatch site
+  (`resolve_live_membership_recompute_cell`, `resolve_live_column_scoped_cell`,
+  `resolve_live_per_group_recompute_cell`'s `UpstreamMutation` branch) serves an `on:` trigger
+  over a mutable or unclocked source, and `contract.cells[].deferral` is validly declarable
+  only on a clocked, interval-representable `on:` — the ordinary `Trigger::NewData` fold cell
+  over an append-only source. Wiring a real skip therefore reaches into the plain
+  windowed-incremental/cumulative-fold dispatch, not the `UpstreamMutation` family. `RunManifest`'s
+  `deferred_cells` field is defined (`run_state.md` §"Run manifest") but consequently never
+  populated yet. Tracked: `docs/outcomes/20260809-contract-lattice-v1/outcome.md`,
+  `docs/outcomes/20260815-definition-delta-migrate/phases/12-plan.md`.
+- **`diff_patch` over the region `DeleteInsert` default has a runtime lowering for the
+  membership-sensitive (`grain: key`, `UpstreamMutation`-triggered) case only** — `resolve_live_
+  membership_recompute_cell` routes a `write: diff_patch` pin to `execute_diff_patch` with the
+  trivial whole-scope slice predicate. The ordinary windowed/partition-grain region default (the
+  plain incremental `DELETE`+`INSERT` batch loop, `resolve_incremental_strategy`) still consults
+  no cell choice/write-pin logic at all, so a pin declared there remains silently unenforced —
+  the same gap as before this phase, just narrowed to one fewer case. Tracked:
+  `docs/outcomes/20260809-repair-family/outcome.md`.
 - **Frontmatter-time grain checking has one narrow gap**: a `grain: key` model deriving
   identity from its `GROUP BY` (no top-level `unique_key:`) is checked only at plan
   derivation, not frontmatter validation (cross-ref `models.md` §Known Divergences).

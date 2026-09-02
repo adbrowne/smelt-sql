@@ -1457,6 +1457,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1505,6 +1506,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1537,6 +1539,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -2535,17 +2538,10 @@ pub async fn execute_project(
             // SAME derived plan), so this never double-dispatches a source
             // `column_scoped_cell` already handled.
             let mut used_membership_recompute = false;
-            if let Some((_source, cell, suppression)) = membership_recompute_cell.as_ref() {
+            if let Some((_source, cell, _group_columns, write)) =
+                membership_recompute_cell.as_ref()
+            {
                 if table_exists_before_run && !used_column_scoped_merge {
-                    let smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
-                        compared_columns,
-                    } = suppression
-                    else {
-                        unreachable!(
-                            "resolve_live_membership_recompute_cell only ever returns \
-                             WriteSuppression::Suppressed"
-                        );
-                    };
                     let smelt_logical::maintenance::RowIdentity::Key(key) =
                         &cell.row_identity.identity
                     else {
@@ -2567,20 +2563,53 @@ pub async fn execute_project(
                     )?;
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
-                    let recompute_result =
-                        crate::maintenance_driver::execute_staged_membership_recompute(
-                            backend,
-                            schema,
-                            &db_table_name,
-                            key,
-                            &compiled.sql,
+                    let row_count = match write {
+                        crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
                             compared_columns,
-                            &retry_policy,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        } => {
+                            crate::maintenance_driver::execute_staged_membership_recompute(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                key,
+                                &compiled.sql,
+                                compared_columns,
+                                &retry_policy,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                        crate::maintenance_driver::MembershipRecomputeWrite::DiffPatch {
+                            compared_columns,
+                        } => {
+                            // The candidate select IS the model's full
+                            // admitted state — nothing is excluded from the
+                            // comparison, so the slice predicate that scopes
+                            // the delete leg is the trivial "whole table"
+                            // predicate (`docs/outcomes/
+                            // 20260815-definition-delta-migrate/
+                            // phases/12-plan.md`).
+                            used_diff_patch = true;
+                            crate::maintenance_driver::execute_diff_patch(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                key,
+                                &compiled.sql,
+                                compared_columns,
+                                "TRUE",
+                                &smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
+                                &retry_policy,
+                                None,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                    };
                     used_membership_recompute = true;
-                    total_rows = recompute_result.row_count;
+                    total_rows = row_count;
                 }
             }
             if !used_column_scoped_merge && !used_membership_recompute {
@@ -2625,6 +2654,7 @@ pub async fn execute_project(
                     // 08-plan.md`).
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -3028,6 +3058,7 @@ pub async fn execute_project(
                             retry_count: sink.retry_count(),
                             probes: Vec::new(),
                             subsumed: None,
+                            deferred_cells: Vec::new(),
                         },
                     );
                     break 'run_dispatch_or_batches;
@@ -3674,6 +3705,7 @@ pub async fn execute_project(
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
                         subsumed,
+                        deferred_cells: Vec::new(),
                     },
                 );
 
@@ -4030,6 +4062,7 @@ pub async fn execute_project(
                         retry_count: sink.retry_count(),
                         probes: model_probe_records,
                         subsumed: None,
+                        deferred_cells: Vec::new(),
                     },
                 );
 
@@ -4258,6 +4291,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -4310,6 +4344,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 }
             });
         }
@@ -4330,6 +4365,7 @@ pub async fn execute_project(
                     retry_count: 0,
                     probes: Vec::new(),
                     subsumed: None,
+                    deferred_cells: Vec::new(),
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what

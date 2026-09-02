@@ -81,6 +81,15 @@ pub struct ModelRunRecord {
     /// run that folds work on schedule without ever having deferred it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subsumed: Option<SubsumedWindow>,
+    /// Cell addresses (`smelt_logical::contract::deferral::cell_address`)
+    /// this run licensed to skip via `contract.cells[].deferral` — the
+    /// per-cell counterpart of the model-level `skipped_deferral`/
+    /// `skipped_deferral_upstream` `strategy` values
+    /// (`docs/specs/run_state.md` §"Run manifest"). Empty when the model
+    /// declares no per-cell deferral, or when every declaring cell ran this
+    /// cycle.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deferred_cells: Vec<String>,
 }
 
 /// The dated bounds of a `contract.deferral` pending window a run's own

@@ -359,19 +359,31 @@ pub fn resolve_cell_choice(
                     // (`repair::admit_per_group_recompute`'s bounded
                     // per-group slice), which is exactly diff_patch's own
                     // completeness argument for that slice — so the delete
-                    // leg is sound. Every other recompute (region
-                    // `DeleteInsert`) has no such premise threaded through
-                    // this admission layer yet, so its delete leg stays
-                    // omitted with a stated reason rather than silently
-                    // assumed complete.
-                    let delete_leg = if recompute == Technique::PerGroupRecompute {
+                    // leg is sound. The region `DeleteInsert` default's own
+                    // completeness argument is its write-window clamp
+                    // itself: the candidate a region recompute writes IS
+                    // the model's entire admitted state over the clamped
+                    // write range, so a stored row inside that range absent
+                    // from the candidate really has departed, never merely
+                    // unscanned — the same premise `resolve_repair_write`'s
+                    // caller threads for the membership-recompute lowering
+                    // (`docs/outcomes/20260815-definition-delta-migrate/
+                    // phases/12-plan.md`). Every OTHER recompute has no such
+                    // premise threaded through this admission layer yet, so
+                    // its delete leg stays omitted with a stated reason
+                    // rather than silently assumed complete.
+                    let delete_leg = if matches!(
+                        recompute,
+                        Technique::PerGroupRecompute | Technique::DeleteInsert
+                    ) {
                         diff_patch::DeleteLeg::Complete
                     } else {
                         diff_patch::DeleteLeg::Omitted {
                             why: "slice-completeness proof is not yet threaded through \
                                   resolve_cell_choice for this recompute technique — only \
-                                  PerGroupRecompute's own key-temporal-locality premise \
-                                  (already proven at admission) discharges it here"
+                                  PerGroupRecompute's key-temporal-locality premise and the \
+                                  region DeleteInsert default's write-window clamp (both \
+                                  already proven at admission) discharge it here"
                                 .to_string(),
                         }
                     };
@@ -1612,7 +1624,12 @@ mod tests {
     }
 
     #[test]
-    fn diff_patch_over_a_delete_insert_recompute_still_omits_the_delete_leg() {
+    fn diff_patch_over_a_region_delete_insert_default_admits_the_delete_leg() {
+        // The region `DeleteInsert` default's own write-window clamp IS its
+        // slice-completeness argument (`docs/outcomes/
+        // 20260815-definition-delta-migrate/phases/12-plan.md`), so —
+        // unlike an as-yet-unthreaded recompute technique — this delete leg
+        // is admitted `Complete`, not degraded to `Omitted`.
         let diff_patch_pattern =
             crate::maintenance::lookup_write_pattern("diff_patch").expect("diff_patch registered");
         let trigger = Trigger::UpstreamMutation {
@@ -1629,7 +1646,7 @@ mod tests {
         .expect("diff_patch pin over a delete-insert cell must resolve");
         match resolved {
             ChosenTechnique::DiffPatch { delete_leg, .. } => {
-                assert!(matches!(delete_leg, diff_patch::DeleteLeg::Omitted { .. }));
+                assert_eq!(delete_leg, diff_patch::DeleteLeg::Complete);
             }
             other => panic!("expected ChosenTechnique::DiffPatch, got {other:?}"),
         }

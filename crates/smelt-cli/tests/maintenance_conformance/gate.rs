@@ -2600,7 +2600,7 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
     let mut explicitly_mutable = std::collections::HashSet::new();
     explicitly_mutable.insert(recipe.dimension.name.clone());
 
-    let (source, cell, suppression) = resolve_live_membership_recompute_cell(
+    let (source, cell, _group_columns, write) = resolve_live_membership_recompute_cell(
         sql_body,
         &recipe.model_name,
         &metadata,
@@ -2618,8 +2618,11 @@ fn keyed_enriched_recipe_admits_membership_recompute() {
     assert_eq!(source, recipe.dimension.name);
     assert_eq!(cell.technique, Technique::DeleteInsert);
     assert!(
-        matches!(suppression, WriteSuppression::Suppressed { .. }),
-        "expected the change-suppressed matched arm, got {suppression:?}"
+        matches!(
+            write,
+            smelt_runtime::maintenance_driver::MembershipRecomputeWrite::StagedRecompute { .. }
+        ),
+        "expected the change-suppressed matched arm, got {write:?}"
     );
 }
 

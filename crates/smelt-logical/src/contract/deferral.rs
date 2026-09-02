@@ -205,6 +205,21 @@ pub fn subsumption(
     Some(SubsumedWork { pending })
 }
 
+/// The stable identity a `contract.cells[]` entry addresses, shared between
+/// the ledger's per-cell frontier map key and any diagnostic naming the
+/// cell — the same `(columns × trigger)` addressing scheme
+/// `maintenance.cells[]` already uses
+/// (`incremental_models.md` §"Contract relaxations (`contract:`)"). Columns
+/// are sorted before joining so a cell naming the same group in a different
+/// declared order still resolves to the same address (order-insensitive
+/// within `columns`, order-sensitive w.r.t. `on` since a trigger is a single
+/// string, not a set).
+pub fn cell_address(columns: &[String], on: &str) -> String {
+    let mut sorted: Vec<&str> = columns.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    format!("{}@{}", sorted.join(","), on)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
