@@ -341,11 +341,22 @@ open — not that the excluded bullets themselves are gone.
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
-| 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | planned |
+| 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
+
+- **2026-09-03, phase 30 — backbuild joins `statement_parity`; B3 fixtures need an explicit
+  key pull-through column and no `SELECT *`.** Three new tests drive `definition_delta::
+  {derive_plan, apply_migration}` directly (B1 in-place backfill, the `SkeletonChange` →
+  `FullRefresh` fallback, B3 upstream backfill), each proving executed SQL byte-identical to a
+  direct `backbuild::emit` call plus result multiset-equality to a full refresh. Discovered along
+  the way: `infer_deployed_columns` returns zero columns for a `SELECT *`-projected VALUES model,
+  so schema tracking silently skips saving its deployed schema — any fixture leaning on an
+  upstream's declared/inferred NOT NULL facts (B3's grain-link proof) needs an explicit column
+  list. `smelt-state/ddl_duckdb.rs`'s own `ALTER TABLE` DDL authoring (phase 30b's scope) was
+  confirmed still present and untouched.
 
 - **2026-09-03, phase 29 — windowless window-forward keyed runs refuse; `safety_overrides:`
   on a keyed model gets its own diagnostic.** `execute.rs`'s windowless keyed dispatch now

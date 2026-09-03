@@ -22,6 +22,14 @@
 //! `smelt-runtime` to call `execute_project` (`docs/plans/
 //! 20260710-emit-unification.md` Phase 4).
 //!
+//! Also covers the backbuild emitter family
+//! (`crates/smelt-logical/src/backbuild/emit.rs`) — B1 in-place backfill,
+//! the model-level `FullRefresh` baseline, and B3 upstream backfill — driven
+//! directly through `smelt_runtime::definition_delta::{derive_plan,
+//! apply_migration}` rather than `execute_project`, since backbuild's
+//! dispatch point is a migration plan a caller applies explicitly, not a
+//! step of an ordinary run.
+//!
 //! This file also carries the structural no-authoring gate
 //! (`no_maintenance_statement_authoring_outside_the_emitter`): a source
 //! scan asserting the region `DELETE FROM`/keyed+column-scoped
@@ -43,6 +51,11 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
+use smelt_logical::backbuild::emit::{
+    emit_alter_add_column, emit_column_backfill_update_from, emit_full_refresh,
+    emit_in_place_update,
+};
+use smelt_logical::backbuild::{MigrationPlan, MigrationVerdict, Technique};
 use smelt_logical::maintenance::emit::{
     emit_append_only_posture_probe, emit_column_scoped_merge, emit_create_table_as,
     emit_delete_insert, emit_diff_patch, emit_keyed_fold, emit_keyed_fold_suppressed,
@@ -53,6 +66,7 @@ use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
     AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
+use smelt_runtime::definition_delta::{apply_migration, derive_plan};
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
 use smelt_runtime::maintenance_driver::{
     driving_steps, run_windowed_keyed_maintenance, RestrictionDeltaSource,
@@ -4685,6 +4699,328 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
 }
 
 // =============================================================================
+// Backbuild statement-parity legs (`crates/smelt-logical/src/backbuild/
+// emit.rs`, `docs/outcomes/20260815-definition-delta-migrate/phases/
+// 30-plan.md`): the same "executed byte-identical to a direct emitter call"
+// proof as the maintenance families above, driven directly through
+// `smelt_runtime::definition_delta::{derive_plan, apply_migration}` —
+// backbuild's own single dispatch point, mirroring the "drive the single
+// dispatch point" rationale
+// `recurrence_bound_probe_and_checked_merge_come_from_the_emitters` already
+// documents. Plus the same result-equivalence leg (`multiset_equal` against a
+// full refresh) the maintenance families carry.
+// =============================================================================
+
+/// Shared staging for the three backbuild legs below: writes every model in
+/// `models` (each `(name, v1_sql)`), deploys them via a real
+/// `execute_project` run so schema tracking records `model_sql`/columns for
+/// each, then rewrites `target_model`'s file to `v2_sql`, re-discovers the
+/// workspace, and re-derives the migration plan via `definition_delta::
+/// derive_plan` — the same single derivation `smelt migrate`/the run gate/
+/// `smelt explain` all read. Returns the derived plan and a fresh
+/// `RecordingBackend` opened on the same DuckDB file (not yet applied — each
+/// leg calls `apply_migration` itself, since the skeleton-change leg applies
+/// a hand-built full-refresh plan rather than `derived.plan` itself, whose
+/// `statements` are empty for a `SkeletonChange` verdict).
+async fn stage_and_migrate(
+    target_model: &str,
+    models: &[(&str, &str)],
+    v2_sql: &str,
+) -> (
+    smelt_runtime::definition_delta::DerivedPlan,
+    RecordingBackend,
+    tempfile::TempDir,
+) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+    for (name, sql) in models {
+        write_model(&project_dir, name, sql);
+    }
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: backbuild_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+
+    // Deploy v1 through a real run so schema tracking records every model's
+    // `model_sql` and columns.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: backend_slot,
+        };
+        execute_project(
+            "backbuild-parity-deploy".to_string(),
+            make_request("dev", "2024-01-01", "2024-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("execute_project v1 deploy");
+    }
+
+    // Rewrite the target model to v2 and re-discover the workspace.
+    write_model(&project_dir, target_model, v2_sql);
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let sql_models = discovery.discover_models().expect("discover_models v2");
+
+    let mut db2 = smelt_db::Database::default();
+    let project = db2.set_project_input(project_dir.clone(), String::new());
+    let source_files: Vec<_> = sql_models
+        .iter()
+        .map(|m| db2.set_source_file(m.path.clone(), m.content.clone(), project_dir.clone()))
+        .collect();
+    db2.set_workspace(source_files, vec![project]);
+    db2.set_active_target(config.target.clone().map(|t| Arc::from(t.as_str())));
+
+    let target = sql_models
+        .iter()
+        .find(|m| m.name == target_model)
+        .expect("target model discovered")
+        .clone();
+
+    let file_store = smelt_state::file_store::FileStore::new(&project_dir, "dev");
+    let deployed = file_store
+        .load_schema(&target.db_name_owned())
+        .expect("load deployed schema")
+        .expect("the v1 deploy must have recorded a schema");
+    let before_sql_raw = deployed
+        .model_sql
+        .clone()
+        .expect("the v1 deploy must have recorded model_sql");
+
+    let derived = derive_plan(
+        &file_store,
+        &target,
+        &sql_models,
+        None,
+        &db2,
+        &before_sql_raw,
+        &deployed.columns,
+    )
+    .expect("derive_plan");
+
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb for migration");
+    let backend = RecordingBackend::new(inner);
+
+    (derived, backend, tmp)
+}
+
+/// B1 (`Technique::SelfDerivedColumnAdd`): a new column that is a pure
+/// function of existing stored columns backfills via `ALTER TABLE ADD
+/// COLUMN` + an in-place `UPDATE`, both byte-identical to a direct
+/// `emit_alter_add_column`/`emit_in_place_update` call over the plan's own
+/// derived inputs — never merely emitter-shaped text.
+#[tokio::test]
+async fn backbuild_in_place_backfill_statements_come_from_the_emitter() {
+    const V1: &str = "---\nmaterialization: table\n---\n\
+SELECT id, amount, discount FROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)\n";
+    const V2: &str = "---\nmaterialization: table\n---\n\
+SELECT id, amount, discount, amount - discount AS net_amount FROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)\n";
+
+    let (derived, backend, _tmp) = stage_and_migrate("net_orders", &[("net_orders", V1)], V2).await;
+
+    assert_eq!(derived.plan.groups.len(), 1, "{:?}", derived.plan.groups);
+    let group = &derived.plan.groups[0];
+    assert_eq!(group.verdict, MigrationVerdict::BackfillInPlace);
+    assert_eq!(group.options.len(), 1);
+    assert_eq!(group.options[0].technique, Technique::SelfDerivedColumnAdd);
+
+    let sql_type = derived
+        .inputs
+        .added_column_types
+        .get("net_amount")
+        .expect("net_amount type inferred")
+        .clone();
+    let expected_alter = emit_alter_add_column(&derived.inputs.table, "net_amount", &sql_type);
+    let expected_update = emit_in_place_update(
+        &derived.inputs.table,
+        &[("net_amount".to_string(), "amount - discount".to_string())],
+    );
+    let expected_statements = vec![expected_alter, expected_update];
+    assert_eq!(group.options[0].statements, expected_statements);
+    assert_eq!(derived.plan.statements, expected_statements);
+
+    apply_migration(&backend, &derived.plan)
+        .await
+        .expect("apply_migration");
+    assert_eq!(
+        backend.recorded_sql(),
+        expected_statements,
+        "executed SQL must be byte-identical to a direct emitter call over the plan's own inputs"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            &format!("SELECT * FROM {}", derived.inputs.table),
+            "SELECT id, amount, discount, amount - discount AS net_amount FROM (VALUES \
+             (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)"
+        )
+        .await,
+        "the backfill statements must reproduce a full refresh of the after-definition"
+    );
+}
+
+/// A skeleton (grain) change admits no in-place backfill technique
+/// (`MigrationVerdict::SkeletonChange`) — the only honest route is the
+/// always-present model-level `FullRefresh` baseline, byte-identical to a
+/// direct `emit_full_refresh` call.
+#[tokio::test]
+async fn backbuild_full_refresh_statement_comes_from_the_emitter() {
+    const V1: &str = "---\nmaterialization: table\n---\n\
+SELECT id, amount, discount FROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount)\n";
+    const V2_SKELETON_CHANGE: &str = "---\nmaterialization: table\n---\n\
+SELECT id, amount, discount, count(*) AS n FROM (VALUES (1, 100, 20), (2, 200, 50)) AS t(id, amount, discount) GROUP BY id, amount, discount\n";
+
+    let (derived, backend, _tmp) =
+        stage_and_migrate("net_orders", &[("net_orders", V1)], V2_SKELETON_CHANGE).await;
+
+    assert_eq!(derived.plan.groups.len(), 1, "{:?}", derived.plan.groups);
+    assert_eq!(
+        derived.plan.groups[0].verdict,
+        MigrationVerdict::SkeletonChange
+    );
+    assert!(
+        derived.plan.groups[0].options.is_empty(),
+        "a skeleton change admits no targeted technique: {:?}",
+        derived.plan.groups[0].options
+    );
+
+    let expected_full_refresh = emit_full_refresh(&derived.inputs.table, &derived.inputs.after_sql);
+    assert_eq!(
+        derived.plan.full_refresh.statements,
+        vec![expected_full_refresh.clone()]
+    );
+
+    // The caller (not `derive_plan`) is the one that decides to fall back to
+    // the full-refresh option on a `SkeletonChange` verdict — build that
+    // plan explicitly, the same shape `apply_migration_executes_plan_
+    // statements_in_order` (`crates/smelt-runtime/src/definition_delta.rs`)
+    // hand-builds.
+    let full_refresh_plan = MigrationPlan {
+        model: derived.plan.model.clone(),
+        table: derived.plan.table.clone(),
+        groups: vec![],
+        full_refresh: derived.plan.full_refresh.clone(),
+        statements: derived.plan.full_refresh.statements.clone(),
+    };
+    apply_migration(&backend, &full_refresh_plan)
+        .await
+        .expect("apply_migration");
+    assert_eq!(
+        backend.recorded_sql(),
+        vec![expected_full_refresh],
+        "executed SQL must be byte-identical to a direct emit_full_refresh call"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            &format!(
+                "SELECT id, amount, discount, n FROM {}",
+                derived.inputs.table
+            ),
+            "SELECT id, amount, discount, count(*) AS n FROM (VALUES (1, 100, 20), (2, 200, 50)) \
+             AS t(id, amount, discount) GROUP BY id, amount, discount"
+        )
+        .await,
+        "the full-refresh statement must reproduce a full refresh of the after-definition"
+    );
+}
+
+/// B3 (`Technique::UpstreamPullthrough`): an added column that pulls through
+/// an upstream already in the FROM tree, bound via the upstream's declared
+/// `unique_key`, backfills via `ALTER TABLE ADD COLUMN` + a column-scoped
+/// `UPDATE ... FROM`, byte-identical to a direct `emit_alter_add_column`/
+/// `emit_column_backfill_update_from` call.
+#[tokio::test]
+async fn backbuild_upstream_backfill_statements_come_from_the_emitter() {
+    const CUSTOMERS: &str = "---\nmaterialization: table\nunique_key:\n  - customer_id\n---\n\
+SELECT customer_id, name FROM (VALUES (1, 'Alice'), (2, 'Bob')) AS t(customer_id, name)\n";
+    const ORDERS_V1: &str = "---\nmaterialization: table\n---\n\
+SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+customers.customer_id AS customers_customer_id \
+FROM (VALUES (1, 1), (2, 2)) AS o(order_id, customer_id) \
+JOIN smelt.customers AS customers ON o.customer_id = customers.customer_id\n";
+    const ORDERS_V2: &str = "---\nmaterialization: table\n---\n\
+SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+customers.customer_id AS customers_customer_id, customers.name AS customer_name \
+FROM (VALUES (1, 1), (2, 2)) AS o(order_id, customer_id) \
+JOIN smelt.customers AS customers ON o.customer_id = customers.customer_id\n";
+
+    let (derived, backend, _tmp) = stage_and_migrate(
+        "orders",
+        &[("customers", CUSTOMERS), ("orders", ORDERS_V1)],
+        ORDERS_V2,
+    )
+    .await;
+
+    assert_eq!(derived.plan.groups.len(), 1, "{:?}", derived.plan.groups);
+    let group = &derived.plan.groups[0];
+    assert_eq!(group.verdict, MigrationVerdict::Rederive);
+    assert_eq!(group.options.len(), 1);
+    assert_eq!(group.options[0].technique, Technique::UpstreamPullthrough);
+
+    let sql_type = derived
+        .inputs
+        .added_column_types
+        .get("customer_name")
+        .expect("customer_name type inferred")
+        .clone();
+    let expected_alter = emit_alter_add_column(&derived.inputs.table, "customer_name", &sql_type);
+    let expected_update = emit_column_backfill_update_from(
+        &derived.inputs.table,
+        &[("customer_name".to_string(), "u.name".to_string())],
+        "customers",
+        "u",
+        &[(
+            "customers_customer_id".to_string(),
+            "customer_id".to_string(),
+        )],
+    );
+    let expected_statements = vec![expected_alter, expected_update];
+    assert_eq!(group.options[0].statements, expected_statements);
+    assert_eq!(derived.plan.statements, expected_statements);
+
+    apply_migration(&backend, &derived.plan)
+        .await
+        .expect("apply_migration");
+    assert_eq!(
+        backend.recorded_sql(),
+        expected_statements,
+        "executed SQL must be byte-identical to a direct emitter call over the plan's own inputs"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            &format!("SELECT * FROM {}", derived.inputs.table),
+            "SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+             customers.customer_id AS customers_customer_id, customers.name AS customer_name \
+             FROM (VALUES (1, 1), (2, 2)) AS o(order_id, customer_id) \
+             JOIN customers ON o.customer_id = customers.customer_id"
+        )
+        .await,
+        "the backfill statements must reproduce a full refresh of the after-definition"
+    );
+}
+
+// =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
 // (`docs/specs/incremental_models.md` §"Statement emission (single owner)";
 // `docs/plans/20260710-emit-unification.md` Phase 4). Same `rg`-over-sources
@@ -4784,7 +5120,26 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
             // (which the generic table-lifecycle helpers already construct
             // legitimately, outside any maintenance-statement family — see
             // `Backend::drop_table_if_exists`'s own implementations).
-            || line.contains("CREATE TEMP TABLE ");
+            || line.contains("CREATE TEMP TABLE ")
+            // The backbuild family (`crates/smelt-logical/src/backbuild/
+            // emit.rs`): `ALTER TABLE ` covers B1/B2/B3's `ADD`/`RENAME` and
+            // C1's `DROP` (no other production code in the scanned crates
+            // issues a bare `ALTER TABLE ` DDL string); `CREATE OR REPLACE
+            // TABLE ` is the always-present model-level `FullRefresh`
+            // baseline, distinct from the region family's own qualified
+            // `CREATE TABLE {}.{} AS` shape above; `__backbuild_diff` is the
+            // derived-table alias `emit_difference_insert` (E2/E4) wraps its
+            // own `after_sql` argument in — a marker string with no
+            // legitimate production match anywhere outside that one
+            // authoring site, representative of the in-place-UPDATE/
+            // difference-INSERT half of the family the way `CREATE TEMP
+            // TABLE ` is representative of the staged-candidate shape above
+            // (not every backbuild statement shape has an equally unique
+            // marker; this one does, and catching a stray copy of it is
+            // enough to catch a re-authored difference/branch INSERT).
+            || line.contains("ALTER TABLE ")
+            || line.contains("CREATE OR REPLACE TABLE ")
+            || line.contains("__backbuild_diff");
         if !forbidden {
             continue;
         }
