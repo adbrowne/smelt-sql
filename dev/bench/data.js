@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788435883269,
+  "lastUpdate": 1788435920097,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -375,6 +375,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 10.59207,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "39228307bd7960d6e5319c1b06150a5be9ec3d53",
+          "message": "CI: restore rustfmt/clippy component install in Lint job\n\nRemoved this in the mise migration on the mistaken assumption mise's\nrust backend includes them by default (confirmed locally, but that\nmachine already had rustfmt/clippy from a prior non-mise rustup\ninstall — a fresh CI runner doesn't have them). CI failed with\n\"'cargo-fmt' is not installed for the toolchain '1.95.0-...'\".\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:42:07+10:00",
+          "tree_id": "e3f4391fcacc37d66cc207e31cb67a7d566baf8b",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/39228307bd7960d6e5319c1b06150a5be9ec3d53"
+        },
+        "date": 1788435917136,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 58.988726,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 56.847601999999995,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.883695,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.611528,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.35142399999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1096.053442,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.591042,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.8871320000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.717026,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.703519,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 908.859635,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.37496,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.66534,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.804406,
             "unit": "ms"
           }
         ]
