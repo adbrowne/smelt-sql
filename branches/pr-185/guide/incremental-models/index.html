@@ -1456,6 +1456,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#renaming-partition_column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming partition_column
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -3365,6 +3376,17 @@
   
 </li>
         
+          <li class="md-nav__item">
+  <a href="#renaming-partition_column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Renaming partition_column
+      
+    </span>
+  </a>
+  
+</li>
+        
       </ul>
     </nav>
   
@@ -4052,6 +4074,15 @@
 <li><strong><code>quarter</code></strong> -- One partition per calendar quarter.</li>
 <li><strong><code>year</code></strong> -- One partition per calendar year.</li>
 </ul>
+<h3 id="renaming-partition_column">Renaming <code>partition_column</code><a class="headerlink" href="#renaming-partition_column" title="Permanent link">&para;</a></h3>
+<p>Once a partition-grain model's table has been deployed, changing <code>timeseries.partition_column</code>
+is refused: <code>smelt run</code> (and <code>smelt build</code>) reports <code>MaintenancePartitionColumnChanged</code>, naming
+the recorded and the current column. This refusal fires even for a rename that repoints the
+address at a column your query already projects — a column-set diff alone can't see it, but the
+partition address is still a world fact that changed. No run flag bypasses it (the analyzer gate
+refuses on any Error-severity diagnostic unconditionally). To accept the rename, delete the
+model's recorded snapshot at <code>.smelt/targets/&lt;target&gt;/schemas/&lt;model&gt;.json</code> and re-run — the
+next run addresses the table under the new column and records a fresh snapshot.</p>
 <h2 id="running-incremental-models">Running incremental models<a class="headerlink" href="#running-incremental-models" title="Permanent link">&para;</a></h2>
 <h3 id="explicit-time-range">Explicit time range<a class="headerlink" href="#explicit-time-range" title="Permanent link">&para;</a></h3>
 <p>Specify the start (inclusive) and end (exclusive) dates:</p>
