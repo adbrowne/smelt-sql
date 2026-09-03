@@ -174,10 +174,27 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     let effective_start = args.start.as_ref().or(args.event_time_start.as_ref());
     let effective_end = args.end.as_ref().or(args.event_time_end.as_ref());
     if let (Some(s), Some(e)) = (effective_start, effective_end) {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .with_context(|| format!("Invalid start date format: {}. Expected YYYY-MM-DD", s))?;
-        chrono::NaiveDate::parse_from_str(e, "%Y-%m-%d")
-            .with_context(|| format!("Invalid end date format: {}. Expected YYYY-MM-DD", e))?;
+        // A bound is either a calendar date (`YYYY-MM-DD`) or a bare integer
+        // — the two forms a resolved partition axis can be
+        // (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+        // 8a: "--period bounds are read in the same domain"). Per-model axis
+        // resolution happens later in `execute_project`; this is only a
+        // shape pre-check, rejecting neither domain outright.
+        let is_calendar_or_integer = |v: &str| {
+            chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d").is_ok() || v.parse::<i64>().is_ok()
+        };
+        if !is_calendar_or_integer(s) {
+            return Err(anyhow::anyhow!(
+                "Invalid start bound: {}. Expected a calendar date (YYYY-MM-DD) or a bare integer",
+                s
+            ));
+        }
+        if !is_calendar_or_integer(e) {
+            return Err(anyhow::anyhow!(
+                "Invalid end bound: {}. Expected a calendar date (YYYY-MM-DD) or a bare integer",
+                e
+            ));
+        }
         info!("Time range: {} to {} (exclusive)", s, e);
     } else if effective_start.is_some() != effective_end.is_some() {
         return Err(anyhow::anyhow!(

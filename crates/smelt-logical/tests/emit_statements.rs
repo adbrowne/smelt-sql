@@ -1666,3 +1666,44 @@ fn source_mutation_fingerprint_bigquery_shape() {
 fn source_mutation_fingerprint_panics_on_empty_digest_columns() {
     emit_source_mutation_fingerprint("main.t", &[], MaintenanceDialect::DuckDb);
 }
+
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a — a
+/// partition literal renders in its axis's own domain: quoted and escaped
+/// on the calendar axis, bare on the integer axis, and `Err` for a
+/// non-integer value on the integer axis.
+#[test]
+fn partition_literal_renders_per_axis() {
+    use smelt_logical::maintenance::emit::partition_literal;
+    use smelt_logical::PartitionAxis;
+
+    assert_eq!(
+        partition_literal(PartitionAxis::Calendar, "2026-01-01").unwrap(),
+        "'2026-01-01'"
+    );
+    assert_eq!(
+        partition_literal(PartitionAxis::Calendar, "it's").unwrap(),
+        "'it''s'"
+    );
+    assert_eq!(partition_literal(PartitionAxis::Integer, "7").unwrap(), "7");
+    assert_eq!(
+        partition_literal(PartitionAxis::Integer, "-3").unwrap(),
+        "-3"
+    );
+    assert!(partition_literal(PartitionAxis::Integer, "2026-01-01").is_err());
+    assert!(partition_literal(PartitionAxis::Integer, "not-a-number").is_err());
+}
+
+#[test]
+fn region_for_axis_renders_per_axis() {
+    use smelt_logical::PartitionAxis;
+
+    let calendar = Region::for_axis(PartitionAxis::Calendar, "2026-01-01", "2026-01-02").unwrap();
+    assert_eq!(calendar.start, "'2026-01-01'");
+    assert_eq!(calendar.end, "'2026-01-02'");
+
+    let integer = Region::for_axis(PartitionAxis::Integer, "1", "2").unwrap();
+    assert_eq!(integer.start, "1");
+    assert_eq!(integer.end, "2");
+
+    assert!(Region::for_axis(PartitionAxis::Integer, "1", "not-a-number").is_err());
+}

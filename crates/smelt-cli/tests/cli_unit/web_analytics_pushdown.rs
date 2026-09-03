@@ -142,6 +142,7 @@ fn test_pushdown_reduces_scan() {
     let range = TimeRange {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     // If sessions has no bounded sources (e.g., bound derivation not wired for function bodies),
@@ -185,6 +186,7 @@ fn test_full_run_equivalent_with_pushdown() {
     let range = TimeRange {
         start: "2024-01-15".into(),
         end: "2024-01-16".into(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     let result_with_pushdown = inject_source_filters(&sql, &bound_map, &range);

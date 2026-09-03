@@ -30,6 +30,7 @@ fn _unused_range_ref() -> TimeRange {
     TimeRange {
         start: String::new(),
         end: String::new(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     }
 }
 

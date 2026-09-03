@@ -528,6 +528,7 @@ fn build_technique_statements(
     let placeholder_range = || TimeRange {
         start: "{{window_start}}".to_string(),
         end: "{{window_end}}".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     match technique {

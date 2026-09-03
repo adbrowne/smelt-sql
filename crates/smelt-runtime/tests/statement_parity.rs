@@ -2141,6 +2141,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
         column: String::new(),
         start: "2025-01-10".to_string(),
         end: "2025-01-11".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
         &backend,
@@ -2246,6 +2247,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
         &backend,
@@ -5263,7 +5265,7 @@ struct StatementAuthoringHit {
 const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[
     (
         "smelt-backend-duckdb/src/lib.rs",
-        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+        "DELETE FROM {} WHERE {} >= {} AND {} < {}",
     ),
     (
         "smelt-backend-duckdb/src/lib.rs",
@@ -5275,7 +5277,7 @@ const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "smelt-backend-spark/src/sql.rs",
-        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+        "DELETE FROM {} WHERE {} >= {} AND {} < {}",
     ),
 ];
 

@@ -335,6 +335,7 @@ GROUP BY 1, 2"#;
     let range = smelt_runtime::TimeRange {
         start: "2024-01-01".to_string(),
         end: "2024-01-06".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
     // The output clamp ranges over the model's OUTPUT schema (F1 subquery
     // wrap), so it clamps the declared partition column — `event_time` is
@@ -372,6 +373,7 @@ GROUP BY 1, 2"#;
     let range_day6 = smelt_runtime::TimeRange {
         start: "2024-01-06".to_string(),
         end: "2024-01-07".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
     let filtered_day6 =
         smelt_runtime::inject_time_filter(stripped_sql, &partition_col, &range_day6).unwrap();
@@ -506,6 +508,7 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
     let range = smelt_runtime::TimeRange {
         start: "2024-01-01".to_string(),
         end: "2024-01-06".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     for step in &steps {

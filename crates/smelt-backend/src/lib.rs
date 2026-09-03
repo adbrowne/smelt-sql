@@ -12,9 +12,10 @@ pub use smelt_core::config::{
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, MaintenanceDialect, MaintenanceStatement, Region,
-    StatementGroup,
+    emit_column_scoped_merge, emit_delete_insert, partition_literal, MaintenanceDialect,
+    MaintenanceStatement, Region, StatementGroup,
 };
+pub use smelt_logical::PartitionAxis;
 pub use types::{
     ExecutionResult, Materialization, MaterializationStrategy, PartitionRange, PartitionSpec,
 };
@@ -49,19 +50,16 @@ fn build_delete_insert_group(
     partition: &PartitionRange,
     sql: &str,
     dialect: SqlDialect,
-) -> StatementGroup {
+) -> Result<StatementGroup, String> {
     let table_name = format!("{schema}.{name}");
-    let region = Region {
-        start: format!("'{}'", partition.start.replace('\'', "''")),
-        end: format!("'{}'", partition.end.replace('\'', "''")),
-    };
-    emit_delete_insert(
+    let region = Region::for_axis(partition.axis, &partition.start, &partition.end)?;
+    Ok(emit_delete_insert(
         &table_name,
         &partition.column,
         &region,
         sql,
         maintenance_dialect(dialect),
-    )
+    ))
 }
 
 /// Refuse a whole-row `MERGE` whose dialect needs an explicit column list and
@@ -437,7 +435,8 @@ pub trait Backend: Send + Sync {
         partition: &PartitionRange,
         sql: &str,
     ) -> Result<(), BackendError> {
-        let group = build_delete_insert_group(schema, name, partition, sql, self.dialect());
+        let group = build_delete_insert_group(schema, name, partition, sql, self.dialect())
+            .map_err(|message| BackendError::ConfigurationError { message })?;
         self.execute_statement_group(&group).await
     }
 

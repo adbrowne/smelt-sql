@@ -24,6 +24,31 @@
 
 use super::diff_patch::DeleteLeg;
 use super::ScanClamp;
+use crate::PartitionAxis;
+
+/// Render a bare partition-column value as a SQL literal **in its axis's own
+/// domain** — the single owner of partition-literal quoting
+/// (`docs/specs/incremental_shapes.md` §"The partition grain" rule 8a): quoted
+/// and escaped (`'2026-01-01'`) on the calendar axis, bare (`7`) on the
+/// integer axis. `Err` when `value` doesn't parse as a bare integer on the
+/// integer axis — fail-closed rather than silently emitting a malformed
+/// literal.
+pub fn partition_literal(axis: PartitionAxis, value: &str) -> Result<String, String> {
+    match axis {
+        PartitionAxis::Calendar => Ok(format!("'{}'", value.replace('\'', "''"))),
+        PartitionAxis::Integer => {
+            value
+                .trim()
+                .parse::<i64>()
+                .map(|v| v.to_string())
+                .map_err(|_| {
+                    format!(
+                "expected a bare integer literal for an integer partition axis, got '{value}'"
+            )
+                })
+        }
+    }
+}
 
 /// One SQL statement a maintenance run executes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +113,17 @@ pub fn widened_scan_predicate(clamp: &ScanClamp, region: &Region) -> String {
 }
 
 impl Region {
+    /// Build a [`Region`] from bare (unquoted) partition-column values,
+    /// rendering each through [`partition_literal`] for `axis` — the single
+    /// owner of partition-literal quoting. `Err` propagates a malformed
+    /// integer-axis value.
+    pub fn for_axis(axis: PartitionAxis, start: &str, end: &str) -> Result<Region, String> {
+        Ok(Region {
+            start: partition_literal(axis, start)?,
+            end: partition_literal(axis, end)?,
+        })
+    }
+
     pub fn predicate(&self, qualifier: Option<&str>, column: &str) -> String {
         let col = match qualifier {
             Some(q) => format!("{q}.{column}"),

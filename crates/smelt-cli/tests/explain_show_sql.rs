@@ -623,3 +623,62 @@ fn json_show_sql_reports_source_derived_columns_for_a_bigquery_median_model() {
         "expected at least one INSERT statement in the JSON output: {json_stdout}"
     );
 }
+
+/// `docs/outcomes/20260815-partition-grain-residue/phases/05b-plan.md` —
+/// a bare-integer `--period` (`1..4`) selects the integer partition axis,
+/// so the derived window and the DELETE/INSERT region literals it feeds
+/// print as bare integers, not quoted dates.
+#[test]
+fn explain_period_implies_integer_axis() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let root = tmp.path().join("int_axis_explain");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+    std::fs::write(
+        root.join("smelt.yml"),
+        "name: int_axis_explain\n\
+         version: 1\n\
+         paths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: table\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("models/int_partition_mart.sql"),
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20 partition_column: batch_id\n  event_time_column: event_ts\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(batch_id AS INTEGER) AS batch_id, event_ts, id FROM (VALUES \
+         (1, TIMESTAMP '2026-01-01 00:00:00', 1)) AS t(batch_id, event_ts, id)\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("int_partition_mart")
+        .arg("--show-sql")
+        .arg("--period")
+        .arg("1..4")
+        .arg("--project-dir")
+        .arg(&root)
+        .output()
+        .expect("spawn smelt explain --show-sql --period 1..4");
+
+    assert!(
+        output.status.success(),
+        "smelt explain --show-sql --period 1..4 failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("batch_id >= 1") && stdout.contains("batch_id < 4"),
+        "expected bare-integer clamp bounds in the show-sql output: {stdout}"
+    );
+    assert!(
+        !stdout.contains("'1'") && !stdout.contains("'4'"),
+        "integer-axis bounds must not be quoted: {stdout}"
+    );
+}

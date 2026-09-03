@@ -84,6 +84,7 @@ fn incremental_delete_insert_is_idempotent_on_both() {
             column: "event_date".to_string(),
             start: window_start.to_string(),
             end: window_end.to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
         };
 
         match &kind {

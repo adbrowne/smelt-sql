@@ -964,6 +964,27 @@ pub fn validate_run_window_against_partition_grid(
     }
 }
 
+/// The axis implied by a run-window bound literal's own form — a calendar
+/// date (`YYYY-MM-DD`) or a bare integer. Used as a fail-open fallback
+/// wherever a model's `partition_column` type can't be resolved (no schema
+/// handle to read it from): `execute.rs::build_model_plans` when
+/// `resolved_model_schema` can't classify the column, and `smelt explain`
+/// (no Salsa handle at all) unconditionally. `Calendar` when `s` is `None`
+/// or matches neither form — the historical default, so an absent/malformed
+/// bound never flips a calendar-axis model to the integer branch.
+pub fn axis_implied_by_literal_form(s: Option<&str>) -> PartitionAxis {
+    s.and_then(|s| {
+        if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
+            Some(PartitionAxis::Calendar)
+        } else if s.parse::<i64>().is_ok() {
+            Some(PartitionAxis::Integer)
+        } else {
+            None
+        }
+    })
+    .unwrap_or(PartitionAxis::Calendar)
+}
+
 /// Advance `current` by exactly one partition step for the given granularity.
 ///
 /// For Month/Quarter/Year this is a true calendar step (chrono `Months`), not a

@@ -872,18 +872,19 @@ fn build_derived_window(
     // `build_explain_output`/`build_model_plans` already do.
     let expanded_sql = smelt_runtime::expand_function_calls(&model.content, fn_bodies);
 
+    // `smelt explain` has no Salsa handle to resolve the model's schema, so
+    // it can't read `partition_column`'s type the way a live run does
+    // (`execute.rs::resolve_partition_axes`) — it infers the axis from the
+    // `--period` literal's own form instead, the same fail-open posture
+    // `build_model_plans` already uses when a schema read is unavailable
+    // (`smelt_runtime::windowing::axis_implied_by_literal_form`).
+    let axis = smelt_runtime::windowing::axis_implied_by_literal_form(Some(start));
     let full_range = smelt_runtime::TimeRange {
         start: start.clone(),
         end: end.clone(),
+        axis,
     };
 
-    // `smelt explain` doesn't yet resolve the model's schema to pick the
-    // axis (`docs/specs/incremental_shapes.md` §"The partition grain" Known
-    // Divergences — per-source clamp observability); hardcode the calendar
-    // axis for now, matching every existing (calendar-axis) `explain`
-    // fixture byte-for-byte. Making this axis-aware is future work, not
-    // in scope for the windowing/chunking-math phase this call site was
-    // mechanically updated for.
     let windows = smelt_runtime::windowing::compute_incremental_windows(
         &ts,
         &inc,
@@ -891,7 +892,7 @@ fn build_derived_window(
         &dep_ts,
         data_latency_days,
         &full_range,
-        smelt_logical::PartitionAxis::Calendar,
+        axis,
         None,
         false,
     )
@@ -914,17 +915,29 @@ fn build_derived_window(
         scan_bounds,
         skew: windows.skew,
         run_start: chrono::Utc::now(),
+        axis,
     }))
 }
 
-/// Parse `--period <start>..<end>` (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive)
-/// into raw literal date strings. A named CLI error (never a panic) on a
-/// malformed range — mirrors `smelt_runtime::propagation::parse_landed_range`'s
-/// grammar and error shape for the sibling `--landed` flag.
+/// Parse `--period <start>..<end>` — either `YYYY-MM-DD..YYYY-MM-DD` (a
+/// calendar-axis model) or `<int>..<int>` (an integer-axis model,
+/// `docs/specs/incremental_shapes.md` §"The partition grain" rule 8a —
+/// "`--period` bounds are read in the same domain"), end exclusive. A named
+/// CLI error (never a panic) on a malformed range — mirrors
+/// `smelt_runtime::propagation::parse_landed_range`'s grammar and error
+/// shape for the sibling `--landed` flag.
 fn parse_period(value: &str) -> Result<(String, String)> {
     let (start, end) = value
         .split_once("..")
         .with_context(|| format!("malformed --period range '{value}': expected <start>..<end>"))?;
+
+    if let (Ok(start_i), Ok(end_i)) = (start.parse::<i64>(), end.parse::<i64>()) {
+        if end_i < start_i {
+            anyhow::bail!("malformed --period range '{value}': end is before start");
+        }
+        return Ok((start_i.to_string(), end_i.to_string()));
+    }
+
     let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
         .with_context(|| format!("malformed --period range '{value}': invalid start date"))?;
     let end_date = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")

@@ -284,6 +284,7 @@ fn test_compile_with_time_filter_injection() {
     let range = TimeRange {
         start: "2024-01-15".to_string(),
         end: "2024-01-18".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
     let filtered = inject_time_filter(sql, "event_time", &range).expect("filter ok");
 

@@ -1102,7 +1102,13 @@ drift risk; a consequence is that every consumer inherits the driver's granulari
    `data_latency`, a seconds-domain SQL-inferred lookback/lookahead, or a derived
    partition-column skew — have no conversion into an integer axis's units; if any of them would
    be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
-   zeroed or coerced 1:1 into "N units".
+   zeroed or coerced 1:1 into "N units". A partition literal is rendered **in the axis's own
+   domain** everywhere a run emits one — the output clamp, the per-source scan filter, and the
+   maintenance region's `DELETE` predicate — and everywhere `smelt explain` reports one: quoted
+   and escaped (`'2026-01-01'`) on the calendar axis, bare (`7`) on the integer axis. A
+   `contract.frozen_horizon` declared on an integer-axis model is also a hard refusal: its
+   horizon is a day count with no conversion into partition units, consistent with the day-typed
+   widening refusal above.
 9. **Safety-check overrides are explicit.** A `safety_overrides` entry names the specific check
    it bypasses; there is no global disable.
 10. **No silent downgrade to full refresh.** A rejected or `NotDerivable` model is refused at
@@ -1193,10 +1199,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   partition granularity" requires the refusal to spell out the run window that would be
   accepted; today it hard-rejects without the suggestion. (Reject-with-suggestion over
   auto-coarsening was decided 2026-08-16; `docs/research/20260816-open-questions-triage.md`.)
-- **Monotone-integer `partition_column` has no end-to-end run** — the trace and bound
-  derivation admit it, but run windows, backfill chunking, scan-filter injection, and the
-  explain clamp rendering are date-typed throughout. Tracked:
-  `docs/plans/20260704-model-updates-l4-batched.md`.
 - **`NOW()`/`CURRENT_*` are still compile-time-pinned** — §"Safety checks" admits them running
   as-is with no equivalence promise on the columns they feed; the implementation still freezes
   them to one per-run timestamp. Decision record:

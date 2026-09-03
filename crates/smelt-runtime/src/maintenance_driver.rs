@@ -100,6 +100,7 @@ pub fn driving_steps(
             range: TimeRange {
                 start: current.format("%Y-%m-%d").to_string(),
                 end: next.format("%Y-%m-%d").to_string(),
+                axis: smelt_logical::PartitionAxis::Calendar,
             },
         });
         current = next;

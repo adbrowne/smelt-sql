@@ -891,6 +891,7 @@ fn identity_model_windows_unchanged() {
     let range = TimeRange {
         start: "2026-04-10".to_string(),
         end: "2026-04-12".to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     };
 
     let windows = compute_incremental_windows(

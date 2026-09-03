@@ -72,7 +72,7 @@ fixture.
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
-| 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | planned |
+| 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
@@ -228,6 +228,18 @@ fixture.
   literal's own form (it has no Salsa handle to resolve a schema), which is the
   same fail-open posture `build_model_plans` already uses, hoisted into one
   shared helper rather than duplicated.
+
+- 2026-09-04 — Phase 5b implemented (`phases/05b-summary.md`). Landed the
+  single-owner axis renderer (`partition_literal`/`Region::for_axis`),
+  threaded `axis` through `PartitionRange`/`TimeRange` to every emission
+  site (backend crates' DELETE builders, `transformer.rs`'s clamp/pushdown
+  injection, `smelt explain`'s derived window and region), refused
+  `contract.frozen_horizon` on an integer axis, and inverted
+  `probe_integer_partition_column_run` into a real first-run/backfill/
+  steady-state-vs-full-refresh-oracle proof. Fixed a double-quoting bug in
+  `wrap_source_ref_with_filter` surfaced by `statement_parity` going red
+  mid-phase. Success criterion 5 complete; the matching Known Divergences
+  bullet removed from `docs/specs/incremental_shapes.md`. No phase reshape.
 
 ## Blocked
 

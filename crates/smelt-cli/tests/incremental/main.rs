@@ -134,6 +134,7 @@ pub async fn run_incremental_sequence(
                 column: partition_column.to_string(),
                 start: range.start.clone(),
                 end: range.end.clone(),
+                axis: smelt_backend::PartitionAxis::Calendar,
             };
 
             let mat_strategy = MaterializationStrategy::Incremental {

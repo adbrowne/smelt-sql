@@ -22,25 +22,21 @@ fn write_file(path: &Path, content: &str) {
 }
 
 /// Residue: "Monotone-integer `partition_column` has no end-to-end run" —
-/// `docs/specs/incremental_shapes.md` §"The partition grain" Known
-/// Divergences. Tracked: `docs/plans/20260704-model-updates-l4-batched.md`
-/// (Phase BL6 landed only the trace/bound-derivation admission in
-/// `crates/smelt-logical/src/analysis/monotonicity.rs`; run windows,
-/// backfill chunking, and scan-filter injection stay date-typed throughout
-/// `crates/smelt-runtime/src/windowing.rs`'s `IncrementalWindows` —
-/// `partition_start`/`partition_end`/`filter_start`/`filter_end` are all
-/// `chrono::NaiveDate`, and the CLI's own `--event-time-start`/
-/// `--event-time-end` flags are documented `YYYY-MM-DD` only). Inverts in
-/// phase 5.
+/// formerly `docs/specs/incremental_shapes.md` §"The partition grain" Known
+/// Divergences (removed by phase 5b, `docs/outcomes/20260815-partition-
+/// grain-residue`). LANDED: a monotone-integer `partition_column` model now
+/// runs first-run, a windowed `--batch-size`-chunked backfill, and a
+/// steady-state re-run, all producing a table equal to a full-refresh
+/// oracle.
 ///
 /// Stages a partition-grain model whose `partition_column` is a plain
-/// monotone `INTEGER` (`batch_id`), decoupled from its (still timestamp)
-/// `event_time_column`, and drives a real windowed run through the `smelt`
-/// binary against DuckDB. Pins wherever it first breaks today.
-#[test]
-fn probe_integer_partition_column_run() {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let root = tmp.path().join("int_partition_probe");
+/// monotone `INTEGER` (`batch_id`, cast explicitly so `resolved_model_schema`
+/// classifies the integer axis for real rather than falling back to the
+/// axis implied by the run-window literal's form — `docs/outcomes/
+/// 20260815-partition-grain-residue/phases/05a-summary.md` "For the next
+/// planner"), decoupled from its (still timestamp) `event_time_column`, and
+/// drives a real run through the `smelt` binary against DuckDB.
+fn stage_int_partition_project(root: &Path, model_sql_extra: &str) {
     write_file(
         &root.join("smelt.yml"),
         "name: int_partition_probe\n\
@@ -63,51 +59,116 @@ fn probe_integer_partition_column_run() {
     );
     write_file(
         &root.join("models/int_partition_mart.sql"),
-        "---\n\
-         materialization: table\n\
-         refresh: incremental\n\
+        &format!(
+            "---\n\
+             materialization: table\n\
+             {model_sql_extra}\
+             ---\n\
+             SELECT CAST(batch_id AS INTEGER) AS batch_id, event_ts, id FROM smelt.seed_events\n"
+        ),
+    );
+}
+
+fn query_all_rows(db_path: &Path, table: &str) -> Vec<(i64, i64)> {
+    let conn = duckdb::Connection::open(db_path).expect("open duckdb");
+    let query = format!("SELECT batch_id, id FROM main.{table} ORDER BY batch_id, id");
+    let mut stmt = conn.prepare(&query).expect("prepare");
+    stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect()
+}
+
+#[test]
+fn probe_integer_partition_column_run() {
+    // Phased project: first run, then a windowed `--batch-size`-chunked
+    // backfill, then a steady-state re-run of the same window.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("int_partition_probe");
+    stage_int_partition_project(
+        &root,
+        "refresh: incremental\n\
          grain: partition\n\
          timeseries:\n\
-         \x20 event_time_column: event_ts\n  partition_column: batch_id\n  granularity: day\n\
-         ---\n\
-         SELECT batch_id, event_ts, id FROM smelt.seed_events\n",
+         \x20 event_time_column: event_ts\n  partition_column: batch_id\n  granularity: day\n",
     );
 
-    // First run: no window — a plain first-build. If this fails, the residue
-    // blocks even before any windowed arithmetic runs.
     let first = Command::new(smelt_bin())
         .args(["run"])
         .args(["--project-dir", root.to_str().unwrap()])
         .env_remove("RUST_LOG")
         .output()
         .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (first run): {e}"));
+    assert!(
+        first.status.success(),
+        "first run failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
 
-    // Windowed run: forces the DELETE+INSERT partition-clamp arithmetic that
-    // `windowing.rs` computes in `chrono::NaiveDate` space.
-    let windowed = Command::new(smelt_bin())
+    // Windowed backfill: bare-integer bounds in the partition column's own
+    // domain (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+    // 8a — "--period bounds are read in the same domain"), `--batch-size 1`
+    // forcing three separate DELETE+INSERT chunks over batch_id 1, 2, 3.
+    let backfill = Command::new(smelt_bin())
         .args(["run"])
-        .args(["--event-time-start", "2026-01-01"])
-        .args(["--event-time-end", "2026-01-04"])
+        .args(["--event-time-start", "1", "--event-time-end", "4"])
+        .args(["--batch-size", "1"])
         .args(["--project-dir", root.to_str().unwrap()])
         .env_remove("RUST_LOG")
         .output()
-        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (windowed): {e}"));
-
-    // TODAY: at least one of these fails — the residue's whole premise is
-    // that no end-to-end run exists for a monotone-integer partition_column.
-    // If both succeed, the residue is LANDED; invert this probe (assert both
-    // succeed and the output matches a full-refresh oracle) and update
-    // docs/specs/incremental_shapes.md's Known Divergences entry.
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (backfill): {e}"));
     assert!(
-        !first.status.success() || !windowed.status.success(),
-        "both first-run and windowed run succeeded for a monotone-integer \
-         partition_column model — this residue is LANDED.\n\
-         first stdout: {}\nfirst stderr: {}\n\
-         windowed stdout: {}\nwindowed stderr: {}",
-        String::from_utf8_lossy(&first.stdout),
-        String::from_utf8_lossy(&first.stderr),
-        String::from_utf8_lossy(&windowed.stdout),
-        String::from_utf8_lossy(&windowed.stderr),
+        backfill.status.success(),
+        "windowed backfill run failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&backfill.stdout),
+        String::from_utf8_lossy(&backfill.stderr),
+    );
+
+    // Steady-state: re-running the same window must be idempotent.
+    let steady_state = Command::new(smelt_bin())
+        .args(["run"])
+        .args(["--event-time-start", "1", "--event-time-end", "4"])
+        .args(["--batch-size", "1"])
+        .args(["--project-dir", root.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run` (steady-state): {e}"));
+    assert!(
+        steady_state.status.success(),
+        "steady-state re-run failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&steady_state.stdout),
+        String::from_utf8_lossy(&steady_state.stderr),
+    );
+
+    let phased_rows = query_all_rows(&root.join("target/dev.duckdb"), "int_partition_mart");
+
+    // Full-refresh oracle: the same model, materialized in one shot.
+    let oracle_tmp = tempfile::TempDir::new().unwrap();
+    let oracle_root = oracle_tmp.path().join("int_partition_probe_oracle");
+    stage_int_partition_project(&oracle_root, "refresh: full\n");
+    let oracle_build = Command::new(smelt_bin())
+        .args(["build"])
+        .args(["--project-dir", oracle_root.to_str().unwrap()])
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt build` (oracle): {e}"));
+    assert!(
+        oracle_build.status.success(),
+        "oracle build failed: stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&oracle_build.stdout),
+        String::from_utf8_lossy(&oracle_build.stderr),
+    );
+    let oracle_rows = query_all_rows(&oracle_root.join("target/dev.duckdb"), "int_partition_mart");
+
+    assert_eq!(
+        phased_rows, oracle_rows,
+        "integer-axis phased run diverged from the full-refresh oracle"
+    );
+    assert_eq!(
+        phased_rows,
+        vec![(1, 1), (1, 2), (2, 3), (3, 4)],
+        "unexpected row set for the integer-axis phased run"
     );
 }
 

@@ -125,6 +125,7 @@ fn window() -> PartitionRange {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     }
 }
 
@@ -141,6 +142,7 @@ fn partitioned_window() -> PartitionRange {
         column: "region".to_string(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     }
 }
 
@@ -788,6 +790,7 @@ fn one_step(start: &str, end: &str) -> Vec<MaintenanceStep> {
         range: TimeRange {
             start: start.to_string(),
             end: end.to_string(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         },
     }]
 }
@@ -860,6 +863,7 @@ async fn keyed_fold_suppressed_records_changed_keys() {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     let (changed_keys, _partitions) = recorded_delta(&backend, "dim_scores", &w)
         .await
@@ -926,6 +930,7 @@ async fn keyed_fold_fully_suppressed_records_an_empty_delta() {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     let (changed_keys, partitions) = recorded_delta(&backend, "dim_scores", &w)
         .await
@@ -1063,6 +1068,7 @@ async fn keyed_fold_delta_rolls_back_with_a_failed_write() {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
     assert!(
         recorded_delta(&backend, "dim_scores", &w).await.is_none(),
@@ -1241,6 +1247,7 @@ async fn staged_membership_recompute_records_changed_keys() {
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
 
     execute_staged_membership_recompute(
@@ -1296,6 +1303,7 @@ async fn staged_membership_recompute_records_an_empty_delta_when_nothing_changed
         column: String::new(),
         start: "2026-01-01".to_string(),
         end: "2026-01-02".to_string(),
+        axis: smelt_backend::PartitionAxis::Calendar,
     };
 
     execute_staged_membership_recompute(

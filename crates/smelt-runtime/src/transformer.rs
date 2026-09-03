@@ -6,14 +6,21 @@
 
 use chrono::{DateTime, Utc};
 use smelt_logical::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
+use smelt_logical::maintenance::emit::partition_literal;
+use smelt_logical::PartitionAxis;
 use smelt_parser::{parse, File, FunctionCall};
 use thiserror::Error;
 
-/// Time range for filtering (inclusive start, exclusive end)
+/// Time range for filtering (inclusive start, exclusive end). `start`/`end`
+/// are bare values in `axis`'s own domain — `YYYY-MM-DD` on the calendar
+/// axis, a decimal integer on the integer axis
+/// (`docs/specs/incremental_shapes.md` §"The partition grain" rule 8a).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct TimeRange {
-    pub start: String, // ISO 8601 date: YYYY-MM-DD
-    pub end: String,   // ISO 8601 date: YYYY-MM-DD (exclusive)
+    pub start: String,
+    pub end: String,
+    #[serde(skip)]
+    pub axis: PartitionAxis,
 }
 
 /// Errors that can occur during query transformation
@@ -39,6 +46,9 @@ pub enum TransformError {
         "Query contains subqueries which are not yet supported for incremental transformation"
     )]
     SubqueryNotSupported,
+
+    #[error("output-clamp bound is invalid for its partition axis: {0}")]
+    InvalidPartitionLiteral(String),
 }
 
 /// Bound for a single source: the partition column and the (before, after) seconds offset.
@@ -88,20 +98,46 @@ pub fn inject_source_filters(
         // We search for the smelt path as it appears in the SQL.
         let smelt_ref = source_path.clone();
 
-        // Compute the pushdown window: run_start - before .. run_end + after
+        // Compute the pushdown window: run_start - before .. run_end + after.
+        // On the integer axis `before_secs`/`after_secs` are always zero
+        // (day-typed widening is refused at plan construction, `windowing.rs`'s
+        // `compute_integer_windows`), so this stays a no-op arithmetically —
+        // only the literal's rendering (quoted vs. bare) differs by axis.
         let filter_start = subtract_seconds_from_date(&range.start, bound.before_secs);
         let filter_end = add_seconds_to_date(&range.end, bound.after_secs);
 
         let safe_col = bound.partition_col.replace('\'', "''");
-        let safe_start = filter_start.replace('\'', "''");
-        let safe_end = filter_end.replace('\'', "''");
+        // `filter_start`/`filter_end` are `range.start`/`range.end` (the
+        // margin arithmetic above is a no-op on the integer axis) — both
+        // already validated against `range.axis` by the caller
+        // (`PartitionPoint::parse_in_axis`/`Display`), so a render failure
+        // here is unreachable in production; the `unwrap_or` fallback keeps
+        // this function infallible rather than propagating a `Result` no
+        // real caller can trigger.
+        let start_lit = partition_literal(range.axis, &filter_start).unwrap_or_else(|_| {
+            debug_assert!(
+                false,
+                "inject_source_filters: '{filter_start}' does not render in axis {:?} — \
+                 caller invariant violated",
+                range.axis
+            );
+            format!("'{}'", filter_start.replace('\'', "''"))
+        });
+        let end_lit = partition_literal(range.axis, &filter_end).unwrap_or_else(|_| {
+            debug_assert!(
+                false,
+                "inject_source_filters: '{filter_end}' does not render in axis {:?} — \
+                 caller invariant violated",
+                range.axis
+            );
+            format!("'{}'", filter_end.replace('\'', "''"))
+        });
 
         // Wrap each occurrence of `smelt_ref` in the SQL with a subquery filter.
         // We need to be careful not to match partial identifiers.
         // We replace `smelt_ref` when it appears as a standalone reference (not as
         // part of a smelt function call like `smelt.functions.*`).
-        result =
-            wrap_source_ref_with_filter(&result, &smelt_ref, &safe_col, &safe_start, &safe_end);
+        result = wrap_source_ref_with_filter(&result, &smelt_ref, &safe_col, &start_lit, &end_lit);
     }
 
     result
@@ -215,7 +251,7 @@ fn wrap_source_ref_with_filter(
     // We'll look for the full "smelt.<path>" pattern in the SQL.
 
     let replacement = format!(
-        "(SELECT * FROM {} WHERE {} >= '{}' AND {} < '{}')",
+        "(SELECT * FROM {} WHERE {} >= {} AND {} < {})",
         smelt_ref, partition_col, filter_start, partition_col, filter_end
     );
 
@@ -352,14 +388,15 @@ pub fn inject_time_filter(
         return Err(TransformError::NoFromClause);
     }
 
-    // Escape single quotes (defensive)
     let safe_column = event_time_column.replace('\'', "''");
-    let safe_start = range.start.replace('\'', "''");
-    let safe_end = range.end.replace('\'', "''");
+    let safe_start = partition_literal(range.axis, &range.start)
+        .map_err(TransformError::InvalidPartitionLiteral)?;
+    let safe_end = partition_literal(range.axis, &range.end)
+        .map_err(TransformError::InvalidPartitionLiteral)?;
 
     Ok(format!(
         "SELECT * FROM (\n{sql}\n) AS _smelt_output_clamp \
-         WHERE {safe_column} >= '{safe_start}' AND {safe_column} < '{safe_end}'"
+         WHERE {safe_column} >= {safe_start} AND {safe_column} < {safe_end}"
     ))
 }
 
@@ -473,6 +510,65 @@ pub fn pin_run_deterministic_clocks(sql: &str, run_timestamp: DateTime<Utc>) -> 
 mod tests {
     use super::*;
 
+    // ─── Phase 5b: axis-domain literal rendering ─────────────────────────────
+
+    #[test]
+    fn inject_time_filter_renders_integer_bounds_bare() {
+        let sql = "SELECT * FROM t";
+        let range = TimeRange {
+            start: "1".into(),
+            end: "2".into(),
+            axis: PartitionAxis::Integer,
+        };
+        let result = inject_time_filter(sql, "batch_id", &range).unwrap();
+        assert!(
+            result.contains("WHERE batch_id >= 1 AND batch_id < 2"),
+            "expected bare integer bounds, got: {result}"
+        );
+        assert!(!result.contains('\''));
+    }
+
+    #[test]
+    fn inject_source_filters_renders_integer_bounds_bare() {
+        let sql = "SELECT * FROM smelt.silver.events";
+        let range = TimeRange {
+            start: "1".into(),
+            end: "2".into(),
+            axis: PartitionAxis::Integer,
+        };
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events".to_string(),
+            SourceBound {
+                partition_col: "batch_id".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        let result = inject_source_filters(sql, &bounds, &range);
+        assert!(
+            result.contains("batch_id >= 1 AND batch_id < 2"),
+            "expected bare integer bounds, got: {result}"
+        );
+        assert!(!result.contains('\''));
+    }
+
+    #[test]
+    fn calendar_time_filter_is_byte_identical() {
+        let sql = "SELECT * FROM t";
+        let range = TimeRange {
+            start: "2024-01-15".into(),
+            end: "2024-01-18".into(),
+            axis: PartitionAxis::Calendar,
+        };
+        let result = inject_time_filter(sql, "event_date", &range).unwrap();
+        assert_eq!(
+            result,
+            "SELECT * FROM (\nSELECT * FROM t\n) AS _smelt_output_clamp \
+             WHERE event_date >= '2024-01-15' AND event_date < '2024-01-18'"
+        );
+    }
+
     // ─── Phase 5 TDD tests ────────────────────────────────────────────────────
 
     /// Given a model with a derived bound `{events_parsed: Bounded(event_date, 1d, 0)}`,
@@ -484,6 +580,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -521,6 +618,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         // Empty bounds — regions is a lookup, not in the map
         let bounds = std::collections::HashMap::new();
@@ -545,6 +643,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -581,6 +680,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let mut bounds = std::collections::HashMap::new();
         // Union bound: before = 1d, after = 0
@@ -613,6 +713,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
         let mut bounds = std::collections::HashMap::new();
         bounds.insert(
@@ -732,6 +833,7 @@ mod tests {
         let run_range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-16".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         // A source with a real 1-day lookback margin (e.g. a bounded RANGE
@@ -790,6 +892,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
@@ -808,6 +911,7 @@ mod tests {
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
@@ -834,6 +938,7 @@ GROUP BY 1, 2
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         let result = inject_time_filter(sql, "transaction_timestamp", &range).unwrap();
@@ -859,6 +964,7 @@ GROUP BY 1, 2
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         let result = inject_time_filter(sql, "event_time", &range);
@@ -871,6 +977,7 @@ GROUP BY 1, 2
         let range = TimeRange {
             start: "2024-01-15".into(),
             end: "2024-01-18".into(),
+            axis: smelt_logical::PartitionAxis::Calendar,
         };
 
         // Contract change with the F1 subquery wrap (deliberate, see

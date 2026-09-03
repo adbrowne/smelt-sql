@@ -6,7 +6,8 @@ use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
 use smelt_backend::{
-    Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect, StatementGroup,
+    partition_literal, Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect,
+    StatementGroup,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -573,16 +574,16 @@ impl Backend for DuckDbBackend {
     ) -> Result<(), BackendError> {
         let table_name = format!("{}.{}", schema, name);
 
-        // Range-based DELETE: `column >= start AND column < end`.
-        // More efficient than an IN-list for large windows and correct for
-        // any window size.
+        // Range-based DELETE: `column >= start AND column < end`, rendered
+        // through the single-owner axis renderer (quoted on the calendar
+        // axis, bare on the integer axis).
+        let start_lit = partition_literal(partition.axis, &partition.start)
+            .map_err(|message| BackendError::ConfigurationError { message })?;
+        let end_lit = partition_literal(partition.axis, &partition.end)
+            .map_err(|message| BackendError::ConfigurationError { message })?;
         let delete_sql = format!(
-            "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
-            table_name,
-            partition.column,
-            partition.start.replace('\'', "''"),
-            partition.column,
-            partition.end.replace('\'', "''"),
+            "DELETE FROM {} WHERE {} >= {} AND {} < {}",
+            table_name, partition.column, start_lit, partition.column, end_lit,
         );
 
         let connection = Arc::clone(&self.connection);
@@ -1173,6 +1174,7 @@ mod tests {
             column: "dt".to_string(),
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
         };
 
         backend
@@ -1228,6 +1230,7 @@ mod tests {
             column: "dt".to_string(),
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
         };
 
         backend
@@ -1281,6 +1284,7 @@ mod tests {
             column: "dt".to_string(),
             start: "2024-01-01".to_string(),
             end: "2024-01-02".to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
         };
 
         // The INSERT SELECT references a column that doesn't exist in

@@ -931,6 +931,7 @@ pub async fn execute_project(
                     let run_range = TimeRange {
                         start: start.clone(),
                         end: end.clone(),
+                        axis: batch.partition_start.axis(),
                     };
                     let filtered_sql = derive_batch_filtered_sql(
                         &clean_sql,
@@ -946,10 +947,12 @@ pub async fn execute_project(
                         &filtered_sql,
                         resolver,
                     )?;
-                    let region = smelt_logical::maintenance::emit::Region {
-                        start: format!("'{}'", start.replace('\'', "''")),
-                        end: format!("'{}'", end.replace('\'', "''")),
-                    };
+                    let region = smelt_logical::maintenance::emit::Region::for_axis(
+                        run_range.axis,
+                        &start,
+                        &end,
+                    )
+                    .map_err(anyhow::Error::msg)?;
                     let group = crate::maintenance_driver::build_delete_insert_group_dispatched(
                         &table_name,
                         partition_col,
@@ -2230,6 +2233,7 @@ pub async fn execute_project(
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
                     };
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2694,6 +2698,7 @@ pub async fn execute_project(
                             column: String::new(),
                             start: window_start,
                             end: window_end,
+                            axis: smelt_backend::PartitionAxis::Calendar,
                         };
                         let retry_policy =
                             RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -2823,6 +2828,7 @@ pub async fn execute_project(
                         column: String::new(),
                         start: window_start,
                         end: window_end,
+                        axis: smelt_backend::PartitionAxis::Calendar,
                     };
                     let row_count = match write {
                         crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
@@ -3657,6 +3663,7 @@ pub async fn execute_project(
                     let run_range = TimeRange {
                         start: batch.partition_start.to_string(),
                         end: batch.partition_end.to_string(),
+                        axis: smelt_logical::PartitionAxis::Calendar,
                     };
 
                     // Two-layer widened-scan + exact output clamp
@@ -3912,6 +3919,7 @@ pub async fn execute_project(
                         column: inc_plan.timeseries.partition_column.clone(),
                         start: batch.partition_start.to_string(),
                         end: batch.partition_end.to_string(),
+                        axis: batch.partition_start.axis(),
                     };
 
                     // T3: re-checked per batch (not hoisted with
@@ -4062,10 +4070,12 @@ pub async fn execute_project(
                         // the closure is `Open`/absent, the delta is absent
                         // or empty, or the model's row identity is not a
                         // single column — never a silent skip.
-                        let region = smelt_logical::maintenance::emit::Region {
-                            start: format!("'{}'", partition.start.replace('\'', "''")),
-                            end: format!("'{}'", partition.end.replace('\'', "''")),
-                        };
+                        let region = smelt_logical::maintenance::emit::Region::for_axis(
+                            partition.axis,
+                            &partition.start,
+                            &partition.end,
+                        )
+                        .map_err(anyhow::Error::msg)?;
                         let group =
                             crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
                                 backend,
@@ -4149,10 +4159,12 @@ pub async fn execute_project(
                             .find(|s| s.name == facts.source_name)
                             .map(|s| s.unique_key.clone())
                             .unwrap_or_default();
-                        let region = smelt_logical::maintenance::emit::Region {
-                            start: format!("'{}'", partition.start.replace('\'', "''")),
-                            end: format!("'{}'", partition.end.replace('\'', "''")),
-                        };
+                        let region = smelt_logical::maintenance::emit::Region::for_axis(
+                            partition.axis,
+                            &partition.start,
+                            &partition.end,
+                        )
+                        .map_err(anyhow::Error::msg)?;
                         let group =
                             crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
                                 backend,
@@ -4243,10 +4255,12 @@ pub async fn execute_project(
                         {
                             let table_name =
                                 format!("{schema}.{}", plan.model_file.db_name_owned());
-                            let region = smelt_logical::maintenance::emit::Region {
-                                start: format!("'{}'", partition.start.replace('\'', "''")),
-                                end: format!("'{}'", partition.end.replace('\'', "''")),
-                            };
+                            let region = smelt_logical::maintenance::emit::Region::for_axis(
+                                partition.axis,
+                                &partition.start,
+                                &partition.end,
+                            )
+                            .map_err(anyhow::Error::msg)?;
                             let group = smelt_logical::maintenance::emit::emit_delete_insert(
                                 &table_name,
                                 &partition.column,
@@ -5359,19 +5373,8 @@ fn build_model_plans(
                     // implied by the run-window literal's own form so a
                     // first-run without a resolvable schema still works for
                     // the common calendar case.
-                    let implied = request
-                        .start
-                        .as_deref()
-                        .and_then(|s| {
-                            if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok() {
-                                Some(smelt_logical::PartitionAxis::Calendar)
-                            } else if s.parse::<i64>().is_ok() {
-                                Some(smelt_logical::PartitionAxis::Integer)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(smelt_logical::PartitionAxis::Calendar);
+                    let implied =
+                        crate::windowing::axis_implied_by_literal_form(request.start.as_deref());
                     warn!(
                         "model '{model_name}': partition column '{}' type could not be \
                          resolved from the output schema; falling back to the axis implied \
@@ -5400,11 +5403,25 @@ fn build_model_plans(
                 // (`contract:`)"): narrows the requested range's start to
                 // `end - H`, never widens. The pure transform is single-owned
                 // in `smelt-logical`; this call site only converts dates to
-                // the day-count unit it operates on. Calendar axis only —
-                // `frozen_horizon` interaction with an integer partition
-                // axis is out of scope this phase (no test/fixture exercises
-                // the combination; deferred alongside the rest of integer-
-                // axis emission).
+                // the day-count unit it operates on. Calendar axis only — a
+                // `frozen_horizon` declared on an integer-axis model is a
+                // hard refusal below (`docs/specs/incremental_shapes.md`
+                // §"The partition grain" rule 8a: its horizon is a day count
+                // with no conversion into partition units).
+                if axis == smelt_logical::PartitionAxis::Integer
+                    && metadata
+                        .and_then(|m| m.contract.as_ref())
+                        .and_then(|c| c.frozen_horizon.as_ref())
+                        .is_some()
+                {
+                    return Err(anyhow::anyhow!(
+                        "model '{model_name}': contract.frozen_horizon is declared, but \
+                         partition column '{}' resolves to an integer partition axis; a \
+                         frozen_horizon (a day count) has no conversion into partition units \
+                         and is refused rather than silently unclamped",
+                        ts.partition_column,
+                    ));
+                }
                 let full_range = match (window_start, window_end) {
                     (
                         crate::windowing::PartitionPoint::Date(start_date),
@@ -5437,11 +5454,13 @@ fn build_model_plans(
                         TimeRange {
                             start: clamped_start_date.format("%Y-%m-%d").to_string(),
                             end: end_date.format("%Y-%m-%d").to_string(),
+                            axis: smelt_logical::PartitionAxis::Calendar,
                         }
                     }
                     (start, end) => TimeRange {
                         start: start.to_string(),
                         end: end.to_string(),
+                        axis: start.axis(),
                     },
                 };
 
@@ -6459,6 +6478,24 @@ mod tests {
                 .expect("both bounds supplied");
         assert_eq!(start, crate::windowing::PartitionPoint::Integer(1));
         assert_eq!(end, crate::windowing::PartitionPoint::Integer(4));
+    }
+
+    /// `docs/outcomes/20260815-partition-grain-residue/phases/05b-plan.md`
+    /// §Tests — the `Region` built for an integer-axis batch (via the same
+    /// `Region::for_axis(batch.partition_start.axis(), ...)` call
+    /// `execute.rs`'s batch loop makes) carries bare literals, not quoted
+    /// ones.
+    #[test]
+    fn integer_axis_region_is_bare() {
+        let batch = crate::windowing::PartitionPoint::Integer(1);
+        let region = smelt_logical::maintenance::emit::Region::for_axis(
+            batch.axis(),
+            &batch.to_string(),
+            &crate::windowing::PartitionPoint::Integer(2).to_string(),
+        )
+        .expect("integer literals must render");
+        assert_eq!(region.start, "1");
+        assert_eq!(region.end, "2");
     }
 
     #[test]

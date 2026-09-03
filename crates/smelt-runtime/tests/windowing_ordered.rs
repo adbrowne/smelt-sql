@@ -48,6 +48,7 @@ fn make_range(start: &str, end: &str) -> TimeRange {
     TimeRange {
         start: start.to_string(),
         end: end.to_string(),
+        axis: smelt_logical::PartitionAxis::Calendar,
     }
 }
 

@@ -987,6 +987,10 @@ pub struct DerivedWindow {
     /// run-deterministic calls (`NOW()`, …) to. `--show-sql` has no real run
     /// clock, so this is simply the report's own build time.
     pub run_start: chrono::DateTime<chrono::Utc>,
+    /// The axis `output_start`/`output_end` are rendered in — inferred by
+    /// `commands/explain.rs::build_derived_window` from the `--period`
+    /// literal's own form (no schema handle to resolve it from directly).
+    pub axis: smelt_logical::PartitionAxis,
 }
 
 /// One cell's `--show-sql` statement report: the cell it belongs to
@@ -1129,6 +1133,7 @@ fn build_delete_insert_period_statement_group(
     let run_range = TimeRange {
         start: dw.output_start.clone(),
         end: dw.output_end.clone(),
+        axis: dw.axis,
     };
     let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
         &stripped_sql,
@@ -1145,10 +1150,12 @@ fn build_delete_insert_period_statement_group(
         .compile_with_sql_and_ephemerals(model, schema, &filtered_sql, resolver)
         .map_err(|e| format!("failed to compile model body: {e}"))?;
 
-    let region_used = smelt_logical::maintenance::emit::Region {
-        start: format!("'{}'", dw.output_start.replace('\'', "''")),
-        end: format!("'{}'", dw.output_end.replace('\'', "''")),
-    };
+    let region_used = smelt_logical::maintenance::emit::Region::for_axis(
+        dw.axis,
+        &dw.output_start,
+        &dw.output_end,
+    )
+    .map_err(|e| format!("failed to render the DELETE/INSERT region literal: {e}"))?;
 
     Ok(smelt_logical::maintenance::emit::emit_delete_insert(
         &table_name,
