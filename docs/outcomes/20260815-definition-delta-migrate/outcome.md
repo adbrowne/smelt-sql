@@ -338,7 +338,7 @@ open — not that the excluded bullets themselves are gone.
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
 | 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
-| 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | planned |
+| 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -346,6 +346,15 @@ open — not that the excluded bullets themselves are gone.
 
 ## Decision log
 
+- **2026-09-03, phase 28b — merged-group region-recompute rule enforced, not just declared.**
+  `derive_mutation` was calling the corner/technique choice per source alone, so a column group
+  value-sensitive to two mutation-capable inputs got two independent `ColumnScopedMerge` cells —
+  the exact shape §"The plan matrix" forbids. Added a guard: a group whose mutation-capable
+  input count (sources actually deriving an `UpstreamMutation` trigger, read off the same
+  `covered_by_mutation` set `derive_triggers` already computes) is ≥ 2 forces region recompute,
+  same as the pre-existing membership-sensitivity branch. Pinned with 4 hand-built-`ModelInputs`
+  unit tests plus one real-derivation-path fixture; the "unverified in the implementation"
+  Known Divergences bullet is removed.
 - **2026-09-03, phase 28a — recorded two taken decisions; closed the docs-site CLI-coverage
   divergence with a standing gate.** `incremental_models.md`'s "no out-of-band-edit tripwire"
   cross-reference now points at §"Other deliberate boundaries" (the non-goal) instead of a

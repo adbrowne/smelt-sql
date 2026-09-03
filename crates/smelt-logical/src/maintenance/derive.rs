@@ -1101,6 +1101,7 @@ fn derive_maintenance_plan_impl(
                 source,
                 &identity,
                 source_referential_integrity,
+                &covered_by_mutation,
                 &mut plan,
             ),
             Trigger::ColumnAdded { columns } => {
@@ -1498,6 +1499,7 @@ fn derive_mutation(
     source: &str,
     identity: &RowIdentityVerdict,
     source_referential_integrity: &SourceReferentialIntegrity,
+    covered_by_mutation: &BTreeSet<String>,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::UpstreamMutation {
@@ -1597,7 +1599,26 @@ fn derive_mutation(
             });
             continue;
         }
-        let (corner, technique) = if membership_sensitive {
+        // Group-merge-provenance guard (`incremental_models.md` §"The plan
+        // matrix", decided in success criterion 18's "Group-merge-provenance
+        // policy" open question): a group whose sensitivity spans TWO OR
+        // MORE mutation-capable inputs is repaired by region recompute,
+        // never a column-scoped merge — the conservative, always-correct
+        // default every other mutation-sensitivity rule here already takes.
+        // "Mutation-capable" means the source actually gets its own
+        // `UpstreamMutation` trigger (`covered_by_mutation`, read straight
+        // off `triggers` — the SAME predicate `derive_triggers` already
+        // computed, not a second guess): an append-only source with no
+        // value-sensitivity of its own, or one this model doesn't derive a
+        // mutation cell for, does not count toward the merge, matching
+        // `membership_sensitive`'s existing scoping to genuinely
+        // mutation-driven groups.
+        let mutation_capable_inputs = group
+            .mutation_sensitivity
+            .union(&group.membership_sensitivity)
+            .filter(|s| covered_by_mutation.contains(*s))
+            .count();
+        let (corner, technique) = if membership_sensitive || mutation_capable_inputs >= 2 {
             (Corner::RecomputeRegion, Technique::DeleteInsert)
         } else {
             (Corner::ColumnMerge, Technique::ColumnScopedMerge)

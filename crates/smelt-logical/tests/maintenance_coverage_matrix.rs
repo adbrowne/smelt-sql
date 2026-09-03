@@ -479,3 +479,105 @@ fn ex35_correlated_first_value_fold_admitted() {
     assert!(backfill_plan.refusals.is_empty());
     assert_eq!(backfill_plan.cells[0].technique, Technique::DeleteInsert);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 28b fixture pin (`docs/outcomes/20260815-definition-delta-migrate`):
+// the group-merge-provenance rule (`incremental_models.md` §"The plan
+// matrix") driven through the REAL grouping derivation
+// (`grouping::derive_column_groups`), not a hand-built `ColumnGroup` —
+// `maintenance_merged_group.rs` already pins the guard's own logic
+// (`derive::derive_mutation`'s mutation-capable-input count) directly
+// against hand-built `ModelInputs`; this fixture instead confirms the two
+// real-world provenance derivations that actually feed it (per-column
+// mutation-sensitivity AND JOIN-admission membership-sensitivity) land on
+// the SAME merged group for a two-mutable-dimension enrichment model, and
+// that the derived plan reports region recompute for it — never a
+// column-scoped merge.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn merged_group_fixture_plans_region_recompute() {
+    let sql = "SELECT e.event_id, e.d1_id, e.d2_id, \
+               COALESCE(dim1.value, 0) + COALESCE(dim2.value, 0) AS combined \
+               FROM smelt.sources.events e \
+               LEFT JOIN smelt.sources.dim1 dim1 ON e.d1_id = dim1.id \
+               LEFT JOIN smelt.sources.dim2 dim2 ON e.d2_id = dim2.id";
+    let sources = vec![
+        SourceFacts {
+            name: "events".to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: true,
+        },
+        SourceFacts {
+            name: "dim1".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: strings(&["id"]),
+            allow_full_scan: true,
+        },
+        SourceFacts {
+            name: "dim2".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: strings(&["id"]),
+            allow_full_scan: true,
+        },
+    ];
+    let skeleton = set(&["event_id", "d1_id", "d2_id"]);
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    assert_eq!(grouping.groups.len(), 1, "one merged group: {{combined}}");
+    let merged = &grouping.groups[0];
+    assert_eq!(merged.columns, vec!["combined".to_string()]);
+    assert_eq!(
+        merged.mutation_sensitivity,
+        set(&["dim1", "dim2"]),
+        "the merged group's value provenance spans both mutable dimensions"
+    );
+
+    let inputs = ModelInputs {
+        sql,
+        output: OutputSpec {
+            table: "enriched_events".to_string(),
+            grain: Grain::Key {
+                unique_key: strings(&["event_id"]),
+            },
+            skeleton_columns: skeleton,
+        },
+        sources,
+        column_groups: grouping.groups,
+        fold: None,
+        old_columns: Vec::new(),
+        old_sql: None,
+        keyed_time_axis: None,
+    };
+
+    for source in ["dim1", "dim2"] {
+        let plan = derive_maintenance_plan(
+            &inputs,
+            &[Trigger::UpstreamMutation {
+                source: source.to_string(),
+            }],
+        );
+        assert!(
+            plan.refusals.is_empty(),
+            "mutation trigger for {source} refused unexpectedly: {:?}",
+            plan.refusals
+        );
+        assert_eq!(plan.cells.len(), 1);
+        assert_eq!(plan.cells[0].group, "{combined}");
+        assert_eq!(plan.cells[0].corner, Corner::RecomputeRegion);
+        assert_eq!(
+            plan.cells[0].technique,
+            Technique::DeleteInsert,
+            "merged group must never take ColumnScopedMerge, got {:?}",
+            plan.cells[0]
+        );
+    }
+}

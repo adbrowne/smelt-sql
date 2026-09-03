@@ -2097,11 +2097,6 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   so that branch is proven only at resolver level; `smelt bakeoff` measures technique-family
   cost only, not the write-suppression dimension; whether a future cost model needs
   region-level change-ratio statistics from prior observed deltas is open.
-- **The merged-group region-recompute rule is unverified in the implementation** — a group
-  whose sensitivity spans two or more mutation-sensitive inputs must take region recompute
-  (§"The plan matrix"); whether today's derivation ever admits a column-scoped repair for
-  such a group has not been audited, and no check or fixture pins the rule (decision record:
-  `docs/research/20260816-open-questions-triage.md`).
 - **`change_feed` sources do not yet get an `UpstreamMutation` cell** — every other
   mutation-sensitive posture receives one, and a change feed must too; today none is derived,
   and even where the posture is threaded through, only full-input re-derivation is admitted
