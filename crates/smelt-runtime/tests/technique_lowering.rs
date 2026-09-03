@@ -3485,7 +3485,7 @@ mod external_source_point_lookup_recompute {
     };
     use smelt_runtime::maintenance_driver::{
         diff_fingerprint_sidecar_changed_keys, execute_delete_insert_with_delta_restriction,
-        refresh_fingerprint_sidecar,
+        refresh_fingerprint_sidecar, RestrictionDeltaSource,
     };
 
     /// Seed the observed-delta table for `upstream_model`'s `[window_start,
@@ -4145,9 +4145,11 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
             None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
@@ -4230,9 +4232,11 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
             None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),
@@ -4310,9 +4314,11 @@ mod external_source_point_lookup_recompute {
             &body,
             Some("user_id"),
             Some(&closure),
-            "raw.events",
-            "2025-01-10",
-            "2025-01-11",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: "raw.events",
+                window_start: "2025-01-10",
+                window_end: "2025-01-11",
+            },
             None,
             MaintenanceDialect::DuckDb,
             &super::no_retry_policy(),

@@ -334,7 +334,7 @@ open — not that the excluded bullets themselves are gone.
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | done |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | done |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | done |
-| 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
+| 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | done |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | planned |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
 | 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
@@ -344,6 +344,20 @@ open — not that the excluded bullets themselves are gone.
 
 ## Decision log
 
+- **2026-09-03, phase 27e — delta-restriction admission consumes an external `mutable_snapshot`
+  source's fingerprint-sidecar delta.** `RestrictionDeltaSource` enum generalizes
+  `execute_delete_insert_with_delta_restriction` over the model-edge and external-source routes;
+  `resolve_live_external_delta_restriction_facts` resolves the live `UpstreamMutation` cell for an
+  explicitly-mutable external source, gated on the new `BackendCapabilities::
+  supports_fingerprint_sidecar` (DuckDB only). Found and fixed two bugs blocking this phase's own
+  end-to-end test: `emit_count_preservation_probe_from_body` never unwrapped `inject_time_filter`'s
+  output-clamp wrap (silently defeating the declared-`referential_integrity` probe — and therefore
+  delta restriction — on every real, time-filtered run for BOTH this route and the pre-existing
+  model-edge route, not just this phase's own); and the probe's `enrichment_source` must be the
+  join's physical table text, not the closure's bare logical address (they only coincide for a
+  model edge). See `phases/27e-summary.md` — flags an untested adjacent gap: whether the
+  model-edge route's `DeclaredReferentialIntegrity` closure now actually restricts on a real
+  `execute_project` run post-fix (no test added for that route specifically).
 - **2026-09-03, phase 27a — `--show-sql` previews resolve write suppression, matching a live run.**
   A new shared resolver (`smelt_logical::maintenance::choice::resolve_cell_write_suppression`)
   folds the P2/P3 proof + override ladder that `maintenance_driver.rs`'s live `ColumnScopedMerge`

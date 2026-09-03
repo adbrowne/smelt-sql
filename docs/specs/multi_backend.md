@@ -60,6 +60,7 @@ owners: [andrew]
   | `supports_column_mapping` | ✗ | ✓ | ✗ | ✓ |
   | `supports_pipe_syntax` (`\|>`) | ✗ | ✗ | ✗ | ✓ |
   | `supports_pipe_set_drop_rename` (star-modifier trio `* REPLACE` / `* EXCLUDE` / `* RENAME`) | ✓ | ✗ | ✗ | ✗ |
+  | `supports_fingerprint_sidecar` (delta-restriction admission over an external `mutable_snapshot` source's synthesized fingerprint diff) | ✓ | ✗ | ✗ | ✗ |
   | `requires_schema_init` | ✓ | ✓ | ✓ | ✓ |
   | `null_safe_equality` (synthesised join spelling for a statement-level restructure) | `IS NOT DISTINCT FROM` | `<=>` | `<=>` | `IS NOT DISTINCT FROM` |
 
@@ -589,6 +590,14 @@ These flags live in `BackendCapabilities` itself, queried by admission exactly l
 capability flag above — never re-derived by a consumer. `supports_column_scoped_merge` is a
 struct field; `supports_merge_not_matched_by_source` and `supports_staged_relation_group` are
 specified ahead of their own struct fields (see §Known Divergences).
+
+### The fingerprint sidecar capability
+
+- **`supports_fingerprint_sidecar`** — the backend can build and diff the fingerprint sidecar
+  (`sources.md` §"The fingerprint sidecar") that synthesizes an exact changed-key delta for an
+  external `mutable_snapshot` source with no native change feed. `true` for DuckDB alone today. A
+  backend without it keeps the widened-scan recompute for a mutation-sensitive cell driven by such
+  a source — the gap is declared here, never a silent narrowing a consumer has to discover.
 
 ### Whole-row MERGE
 

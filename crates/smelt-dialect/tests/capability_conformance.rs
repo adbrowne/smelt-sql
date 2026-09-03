@@ -251,6 +251,18 @@ fn every_flag_matches_matrix() {
         NullSafeEqualitySpelling::IsNotDistinctFrom,
         "BigQuery"
     );
+
+    // supports_fingerprint_sidecar — DuckDB alone today (`docs/outcomes/
+    // 20260815-definition-delta-migrate/phases/27e-plan.md`).
+    cell!(duckdb, supports_fingerprint_sidecar, true, "DuckDB");
+    cell!(delta, supports_fingerprint_sidecar, false, "Spark(Delta)");
+    cell!(
+        parquet,
+        supports_fingerprint_sidecar,
+        false,
+        "Spark(Parquet)"
+    );
+    cell!(bigquery, supports_fingerprint_sidecar, false, "BigQuery");
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
@@ -283,6 +295,7 @@ fn all_fields_destructured() {
         dialect: _,
         supports_pipe_set_drop_rename: _,
         null_safe_equality: _,
+        supports_fingerprint_sidecar: _,
     } = BackendCapabilities::duckdb();
     // Adding a field to BackendCapabilities without listing it here is a compile error.
     // When that happens: add the field above, add it to every_flag_matches_matrix(),

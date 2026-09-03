@@ -1427,8 +1427,26 @@ fn select_with_enrichment_join(
     if sources.next().is_some() {
         return None;
     }
-    if only_source.alias().as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS) {
-        // Not the cast-wrap shape — some other single-derived-table FROM
+    // The two single-source wrap shapes a compiled `body_sql` can arrive
+    // already carrying: the SQL compiler's own cast wrap
+    // (`smelt_dialect::TYPE_CAST_WRAP_ALIAS`, `_smelt_typed`) and
+    // `smelt-runtime`'s `inject_time_filter` output-clamp wrap
+    // (`_smelt_output_clamp` — `smelt-logical` cannot depend on
+    // `smelt-runtime` to import its constant, so the literal is named here;
+    // `docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`
+    // discovered the output-clamp shape reaching this function unhandled,
+    // silently disabling the declared-`referential_integrity` route's
+    // count-preservation probe — and therefore delta restriction — for
+    // every live, time-filtered call, both this phase's external-sidecar
+    // route and the model-edge route it generalizes). Neither name is
+    // load-bearing beyond "some known wrap, not a user's own subquery" —
+    // fail closed rather than guess for anything else.
+    const OUTPUT_CLAMP_WRAP_ALIAS: &str = "_smelt_output_clamp";
+    let alias = only_source.alias();
+    if alias.as_deref() != Some(smelt_dialect::TYPE_CAST_WRAP_ALIAS)
+        && alias.as_deref() != Some(OUTPUT_CLAMP_WRAP_ALIAS)
+    {
+        // Not a known wrap shape — some other single-derived-table FROM
         // (a user's own subquery, most commonly). Fail closed rather than
         // guess it's a wrap.
         return None;

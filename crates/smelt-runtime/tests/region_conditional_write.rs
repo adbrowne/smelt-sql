@@ -10,7 +10,9 @@ use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::maintenance::choice::RegionWrite;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, Region};
-use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
+use smelt_runtime::maintenance_driver::{
+    execute_delete_insert_with_delta_restriction, RestrictionDeltaSource,
+};
 use tempfile::TempDir;
 
 const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
@@ -78,9 +80,11 @@ async fn a_run_over_unchanged_data_leaves_the_region_untouched() {
         body,
         None,
         None,
-        "sources.regions_raw",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "sources.regions_raw",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         Some(&suppressed()),
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -149,9 +153,11 @@ async fn a_departed_key_is_deleted_a_changed_value_is_updated_a_new_key_is_inser
         body,
         None,
         None,
-        "sources.regions_raw",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "sources.regions_raw",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         Some(&suppressed()),
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),

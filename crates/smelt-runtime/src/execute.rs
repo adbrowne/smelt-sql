@@ -3057,6 +3057,56 @@ pub async fn execute_project(
                         None => None,
                     }
                 };
+                // 27e (`docs/outcomes/20260815-definition-delta-migrate/
+                // phases/27e-plan.md`): when this model reads NO maintained-
+                // model upstream (`model_edges` empty — the model-edge route
+                // above never resolves), it may still be driven by an
+                // external `mutable_snapshot` source with no native change
+                // feed. `resolve_live_external_delta_restriction_facts`
+                // consults the SAME derived plan's `UpstreamMutation` cell
+                // for that source; `None` in every case where the model-edge
+                // route would also fall back — the caller's safe default
+                // stays the ordinary widened scan.
+                let external_delta_restriction_facts = if !model_edges.is_empty() {
+                    None
+                } else {
+                    match plan.model_file.metadata.as_deref() {
+                        Some(metadata) => {
+                            // Real declared `referential_integrity:` facts
+                            // (`sources.md` §"Referential integrity") — keyed
+                            // the same bare-address way `maint_source_facts`
+                            // above is, so the `DeclaredReferentialIntegrity`
+                            // P1 route is actually reachable live, not only
+                            // through a hand-built fixture.
+                            let source_ri: smelt_logical::maintenance::derive::SourceReferentialIntegrity =
+                                source_infos
+                                    .iter()
+                                    .filter_map(|info| {
+                                        let ri = info.referential_integrity.clone()?;
+                                        let segs = &info.address_segments;
+                                        let bare = match segs.split_first() {
+                                            Some((first, rest)) if first == "sources" => {
+                                                rest.join(".")
+                                            }
+                                            _ => segs.join("."),
+                                        };
+                                        Some((bare, ri))
+                                    })
+                                    .collect();
+                            crate::maintenance_driver::resolve_live_external_delta_restriction_facts(
+                                &sql_for_bounds,
+                                &plan.model_file.db_name_owned(),
+                                metadata,
+                                &maint_source_facts,
+                                &explicitly_mutable,
+                                &source_ri,
+                                backend.capabilities().supports_fingerprint_sidecar,
+                            )
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        }
+                        None => None,
+                    }
+                };
                 // Live dispatch is licensed only for a DuckDB target running
                 // the creation trigger's `DeleteInsert` strategy — the same
                 // scoping the existing report-and-execute branch below
@@ -3068,6 +3118,13 @@ pub async fn execute_project(
                 // transactional` override — e.g. Spark's — must stay
                 // reachable unchanged).
                 let use_delta_restricted_dispatch = delta_restriction_facts.is_some()
+                    && backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                    && matches!(
+                        resolved_strategy,
+                        smelt_backend::IncrementalStrategy::DeleteInsert
+                    );
+                let use_external_delta_restricted_dispatch = external_delta_restriction_facts
+                    .is_some()
                     && backend.dialect() == smelt_backend::SqlDialect::DuckDB
                     && matches!(
                         resolved_strategy,
@@ -3805,6 +3862,24 @@ pub async fn execute_project(
                     } else {
                         None
                     };
+                    // Same re-checked-per-batch reasoning as
+                    // `restricted_facts_this_batch` above, for the external-
+                    // sidecar route.
+                    let external_restricted_facts_this_batch: Option<
+                        &crate::maintenance_driver::ExternalDeltaRestrictionFacts,
+                    > = if use_external_delta_restricted_dispatch {
+                        let exists = backend
+                            .table_exists(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .unwrap_or(false);
+                        if exists {
+                            external_delta_restriction_facts.as_ref()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
 
                     let retry_policy =
                         RetryPolicy::from_request(request, run_id, &plan.name, reporter);
@@ -3924,9 +3999,11 @@ pub async fn execute_project(
                                 &compiled.body_sql,
                                 facts.restrict_column.as_deref(),
                                 facts.skeleton_source_closure.as_ref(),
-                                &facts.upstream_model,
-                                &partition.start,
-                                &partition.end,
+                                crate::maintenance_driver::RestrictionDeltaSource::ModelEdge {
+                                    upstream_model: &facts.upstream_model,
+                                    window_start: &partition.start,
+                                    window_end: &partition.end,
+                                },
                                 Some(&facts.region_write),
                                 smelt_backend::maintenance_dialect(backend.dialect()),
                                 &retry_policy,
@@ -3934,6 +4011,116 @@ pub async fn execute_project(
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let chunk = crate::reporter::ChunkInfo {
+                            index: batch_idx,
+                            total: inc_plan.batches.len(),
+                            start: partition.start.clone(),
+                            end: partition.end.clone(),
+                        };
+                        reporter.maintenance_statements(run_id, &plan.name, Some(&chunk), &group);
+                        let row_count = backend
+                            .get_row_count(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        smelt_backend::ExecutionResult {
+                            model_name: plan.name.clone(),
+                            duration: batch_start_time.elapsed(),
+                            row_count,
+                            preview: None,
+                        }
+                    } else if let Some(facts) = external_restricted_facts_this_batch {
+                        // 27e: this model's `UpstreamMutation` cell is driven
+                        // by an external `mutable_snapshot` source with no
+                        // native change feed — the fingerprint sidecar's own
+                        // diff (`RestrictionDeltaSource::ExternalSidecar`)
+                        // may license restricting this batch's recompute to
+                        // the synthesized changed-key set, resolved inside
+                        // `execute_delete_insert_with_delta_restriction`
+                        // itself. `external_restricted_facts_this_batch` is
+                        // `None` (falling through to the ordinary branch
+                        // below) under the same conditions as the model-edge
+                        // route above.
+                        let source_info = source_infos
+                            .iter()
+                            .find(|info| {
+                                let segs = &info.address_segments;
+                                let bare = match segs.split_first() {
+                                    Some((first, rest)) if first == "sources" => rest.join("."),
+                                    _ => segs.join("."),
+                                };
+                                bare == facts.source_name
+                            })
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "model '{}' resolved a live external delta-restriction cell \
+                                     on source '{}', but that source has no resolved physical \
+                                     table",
+                                    plan.name,
+                                    facts.source_name
+                                )
+                            })?;
+                        let source_table = source_info.db_name_for_target(model_target, schema);
+                        let source_address = format!("smelt.sources.{}", facts.source_name);
+                        let all_source_columns: Vec<String> = source_info
+                            .columns
+                            .iter()
+                            .map(|c| c.name.clone())
+                            .collect();
+                        let source_key: Vec<String> = maint_source_facts
+                            .iter()
+                            .find(|s| s.name == facts.source_name)
+                            .map(|s| s.unique_key.clone())
+                            .unwrap_or_default();
+                        let region = smelt_logical::maintenance::emit::Region {
+                            start: format!("'{}'", partition.start.replace('\'', "''")),
+                            end: format!("'{}'", partition.end.replace('\'', "''")),
+                        };
+                        let group =
+                            crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
+                                backend,
+                                schema,
+                                &plan.model_file.db_name_owned(),
+                                &partition.column,
+                                &region,
+                                &compiled.sql,
+                                &compiled.body_sql,
+                                facts.restrict_column.as_deref(),
+                                facts.skeleton_source_closure.as_ref(),
+                                crate::maintenance_driver::RestrictionDeltaSource::ExternalSidecar {
+                                    source_address: &source_address,
+                                    source_table: &source_table,
+                                    source_key: &source_key,
+                                    projection: &facts.projection,
+                                    all_source_columns: &all_source_columns,
+                                    model_sql: &compiled.body_sql,
+                                },
+                                Some(&facts.region_write),
+                                smelt_backend::maintenance_dialect(backend.dialect()),
+                                &retry_policy,
+                                &probe_policy_for_model(config, prior_runs, &plan.name),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        // Refresh the sidecar to the source's CURRENT
+                        // content only after the write that consumed the
+                        // diff has succeeded — riding the same ordering the
+                        // repair family's own sidecar refresh follows
+                        // (`RepairSidecarRefresh`'s doc comment), so a
+                        // failed write never advances the sidecar past a
+                        // change it did not actually consume.
+                        crate::maintenance_driver::refresh_fingerprint_sidecar(
+                            backend,
+                            schema,
+                            &source_address,
+                            &source_table,
+                            &source_key,
+                            &facts.projection,
+                            &all_source_columns,
+                            &compiled.body_sql,
+                            &group,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
                         let chunk = crate::reporter::ChunkInfo {
                             index: batch_idx,
                             total: inc_plan.batches.len(),

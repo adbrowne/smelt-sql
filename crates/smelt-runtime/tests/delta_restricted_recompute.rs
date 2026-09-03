@@ -13,7 +13,9 @@ use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::maintenance::emit::{MaintenanceDialect, Region};
 use smelt_logical::maintenance::{RowPreservation, SkeletonSourceClosure};
-use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
+use smelt_runtime::maintenance_driver::{
+    execute_delete_insert_with_delta_restriction, RestrictionDeltaSource,
+};
 use tempfile::TempDir;
 
 /// A retry policy that never retries — these tests exercise the T3
@@ -160,9 +162,11 @@ async fn closed_with_exact_delta_touches_only_the_delta_keys() {
         body(),
         Some("event_id"),
         Some(&closure),
-        UPSTREAM_MODEL,
-        WINDOW_START,
-        WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: UPSTREAM_MODEL,
+            window_start: WINDOW_START,
+            window_end: WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -227,9 +231,11 @@ async fn open_closure_falls_back_to_the_widened_scan() {
         body(),
         Some("event_id"),
         Some(&closure),
-        UPSTREAM_MODEL,
-        WINDOW_START,
-        WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: UPSTREAM_MODEL,
+            window_start: WINDOW_START,
+            window_end: WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -267,9 +273,11 @@ async fn absent_observed_delta_runs_the_ordinary_widened_scan() {
         body(),
         Some("event_id"),
         Some(&closure),
-        UPSTREAM_MODEL,
-        WINDOW_START,
-        WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: UPSTREAM_MODEL,
+            window_start: WINDOW_START,
+            window_end: WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -307,9 +315,11 @@ async fn empty_observed_delta_falls_back_to_the_widened_scan() {
         body(),
         Some("event_id"),
         Some(&closure),
-        UPSTREAM_MODEL,
-        WINDOW_START,
-        WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: UPSTREAM_MODEL,
+            window_start: WINDOW_START,
+            window_end: WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),

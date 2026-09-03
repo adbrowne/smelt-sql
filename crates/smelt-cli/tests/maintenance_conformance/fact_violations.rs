@@ -72,6 +72,7 @@ use smelt_planner::{
 };
 use smelt_runtime::maintenance_driver::{
     driving_steps, execute_delete_insert_with_delta_restriction, run_windowed_keyed_maintenance,
+    RestrictionDeltaSource,
 };
 use smelt_runtime::model_probes::{declared_model_probes, dispatch_declared_model_probes};
 use smelt_runtime::probes::ProbePolicy;
@@ -805,9 +806,11 @@ async fn count_preservation_conforming() -> anyhow::Result<()> {
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
-        CP_UPSTREAM_MODEL,
-        CP_WINDOW_START,
-        CP_WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: CP_UPSTREAM_MODEL,
+            window_start: CP_WINDOW_START,
+            window_end: CP_WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -867,9 +870,11 @@ async fn count_preservation_conforming_with_a_cast_wrapped_body_still_restricts(
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
-        CP_UPSTREAM_MODEL,
-        CP_WINDOW_START,
-        CP_WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: CP_UPSTREAM_MODEL,
+            window_start: CP_WINDOW_START,
+            window_end: CP_WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -926,9 +931,11 @@ async fn count_preservation_violated() -> anyhow::Result<()> {
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
-        CP_UPSTREAM_MODEL,
-        CP_WINDOW_START,
-        CP_WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: CP_UPSTREAM_MODEL,
+            window_start: CP_WINDOW_START,
+            window_end: CP_WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -964,9 +971,11 @@ async fn count_preservation_violated_probes_off() -> anyhow::Result<()> {
         cp_body(),
         Some("event_id"),
         Some(&cp_closure()),
-        CP_UPSTREAM_MODEL,
-        CP_WINDOW_START,
-        CP_WINDOW_END,
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: CP_UPSTREAM_MODEL,
+            window_start: CP_WINDOW_START,
+            window_end: CP_WINDOW_END,
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),

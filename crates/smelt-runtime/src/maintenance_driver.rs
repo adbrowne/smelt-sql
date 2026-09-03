@@ -27,9 +27,9 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
-    effective_override, resolve_cell_choice, resolve_cell_write_suppression,
-    resolve_recompute_restriction, resolve_region_write_variant, ChoiceRefusal, ChosenTechnique,
-    RecomputeRestriction, RegionWrite, WriteSuppression,
+    effective_override, enrichment_restrict_column, resolve_cell_choice,
+    resolve_cell_write_suppression, resolve_recompute_restriction, resolve_region_write_variant,
+    ChoiceRefusal, ChosenTechnique, RecomputeRestriction, RegionWrite, WriteSuppression,
 };
 use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
 use smelt_logical::maintenance::diff_patch::DeleteLeg;
@@ -4011,6 +4011,38 @@ pub fn build_delete_insert_group_dispatched(
     }
 }
 
+/// Where an exact changed-key delta comes from for
+/// [`execute_delete_insert_with_delta_restriction`]'s restriction attempt —
+/// the T3 model-edge route (`read_observed_delta_changed_keys`, unchanged
+/// from before this variant existed) or the F3/T3-external fingerprint-
+/// sidecar route for a `mutable_snapshot` external source
+/// (`diff_fingerprint_sidecar_changed_keys`). One executor consumes either
+/// shape: the probe dispatch, `resolve_recompute_restriction` call and
+/// emitter path stay identical regardless of which variant is passed
+/// (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`).
+#[derive(Debug, Clone, Copy)]
+pub enum RestrictionDeltaSource<'a> {
+    /// The upstream is a maintained model — read its recorded
+    /// `_smelt_observed_delta` row for `[window_start, window_end)`.
+    ModelEdge {
+        /// The driving model edge's bare address.
+        upstream_model: &'a str,
+        window_start: &'a str,
+        window_end: &'a str,
+    },
+    /// The upstream is an external `mutable_snapshot` source with no native
+    /// change feed — diff the fingerprint sidecar against the source's
+    /// current content.
+    ExternalSidecar {
+        source_address: &'a str,
+        source_table: &'a str,
+        source_key: &'a [String],
+        projection: &'a FingerprintProjection,
+        all_source_columns: &'a [String],
+        model_sql: &'a str,
+    },
+}
+
 /// Execute a model-edge creation-trigger region recompute, restricting it to
 /// an exact upstream delta's changed-key set when licensed
 /// ([`resolve_recompute_restriction`]'s two-factor admission: P1 skeleton-
@@ -4031,6 +4063,11 @@ pub fn build_delete_insert_group_dispatched(
 /// below reads its enrichment join from (`CompiledModel::body_sql`). Never
 /// derive one from the other here — see
 /// `docs/plans/20260819-source-derived-projection.md` Phase 5.
+///
+/// `delta_source` selects where the changed-key set is read from
+/// ([`RestrictionDeltaSource`]) — the acquisition step is the only part of
+/// this function that varies by source; the probe dispatch and emitter path
+/// below are shared unconditionally.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_delete_insert_with_delta_restriction(
     backend: &dyn Backend,
@@ -4042,9 +4079,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     probe_body: &str,
     restrict_column: Option<&str>,
     skeleton_source_closure: Option<&SkeletonSourceClosure>,
-    upstream_model: &str,
-    window_start: &str,
-    window_end: &str,
+    delta_source: RestrictionDeltaSource<'_>,
     region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
     retry: &crate::execute::RetryPolicy<'_>,
@@ -4053,8 +4088,42 @@ pub async fn execute_delete_insert_with_delta_restriction(
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
     let mut delta = if restrict_column.is_some() && closed {
-        read_observed_delta_changed_keys(backend, schema, upstream_model, window_start, window_end)
-            .await?
+        match delta_source {
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model,
+                window_start,
+                window_end,
+            } => {
+                read_observed_delta_changed_keys(
+                    backend,
+                    schema,
+                    upstream_model,
+                    window_start,
+                    window_end,
+                )
+                .await?
+            }
+            RestrictionDeltaSource::ExternalSidecar {
+                source_address,
+                source_table,
+                source_key,
+                projection,
+                all_source_columns,
+                model_sql,
+            } => Some(
+                diff_fingerprint_sidecar_changed_keys(
+                    backend,
+                    schema,
+                    source_address,
+                    source_table,
+                    source_key,
+                    projection,
+                    all_source_columns,
+                    model_sql,
+                )
+                .await?,
+            ),
+        }
     } else {
         None
     };
@@ -4073,6 +4142,28 @@ pub async fn execute_delete_insert_with_delta_restriction(
             row_preservation: RowPreservation::DeclaredReferentialIntegrity { source },
         }) = skeleton_source_closure
         {
+            // `emit_count_preservation_probe_from_body` matches the join
+            // it finds in `probe_body` against this name, exact-or-last-
+            // segment. For a model edge, `source`'s bare address (the
+            // closure's own logical derivation) is that name — a
+            // maintained model's physical table name has no extra
+            // naming-convention prefix over its bare address. For an
+            // external source, it is NOT: the compiler's `sources_`
+            // naming convention (`<schema>.sources_<address_segments>`)
+            // means "raw.users"'s physical table is "sources_raw_users",
+            // whose own last dot-segment never matches "raw.users"'s
+            // ("users") — so the closure's bare address must be swapped
+            // for `delta_source`'s own already-physical `source_table`
+            // here, or the probe silently never finds its join and the
+            // whole declared-route restriction falls back to the widened
+            // scan on every external-source live run
+            // (`docs/outcomes/20260815-definition-delta-migrate/phases/
+            // 27e-plan.md` — discovered by this phase's own end-to-end
+            // test).
+            let probe_enrichment_source = match delta_source {
+                RestrictionDeltaSource::ExternalSidecar { source_table, .. } => source_table,
+                RestrictionDeltaSource::ModelEdge { .. } => source.as_str(),
+            };
             let ctx = crate::probes::ProbeContext {
                 probe_code: "SourceCountPreservationViolated".to_string(),
                 fact: "referential_integrity".to_string(),
@@ -4094,7 +4185,10 @@ pub async fn execute_delete_insert_with_delta_restriction(
             ) {
                 smelt_logical::maintenance::ProbeDispatch::Skip(_) => {}
                 smelt_logical::maintenance::ProbeDispatch::Dispatch => {
-                    match emit_count_preservation_probe_from_body(probe_body, source) {
+                    match emit_count_preservation_probe_from_body(
+                        probe_body,
+                        probe_enrichment_source,
+                    ) {
                         Some(probe) => {
                             let batches = backend.execute_sql(&probe.sql).await?;
                             let rows = crate::check_runner::batches_to_rows(&batches);
@@ -4123,11 +4217,13 @@ pub async fn execute_delete_insert_with_delta_restriction(
                                     message: format!(
                                         "SourceCountPreservationViolated: '{source}' declares \
                                          referential_integrity, but the enrichment join over the \
-                                         touched region ({window_start}..{window_end}) returned \
+                                         touched region ({}..{}) returned \
                                          {enriched_count} row(s) against {driving_count} driving \
                                          row(s) — some driving row's join key has no match in the \
                                          dimension; correct or backfill the dimension's missing \
                                          key, or drop the declaration.{}",
+                                        region.start,
+                                        region.end,
                                         crate::probes::probe_violation_suffix(&ctx)
                                     ),
                                 });
@@ -4318,6 +4414,175 @@ pub fn resolve_live_delta_restriction_facts(
         upstream_model: driving_edge.name.clone(),
         restrict_column,
         skeleton_source_closure: cell.skeleton_source_closure.clone(),
+        region_write,
+    }))
+}
+
+/// The facts [`execute_delete_insert_with_delta_restriction`]'s
+/// `RestrictionDeltaSource::ExternalSidecar` arm needs to attempt T3 delta
+/// restriction for a region-family cell driven by an external
+/// `mutable_snapshot` source with no native change feed, resolved by
+/// [`resolve_live_external_delta_restriction_facts`].
+#[derive(Debug, Clone)]
+pub struct ExternalDeltaRestrictionFacts {
+    /// The external source's bare address (`Trigger::UpstreamMutation`'s
+    /// `source` name) — the sidecar partition this cell diffs against.
+    pub source_name: String,
+    /// The model's own region row identity, when it resolves to exactly one
+    /// column — mirrors [`DeltaRestrictionFacts::restrict_column`].
+    pub restrict_column: Option<String>,
+    /// The cell's P1 skeleton-source-closure verdict.
+    pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+    /// The P4 fingerprint projection the sidecar digests over this source.
+    pub projection: FingerprintProjection,
+    /// The region family's own change-suppressed conditional-write verdict,
+    /// resolved from the SAME `Trigger::UpstreamMutation` cell this struct
+    /// already reads.
+    pub region_write: RegionWrite,
+}
+
+/// Resolve [`ExternalDeltaRestrictionFacts`] for a model driven by an
+/// explicitly-mutable **external** source with no maintained-model upstream
+/// (`model_edges` empty is the caller's own gate —
+/// `docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`).
+/// Routes through the SAME edge-aware derivation
+/// [`resolve_live_delta_restriction_facts`] uses
+/// (`derive_model_maintenance_plan_with_edges` → the `Trigger::
+/// UpstreamMutation` cell this source drives), never re-deriving admission
+/// (`CLAUDE.md` §"Maintenance-plan purity").
+///
+/// `explicitly_mutable`'s driving source is picked deterministically
+/// (lexicographically smallest — `HashSet` iteration order is unspecified),
+/// mirroring `resolve_live_delta_restriction_facts`'s `model_edges.first()`
+/// "restrict only against one driving delta in this phase" scoping.
+///
+/// Returns `None` — logging a `tracing::debug!` `why` — when
+/// `supports_fingerprint_sidecar` is `false` for this backend, no
+/// explicitly-mutable source exists, the plan derives no `UpstreamMutation`
+/// cell for it, the closure is `Open`/absent, the source's declared
+/// `unique_key` is composite/undeclared
+/// ([`enrichment_restrict_column`] returns `None`), or no P4 fingerprint
+/// projection resolved for it — every `None` case is the caller's safe
+/// default of falling back to the ordinary widened scan.
+pub fn resolve_live_external_delta_restriction_facts(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    source_referential_integrity: &SourceReferentialIntegrity,
+    supports_fingerprint_sidecar: bool,
+) -> Result<Option<ExternalDeltaRestrictionFacts>, ChoiceRefusal> {
+    if !supports_fingerprint_sidecar {
+        tracing::debug!(
+            table,
+            "backend does not declare supports_fingerprint_sidecar — external delta \
+             restriction stays out of reach, falling back to the widened scan"
+        );
+        return Ok(None);
+    }
+    let mut candidates: Vec<&String> = explicitly_mutable.iter().collect();
+    candidates.sort();
+    let Some(source_name) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+    let Some(source_facts) = sources.iter().find(|s| &s.name == source_name) else {
+        return Ok(None);
+    };
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        &[],
+        None,
+        &[],
+        &[],
+        source_referential_integrity,
+        None,
+    ) else {
+        return Ok(None);
+    };
+    let trigger = Trigger::UpstreamMutation {
+        source: source_name.clone(),
+    };
+    let Some(cell) = result.plan.cell_for(&trigger) else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "no UpstreamMutation cell admitted for this source — external delta restriction \
+             falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    if !cell
+        .skeleton_source_closure
+        .as_ref()
+        .is_some_and(|c| c.is_closed())
+    {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "skeleton-source closure is Open/absent — external delta restriction falls back \
+             to the widened scan"
+        );
+        return Ok(None);
+    }
+    let Some(restrict_column) = enrichment_restrict_column(&source_facts.unique_key) else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "source's declared unique_key is composite or undeclared — external delta \
+             restriction falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    let Some(projection) = cell.fingerprint_projections.get(source_name).cloned() else {
+        tracing::debug!(
+            table,
+            source = %source_name,
+            "no P4 fingerprint projection resolved for this source — external delta \
+             restriction falls back to the widened scan"
+        );
+        return Ok(None);
+    };
+    let group_columns: Vec<String> = result
+        .column_groups
+        .iter()
+        .find(|g| g.name() == cell.group)
+        .map(|g| g.columns.clone())
+        .unwrap_or_default();
+    let comparability = model_property_vector(sql, &JoinContext::new())
+        .map(|v| v.comparability)
+        .unwrap_or_default();
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let overrides = effective_override(
+        metadata
+            .maintenance
+            .as_ref()
+            .and_then(|m| m.defaults.as_ref()),
+        cells_cfg,
+        source_name,
+        &group_columns,
+    );
+    let region_write = resolve_region_write_variant(
+        &group_columns,
+        &comparability,
+        &cell.row_identity,
+        &cell.trigger,
+        cell.ledger_catch_up,
+        &overrides,
+    )?;
+    Ok(Some(ExternalDeltaRestrictionFacts {
+        source_name: source_name.clone(),
+        restrict_column: Some(restrict_column.to_string()),
+        skeleton_source_closure: cell.skeleton_source_closure.clone(),
+        projection,
         region_write,
     }))
 }
@@ -4586,6 +4851,143 @@ mod tests {
             model_name: "maintenance-driver-unit-test",
             reporter: &NO_OP_REPORTER,
         }
+    }
+
+    // ── 27e: resolve_live_external_delta_restriction_facts ────────────────
+    // (`docs/outcomes/20260815-definition-delta-migrate/phases/27e-plan.md`)
+
+    /// The real `examples/timeseries/daily_events_enriched.sql` shape's SQL
+    /// body (frontmatter stripped) — the SAME fixture
+    /// `crates/smelt-runtime/tests/technique_lowering.rs`'s
+    /// `external_source_point_lookup_recompute` module reads, so this unit
+    /// test can never silently drift from what that end-to-end suite pins.
+    fn external_facts_model_sql_body() -> (smelt_core::ModelMetadata, String) {
+        let project_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+        let text = std::fs::read_to_string(project_dir.join("models/daily_events_enriched.sql"))
+            .expect("read daily_events_enriched.sql");
+        let smelt_core::FileMetadata::Single {
+            metadata,
+            sql_offset,
+        } = smelt_core::extract_file_metadata(&text).expect("parse frontmatter")
+        else {
+            panic!("daily_events_enriched.sql must be a single-model file");
+        };
+        (*metadata, text[sql_offset..].to_string())
+    }
+
+    fn external_facts_source_facts(users_unique_key: Vec<String>) -> Vec<SourceFacts> {
+        vec![
+            SourceFacts {
+                name: "raw.events".to_string(),
+                mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+                partition_col: None,
+                unique_key: vec!["event_id".to_string()],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "raw.users".to_string(),
+                mutation: smelt_logical::maintenance::MutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: users_unique_key,
+                allow_full_scan: true,
+            },
+        ]
+    }
+
+    fn external_facts_explicitly_mutable() -> HashSet<String> {
+        std::iter::once("raw.users".to_string()).collect()
+    }
+
+    fn external_facts_source_ri() -> SourceReferentialIntegrity {
+        let mut ri = SourceReferentialIntegrity::new();
+        ri.insert("raw.users".to_string(), vec!["user_id".to_string()]);
+        ri
+    }
+
+    /// A declared-RI closure (P1 `Closed`) plus a single-column declared
+    /// `unique_key` resolves external delta-restriction facts for the
+    /// `{user_name}` cell on `raw.users` — the golden path this whole
+    /// mechanism exists for.
+    #[test]
+    fn external_facts_resolve_for_a_declared_mutable_dimension() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources = external_facts_source_facts(vec!["user_id".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            true,
+        )
+        .expect("resolver does not refuse")
+        .expect("facts resolve for a declared-RI mutable dimension");
+        assert_eq!(facts.source_name, "raw.users");
+        assert_eq!(facts.restrict_column.as_deref(), Some("user_id"));
+        assert_eq!(
+            facts.skeleton_source_closure,
+            Some(SkeletonSourceClosure::Closed {
+                row_preservation: RowPreservation::DeclaredReferentialIntegrity {
+                    source: "raw.users".to_string()
+                }
+            })
+        );
+    }
+
+    /// A composite `unique_key` on the driving source makes
+    /// `enrichment_restrict_column` return `None` — this phase's semi-join
+    /// restriction is single-column only — so the resolver returns `None`
+    /// (falling back to the widened scan) rather than a facts value with no
+    /// restrict column.
+    #[test]
+    fn external_facts_refuse_a_composite_dimension_key() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources =
+            external_facts_source_facts(vec!["user_id".to_string(), "region".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            true,
+        )
+        .expect("resolver does not refuse");
+        assert!(
+            facts.is_none(),
+            "a composite unique_key must fall back to the widened scan, got {facts:?}"
+        );
+    }
+
+    /// `supports_fingerprint_sidecar: false` refuses external delta
+    /// restriction outright — the fallback is capability-driven, not a
+    /// property re-derived from the closure/key facts alone.
+    #[test]
+    fn external_facts_refuse_without_the_sidecar_capability() {
+        let (metadata, sql_body) = external_facts_model_sql_body();
+        let sources = external_facts_source_facts(vec!["user_id".to_string()]);
+        let explicitly_mutable = external_facts_explicitly_mutable();
+        let facts = resolve_live_external_delta_restriction_facts(
+            &sql_body,
+            "daily_events_enriched",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            &external_facts_source_ri(),
+            false,
+        )
+        .expect("resolver does not refuse");
+        assert!(
+            facts.is_none(),
+            "supports_fingerprint_sidecar: false must refuse, got {facts:?}"
+        );
     }
 
     /// The rejection test at the `maintenance_driver` call site: for

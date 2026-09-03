@@ -54,7 +54,9 @@ use smelt_planner::{
     AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
-use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
+use smelt_runtime::maintenance_driver::{
+    driving_steps, run_windowed_keyed_maintenance, RestrictionDeltaSource,
+};
 use smelt_runtime::types::ExecuteRequest;
 use tokio_util::sync::CancellationToken;
 
@@ -3873,9 +3875,11 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         body,
         Some("event_id"),
         Some(&closure),
-        "silver.fact",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "silver.fact",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         None,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -3963,9 +3967,11 @@ async fn region_conditional_write_matches_the_emitted_group_byte_for_byte() {
         body,
         None,
         None,
-        "sources.regions_raw",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "sources.regions_raw",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         Some(&region_write),
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
@@ -4051,9 +4057,11 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         body,
         Some("event_id"),
         Some(&closure),
-        "silver.fact",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "silver.fact",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         None,
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
         &no_retry_policy(),

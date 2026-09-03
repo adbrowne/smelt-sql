@@ -42,6 +42,7 @@ use smelt_planner::{
 use smelt_runtime::check_runner::batches_to_rows;
 use smelt_runtime::maintenance_driver::{
     driving_steps, resolve_live_membership_recompute_cell, run_windowed_keyed_maintenance,
+    RestrictionDeltaSource,
 };
 
 /// A retry policy that never retries — this conformance gate drives a real
@@ -6127,9 +6128,11 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             body,
             Some("event_id"),
             Some(&closed_verdict),
-            recipe.driving_source(),
-            "2026-07-01",
-            "2026-07-02",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: recipe.driving_source(),
+                window_start: "2026-07-01",
+                window_end: "2026-07-02",
+            },
             None,
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),
@@ -6151,9 +6154,11 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             body,
             Some("event_id"),
             Some(&open_verdict),
-            recipe.driving_source(),
-            "2026-07-01",
-            "2026-07-02",
+            RestrictionDeltaSource::ModelEdge {
+                upstream_model: recipe.driving_source(),
+                window_start: "2026-07-01",
+                window_end: "2026-07-02",
+            },
             None,
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
             &no_retry_policy(),

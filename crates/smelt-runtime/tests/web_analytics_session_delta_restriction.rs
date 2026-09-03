@@ -25,7 +25,9 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_logical::maintenance::derive::{append_model_edge_cells, ModelEdge};
 use smelt_logical::maintenance::emit::{MaintenanceDialect, Region};
 use smelt_logical::maintenance::{MaintenancePlan, Trigger};
-use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
+use smelt_runtime::maintenance_driver::{
+    execute_delete_insert_with_delta_restriction, RestrictionDeltaSource,
+};
 use tempfile::TempDir;
 
 /// A retry policy that never retries — this test exercises the T3
@@ -173,9 +175,11 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         body,
         Some("event_id"),
         cell.skeleton_source_closure.as_ref(),
-        "silver.events_deduped",
-        "2026-07-01",
-        "2026-07-02",
+        RestrictionDeltaSource::ModelEdge {
+            upstream_model: "silver.events_deduped",
+            window_start: "2026-07-01",
+            window_end: "2026-07-02",
+        },
         None,
         MaintenanceDialect::DuckDb,
         &no_retry_policy(),
