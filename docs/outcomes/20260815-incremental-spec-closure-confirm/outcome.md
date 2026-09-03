@@ -59,7 +59,7 @@ divergence entry removed).
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
-| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | pending |
+| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | planned |
 | 3 | Resolve any residual or drifted bullets, including the `keyed-grain-residue` blocked-phase residue: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
@@ -85,6 +85,13 @@ divergence entry removed).
   `baseline-inventory.md` §Extraction notes. `incremental_shapes` `IS-24` (the transactional-fold
   bullet) is flagged for phase 2 as the `keyed-grain-residue` blocked-phase bullet — not to be
   marked closed without independent repo-state verification.
+
+- 2026-09-04 — Phase 2 planned. No reshape: phase 1 surfaced no work needing a new row (its one
+  finding, the corrected Open-Question denominators, is already carried in `baseline-inventory.md`
+  and lands in the phase-5 report), and row 3 already names the `IS-24` / `keyed-grain-residue`
+  residue that phase 1 flagged. Fixed here: the four-value disposition vocabulary
+  (`closed <sha>` / `open` / `drifted` / `residue`) and the rule that a `closed` claim is verified
+  against the repo, never against the removing commit's message or an owning outcome's say-so.
 
 ## Blocked
 
