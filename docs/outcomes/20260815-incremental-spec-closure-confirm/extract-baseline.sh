@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Extracts every "§Known Divergences / Open Questions" bullet from the four
-# incremental-program anchor specs, as they stood at the 2026-08-15 program
-# baseline commit. Emits one TSV line per bullet:
-#   spec<TAB>subsection<TAB>bold lead-in<TAB>has_open_question(yes/no)<TAB>baseline line no
+# incremental-program anchor specs, as they stood at a given git ref (default:
+# the 2026-08-15 program baseline commit). Emits one TSV line per bullet:
+#   spec<TAB>subsection<TAB>bold lead-in<TAB>has_open_question(yes/no)<TAB>line no (at that ref)
 #
-# Usage: bash extract-baseline.sh
+# Usage: bash extract-baseline.sh [ref]
 set -euo pipefail
 
-BASELINE_COMMIT="03a431f3"
+REF="${1:-03a431f3}"
 SPECS=(definition_deltas incremental_models incremental_shapes model_properties)
 
 for spec in "${SPECS[@]}"; do
-  git show "${BASELINE_COMMIT}:docs/specs/${spec}.md" | awk -v spec="$spec" '
+  git show "${REF}:docs/specs/${spec}.md" | awk -v spec="$spec" '
     function flush() {
       if (bullet_active) {
         # Find the bold lead-in: text between the first and second "**".

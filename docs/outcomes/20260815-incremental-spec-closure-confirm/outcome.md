@@ -59,7 +59,7 @@ divergence entry removed).
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
-| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | planned |
+| 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
 | 3 | Resolve any residual or drifted bullets, including the `keyed-grain-residue` blocked-phase residue: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
@@ -92,6 +92,18 @@ divergence entry removed).
   residue that phase 1 flagged. Fixed here: the four-value disposition vocabulary
   (`closed <sha>` / `open` / `drifted` / `residue`) and the rule that a `closed` claim is verified
   against the repo, never against the removing commit's message or an owning outcome's say-so.
+- 2026-09-04 — Phase 2 done. All 80 baseline bullets classified: 35 `closed`, 29 `open`, 16
+  `drifted`, **0 `residue`** — every owning-outcome closure claim independently confirmed against
+  code/tests/a landed decision record. Found and fixed a mislabeling carried from phase 1's
+  decision log: the transactional-merge-ledger bullet (the one `20260815-keyed-grain-residue`
+  phase 3 is blocked on) is `IS-18`, not `IS-24` as previously written here — `IS-24` is a
+  different bullet (recurrence-bound slice pruning / granularity relaxation / slice-scoped
+  deletion), now `drifted` (moved to §Future Extensions) for unrelated reasons. `IS-18` itself
+  classified `drifted` (bold lead-in reworded, same DuckDB-only gap), not `residue`: the blocked
+  outcome's decision log honestly states the criterion is "deliberately left unmet" and never
+  claims closure, so success criterion 6 doesn't fire — no owning-outcome reopen is needed. Full
+  detail in `phases/02-summary.md` and `baseline-inventory.md` §Classification summary. Row 3 is
+  lighter-scoped than anticipated (a wording spot-check on the 16 `drifted` rows, not a reopen).
 
 ## Blocked
 
