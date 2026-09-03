@@ -1,7 +1,7 @@
 # Outcome: Confirm every closeable-without-design divergence is closed, and everything left is honestly flagged
 
 **Created:** 2026-08-15
-**Status:** active
+**Status:** done
 **Source:** `docs/outcomes/20260815-definition-delta-migrate` and the two outcomes it spawned
 (`keyed-grain-residue`, `partition-grain-residue`)
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
@@ -62,7 +62,7 @@ divergence entry removed).
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
 | 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | done |
-| 5 | Write `closure-report.md`; final standing-gate run | planned |
+| 5 | Write `closure-report.md`; final standing-gate run | done |
 
 ## Decision log
 
@@ -176,6 +176,19 @@ divergence entry removed).
   one section per criterion, all five criterion-5 gates named with a verdict). The criterion-5
   gates are re-run in this phase rather than cited from phase 4, since criterion 5 asks for a
   final green suite.
+
+- 2026-09-04 — Phase 5 done. `closure-report.md` written: all 80 baseline IDs enumerated with
+  disposition and, for all 29 `open` rows, the per-bullet reason criterion 1 demanded (product
+  decision this program declined vs. plain unscheduled backlog, distinguished per row). All five
+  criterion-5 gates re-run fresh in this phase, all PASS (`verify-phase.sh`;
+  `maintenance_conformance` 75/75; `statement_parity` 33/33; `walk_coverage` 4/4; `execute_parity`
+  4/4). New gate `check-closure-report.sh` went red (report missing, then an ID-padding bug: `seq
+  -w` doesn't zero-pad when the range max is single-digit, e.g. `DD-1..7` instead of `DD-01..07`)
+  then green after fixing the padding. `check-inventory.sh`/`check-classification.sh`/
+  `check-validations.sh` re-run, all still green. All six success criteria met (see report
+  §Summary) — criterion 6 confirmed zero false-closure residue, with `IS-18` (the
+  `keyed-grain-residue` blocked bullet) explicitly named as correctly not reopened. No spec or code
+  changes this phase (audit artifact only, as planned). Outcome status set to `done`.
 
 ## Blocked
 
