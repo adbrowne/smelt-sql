@@ -2768,7 +2768,7 @@ them distinct, because the correct response to each is different:</p>
 </ol>
 <p>There is a fourth kind — changing the <em>logic</em> of an existing column —
 that smelt does not yet detect: the schema is unchanged, so nothing
-flags that history is stale, and you re-run or <code>backbuild</code> the affected
+flags that history is stale, and you re-run or <code>rebuild</code> the affected
 range yourself. Automatic definition-change handling is tracked in the
 project's maintenance-plan spec; until it lands, treat logic edits as
 backfills you initiate.</p>
@@ -2777,11 +2777,11 @@ stage projects (<a href="https://github.com/adbrowne/smelt-sql/tree/main/example
 <a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/04_add_column">stage 4</a>,
 <a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/05_enrichment">stage 5</a>).</p>
 <h2 id="backfilling-a-range">Backfilling a range<a class="headerlink" href="#backfilling-a-range" title="Permanent link">&para;</a></h2>
-<p><code>smelt backbuild</code> rebuilds a model (and anything upstream it needs) over
+<p><code>smelt rebuild</code> rebuilds a model (and anything upstream it needs) over
 a date range. <code>--dry-run</code> prints the full plan without executing:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>silver.events_parsed<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-04-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-04-19<span class="w"> </span>--dry-run
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>rebuild<span class="w"> </span>silver.events_parsed<span class="w"> </span>--start<span class="w"> </span><span class="m">2026</span>-04-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2026</span>-04-19<span class="w"> </span>--dry-run
 </code></pre></div>
-<!-- smelt-generate: @cwd=tutorial_stages/03_late_data @render=skeleton backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
+<!-- smelt-generate: @cwd=tutorial_stages/03_late_data @render=skeleton rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">-- Would run: bronze.raw_events (materialization shown below)</span>
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1">-- … model SELECT body (see the full SQL below) …</span>
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
@@ -2811,7 +2811,7 @@ a date range. <code>--dry-run</code> prints the full plan without executing:</p>
 </code></pre></div>
 <details class="example">
 <summary>Full dry-run transcript</summary>
-<p><!-- smelt-generate: @cwd=tutorial_stages/03_late_data backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
+<p><!-- smelt-generate: @cwd=tutorial_stages/03_late_data rebuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">-- Would run: bronze.raw_events (materialization shown below)</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">device_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">user_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">seconds_in_day</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">seconds_in_day</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_time</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">arrival_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">utm_campaign</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">utm_campaign</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">payload</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_date</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="k">SELECT</span>
@@ -2951,7 +2951,7 @@ new rows populated — is pinned end-to-end by
 <ul>
 <li><strong>Populating history.</strong> <code>NULL</code> history is often fine (the flag simply
   starts existing). When it isn't, declare a <code>backfill:</code> expression for
-  the column in frontmatter, or <code>smelt backbuild</code> the range — the
+  the column in frontmatter, or <code>smelt rebuild</code> the range — the
   definition already computes the column, so a backfill fills it. See
   <a href="../../../guide/schema-evolution/">schema evolution</a>.</li>
 <li><strong>The not-nullable trap.</strong> If the new column is provably <code>NOT NULL</code>

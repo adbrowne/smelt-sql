@@ -2894,6 +2894,10 @@
 <p>Hover over any model reference, source, or CTE to see its full schema -- column names, types, and where the data comes from.</p>
 <p>Column types include nullability: a non-nullable column shows as <code>T NOT NULL</code> (for example <code>INTEGER NOT NULL</code>), while a nullable column shows the bare type (for example <code>INTEGER</code>). This matches the annotation syntax you write in function signatures, so what you see in hover is always consistent with what you type.</p>
 <p>This is particularly useful when writing joins or aggregations: you can quickly check what columns are available without switching files.</p>
+<p>Hovering over a <code>smelt.&lt;path&gt;</code> reference into a partition-grain incremental model also appends a
+one-line scan-window clamp readout below the schema table when the source carries a resolvable
+<code>before</code>/<code>after</code> bound — the same run-relative window <code>smelt explain --json</code>'s <code>source_bounds</code>
+reports.</p>
 <p><img alt="Model schema on hover" src="../../assets/editor-features/01-model-schema-on-hover-editor.png" /></p>
 <p><img alt="Upstream schema lineage" src="../../assets/editor-features/02-upstream-schema-lineage.png" /></p>
 <p><img alt="Source schema on hover" src="../../assets/editor-features/03-source-schema-on-hover-editor.png" /></p>

@@ -1172,10 +1172,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#modeldef-the-closed-five-field-record" class="md-nav__link">
+  <a href="#modeldef-the-closed-seven-field-record" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ModelDef — the closed five-field record
+        ModelDef — the closed seven-field record
       
     </span>
   </a>
@@ -1248,6 +1248,17 @@
     <span class="md-ellipsis">
       
         Complete example: per-cohort union
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#per-cohort-overrides-distinct-event-time-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-cohort overrides: distinct event-time columns
       
     </span>
   </a>
@@ -2784,10 +2795,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#modeldef-the-closed-five-field-record" class="md-nav__link">
+  <a href="#modeldef-the-closed-seven-field-record" class="md-nav__link">
     <span class="md-ellipsis">
       
-        ModelDef — the closed five-field record
+        ModelDef — the closed seven-field record
       
     </span>
   </a>
@@ -2867,6 +2878,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#per-cohort-overrides-distinct-event-time-columns" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Per-cohort overrides: distinct event-time columns
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#diagnostic-codes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2930,7 +2952,7 @@
 <a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">     </span><span class="err">}</span><span class="p">)</span>
 </code></pre></div>
 <p>The file body is a meta-language expression of type <code>List&lt;ModelDef&gt;</code>. Each <code>ModelDef</code> value in the list becomes a model in the workspace.</p>
-<h2 id="modeldef-the-closed-five-field-record">ModelDef — the closed five-field record<a class="headerlink" href="#modeldef-the-closed-five-field-record" title="Permanent link">&para;</a></h2>
+<h2 id="modeldef-the-closed-seven-field-record">ModelDef — the closed seven-field record<a class="headerlink" href="#modeldef-the-closed-seven-field-record" title="Permanent link">&para;</a></h2>
 <p><code>ModelDef</code> is a built-in closed record type. It is user-constructible only inside a generator file body.</p>
 <table>
 <thead>
@@ -2972,9 +2994,21 @@
 <td>No</td>
 <td><code>""</code></td>
 </tr>
+<tr>
+<td><code>timeseries</code></td>
+<td><code>Record{event_time_column: Text, partition_column: Text, granularity: Text, week_start: Text?, assert_monotonic: Bool?}</code></td>
+<td>No</td>
+<td>inherits the frontmatter <code>timeseries:</code> block</td>
+</tr>
+<tr>
+<td><code>safety_overrides</code></td>
+<td><code>Record{allow_window_functions: Bool?, allow_having: Bool?, allow_limit: Bool?, allow_subqueries: Bool?, allow_nondeterministic: Bool?, allow_distinct: Bool?}</code></td>
+<td>No</td>
+<td>inherits the frontmatter <code>safety_overrides:</code> block</td>
+</tr>
 </tbody>
 </table>
-<p>The <code>name</code> field must be a path-safe identifier (ASCII letters, digits, underscores only; must not start with a digit).</p>
+<p>The <code>name</code> field must be a path-safe identifier (ASCII letters, digits, underscores only; must not start with a digit). <code>timeseries</code> and <code>safety_overrides</code> are honoured only when <code>materialization</code> is <code>'incremental'</code>; present on any other materialization, they emit <code>ModelDefOverrideRequiresIncremental</code>.</p>
 <h2 id="emitted-model-paths">Emitted model paths<a class="headerlink" href="#emitted-model-paths" title="Permanent link">&para;</a></h2>
 <p>Each emitted <code>ModelDef</code> with <code>name: 'n'</code> from a generator at workspace-relative path <code>&lt;dir&gt;/&lt;base&gt;.gen.sql</code> becomes:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt.&lt;dir&gt;.&lt;base&gt;.&lt;n&gt;
@@ -2997,7 +3031,7 @@
 <ul>
 <li><code>tags</code>: frontmatter tags are merged with per-<code>ModelDef</code> tags.</li>
 <li><code>materialization</code>: the frontmatter value is the default; each <code>ModelDef</code> may override it via the <code>materialization</code> field.</li>
-<li><code>incremental:</code> block: shared by all incremental emissions from the same generator. Per-<code>ModelDef</code> overrides are not supported in v1.</li>
+<li><code>timeseries:</code> / <code>safety_overrides:</code> blocks: inherited by every incremental emission from the same generator by default. A <code>ModelDef</code> may replace either block in full for its own emission via the <code>timeseries</code> / <code>safety_overrides</code> fields (whole-block replacement, not a key-level merge) — see <a href="#per-cohort-overrides-distinct-event-time-columns">Per-cohort overrides</a> below.</li>
 </ul>
 <h2 id="name-uniqueness-and-collision-rules">Name uniqueness and collision rules<a class="headerlink" href="#name-uniqueness-and-collision-rules" title="Permanent link">&para;</a></h2>
 <ul>
@@ -3061,6 +3095,36 @@
 <a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">cohorts</span><span class="p">.</span><span class="n">eu</span>
 </code></pre></div></p>
 <p>The full working example is in <code>examples/per_cohort_union/</code>.</p>
+<h2 id="per-cohort-overrides-distinct-event-time-columns">Per-cohort overrides: distinct event-time columns<a class="headerlink" href="#per-cohort-overrides-distinct-event-time-columns" title="Permanent link">&para;</a></h2>
+<p>A generator's frontmatter <code>timeseries:</code> block applies file-wide, but a source-per-cohort setup
+sometimes needs a different event-time column per emission. Each <code>ModelDef</code> can replace the
+block for its own emission via the <code>timeseries</code> field:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">---</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">generates</span><span class="p">:</span><span class="w"> </span><span class="n">models</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="c1">---</span>
+<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="p">[</span>
+<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="w">  </span><span class="n">ModelDef</span><span class="w"> </span><span class="err">{</span>
+<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="w">    </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;us_west&#39;</span><span class="p">,</span>
+<a id="__codelineno-8-9" name="__codelineno-8-9" href="#__codelineno-8-9"></a><span class="w">    </span><span class="n">body</span><span class="p">:</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">orders_us</span><span class="p">,</span>
+<a id="__codelineno-8-10" name="__codelineno-8-10" href="#__codelineno-8-10"></a><span class="w">    </span><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;incremental&#39;</span><span class="p">,</span>
+<a id="__codelineno-8-11" name="__codelineno-8-11" href="#__codelineno-8-11"></a><span class="w">    </span><span class="n">timeseries</span><span class="p">:</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;order_ts&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;order_ts&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;day&#39;</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-8-12" name="__codelineno-8-12" href="#__codelineno-8-12"></a><span class="w">  </span><span class="err">}</span><span class="p">,</span>
+<a id="__codelineno-8-13" name="__codelineno-8-13" href="#__codelineno-8-13"></a><span class="w">  </span><span class="n">ModelDef</span><span class="w"> </span><span class="err">{</span>
+<a id="__codelineno-8-14" name="__codelineno-8-14" href="#__codelineno-8-14"></a><span class="w">    </span><span class="n">name</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;eu&#39;</span><span class="p">,</span>
+<a id="__codelineno-8-15" name="__codelineno-8-15" href="#__codelineno-8-15"></a><span class="w">    </span><span class="n">body</span><span class="p">:</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">orders_eu</span><span class="p">,</span>
+<a id="__codelineno-8-16" name="__codelineno-8-16" href="#__codelineno-8-16"></a><span class="w">    </span><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;incremental&#39;</span><span class="p">,</span>
+<a id="__codelineno-8-17" name="__codelineno-8-17" href="#__codelineno-8-17"></a><span class="w">    </span><span class="n">timeseries</span><span class="p">:</span><span class="w"> </span><span class="err">{</span><span class="w"> </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;created_at&#39;</span><span class="p">,</span><span class="w"> </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;day&#39;</span><span class="w"> </span><span class="err">}</span>
+<a id="__codelineno-8-18" name="__codelineno-8-18" href="#__codelineno-8-18"></a><span class="w">  </span><span class="err">}</span>
+<a id="__codelineno-8-19" name="__codelineno-8-19" href="#__codelineno-8-19"></a><span class="p">]</span>
+</code></pre></div>
+<p><code>smelt.cohorts.us_west</code> and <code>smelt.cohorts.eu</code> are each partition-grain models with their own
+<code>event_time_column</code> — the override replaces the frontmatter's <code>timeseries:</code> block in full for
+that emission, so there is no risk of a stale sub-field carrying over. <code>safety_overrides</code>
+follows the same whole-block-replacement rule. Both fields require <code>materialization:
+'incremental'</code> on the same literal; omitting it (or setting <code>'view'</code>/<code>'table'</code>) emits
+<code>ModelDefOverrideRequiresIncremental</code>.</p>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
@@ -3109,6 +3173,10 @@
 <tr>
 <td><code>GeneratorBodyForbidsModelReflection</code></td>
 <td>Generator body calls <code>smelt.models.with_tag</code> or <code>smelt.models.all</code></td>
+</tr>
+<tr>
+<td><code>ModelDefOverrideRequiresIncremental</code></td>
+<td><code>timeseries</code> or <code>safety_overrides</code> field present but <code>materialization</code> is not <code>'incremental'</code></td>
 </tr>
 </tbody>
 </table>
