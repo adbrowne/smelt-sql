@@ -1,7 +1,7 @@
 # Outcome: Confirm every closeable-without-design divergence is closed, and everything left is honestly flagged
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** active
 **Source:** `docs/outcomes/20260815-definition-delta-migrate` and the two outcomes it spawned
 (`keyed-grain-residue`, `partition-grain-residue`)
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
@@ -58,13 +58,23 @@ divergence entry removed).
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | pending |
+| 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | planned |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | pending |
-| 3 | Resolve any residual or drifted bullets: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
+| 3 | Resolve any residual or drifted bullets, including the `keyed-grain-residue` blocked-phase residue: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
 
 ## Decision log
+
+- 2026-09-04 — Phase 1 planned. Two facts fixed here. (a) The program baseline is commit
+  `03a431f3` (`outcome(20260815-definition-delta-migrate): scaffold`), the first commit of the
+  2026-08-15 program; every later spec edit is in scope for classification. (b) The precondition
+  in §"The outcome" — run only once all three owning outcomes are `done` — is **not** met:
+  `20260815-keyed-grain-residue` is `**Status:** blocked` (its phase 3, "Transactional ledger fold
+  on every shipped backend"; all its other rows are `done`). This does not block the audit — it is
+  precisely the case success criterion 6 exists for — so the audit proceeds and phase 3's row is
+  reworded to name that residue explicitly. No other reshape: rows 2-5 still map one-for-one onto
+  criteria 2-3, 4 and 1/5.
 
 ## Blocked
 
