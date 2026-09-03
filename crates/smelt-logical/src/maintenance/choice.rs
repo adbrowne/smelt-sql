@@ -1008,12 +1008,86 @@ pub enum KeyedWriteMechanism {
 /// recompute, [`ChosenTechnique::RegionRecompute`]), never invent a
 /// merge-less unconditional MERGE substitute.
 ///
-/// This does not yet consult a `write:` pin (the open write-pattern
-/// registry and `maintenance.cells[].write` — tracked by a later phase);
-/// today it always prefers `MERGE` when the backend has it, matching
-/// "never a silent substitution" — the staged-candidate mechanism is
-/// reachable *only* through a genuine capability gap, not a preference.
+/// Consults an optional `write:` pin (`incremental_models.md` §"Per-cell
+/// write addressing" → "User pins"): within the `KeyedFold` technique
+/// family, `keyed`/`keyed_conditional` and `staged_candidate` all select the
+/// same *technique* but pin different **mechanisms**. `keyed`/
+/// `keyed_conditional` pin the `MERGE` mechanism — refusing
+/// (`ChoiceRefusal`) rather than silently falling back to the
+/// staged-candidate shape when the backend can't run `MERGE` (a fail-closed
+/// second line of defence behind the open registry's own
+/// `WriteCapability::Merge` check, `resolve_write_pin`). `staged_candidate`
+/// pins the merge-less staged conditional `DELETE`+`INSERT` **even on a
+/// `MERGE`-capable backend** — an explicit pin is not a downgrade to be
+/// second-guessed — and refuses when `suppression` is `Unconditional`: the
+/// staged-candidate emitter has no unconditional shape, so there is nothing
+/// to fall back to except a silent substitution, which a pin must never
+/// produce. A pin naming any other pattern (e.g. `region`) is outside this
+/// function's family — [`resolve_cell_choice`] itself already resolved (or
+/// refused) that case, so this function does not second-guess it and just
+/// applies the unpinned default below.
+///
+/// Absent a pin (or given one outside the `KeyedFold` family),
+/// `Ok(None)`/`Ok(Some(..))` matches the unpinned default: `MERGE` is
+/// preferred whenever the backend has it, and the staged-candidate
+/// mechanism is reachable only through a genuine capability gap
+/// (`backend_supports_merge = false` with a `Suppressed` verdict) — never a
+/// preference. `Ok(None)` means neither mechanism this function knows about
+/// is admissible: the backend cannot run `MERGE`, and the compare group was
+/// not fully comparable (or no row identity was proven) —
+/// `WriteSuppression::Unconditional`. There is no merge-less *unconditional*
+/// keyed-fold emitter in this catalogue (the staged-candidate shape's
+/// `DELETE`+`INSERT` only makes sense restricted to the rows whose effect is
+/// not the identity — see [`super::emit::emit_staged_candidate_conditional`]'s
+/// panic contract); a caller reaching `Ok(None)` must fall back to a
+/// backend-agnostic mechanism outside this function's scope (e.g. the
+/// always-available whole-region recompute,
+/// [`ChosenTechnique::RegionRecompute`]), never invent a merge-less
+/// unconditional MERGE substitute.
 pub fn resolve_keyed_write_mechanism(
+    suppression: &WriteSuppression,
+    backend_supports_merge: bool,
+    write_pin: Option<&'static super::WritePattern>,
+) -> Result<Option<KeyedWriteMechanism>, ChoiceRefusal> {
+    if let Some(pattern) = write_pin {
+        match pattern.name {
+            "staged_candidate" => {
+                return match suppression {
+                    WriteSuppression::Suppressed { compared_columns } => {
+                        Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                            compared_columns: compared_columns.clone(),
+                        }))
+                    }
+                    WriteSuppression::Unconditional { why } => Err(ChoiceRefusal {
+                        trigger: "keyed-fold cell".to_string(),
+                        pinned: PinnedRequest::Write(pattern.name.to_string()),
+                        why: format!("write: staged_candidate has no unconditional form — {why}"),
+                    }),
+                };
+            }
+            "keyed" | "keyed_conditional" => {
+                return if backend_supports_merge {
+                    Ok(Some(KeyedWriteMechanism::Merge(suppression.clone())))
+                } else {
+                    Err(ChoiceRefusal {
+                        trigger: "keyed-fold cell".to_string(),
+                        pinned: PinnedRequest::Write(pattern.name.to_string()),
+                        why: "the backend cannot run MERGE — write: keyed/keyed_conditional \
+                              pins the MERGE mechanism, never a silent substitute"
+                            .to_string(),
+                    })
+                };
+            }
+            _ => {}
+        }
+    }
+    Ok(default_keyed_write_mechanism(
+        suppression,
+        backend_supports_merge,
+    ))
+}
+
+fn default_keyed_write_mechanism(
     suppression: &WriteSuppression,
     backend_supports_merge: bool,
 ) -> Option<KeyedWriteMechanism> {
@@ -1253,29 +1327,34 @@ mod keyed_write_mechanism_tests {
         }
     }
 
+    fn pattern(name: &str) -> &'static super::super::WritePattern {
+        super::super::lookup_write_pattern(name)
+            .unwrap_or_else(|| panic!("registry entry '{name}' must exist"))
+    }
+
     #[test]
     fn merge_capable_backend_always_resolves_to_merge_never_staged_candidate() {
         // Even a fully-comparable group stays on MERGE when the backend
         // can run one — the staged-candidate mechanism is never a silent
         // substitute for a MERGE the backend could have executed.
-        let resolved = resolve_keyed_write_mechanism(&suppressed(), true);
-        assert_eq!(resolved, Some(KeyedWriteMechanism::Merge(suppressed())));
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), true, None);
+        assert_eq!(resolved, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
 
-        let resolved_unconditional = resolve_keyed_write_mechanism(&unconditional(), true);
+        let resolved_unconditional = resolve_keyed_write_mechanism(&unconditional(), true, None);
         assert_eq!(
             resolved_unconditional,
-            Some(KeyedWriteMechanism::Merge(unconditional()))
+            Ok(Some(KeyedWriteMechanism::Merge(unconditional())))
         );
     }
 
     #[test]
     fn merge_less_backend_with_comparable_group_admits_staged_candidate() {
-        let resolved = resolve_keyed_write_mechanism(&suppressed(), false);
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), false, None);
         assert_eq!(
             resolved,
-            Some(KeyedWriteMechanism::StagedCandidate {
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
                 compared_columns: vec!["event_count".to_string()]
-            })
+            }))
         );
     }
 
@@ -1284,8 +1363,84 @@ mod keyed_write_mechanism_tests {
         // Fail-closed: no merge-less unconditional keyed-fold mechanism
         // exists in this catalogue — the caller must fall back further
         // (e.g. region recompute), never invent a substitute here.
-        let resolved = resolve_keyed_write_mechanism(&unconditional(), false);
-        assert_eq!(resolved, None);
+        let resolved = resolve_keyed_write_mechanism(&unconditional(), false, None);
+        assert_eq!(resolved, Ok(None));
+    }
+
+    #[test]
+    fn an_unpinned_cell_resolves_exactly_as_before() {
+        assert_eq!(
+            resolve_keyed_write_mechanism(&suppressed(), true, None),
+            Ok(Some(KeyedWriteMechanism::Merge(suppressed())))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&unconditional(), true, None),
+            Ok(Some(KeyedWriteMechanism::Merge(unconditional())))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&suppressed(), false, None),
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: vec!["event_count".to_string()]
+            }))
+        );
+        assert_eq!(
+            resolve_keyed_write_mechanism(&unconditional(), false, None),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn staged_candidate_pin_selects_staged_mechanism_on_a_merge_capable_backend() {
+        let resolved =
+            resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("staged_candidate")));
+        assert_eq!(
+            resolved,
+            Ok(Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: vec!["event_count".to_string()]
+            }))
+        );
+    }
+
+    #[test]
+    fn staged_candidate_pin_over_an_unconditional_verdict_refuses() {
+        for backend_supports_merge in [true, false] {
+            let resolved = resolve_keyed_write_mechanism(
+                &unconditional(),
+                backend_supports_merge,
+                Some(pattern("staged_candidate")),
+            );
+            match resolved {
+                Err(ChoiceRefusal { pinned, .. }) => {
+                    assert_eq!(pinned, PinnedRequest::Write("staged_candidate".to_string()));
+                }
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn keyed_conditional_pin_selects_merge_and_refuses_on_a_merge_less_backend() {
+        let refused =
+            resolve_keyed_write_mechanism(&suppressed(), false, Some(pattern("keyed_conditional")));
+        match refused {
+            Err(ChoiceRefusal { pinned, .. }) => {
+                assert_eq!(
+                    pinned,
+                    PinnedRequest::Write("keyed_conditional".to_string())
+                );
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let admitted =
+            resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("keyed_conditional")));
+        assert_eq!(admitted, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
+    }
+
+    #[test]
+    fn a_pin_outside_the_keyed_fold_family_leaves_the_default_selection() {
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), true, Some(pattern("region")));
+        assert_eq!(resolved, Ok(Some(KeyedWriteMechanism::Merge(suppressed()))));
     }
 }
 

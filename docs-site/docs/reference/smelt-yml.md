@@ -357,6 +357,8 @@ maintenance:
 
 `smelt explain <model>` prints each cell's admissible pattern set and its active pin (if any), so you can see what a pin would resolve against before setting one.
 
+Within a keyed-fold cell, `write: keyed` (or its explicit alias `write: keyed_conditional`) and `write: staged_candidate` are not two different techniques — both keep the fold, they just pin a different *mechanism* for it. `keyed`/`keyed_conditional` pin the ordinary `MERGE`; unavailable on a backend without `MERGE` fails `MaintenanceWritePatternUnavailable` rather than silently downgrading. `staged_candidate` pins the merge-less staged conditional `DELETE`+`INSERT` — even on a backend that *can* run `MERGE`, since an explicit pin is a deliberate choice, not a downgrade to second-guess. A `staged_candidate` pin over a cell whose write-suppression proof resolved to the unconditional (always-rewrite) form fails `MaintenanceWriteAddressingRefused`: the staged-candidate mechanism has no unconditional shape to fall back to.
+
 ---
 
 ## Probes Configuration

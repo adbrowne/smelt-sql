@@ -2101,6 +2101,68 @@ fn substitute_identifiers(text: &str, replacements: &[(String, String)]) -> Stri
     result
 }
 
+/// The post-fold candidate rows for a keyed fold (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27d-plan.md`): a keyed fold's
+/// staged candidate is `combiner(stored, delta)`, not the raw delta — the
+/// merge-less staged-candidate mechanism ([`emit_staged_candidate_conditional`])
+/// needs this select as its `candidate_select` to realise a `KeyedFold`
+/// cell, mirroring what [`emit_keyed_fold`]'s `MERGE … WHEN MATCHED THEN
+/// UPDATE SET` already computes for the `MERGE`-capable path.
+///
+/// `SELECT <key>, <folds> FROM (<delta_sql>) AS delta LEFT JOIN <table> AS
+/// target ON <key join>` — a `LEFT JOIN` of the delta to the target so every
+/// delta key is represented even when the target has no stored row for it
+/// yet. A matched key (the target row exists) resolves each fold column to
+/// `folds`'s own combine expression, exactly like `emit_keyed_fold`'s
+/// matched arm. A delta-only key (no stored row — `target`'s join columns
+/// are `NULL`) resolves each fold column to its own **raw delta value**
+/// instead: `folds`'s combine expressions are written in terms of
+/// `target.*`/`delta.*` assuming a matched row (e.g. `target.c + delta.c` for
+/// a `Sum` combiner), so applying them unmodified to an absent target would
+/// produce `NULL` rather than the delta's own value — the same "insert the
+/// delta row as-is" contract `emit_keyed_fold`'s `WHEN NOT MATCHED THEN
+/// INSERT` arm already has.
+///
+/// # Panics
+/// Panics if `key` is empty — an identity-free call has no join to build
+/// (mirrors [`emit_staged_candidate_conditional`]'s own empty-key panic).
+pub fn keyed_fold_candidate_select(
+    table: &str,
+    key: &[String],
+    folds: &[(String, String)],
+    delta_sql: &str,
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !key.is_empty(),
+        "keyed_fold_candidate_select requires a non-empty key for {table}"
+    );
+    let unmatched_guard = format!("target.{} IS NULL", key[0]);
+    let key_cols = key
+        .iter()
+        .map(|k| format!("COALESCE(delta.{k}, target.{k}) AS {k}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fold_cols = folds
+        .iter()
+        .map(|(col, expr)| {
+            format!("CASE WHEN {unmatched_guard} THEN delta.{col} ELSE {expr} END AS {col}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let on = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let select_list = if fold_cols.is_empty() {
+        key_cols
+    } else {
+        format!("{key_cols}, {fold_cols}")
+    };
+    format!("SELECT {select_list} FROM ({delta_sql}) AS delta LEFT JOIN {table} AS target ON {on}")
+}
+
 // ── Decomposed state (rung 2) select augmentation (`docs/specs/
 // incremental_shapes.md` §"Decomposed state (rung 2) in keyed models") ────
 
@@ -3737,6 +3799,102 @@ mod staged_candidate_conditional_tests {
             &["user_id".to_string()],
             "SELECT user_id, tier FROM source_delta",
             &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyed_fold_candidate_select_tests {
+    use super::*;
+
+    fn folds() -> Vec<(String, String)> {
+        vec![(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )]
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_folds_stored_state_against_the_delta() {
+        let sql = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        // A matched key's candidate row resolves to the fold's own combine
+        // expression, exactly as emit_keyed_fold's matched arm does.
+        assert!(
+            sql.contains("ELSE target.event_count + delta.event_count END AS event_count"),
+            "expected the fold's combine expression in the matched (ELSE) arm, got: {sql}"
+        );
+        assert!(
+            sql.contains("LEFT JOIN main.user_stats AS target ON target.user_id = delta.user_id"),
+            "expected a LEFT JOIN of the delta to the target on the key, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_carries_keys_absent_from_the_target() {
+        let sql = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        // A delta-only key (no stored row) resolves to its own raw delta
+        // value, matching WHEN NOT MATCHED THEN INSERT's whole-row insert.
+        assert!(
+            sql.contains("CASE WHEN target.user_id IS NULL THEN delta.event_count ELSE"),
+            "expected the delta-only THEN arm to carry the raw delta value, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn keyed_fold_candidate_select_feeds_the_staged_emitter_unchanged() {
+        let candidate_select = keyed_fold_candidate_select(
+            "main.user_stats",
+            &["user_id".to_string()],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
+        );
+
+        let group = emit_staged_candidate_conditional(
+            "main.user_stats",
+            "__smelt_staged_user_stats",
+            &["user_id".to_string()],
+            &candidate_select,
+            &["event_count".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 5);
+        assert_eq!(
+            group.statements[2].sql,
+            format!(
+                "DELETE FROM main.user_stats USING __smelt_staged_user_stats WHERE \
+                 main.user_stats.user_id = __smelt_staged_user_stats.user_id AND \
+                 (main.user_stats.event_count IS DISTINCT FROM \
+                 __smelt_staged_user_stats.event_count)"
+            )
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty key")]
+    fn keyed_fold_candidate_select_panics_on_empty_key() {
+        keyed_fold_candidate_select(
+            "main.user_stats",
+            &[],
+            &folds(),
+            "SELECT user_id, COUNT(*) AS event_count FROM events GROUP BY user_id",
             MaintenanceDialect::DuckDb,
         );
     }

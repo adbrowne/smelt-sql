@@ -1046,6 +1046,19 @@ identity, refuses `MaintenanceWriteAddressingRefused` naming the offending colum
 `ChoiceRefusal` raised before any statement executes — never a silent fallback to the
 unconditional/region form — and `smelt explain` prints the same refusal.
 
+**Within-family mechanism pins.** `keyed`, `keyed_conditional`, and `staged_candidate` all
+select the same `KeyedFold` *technique*, but pin different **mechanisms** within it (the keyed
+`MERGE` versus the merge-less staged-candidate conditional `DELETE`+`INSERT`, §"Windowed
+maintenance and the horizon"). `keyed`/`keyed_conditional` pin the `MERGE` mechanism: unavailable
+on a backend without `MERGE` refuses `MaintenanceWritePatternUnavailable` — already the open
+registry's capability answer, since both names declare `WriteCapability::Merge`. `staged_candidate`
+pins the staged conditional `DELETE`+`INSERT` **even on a `MERGE`-capable backend** — an explicit
+pin is a choice, never a downgrade to be second-guessed. A `staged_candidate` pin over a cell
+whose write-suppression verdict resolved `Unconditional` refuses `MaintenanceWriteAddressingRefused`
+— the staged-candidate shape has no unconditional form, so there is nothing to fall back to except
+a silent substitution, which a pin must never produce. Absent a pin naming one of these three,
+`MERGE` stays preferred wherever the backend can run it, matching the unpinned default.
+
 **Worked example — the plan of a composed model.** `order_facts` (running example) declares
 both `unique_key: [order_id]` and a `timeseries:` clock on `order_ts`/`order_date`, joining
 mutable `customers` to project `c.tier AS customer_tier`; `smelt explain order_facts` prints

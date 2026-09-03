@@ -333,7 +333,7 @@ open — not that the excluded bullets themselves are gone.
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | done |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | done |
 | 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | done |
-| 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
+| 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | done |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | planned |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | pending |
@@ -411,6 +411,18 @@ open — not that the excluded bullets themselves are gone.
   change scheduling semantics), so 26c closes that clause by making `Edge`'s constructor *require*
   both declared grains rather than defaulting to Day, and deletes the clause from Known
   Divergences instead of building SQL-derived grains. No work leaves the outcome.
+
+- **2026-09-03, phase 27d — `write:` pin selects the keyed-fold mechanism (`MERGE` vs.
+  staged-candidate), plan-layer only.** `choice::resolve_keyed_write_mechanism` now consults an
+  optional `write:` pin: `keyed`/`keyed_conditional` pin `MERGE` (fail-closed refusal on a
+  merge-less backend, defence-in-depth behind the registry's own capability gate);
+  `staged_candidate` pins the staged conditional shape even on a `MERGE`-capable backend and
+  refuses (never substitutes) over an `Unconditional` suppression verdict. New
+  `emit::keyed_fold_candidate_select` builds the post-fold candidate rows
+  (`combiner(stored, delta)` per matched key, raw delta value per delta-only key) the
+  staged-candidate mechanism needs to realise a keyed fold. Deliberately not wired into any live
+  path — `resolve_keyed_write_mechanism` has no production call site yet; phase 27g threads it
+  into `cumulative.rs`'s live write path. See `phases/27d-summary.md`.
 
 - **2026-09-03, phase 26 reshape — split into 26a–26d (one residue each).** The single row
   bundled four independent proof residues touching four different layers (clamp derivation,
