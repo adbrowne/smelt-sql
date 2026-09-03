@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1788435879726,
+  "lastUpdate": 1788435883269,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -464,6 +464,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.16585541552287,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "b8bc12a3958f25ee394931ac3837e5ffcb864284",
+          "message": "CI: fix nightly-rust mise scoping and defensive toolchain pin\n\nMISE_RUST_VERSION=nightly was step-scoped on the mise-action step, but\nmise resolves the tool version per-invocation via its shims — a later\nstep has no visibility into an earlier step's env:, so the fuzz build\nsilently fell back to mise.toml's pinned stable and failed with \"the\noption Z is only accepted on the nightly compiler\". Moved to job-level\nenv in both fuzz.yml and test.yml's fuzz-build job.\n\nAlso drop the now-redundant \"Add rust components\" step (clippy/rustfmt\nship in mise's default rustup profile already — confirmed by the prior\nLint job passing without it), and pin `rustup target add` explicitly to\nthe mise-resolved toolchain via `--toolchain \"$(mise current rust)\"`\nwith `shell: bash` (matrix includes windows-latest, whose default shell\nis pwsh) so it can't silently target a different rustup default.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-09-03T21:40:25+10:00",
+          "tree_id": "32a5e2e1761db21fb0548ae16ce6114a03b6beae",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/b8bc12a3958f25ee394931ac3837e5ffcb864284"
+        },
+        "date": 1788435881994,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.54566859924453,
             "unit": "MB/s"
           }
         ]
