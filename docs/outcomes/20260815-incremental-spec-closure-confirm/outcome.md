@@ -61,7 +61,7 @@ divergence entry removed).
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
 | 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
-| 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
+| 4 | Run all four `/smelt:validate` invocations; fix any drift | planned |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
 
 ## Decision log
@@ -134,6 +134,18 @@ divergence entry removed).
   trivial rule, and no product decision is needed (D3 is already decided and shipped) — recorded
   as a closure-report footnote per the standing rule, not a new row or a `## Blocked` entry. The
   `IS-24`/`IS-18` mislabel cross-check (task 7) came back clean in both owning outcomes' files.
+
+- 2026-09-04 — Phase 4 planned. No reshape: phase 3 produced no spec diff, added no row and no
+  `## Blocked` entry, so rows 4-5 stand as written (criterion 4, then criteria 1/5). Two things
+  fixed for this phase. (a) The drift-disposition rule is widened one level from phase 3's:
+  doc/wording drift is fixed inline, behaviour drift gets a new phase row, decision-needing drift
+  gets a `## Blocked` entry, and a bullet the spec *already* flags as open/relocated (per
+  `baseline-inventory.md`) is explicitly **not** drift — criterion 4's "no drift" means no
+  *unflagged* divergence, since the still-open bullets are this program's declared boundary.
+  (b) The four reports are written to `docs/validations/2026-09-04-<slug>-closure.md`, suffixed so
+  they do not clobber the earlier *scoped* `2026-09-04-incremental_shapes.md` (partition-grain
+  only, commit `7f4358cf`), and the automated-check leg is run once and cited by all four rather
+  than four full `cargo test` runs.
 
 ## Blocked
 
