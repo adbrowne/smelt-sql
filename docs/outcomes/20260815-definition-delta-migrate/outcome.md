@@ -340,7 +340,7 @@ open — not that the excluded bullets themselves are gone.
 | 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
-| 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
+| 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | planned |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
@@ -1207,6 +1207,16 @@ open — not that the excluded bullets themselves are gone.
   inputs gets two `ColumnScopedMerge` cells, exactly what `incremental_models.md` §"The plan
   matrix" forbids. 28b is therefore a code-change phase (guard + fixture pin + bullet
   removal), not a docs-only confirmation. No rows added or removed.
+
+- **2026-09-03, phase 29 planned — one divergence bullet's premise is wrong, and the same
+  predicate over-refuses in the other direction.** `safety_overrides:` on a keyed model does
+  *not* silently parse: the top-level key folds into `metadata.batched` and
+  `validate_timeseries` already refuses it — but as `PartitionGrainRequiresRefreshIncremental`,
+  which tells a keyed author to add `grain: partition`. The gap is a correctly-named refusal,
+  not a missing one. The audit also found the check reads the *declared* `grain:` rather than
+  `resolved_grain()`, so a partition-shaped model that writes no `grain:` is wrongly refused
+  for declaring `safety_overrides:`. Row 29 is rewritten to cover both directions; no rows
+  added or removed.
 
 ## Blocked
 
