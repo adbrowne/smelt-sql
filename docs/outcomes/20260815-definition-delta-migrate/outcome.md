@@ -350,7 +350,7 @@ open — not that the excluded bullets themselves are gone.
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
 | 32 | Posture-derived key departure (`retain_departed`): declaration parsing, oracle transform, probe emitter, and a `ContractRetainDepartedInvalid`-shaped diagnostic for the already-decided default-point behaviour (decision record `docs/research/20260816-open-questions-triage.md`); found orphaned by phase 31's audit (maps to no live outcome, out-of-scope entry, or Future Extensions item) | blocked |
-| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | planned |
+| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | blocked |
 
 ## Decision log
 
@@ -1318,3 +1318,11 @@ record `docs/research/20260816-open-questions-triage.md`, then flip to `planned`
 into whichever future phase would naturally cover contract-lattice point additions, if one exists
 by then. No design ambiguity in the underlying work itself — just a process gap in how phase 31's
 audit queued follow-ups.
+
+**2026-09-03 — Phase 33 (Override-ladder reach open question).** Same defect as phase 32, confirmed
+by that phase's own summary (`phases/32-summary.md`): no `phases/33-plan.md` exists, so there is
+nothing for IMPLEMENT to execute. Flipping to `blocked` rather than improvising a plan inline.
+Candidate options: same as phase 32 — the next PLAN-step iteration should write
+`phases/33-plan.md` (deciding, or explicitly deferring to Out of scope, whether the
+first-build-vs-steady-state override-ladder rule reaches the keyed-fold suppression consumer)
+before flipping this row back to `planned`.
