@@ -6,6 +6,20 @@ timeseries:
   event_time_column: session_start_date
   partition_column: session_start_date
   granularity: day
+# `smelt.functions.sessionize`'s body computes session_start_ts (and hence
+# session_start_date) via a window `OVER (PARTITION BY device_id,
+# CAST(event_ts AS DATE))` — necessarily partitioned by the *input* event
+# date, not by `session_start_date`, since the window's own job is to derive
+# that column. Function-call expansion (phase 2, `docs/outcomes/
+# 20260815-partition-grain-residue`) now classifies this window from the
+# expanded body, where it was previously invisible to the alignment check.
+# The model is safe via the declared `RANGE BETWEEN INTERVAL '2 days'
+# PRECEDING` lookback frame and the explicit `HAVING` cap below (see the
+# closed-form proof this file cites), not via partition-alignment — the
+# override below asserts that alternate safety argument explicitly, matching
+# `silver/events_parsed.sql`'s precedent for its own non-aligned window.
+safety_overrides:
+  allow_window_functions: true
 ---
 -- One row per session under the 30-minute inactivity + platform-boundary rule
 -- and the **clock-anchored cut**: a session rooted before 00:30 dies at its

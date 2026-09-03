@@ -145,7 +145,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
             .unwrap_or_default();
         opt_graph.add_model(ModelInfo {
             name: model.name.clone(),
-            sql: model.content.clone(),
+            sql: smelt_runtime::expand_function_calls(&model.content, &fn_bodies),
             refs: model
                 .refs
                 .iter()

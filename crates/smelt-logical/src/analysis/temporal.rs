@@ -145,22 +145,62 @@ pub fn analyze_temporal_dependencies(sql: &str) -> TemporalDependency {
     };
 
     let mut dep = TemporalDependency::default();
-    analyze_one_select(&select, &mut dep);
-    // Window-frame RANGE INTERVAL lookbacks declared inside a derived table or
-    // an inlined `smelt.define` body are invisible to the AST scan above (it
-    // only reaches the outer SELECT list, and the expanded body lands as a
-    // derived table the re-parse may not surface cleanly). Scan the whole
-    // statement text for explicit `RANGE BETWEEN INTERVAL … PRECEDING/FOLLOWING`
-    // frames as a robust catch. Only explicit INTERVAL frames are recognized,
-    // so this only ever adds a *bounded* lookback; bounds merge via `max_with`,
-    // so re-seeing the outer frame already handled by the AST is harmless.
+    analyze_select_recursive(&select, &mut dep);
+    // Belt-and-braces advisory text scan (leaf classifier over the whole
+    // statement text, per `docs/specs/architecture.md` §"Property
+    // composition walk rule"): `analyze_select_recursive` above now descends
+    // into every FROM-clause derived table and CTE body reachable from the
+    // AST, so this scan is no longer the only producer of a subquery-level
+    // bound — it only remains to catch any shape the AST descent cannot
+    // reach. Only explicit INTERVAL frames are recognized, so this only ever
+    // adds a *bounded* lookback; bounds merge via `max_with`, so re-seeing a
+    // frame already handled by the AST walk is harmless.
     analyze_subquery_range_frames(stripped, &mut dep);
     dep
 }
 
+/// Walk a SELECT statement and every derived table / CTE body reachable from
+/// it, merging window-function, LAG/LEAD, WHERE- and JOIN-offset findings
+/// from every level into `dep` (`docs/specs/incremental_shapes.md`
+/// §"Functions inside partition-grain bodies": a lookback introduced by
+/// function-call expansion — which lands as a FROM-clause derived table —
+/// must be seen exactly as an inline one is). Descends into:
+/// - `WITH` clause CTE bodies (`SelectStmt::with_clause`)
+/// - FROM-clause derived tables (`TableRef::subquery`)
+/// - JOIN-clause derived tables (`JoinClause::table_ref().subquery()`)
+fn analyze_select_recursive(select: &SelectStmt, dep: &mut TemporalDependency) {
+    analyze_one_select(select, dep);
+
+    if let Some(with_clause) = select.with_clause() {
+        for cte in with_clause.ctes() {
+            if let Some(inner_select) = cte.query().and_then(|q| q.select_stmt()) {
+                analyze_select_recursive(&inner_select, dep);
+            }
+        }
+    }
+
+    if let Some(from_clause) = select.from_clause() {
+        for table_ref in from_clause.table_refs() {
+            if let Some(inner_select) = table_ref.subquery().and_then(|q| q.select_stmt()) {
+                analyze_select_recursive(&inner_select, dep);
+            }
+        }
+        for join in from_clause.joins() {
+            if let Some(inner_select) = join
+                .table_ref()
+                .and_then(|t| t.subquery())
+                .and_then(|q| q.select_stmt())
+            {
+                analyze_select_recursive(&inner_select, dep);
+            }
+        }
+    }
+}
+
 /// Analyze a single SELECT level — its window functions (SELECT list), WHERE
-/// time filters, and JOIN time filters — merging the findings into `dep`. Does
-/// not descend into subqueries; the caller walks those separately.
+/// time filters, and JOIN time filters — merging the findings into `dep`.
+/// Does not itself descend into subqueries; [`analyze_select_recursive`]
+/// walks those separately and calls this once per level.
 fn analyze_one_select(select: &SelectStmt, dep: &mut TemporalDependency) {
     if let Some(select_list) = select.select_list() {
         for item in select_list.items() {
@@ -467,7 +507,21 @@ fn find_interval_in_text(text: &str) -> Option<u32> {
 
                 // Parse the value — could be "3" or "3 days"
                 if let Some(n) = value.split_whitespace().find_map(|w| w.parse::<u32>().ok()) {
-                    let combined = format!("{} {}", value, &rest[quote_end + 1..]);
+                    // Bound the trailing slice to a short lookahead window
+                    // (the bare-unit form `INTERVAL '3' DAY` puts the unit
+                    // keyword immediately after the closing quote) — taking
+                    // the *entire* remaining document here previously let an
+                    // unrelated `DAY`/`WEEK`/etc. anywhere later in the
+                    // statement (e.g. a different window frame's own
+                    // interval) misdetect this literal's unit, silently
+                    // turning `INTERVAL '5 minutes'` into 5 *days*.
+                    let after_quote = &rest[quote_end + 1..];
+                    let lookahead_end = after_quote
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .nth(16)
+                        .unwrap_or(after_quote.len());
+                    let combined = format!("{} {}", value, &after_quote[..lookahead_end]);
                     if let Some(days) = extract_interval_days_from_combined(&combined, n) {
                         max_days = Some(max_days.map_or(days, |prev: u32| prev.max(days)));
                     }
@@ -953,5 +1007,41 @@ mod tests {
         };
         let window = compute_effective_window(&dep, 0, 7);
         assert_eq!(window.lookback_days, 14);
+    }
+
+    #[test]
+    fn derived_table_window_is_seen() {
+        // A default-frame LAG inside a FROM-clause derived table — the
+        // shape function-call expansion produces (`smelt.functions.foo(...)`
+        // expands to `SELECT * FROM (<body>) t`) — must classify identically
+        // to the same LAG written at the outer level.
+        let outer_sql = "SELECT user_id, LAG(amount, 3) OVER (ORDER BY day) as prev_3 FROM events";
+        let derived_table_sql = "SELECT * FROM (SELECT user_id, LAG(amount, 3) OVER (ORDER BY day) as prev_3 FROM events) t";
+
+        let outer_dep = analyze_temporal_dependencies(outer_sql);
+        let derived_dep = analyze_temporal_dependencies(derived_table_sql);
+
+        assert_eq!(outer_dep.lookback, TemporalOffset::Periods(3));
+        assert_eq!(
+            derived_dep.lookback, outer_dep.lookback,
+            "a LAG inside a FROM-clause derived table must be seen exactly as an inline one is"
+        );
+    }
+
+    #[test]
+    fn cte_body_window_is_seen() {
+        // A ROWS BETWEEN N PRECEDING frame inside a CTE body — a frame shape
+        // the whole-text `RANGE BETWEEN INTERVAL` scan cannot produce (it only
+        // recognizes RANGE+INTERVAL frames), so this can only pass via the
+        // AST descent into the CTE's SELECT.
+        let sql = "WITH w AS (\
+             SELECT user_id, amount, \
+             SUM(amount) OVER (ORDER BY day ROWS BETWEEN 3 PRECEDING AND CURRENT ROW) as rolling \
+             FROM events\
+             ) SELECT * FROM w";
+
+        let dep = analyze_temporal_dependencies(sql);
+
+        assert_eq!(dep.lookback, TemporalOffset::Periods(3));
     }
 }

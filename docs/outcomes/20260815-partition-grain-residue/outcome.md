@@ -63,7 +63,7 @@ fixture.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
-| 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | planned |
+| 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | pending |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
@@ -101,6 +101,23 @@ fixture.
   deferred — without it, expansion alone would leave a define-body `LAG`
   classified `FullyBatchSafe`, i.e. success criterion 2 unmet and the verdict
   unsafe rather than merely conservative.
+
+- 2026-09-04 — Phase 2 implemented (`phases/02-summary.md`). Landed the AST
+  descent into derived tables/CTEs in `temporal.rs`, threaded `FnBodyMap`
+  through `safety::build_model_graph` (the shared classification call site),
+  and fixed a root-cause bug in the standalone `expand_function_calls` helper
+  itself: it never stripped frontmatter before parsing, so every production
+  caller (including the *real execution windowing path*,
+  `execute.rs`'s `compute_incremental_windows_ordered`) silently never
+  expanded `smelt.define` bodies at all — a correctness gap wider than this
+  phase's stated scope, now fixed for every caller. Consequence: `silver.sessions`
+  in `examples/web_analytics` now genuinely needs
+  `safety_overrides.allow_window_functions: true` (added, with rationale —
+  a true positive per the plan's task 6 guidance, not a classifier bug) and
+  its bound-based chunk size corrected from a stale 7-day/5-chunk split
+  (computed against the always-broken expansion path) to the true 12-day/
+  3-chunk split; `rebuild_dry_run.rs`'s golden values and one LSP goto-def
+  line number were updated to match. No phase reshape.
 
 ## Blocked
 

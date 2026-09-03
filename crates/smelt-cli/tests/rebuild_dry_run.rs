@@ -12,32 +12,32 @@
 //! §Semantics "The output window is derived, never assumed") widens the
 //! declared `[2026-03-01, 2026-03-29)` run window one day *backward* (the
 //! Form B skew inverted): `[2026-02-28, 2026-03-29)`. That 29-day derived
-//! window is what the `bounded_safe(chunk=7d,context=2d)` classification
-//! auto-splits — no `--per-partition`/`--batch-size` override is used. The
-//! 2-day context is `sessionize`'s own `max_lookback` backward read alone
-//! (`silver.events_deduped`'s own 3-day recurrence-bounded margin does
-//! *not* fold in here — the clock propagates through the composed
-//! keyed+timeseries dedupe stage, but `sessions`' derived context over that
-//! edge is still exactly 2 days, verified via `smelt explain
-//! silver.sessions`'s scan clamp `before=Seconds(172800)`). The 7-day chunk
-//! size is the pre-existing `min_chunk.clamp(7, 90)` floor
-//! (`crates/smelt-logical/src/rules/incremental.rs`): `min_chunk` is
-//! `context_days` times three, i.e. 6, which falls below the floor, so the
-//! classification clamps up to 7 rather than composing any 5-day margin.
+//! window is what the bound-based batch-safety roll-up
+//! (`crate::compile::batch_safety_for_model`, over the *expanded* SQL — a
+//! call site fixed in phase 2 of `docs/outcomes/
+//! 20260815-partition-grain-residue` to actually see through
+//! `smelt.functions.sessionize`'s body rather than silently no-op'ing on a
+//! frontmatter parse failure) auto-splits — no `--per-partition`/
+//! `--batch-size` override is used. The composed bound over
+//! `silver.events_deduped` is 4 days (verified via `smelt explain
+//! silver.sessions`'s scan clamp `before=P4D`), giving a 12-day chunk size
+//! (`context_days * 3`, `crates/smelt-logical/src/rules/incremental.rs`'s
+//! `min_chunk.clamp(7, 90)` — 12 clears the 7-day floor, so no clamping
+//! applies).
 
 use std::path::Path;
 use std::process::Command;
 
 /// The 28-day declared run window `[2026-03-01, 2026-03-29)` derives a 29-day
 /// output window `[2026-02-28, 2026-03-29)` (the model's own Form B skew,
-/// inverted), which a `bounded_safe(chunk=7d,context=2d)` classification
-/// (the 7-day chunk is the pre-existing `min_chunk.clamp(7, 90)` floor, not
-/// margin composition — see the module doc comment) auto-splits into five
-/// chunks (four full 7-day chunks plus a 1-day remainder); the dry-run
-/// prints one `DELETE`+`INSERT` block per chunk for
-/// `silver.sessions`, each introduced by `-- chunk k/N: [start, end)` in
-/// execution order, and no backend is opened (the run succeeds against a
-/// project whose `.duckdb` target need not exist).
+/// inverted), which the bound-based batch-safety roll-up's 12-day chunk size
+/// (`context_days * 3`, composed over `silver.events_deduped`'s 4-day bound —
+/// see the module doc comment) auto-splits into three chunks (two full
+/// 12-day chunks plus a 5-day remainder); the dry-run prints one
+/// `DELETE`+`INSERT` block per chunk for `silver.sessions`, each introduced
+/// by `-- chunk k/N: [start, end)` in execution order, and no backend is
+/// opened (the run succeeds against a project whose `.duckdb` target need
+/// not exist).
 #[test]
 fn chunked_range_prints_per_chunk_boundaries() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -68,28 +68,26 @@ fn chunked_range_prints_per_chunk_boundaries() {
     // Each chunk introduced by its boundary line, in order. The derived
     // output window [2026-02-28, 2026-03-29) — the declared window widened
     // one day backward by the model's own Form B skew, inverted — splits
-    // into four full 7-day chunks plus a 1-day remainder.
+    // into two full 12-day chunks plus a 5-day remainder.
     for (k, (start, end)) in [
-        ("2026-02-28", "2026-03-07"),
-        ("2026-03-07", "2026-03-14"),
-        ("2026-03-14", "2026-03-21"),
-        ("2026-03-21", "2026-03-28"),
-        ("2026-03-28", "2026-03-29"),
+        ("2026-02-28", "2026-03-12"),
+        ("2026-03-12", "2026-03-24"),
+        ("2026-03-24", "2026-03-29"),
     ]
     .iter()
     .enumerate()
     {
-        let line = format!("-- chunk {}/5: [{}, {})", k + 1, start, end);
+        let line = format!("-- chunk {}/3: [{}, {})", k + 1, start, end);
         assert!(
             stdout.contains(&line),
             "expected per-chunk boundary line `{line}` in the dry-run output:\n{stdout}"
         );
     }
 
-    // The chunks print in execution order (chunk 1 before chunk 5).
-    let pos1 = stdout.find("-- chunk 1/5:").expect("chunk 1 present");
-    let pos5 = stdout.find("-- chunk 5/5:").expect("chunk 5 present");
-    assert!(pos1 < pos5, "chunks must print in execution order");
+    // The chunks print in execution order (chunk 1 before chunk 3).
+    let pos1 = stdout.find("-- chunk 1/3:").expect("chunk 1 present");
+    let pos3 = stdout.find("-- chunk 3/3:").expect("chunk 3 present");
+    assert!(pos1 < pos3, "chunks must print in execution order");
 
     // Each chunk carries the emitted maintenance statements, transactionally
     // bracketed, with real literals (no symbolic placeholders).
@@ -108,7 +106,7 @@ fn chunked_range_prints_per_chunk_boundaries() {
     );
     // The real (derived output) window literals appear in the DELETE predicates.
     assert!(
-        stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-14'"),
+        stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-24'"),
         "expected real chunk window literals in the statements:\n{stdout}"
     );
 }

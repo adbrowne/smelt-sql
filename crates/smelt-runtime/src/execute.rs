@@ -604,7 +604,7 @@ pub async fn execute_project(
     // identically to a live run. This mirrors the CLI's original behaviour
     // where `--dry-run` runs through compilation and thus through the planner.
     {
-        let model_graph = build_model_graph(&selected, &graph_lock, &config);
+        let model_graph = build_model_graph(&selected, &graph_lock, &config, &fn_bodies);
         check_planner_safety(&model_graph, request.enforce_safety)?;
         check_bound_derivation(&model_graph, request.enforce_safety)?;
     }

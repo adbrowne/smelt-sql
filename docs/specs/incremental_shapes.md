@@ -549,7 +549,10 @@ refusal instead of a window.
 
 Function expansion (`expansion.md`) runs **before** every analysis stage here, so a `LAG()`
 inside a `smelt.define` body and one inlined at the call site are indistinguishable — the outer
-clamp and pushdown both operate on the expanded CST. **Opaque calls remain black boxes**: bound
+clamp and pushdown both operate on the expanded CST. Window/frame classification descends
+through every derived table and CTE body reachable from the expanded statement, so a frame a
+function-call expansion introduces as a FROM-clause derived table is seen exactly as one written
+inline at the outer level. **Opaque calls remain black boxes**: bound
 derivation cannot read through `smelt.extern`/built-ins, so time-dependence hidden behind one
 is `NotDerivable` and refused unless a bound is provable from the surrounding SQL.
 `smelt.metric()` calls are refused outright (`PartitionGrainForbidsMetrics`): how metric
@@ -1147,13 +1150,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The partition grain
 
-- **One classification call site reads the outer SQL body**: the bound-`NotDerivable` refusal
-  gate classifies on the outer `model.sql`, so a lookback living only inside a function body
-  with no outer filter would diverge (no such case exists in the repo). Tracked:
-  `docs/plans/20260530-thread-fn-registry-classification.md`.
-- **The window-function batch-safety check runs on unexpanded outer SQL** — an `OVER` inside a
-  `smelt.define` body is invisible to it. Tracked:
-  `docs/plans/20260530-thread-fn-registry-classification.md`.
 - **Per-source clamp observability is partly emitted (Open Question)** — `smelt explain --json`
   doesn't resolve the run-relative scan window when a run window is supplied; the editor-hover
   readout is unimplemented; specified ahead of a tracking plan.
