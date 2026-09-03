@@ -498,11 +498,14 @@ struct ExplainArgs {
     #[arg(long = "show-sql")]
     show_sql: bool,
 
-    /// Region literal bounds for `--show-sql`, `<start>..<end>`
-    /// (`YYYY-MM-DD`, end exclusive). Without this flag, the printed
-    /// statements use the symbolic placeholders `{{window_start}}`/
-    /// `{{window_end}}` instead of real literals.
-    #[arg(long = "period", requires = "show_sql")]
+    /// Run-window bounds, `<start>..<end>` (either `YYYY-MM-DD..YYYY-MM-DD`
+    /// on the calendar axis or `<int>..<int>` on the integer axis, end
+    /// exclusive). Used both by `--show-sql` (printed literals instead of
+    /// the symbolic `{{window_start}}`/`{{window_end}}` placeholders) and by
+    /// `--json`'s per-source `scan_start`/`scan_end` resolution. Without
+    /// this flag, `--show-sql` prints symbolic placeholders and `--json`
+    /// omits the resolved scan window fields.
+    #[arg(long = "period")]
     period: Option<String>,
 
     /// Render a named technique's own preview statements instead of the

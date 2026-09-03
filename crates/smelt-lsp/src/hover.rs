@@ -608,6 +608,38 @@ pub fn hover_text_for_columns_of_call(
 ///   When `None`, the trailing source line is omitted.
 ///
 /// Pure — no Salsa dependency.
+/// Render one source's per-source clamp verdict for editor hover
+/// (`docs/specs/incremental_shapes.md` §"Observing the per-source clamp"):
+/// a one-line readout distinct per [`smelt_db::BoundResult`] variant. `None`
+/// when `bound` is `None` — a source with no derived verdict (e.g. a lookup
+/// with no `timeseries:`) renders nothing rather than a placeholder line.
+pub fn hover_text_for_source_clamp(
+    source_name: &str,
+    bound: Option<&smelt_db::BoundResult>,
+) -> Option<String> {
+    let bound = bound?;
+    let line = match bound {
+        smelt_db::BoundResult::Bounded {
+            source_partition_col,
+            before,
+            after,
+        } => {
+            format!(
+                "clamp: `{source_name}` on `{source_partition_col}` — before {}, after {}",
+                before.to_iso8601(),
+                after.to_iso8601()
+            )
+        }
+        smelt_db::BoundResult::Unbounded => {
+            format!("clamp: `{source_name}` — unbounded (reads full history)")
+        }
+        smelt_db::BoundResult::NotDerivable => {
+            format!("clamp: `{source_name}` — not derivable from this model's SQL")
+        }
+    };
+    Some(line)
+}
+
 pub fn hover_text_for_column_reference(
     display: &str,
     typed_col: Option<&smelt_types::TypedColumn>,

@@ -62,6 +62,7 @@ use crate::hover::{
     hover_text_for_models_all,
     hover_text_for_models_with_tag_call,
     hover_text_for_pipe_expr,
+    hover_text_for_source_clamp,
     hover_text_for_source_ref_field,
     hover_text_for_sources_all,
     hover_text_for_sources_with_tag_call,
@@ -3830,6 +3831,24 @@ impl LanguageServer for Backend {
                                                 ));
                                             }
                                         }
+                                    }
+                                }
+
+                                // Per-source clamp observability
+                                // (`docs/specs/incremental_shapes.md`
+                                // §"Observing the per-source clamp"): if the
+                                // CURRENT file's own model is partition-grain
+                                // and derives a bound for this hovered
+                                // source, render it beside the schema table.
+                                if let Some(fi) = file_input {
+                                    let clamps = smelt_db::model_source_clamps(&db, w, fi);
+                                    let key = segments.join(".");
+                                    if let Some(clamp_line) =
+                                        hover_text_for_source_clamp(&key, clamps.get(&key))
+                                    {
+                                        content.push('\n');
+                                        content.push_str(&clamp_line);
+                                        content.push('\n');
                                     }
                                 }
 

@@ -73,7 +73,7 @@ fixture.
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
-| 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | planned |
+| 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | done |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
@@ -258,6 +258,15 @@ fixture.
   unresolved verdict naming the unit rather than a coerced day count, per fail-loud
   discipline. The LSP half needs no new crate dependency: `smelt-db` gains a thin Salsa
   wrapper over the pure `derive_model_bounds` and re-exports `BoundResult`/`Offset`.
+
+- 2026-09-04 — Phase 6 implemented (`phases/06-summary.md`). Landed the shared
+  `smelt_logical::resolve_scan_window` resolver, threaded through
+  `inject_source_filters` (byte-identical calendar output) and `explain --json`'s
+  `source_bounds` (`scan_start`/`scan_end`/`scan_unresolved`, gated on `--period`
+  no longer requiring `--show-sql`), plus `smelt_db::model_source_clamps` and the
+  LSP hover formatter for the editor-hover half. Spec updated; stale Known
+  Divergences bullet removed; `probe_explain_json_run_relative_source_bounds`
+  inverted. No phase reshape.
 
 ## Blocked
 

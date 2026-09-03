@@ -74,6 +74,20 @@ pub enum SourceBoundJson {
         before: String,
         /// ISO-8601 duration.
         after: String,
+        /// The run-relative scan window `[run_start − before, run_end +
+        /// after)`, rendered in the model's own axis domain — resolved via
+        /// the same `smelt_logical::resolve_scan_window` a run's pushdown
+        /// filter uses. `None` when no `--period` was supplied.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_start: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_end: Option<String>,
+        /// Set instead of `scan_start`/`scan_end` when a concrete `--period`
+        /// was supplied but the margin could not be resolved to a fixed
+        /// value (e.g. a non-uniform month/year offset) — names the reason
+        /// rather than guessing a day count.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        scan_unresolved: Option<String>,
     },
     Unbounded,
     NotDerivable,
@@ -1630,11 +1644,16 @@ pub fn build_maintenance_plan_json(
 /// Build the explain output from the dependency graph and config.
 ///
 /// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
+/// `period` is the parsed `--period <start>..<end>` run window (bounds in
+/// the model's own axis domain), when one was supplied — threaded into each
+/// incremental model's `source_bounds` to resolve `scan_start`/`scan_end`
+/// (`docs/specs/incremental_shapes.md` §"Observing the per-source clamp").
 pub fn build_explain_output(
     graph: &DependencyGraph,
     config: &Config,
     fn_bodies: &smelt_runtime::FnBodyMap,
     origins: &std::collections::HashMap<String, (String, String)>,
+    period: Option<&(String, String)>,
 ) -> Result<ExplainOutput> {
     let execution_order = graph.execution_order()?;
 
@@ -1662,7 +1681,8 @@ pub fn build_explain_output(
                     smelt_runtime::expand_function_calls(&model_file.content, fn_bodies);
                 let batch_safety =
                     compute_batch_safety_label(model_name, &expanded_sql, model_file, &inc, &ts);
-                let source_bounds = compute_source_bounds(model_name, &expanded_sql, graph, config);
+                let source_bounds =
+                    compute_source_bounds(model_name, &expanded_sql, graph, config, period);
                 Some(ExplainIncremental {
                     granularity: ts.granularity,
                     partition_column: ts.partition_column.clone(),
@@ -1797,12 +1817,16 @@ pub fn build_physical_explain(
     }
 }
 
-/// Derive per-source bounds for a model.
+/// Derive per-source bounds for a model, resolving each `Bounded` source's
+/// run-relative scan window against `period` when one is supplied — via the
+/// same `smelt_logical::resolve_scan_window` a run's pushdown filter uses
+/// (`docs/specs/incremental_shapes.md` §"Observing the per-source clamp").
 fn compute_source_bounds(
     model_name: &str,
     sql: &str,
     graph: &DependencyGraph,
     config: &Config,
+    period: Option<&(String, String)>,
 ) -> BTreeMap<String, SourceBoundJson> {
     use smelt_planner::analysis::source_bounds::derive_model_bounds;
     use smelt_planner::Frontmatter;
@@ -1819,11 +1843,37 @@ fn compute_source_bounds(
                 source_partition_col,
                 before,
                 after,
-            } => SourceBoundJson::Bounded {
-                partition_col: source_partition_col,
-                before: before.to_iso8601(),
-                after: after.to_iso8601(),
-            },
+            } => {
+                let (scan_start, scan_end, scan_unresolved) = match period {
+                    Some((run_start, run_end)) => {
+                        let axis =
+                            smelt_runtime::windowing::axis_implied_by_literal_form(Some(run_start));
+                        match smelt_logical::resolve_scan_window(
+                            axis,
+                            run_start,
+                            run_end,
+                            &smelt_logical::Offset::Seconds(before),
+                            &smelt_logical::Offset::Seconds(after),
+                        ) {
+                            smelt_logical::ScanWindowVerdict::Resolved { start, end } => {
+                                (Some(start), Some(end), None)
+                            }
+                            smelt_logical::ScanWindowVerdict::Unresolved { reason } => {
+                                (None, None, Some(reason))
+                            }
+                        }
+                    }
+                    None => (None, None, None),
+                };
+                SourceBoundJson::Bounded {
+                    partition_col: source_partition_col,
+                    before: before.to_iso8601(),
+                    after: after.to_iso8601(),
+                    scan_start,
+                    scan_end,
+                    scan_unresolved,
+                }
+            }
             BoundResult::Unbounded => SourceBoundJson::Unbounded,
             BoundResult::NotDerivable => SourceBoundJson::NotDerivable,
         };
@@ -1985,7 +2035,7 @@ mod tests {
         );
 
         let bs = |fns: &smelt_runtime::FnBodyMap| {
-            build_explain_output(&graph, &config, fns, &HashMap::new())
+            build_explain_output(&graph, &config, fns, &HashMap::new(), None)
                 .unwrap()
                 .models["sessions"]
                 .incremental
@@ -2022,7 +2072,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         assert_eq!(output.execution_order.len(), 2);
         assert_eq!(output.execution_order[0], "orders");
@@ -2076,7 +2126,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let daily = &output.models["daily_revenue"];
         assert_eq!(daily.materialization, Materialization::Table);
@@ -2095,7 +2145,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
         let json = serde_json::to_string_pretty(&output).unwrap();
 
         assert!(json.contains("\"models\""));
@@ -2118,7 +2168,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
         assert_eq!(
             output.models["orders"].owner.as_deref(),
             Some("analytics-team")
@@ -2153,7 +2203,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let model_entry = &output.models["device_stats"];
 
@@ -2205,7 +2255,7 @@ mod tests {
         let graph = DependencyGraph::build(models, None).unwrap();
 
         let output =
-            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new()).unwrap();
+            build_explain_output(&graph, &config, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         let model_entry = &output.models["orders"];
         assert_eq!(

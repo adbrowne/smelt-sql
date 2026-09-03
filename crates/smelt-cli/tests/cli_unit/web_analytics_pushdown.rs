@@ -38,7 +38,7 @@ fn sessions_explain() -> smelt_cli::explain::ExplainOutput {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output")
 }
 
@@ -49,6 +49,7 @@ fn bound_json_to_source_bound(json: &SourceBoundJson) -> Option<SourceBound> {
             partition_col,
             before,
             after,
+            ..
         } => Some(SourceBound {
             partition_col: partition_col.clone(),
             before_secs: iso8601_duration_to_secs(before),

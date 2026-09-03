@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use smelt_logical::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
 use smelt_logical::maintenance::emit::partition_literal;
-use smelt_logical::PartitionAxis;
+use smelt_logical::{Offset, PartitionAxis, ScanWindowVerdict, Seconds};
 use smelt_parser::{parse, File, FunctionCall};
 use thiserror::Error;
 
@@ -98,13 +98,36 @@ pub fn inject_source_filters(
         // We search for the smelt path as it appears in the SQL.
         let smelt_ref = source_path.clone();
 
-        // Compute the pushdown window: run_start - before .. run_end + after.
-        // On the integer axis `before_secs`/`after_secs` are always zero
-        // (day-typed widening is refused at plan construction, `windowing.rs`'s
-        // `compute_integer_windows`), so this stays a no-op arithmetically —
-        // only the literal's rendering (quoted vs. bare) differs by axis.
-        let filter_start = subtract_seconds_from_date(&range.start, bound.before_secs);
-        let filter_end = add_seconds_to_date(&range.end, bound.after_secs);
+        // Compute the pushdown window: run_start - before .. run_end + after,
+        // via the shared resolver (`smelt_logical::resolve_scan_window`) so
+        // this filter and the window `smelt explain --json`/editor hover
+        // report can never drift. On the integer axis `before_secs`/
+        // `after_secs` are always zero (day-typed widening is refused at
+        // plan construction, `windowing.rs`'s `compute_integer_windows`), so
+        // this stays a no-op arithmetically — only the literal's rendering
+        // (quoted vs. bare) differs by axis. Neither margin is ever
+        // `Offset::Symbolic` on this path (only `Seconds`), so the resolver
+        // cannot return `Unresolved` here — the `unwrap_or_else` below keeps
+        // this function infallible rather than propagating a `Result` no
+        // real caller can trigger.
+        let verdict = smelt_logical::resolve_scan_window(
+            range.axis,
+            &range.start,
+            &range.end,
+            &Offset::Seconds(Seconds(bound.before_secs)),
+            &Offset::Seconds(Seconds(bound.after_secs)),
+        );
+        let (filter_start, filter_end) = match verdict {
+            ScanWindowVerdict::Resolved { start, end } => (start, end),
+            ScanWindowVerdict::Unresolved { reason } => {
+                debug_assert!(
+                    false,
+                    "inject_source_filters: resolve_scan_window returned Unresolved({reason}) \
+                     for a Seconds-only margin — caller invariant violated"
+                );
+                (range.start.clone(), range.end.clone())
+            }
+        };
 
         let safe_col = bound.partition_col.replace('\'', "''");
         // `filter_start`/`filter_end` are `range.start`/`range.end` (the
@@ -566,6 +589,79 @@ mod tests {
             result,
             "SELECT * FROM (\nSELECT * FROM t\n) AS _smelt_output_clamp \
              WHERE event_date >= '2024-01-15' AND event_date < '2024-01-18'"
+        );
+    }
+
+    /// The shared resolver (`smelt_logical::resolve_scan_window`) returns
+    /// exactly the `filter_start`/`filter_end` `inject_source_filters`
+    /// pushes down — for a day-offset calendar bound and a zero-offset
+    /// integer bound — so the window a report renders and the filter a run
+    /// pushes down can never drift (phase 6, `docs/outcomes/
+    /// 20260815-partition-grain-residue/phases/06-plan.md`).
+    #[test]
+    fn resolve_scan_window_matches_injected_filter() {
+        // Calendar axis, 1-day lookback.
+        let range = TimeRange {
+            start: "2024-01-15".into(),
+            end: "2024-01-16".into(),
+            axis: PartitionAxis::Calendar,
+        };
+        let sql = "SELECT * FROM smelt.silver.events_parsed";
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 86400,
+                after_secs: 0,
+            },
+        );
+        let injected = inject_source_filters(sql, &bounds, &range);
+        let verdict = smelt_logical::resolve_scan_window(
+            range.axis,
+            &range.start,
+            &range.end,
+            &smelt_logical::Offset::Seconds(smelt_logical::Seconds(86400)),
+            &smelt_logical::Offset::Seconds(smelt_logical::Seconds(0)),
+        );
+        let smelt_logical::ScanWindowVerdict::Resolved { start, end } = verdict else {
+            panic!("expected Resolved, got {verdict:?}");
+        };
+        assert!(
+            injected.contains(&format!("event_date >= '{start}' AND event_date < '{end}'")),
+            "resolver's window {start}..{end} must match the injected filter: {injected}"
+        );
+
+        // Integer axis, zero offset.
+        let range = TimeRange {
+            start: "1".into(),
+            end: "2".into(),
+            axis: PartitionAxis::Integer,
+        };
+        let sql = "SELECT * FROM smelt.silver.events";
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events".to_string(),
+            SourceBound {
+                partition_col: "batch_id".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        let injected = inject_source_filters(sql, &bounds, &range);
+        let verdict = smelt_logical::resolve_scan_window(
+            range.axis,
+            &range.start,
+            &range.end,
+            &smelt_logical::Offset::Seconds(smelt_logical::Seconds(0)),
+            &smelt_logical::Offset::Seconds(smelt_logical::Seconds(0)),
+        );
+        let smelt_logical::ScanWindowVerdict::Resolved { start, end } = verdict else {
+            panic!("expected Resolved, got {verdict:?}");
+        };
+        assert!(
+            injected.contains(&format!("batch_id >= {start} AND batch_id < {end}")),
+            "resolver's window {start}..{end} must match the injected filter: {injected}"
         );
     }
 

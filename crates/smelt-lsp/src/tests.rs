@@ -2413,6 +2413,42 @@ fn hover_on_generates_frontmatter_shows_body_type_and_emission_count() {
     );
 }
 
+/// `hover_text_for_source_clamp` renders a distinct one-line readout per
+/// `BoundResult` verdict, and `None` for a source with no verdict
+/// (`docs/outcomes/20260815-partition-grain-residue/phases/06-plan.md`).
+#[test]
+fn hover_text_for_source_clamp_renders_bounded_unbounded_not_derivable_and_none() {
+    use smelt_db::Seconds;
+
+    let bounded = smelt_db::BoundResult::Bounded {
+        source_partition_col: "event_date".to_string(),
+        before: Seconds::days(3),
+        after: Seconds::ZERO,
+    };
+    let bounded_text =
+        hover_text_for_source_clamp("silver.events", Some(&bounded)).expect("Bounded must render");
+    assert!(bounded_text.contains("silver.events"));
+    assert!(bounded_text.contains("event_date"));
+
+    let unbounded_text =
+        hover_text_for_source_clamp("silver.events", Some(&smelt_db::BoundResult::Unbounded))
+            .expect("Unbounded must render");
+    assert!(unbounded_text.contains("unbounded"));
+
+    let not_derivable_text =
+        hover_text_for_source_clamp("silver.events", Some(&smelt_db::BoundResult::NotDerivable))
+            .expect("NotDerivable must render");
+    assert!(not_derivable_text.contains("not derivable"));
+
+    // Distinct renderings.
+    assert_ne!(bounded_text, unbounded_text);
+    assert_ne!(bounded_text, not_derivable_text);
+    assert_ne!(unbounded_text, not_derivable_text);
+
+    // No verdict at all → None.
+    assert_eq!(hover_text_for_source_clamp("silver.events", None), None);
+}
+
 /// Hover on the opening `{` of a `ModelDef { … }` literal in a generator file
 /// shows the inferred smelt path when the `name` field is statically known, and
 /// falls back to just `"ModelDef"` when the name is not static.

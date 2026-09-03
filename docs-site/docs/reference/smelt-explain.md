@@ -151,6 +151,28 @@ Each entry is a tagged object with `"type"`:
 | `partition_col` | `string` | The source's declared `timeseries.partition_column`. |
 | `before` | `string` | ISO-8601 duration — how far before the run window to read the source. `"PT0S"` means partition-local (no extra lookback). |
 | `after` | `string` | ISO-8601 duration — how far after the run window to read the source. |
+| `scan_start` | `string` | Present only when `--period <start>..<end>` is supplied: the resolved run-relative scan window start, rendered in the model's own axis domain (`YYYY-MM-DD` on the calendar axis, a bare integer on the integer axis) — the same window the run's pushdown filter reads. |
+| `scan_end` | `string` | Present alongside `scan_start`: the resolved scan window end. |
+| `scan_unresolved` | `string` | Present instead of `scan_start`/`scan_end` when `--period` was supplied but the margin could not be resolved to a fixed value (e.g. a non-uniform month/year offset) — names the reason. |
+
+Without `--period`, `scan_start`/`scan_end`/`scan_unresolved` are all omitted:
+
+```bash
+smelt explain --json --period 2026-01-01..2026-01-08 | jq '.models.sessions.incremental.source_bounds'
+```
+
+```json
+{
+  "events_parsed": {
+    "type": "bounded",
+    "partition_col": "event_date",
+    "before": "PT30M",
+    "after": "PT0S",
+    "scan_start": "2026-01-01",
+    "scan_end": "2026-01-08"
+  }
+}
+```
 
 **`"unbounded"`** — the source requires reading unbounded history (cumulative aggregation, `UNBOUNDED PRECEDING`):
 

@@ -37,7 +37,7 @@ fn test_events_parsed_is_bounded_safe_with_3day_context() {
         &db,
         smelt_db::Workspace::try_get(&db).expect("workspace"),
     );
-    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new())
+    let output = build_explain_output(&graph, &config, &fn_bodies, &HashMap::new(), None)
         .expect("build explain output");
 
     let model_info = output

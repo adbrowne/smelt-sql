@@ -546,13 +546,21 @@ column may come from the other side.
 
 Because lookback is derived, not declared, the derived clamp is surfaced so authors can confirm
 the analyzer read their SQL as intended: `smelt explain --json`'s per-cell `source_bounds` map
-reports each source's `source_partition_col` and derived `(before, after)` offsets, resolving
-the scan window when a concrete run window is given; editor hover (LSP) on a `smelt.<path>`
-reference shows the same clamp alongside the schema/column readout. `Bounded(c, 0, 0)` reads
-partition-by-partition, no lookback/lookforward; `Bounded(c, before, after)` reads the window
-`c ∈ [run_start − before, run_end + after)`; `Unbounded` reads all history and forces
+reports each source's `source_partition_col` and derived `(before, after)` offsets. `Bounded(c,
+0, 0)` reads partition-by-partition, no lookback/lookforward; `Bounded(c, before, after)` reads
+the window `c ∈ [run_start − before, run_end + after)`; `Unbounded` reads all history and forces
 `PerPartitionOnly`; a lookup reads in full; a `NotDerivable` source surfaces the planning-time
 refusal instead of a window.
+
+When a concrete run window is supplied (`smelt explain --json --period <start>..<end>`, bounds
+read in the model's own axis domain), a `Bounded` entry additionally carries the resolved
+`scan_start`/`scan_end` pair `[run_start − before, run_end + after)`, rendered in that axis —
+the *same* derivation the run's pushdown filter uses, never a second arithmetic, so the window a
+report prints and the filter a run pushes down cannot drift. An offset with a non-uniform unit
+(month/year) resolves to no window; the entry instead carries `scan_unresolved` naming the unit
+rather than guessing a day count. Without `--period`, neither field is present. Editor hover on
+a `smelt.<path>` reference inside a partition-grain model renders the same per-source verdict
+(`Bounded`/`Unbounded`/`NotDerivable`) alongside the schema/column readout.
 
 #### Functions inside partition-grain bodies
 
@@ -1177,9 +1185,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The partition grain
 
-- **Per-source clamp observability is partly emitted (Open Question)** — `smelt explain --json`
-  doesn't resolve the run-relative scan window when a run window is supplied; the editor-hover
-  readout is unimplemented; specified ahead of a tracking plan.
 - **Per-column `data_latency` is unimplemented**; the two interim mitigations
   (§"First-run and backfill") are the only options.
 - **Non-deterministic row-set-membership or grouping is out of scope** — always rejected;

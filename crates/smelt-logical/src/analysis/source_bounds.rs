@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use crate::analysis::monotonicity::find_leaf_column_ref;
 use crate::analysis::monotonicity::EventTimeTrace;
 use crate::analysis::monotonicity::NotTraceableKind;
+use crate::analysis::partition_axis::PartitionAxis;
 
 /// Duration expressed in whole seconds (always ≥ 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Default)]
@@ -132,6 +133,107 @@ pub(crate) fn parse_interval(value: &str) -> Option<Offset> {
     } else {
         Some(Offset::Seconds(Seconds(n)))
     }
+}
+
+/// The result of resolving a source's run-relative scan window against a
+/// concrete run window: either a resolved `(start, end)` pair rendered in
+/// the axis's own domain, or an unresolved verdict naming why — never a
+/// coerced approximation (fail-loud discipline).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanWindowVerdict {
+    Resolved { start: String, end: String },
+    Unresolved { reason: String },
+}
+
+/// Resolve a source's run-relative scan window: `[run_start − before,
+/// run_end + after)`, rendered in `axis`'s own domain.
+///
+/// Single owner of this arithmetic (`docs/specs/architecture.md`
+/// §"Maintenance-plan purity"): `smelt-runtime::transformer::
+/// inject_source_filters` (the pushdown filter a run actually executes) and
+/// `smelt explain --json` / editor hover (the window a report renders) both
+/// call this, so the window a report prints and the filter a run pushes
+/// down can never drift.
+///
+/// `before`/`after` are the margin the source needs the scan widened by. An
+/// `Offset::Symbolic` (month/year — no fixed length without a reference
+/// date) resolves to [`ScanWindowVerdict::Unresolved`] naming the unit
+/// rather than guessing a day count. On the calendar axis, `run_start`/
+/// `run_end` that don't parse as `YYYY-MM-DD` pass through unchanged
+/// (matching the historical day-arithmetic fallback — a timestamp-shaped
+/// bound that isn't a bare date is left as-is rather than refused). On the
+/// integer axis the margin is applied as a bare integer shift.
+pub fn resolve_scan_window(
+    axis: PartitionAxis,
+    run_start: &str,
+    run_end: &str,
+    before: &Offset,
+    after: &Offset,
+) -> ScanWindowVerdict {
+    match (
+        shift_in_axis(axis, run_start, before, false),
+        shift_in_axis(axis, run_end, after, true),
+    ) {
+        (Ok(start), Ok(end)) => ScanWindowVerdict::Resolved { start, end },
+        (Err(reason), _) | (_, Err(reason)) => ScanWindowVerdict::Unresolved { reason },
+    }
+}
+
+fn shift_in_axis(
+    axis: PartitionAxis,
+    value: &str,
+    offset: &Offset,
+    add: bool,
+) -> Result<String, String> {
+    match offset {
+        Offset::Symbolic(unit) => Err(format!(
+            "offset '{unit}' is a non-uniform unit (month/year); the scan window cannot be \
+             resolved to a fixed value without a reference date"
+        )),
+        Offset::Seconds(secs) => match axis {
+            PartitionAxis::Calendar => Ok(shift_calendar_date(value, secs.0, add)),
+            PartitionAxis::Integer if secs.0 == 0 => Ok(value.to_string()),
+            PartitionAxis::Integer => Err(format!(
+                "a {}-second margin does not apply to the integer partition axis",
+                secs.0
+            )),
+        },
+        Offset::Integer(n) => match axis {
+            PartitionAxis::Integer => {
+                let parsed: i64 = value
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("'{value}' is not an integer partition value"))?;
+                let delta = if add { *n } else { -*n };
+                Ok((parsed + delta).to_string())
+            }
+            PartitionAxis::Calendar => {
+                Err("an integer margin does not apply to the calendar partition axis".to_string())
+            }
+        },
+    }
+}
+
+/// Shift a `YYYY-MM-DD` calendar date by `secs` seconds (ceiling to whole
+/// days). A `date` that doesn't parse as `YYYY-MM-DD` (e.g. a timestamp with
+/// a time component) is returned unchanged — the same fail-open fallback the
+/// pre-extraction `subtract_seconds_from_date`/`add_seconds_to_date` in
+/// `smelt-runtime::transformer` used, preserved here so calendar output
+/// stays byte-identical.
+fn shift_calendar_date(date: &str, secs: u64, add: bool) -> String {
+    if secs == 0 {
+        return date.to_string();
+    }
+    let Ok(d) = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d") else {
+        return date.to_string();
+    };
+    let days = secs.div_ceil(86400) as i64;
+    let shifted = if add {
+        d + chrono::Duration::days(days)
+    } else {
+        d - chrono::Duration::days(days)
+    };
+    shifted.format("%Y-%m-%d").to_string()
 }
 
 /// The derived bound for one source reference.
@@ -2955,5 +3057,63 @@ mod tests {
         let bound = bounds.get("silver.events").unwrap();
         assert_eq!(*bound, BoundResult::Unbounded);
         assert_eq!(bound.injection_point(), InjectionPoint::OuterClamp);
+    }
+
+    // ---- resolve_scan_window ----
+
+    #[test]
+    fn resolve_scan_window_refuses_symbolic_offset() {
+        let verdict = resolve_scan_window(
+            PartitionAxis::Calendar,
+            "2026-01-01",
+            "2026-01-08",
+            &Offset::Symbolic("1 month".to_string()),
+            &Offset::Seconds(Seconds::ZERO),
+        );
+        match verdict {
+            ScanWindowVerdict::Unresolved { reason } => {
+                assert!(
+                    reason.contains("1 month"),
+                    "reason should name the offending unit, got: {reason}"
+                );
+            }
+            other => panic!("expected Unresolved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_scan_window_resolves_calendar_day_offset() {
+        let verdict = resolve_scan_window(
+            PartitionAxis::Calendar,
+            "2026-01-01",
+            "2026-01-08",
+            &Offset::Seconds(Seconds::days(3)),
+            &Offset::Seconds(Seconds::ZERO),
+        );
+        assert_eq!(
+            verdict,
+            ScanWindowVerdict::Resolved {
+                start: "2025-12-29".to_string(),
+                end: "2026-01-08".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_scan_window_resolves_zero_offset_integer_bound() {
+        let verdict = resolve_scan_window(
+            PartitionAxis::Integer,
+            "100",
+            "108",
+            &Offset::Seconds(Seconds::ZERO),
+            &Offset::Seconds(Seconds::ZERO),
+        );
+        assert_eq!(
+            verdict,
+            ScanWindowVerdict::Resolved {
+                start: "100".to_string(),
+                end: "108".to_string(),
+            }
+        );
     }
 }

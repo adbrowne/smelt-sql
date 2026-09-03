@@ -172,15 +172,13 @@ fn probe_integer_partition_column_run() {
     );
 }
 
-/// Residue: "Per-source clamp observability is partly emitted" —
+/// Residue: "Per-source clamp observability is partly emitted" — formerly
 /// `docs/specs/incremental_shapes.md` §"The partition grain" Known
-/// Divergences. Actually tracked (the spec bullet's "specified ahead of a
-/// tracking plan" note is stale): `docs/plans/20260704-model-updates-l4-batched.md`
-/// Phase BL8, status `pending`. `compute_source_bounds`
-/// (`crates/smelt-cli/src/explain.rs`) calls `derive_model_bounds` with no
-/// run-window parameter at all, and `smelt explain`'s `ExplainArgs` has no
-/// `--event-time-start`/`--event-time-end` flag — only `--period` gates the
-/// unrelated `--show-sql` statement rendering. Inverts in phase 6.
+/// Divergences (removed by phase 6, `docs/outcomes/20260815-partition-
+/// grain-residue`). LANDED: `--period` no longer gates only `--show-sql`;
+/// on the whole-project `--json` path it resolves each `Bounded` source's
+/// `scan_start`/`scan_end` via the same `smelt_logical::resolve_scan_window`
+/// a run's pushdown filter uses.
 #[test]
 fn probe_explain_json_run_relative_source_bounds() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -223,14 +221,13 @@ fn probe_explain_json_run_relative_source_bounds() {
          WHERE order_ts >= CURRENT_DATE - INTERVAL '3 day'\n",
     );
 
-    // No CLI flag exists to hand `smelt explain` a run window at all — this
-    // is itself part of the residue. Whole-project `--json` (no positional
-    // model name) is the mode that renders `ExplainIncremental::source_bounds`
-    // via `compute_source_bounds`; there is no `--event-time-start`/`--end`
-    // equivalent here, nor does the unrelated single-model `--period` flag
-    // (which only gates `--show-sql` statement rendering) reach it.
+    // Whole-project `--json` (no positional model name) is the mode that
+    // renders `ExplainIncremental::source_bounds` via `compute_source_bounds`.
+    // `--period` now reaches it (relaxed off `requires = "show_sql"` in
+    // phase 6).
     let out = Command::new(smelt_bin())
         .args(["explain", "--json"])
+        .args(["--period", "2026-01-01..2026-01-08"])
         .args(["--project-dir", root.to_str().unwrap()])
         .env_remove("RUST_LOG")
         .output()
@@ -249,22 +246,19 @@ fn probe_explain_json_run_relative_source_bounds() {
         .next()
         .unwrap_or_else(|| panic!("no source bound entries in {source_bounds:?}"));
 
-    // TODAY: the bound renders as symbolic ISO-8601 *durations*
-    // (`before`/`after`), never resolved against the concrete
-    // 2026-01-01..2026-01-08 window even though one was supplied via
-    // `--period`. A run-relative rendering would carry concrete calendar
-    // dates (`YYYY-MM-DD`) for the resolved scan start/end instead.
-    let before = bound
-        .get("before")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    let looks_like_calendar_date =
-        before.len() == 10 && before.chars().nth(4) == Some('-') && before.starts_with("202");
-    assert!(
-        !looks_like_calendar_date,
-        "source_bounds.before ('{before}') looks like a resolved calendar date — \
-         this residue is LANDED; invert this probe and update \
-         docs/specs/incremental_shapes.md's Known Divergences entry"
+    // LANDED: given a concrete `--period 2026-01-01..2026-01-08` and the
+    // 3-day lookback declared in `recent_orders`' WHERE clause, the bound
+    // now carries the resolved run-relative scan window as real calendar
+    // dates — `run_start − 3d` .. `run_end` (no forward margin).
+    assert_eq!(
+        bound.get("scan_start").and_then(|v| v.as_str()),
+        Some("2025-12-29"),
+        "expected a resolved scan_start in {bound:?}"
+    );
+    assert_eq!(
+        bound.get("scan_end").and_then(|v| v.as_str()),
+        Some("2026-01-08"),
+        "expected a resolved scan_end in {bound:?}"
     );
 }
 
