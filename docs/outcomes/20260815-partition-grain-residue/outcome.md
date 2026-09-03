@@ -1,7 +1,7 @@
 # Outcome: Close the partition grain's stale-plan-tracked implementation residues
 
 **Created:** 2026-08-15
-**Status:** queued
+**Status:** active
 **Source:** `docs/specs/incremental_shapes.md` §"The partition grain" §Known Divergences;
 `docs/plans/20260530-thread-fn-registry-classification.md`,
 `docs/plans/20260616-smelt-feedback-fixes.md`, `docs/plans/20260509-meta-language-overall.md`,
@@ -62,7 +62,7 @@ fixture.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | pending |
+| 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | planned |
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | pending |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | pending |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
@@ -72,6 +72,12 @@ fixture.
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
+
+- 2026-09-04 — Outcome activated. Phase 1 planned as an *evidence* audit: each
+  partition-grain residue gets a characterization probe pinning today's behaviour, so phases
+  2-7 start from a red test rather than re-investigating a stale plan file. No phase reshape
+  made — this is the first phase, there is no prior summary, and reshaping on guesswork rather
+  than the audit's findings is exactly what phase 1 exists to prevent.
 
 ## Blocked
 
