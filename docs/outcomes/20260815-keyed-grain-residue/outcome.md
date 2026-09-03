@@ -70,7 +70,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 1 | `KeyedRetractableContribution`: classifier, diagnostic, fixture, test | done |
 | 2 | Ledger presence for re-run-tolerant models, matching the spec's unqualified "every window-forward model" statement | done |
 | 3 | Transactional ledger fold on every shipped backend | blocked |
-| 4 | Derive and print execution postures (order-independence) in `smelt explain` | pending |
+| 4 | Derive and print execution postures (order-independence) in `smelt explain` | planned |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | pending |
 | 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
@@ -120,6 +120,20 @@ six success criteria — criterion 1 is already met end-to-end without it.
   resolution does not exist at all; `state.md` §Known Divergences says so). Either way the choice
   is a product call this outcome cannot make. Rows 4-6 are unaffected and stay workable; criterion
   3 will be unmet at row 6 unless this is resolved first. Full entry under "## Blocked".
+
+- 2026-09-03 — Phase 4 planned. No reshape: phase 2's summary surfaced no new work, phase 3's
+  blocked entry already records its own decision, and rows 4-6 still map one-for-one onto criteria
+  4, 5 and 6. Phase 4's design was fixed to a single pure derivation in `smelt-logical`
+  (`rules::cumulative::execution_postures` over `&[AggregatorColumn]`, beside `state_column_summary`)
+  that the runtime's existing `ledger_grade` then *delegates* to — the re-run-tolerance verdict
+  exists today only inside `smelt-runtime`, so deriving it there again would violate
+  maintenance-plan purity. One spec clarification is decided here rather than deferred: §"Derived
+  execution postures"'s qualifying enumeration omits the additive fold, but its own formal rule
+  ("holds iff every combiner is order-independent") plus its admission of decomposed fold (whose
+  state columns are additive) already decide that `+`/`XOR` are order-independent; the enumeration
+  is a partial gloss and is made explicit. Criterion 4's "not assumed sequential by default" is read
+  as the *verdict* being derived and printed — actually applying windows out of order stays an
+  unused optimisation and is retained honestly in §Known Divergences.
 
 ## Blocked
 
