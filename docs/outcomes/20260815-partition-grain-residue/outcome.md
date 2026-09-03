@@ -73,7 +73,7 @@ fixture.
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
 | 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | done |
 | 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | done |
-| 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
+| 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | planned |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
@@ -240,6 +240,24 @@ fixture.
   `wrap_source_ref_with_filter` surfaced by `statement_parity` going red
   mid-phase. Success criterion 5 complete; the matching Known Divergences
   bullet removed from `docs/specs/incremental_shapes.md`. No phase reshape.
+
+- 2026-09-04 — Phase 6 planned. No phase row added, split, or reordered. The 5b summary's
+  two forward items both land here rather than being deferred: the stale "specified ahead
+  of a tracking plan" claim is fixed by *removing* the whole bullet (phase 6 closes both of
+  its halves, so phase 8 has nothing left to correct), and the untouched editor-hover half
+  is task 5–6 of this phase. Two design calls the outcome text leaves open, made in the
+  plan rather than escalated: (i) *where the run window enters `explain --json`* — reuse the
+  existing `--period` flag (already parses both calendar and integer forms since 5b) by
+  dropping its `requires = "show_sql"`, rather than adding a second
+  `--event-time-start`/`--end` pair that would then need its own axis parsing; (ii) *who
+  owns the scan-window arithmetic* — the resolver is extracted out of
+  `inject_source_filters` into `smelt-logical` beside `Offset`, so the window the report
+  prints and the filter the run pushes down cannot drift (the alternative, a second
+  offset→date arithmetic in `explain.rs`, is exactly the duplication the maintenance-plan
+  purity rule forbids). A non-uniform (month/year) offset resolves to an explicit
+  unresolved verdict naming the unit rather than a coerced day count, per fail-loud
+  discipline. The LSP half needs no new crate dependency: `smelt-db` gains a thin Salsa
+  wrapper over the pure `derive_model_bounds` and re-exports `BoundResult`/`Offset`.
 
 ## Blocked
 
