@@ -337,7 +337,9 @@ open — not that the excluded bullets themselves are gone.
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | done |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
-| 28 | Decide and record the small Open Questions (out-of-band-edit tripwire, `on_column_add` supersession, docs-site CLI-coverage audit, group-merge-provenance, `change_feed` `UpstreamMutation`) in their owning specs | pending |
+| 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | planned |
+| 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | pending |
+| 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
@@ -1154,6 +1156,17 @@ open — not that the excluded bullets themselves are gone.
   structurally unreachable from `build_forward_graph` even though the underlying proof and
   `smelt-db`'s plan-layer adapter were both already correct. Added the missing field; full
   `cargo test --workspace` sweep green. See `phases/26d-summary.md`.
+
+- **2026-09-03, phase 28 reshaped into 28a/28b/28c (plan step).** The five "small Open
+  Questions" were already *decided* in `docs/research/20260816-open-questions-triage.md` and
+  two of them are already recorded in the specs — what is actually left is not one recording
+  pass but three differently-shaped jobs: a doc-only recording + CLI-audit close-out (28a), an
+  implementation audit with a pinning check for the merged-group rule (28b, `incremental_models.md`
+  says explicitly "unverified in the implementation … no check or fixture pins the rule"), and
+  real derivation work for `change_feed` (28c — the plan-layer `MutationProfile` in
+  `smelt-logical/src/maintenance/derive.rs` has only `AppendOnly`/`MutableSnapshot` variants, so
+  no `UpstreamMutation` cell can be derived for a feed today). Nothing left the outcome; success
+  criteria 18 and 20 are still covered in full by the three rows.
 
 ## Blocked
 
