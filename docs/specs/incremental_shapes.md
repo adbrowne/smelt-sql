@@ -1330,8 +1330,9 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
   - `crates/smelt-backend-duckdb/src/lib.rs` — DuckDB `DeleteInsert` impl
   - `crates/smelt-dialect/src/dialect.rs` — `BackendCapabilities::supports_merge`
   - `crates/smelt-logical/src/analysis/temporal.rs` — `analyze_expr_temporal` subquery/CTE descent
-  - `crates/smelt-logical/src/windowing.rs` — `PartitionAxis`, `PartitionPoint`, `resolve_scan_window`
-  - `crates/smelt-runtime/src/windowing.rs` — `IncrementalBatch` axis dispatch (calendar / unit-step integer)
+  - `crates/smelt-logical/src/analysis/partition_axis.rs` — `PartitionAxis`
+  - `crates/smelt-logical/src/analysis/source_bounds.rs` — `resolve_scan_window`
+  - `crates/smelt-runtime/src/windowing.rs` — `PartitionPoint`, `IncrementalBatch` axis dispatch (calendar / unit-step integer)
   - `crates/smelt-logical/src/maintenance/derive.rs` — `partition_column_changed`, `Refusal::PartitionColumnChanged`
   - `crates/smelt-state/src/schema_tracking.rs` — `DeployedSchema::partition_column`
   - `crates/smelt-db/src/lib.rs` — `model_source_clamps`

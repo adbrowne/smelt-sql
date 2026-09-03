@@ -61,7 +61,7 @@ divergence entry removed).
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
 | 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
-| 4 | Run all four `/smelt:validate` invocations; fix any drift | planned |
+| 4 | Run all four `/smelt:validate` invocations; fix any drift | done |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
 
 ## Decision log
@@ -146,6 +146,24 @@ divergence entry removed).
   they do not clobber the earlier *scoped* `2026-09-04-incremental_shapes.md` (partition-grain
   only, commit `7f4358cf`), and the automated-check leg is run once and cited by all four rather
   than four full `cargo test` runs.
+
+- 2026-09-04 — Phase 4 done. Ran the automated-check leg once (`bash .claude/scripts/verify-phase.sh`,
+  all green) then four parallel full-spec `/smelt:validate` sweeps (steps 3-6), one per anchor spec,
+  each cross-checked against `baseline-inventory.md` so already-flagged-open bullets weren't
+  re-litigated as drift. Result: 0 drift in `definition_deltas` and `incremental_models`; 1 doc/wording
+  item each in `incremental_shapes` (a stale §References Code path — `windowing.rs` no longer holds
+  `PartitionAxis`/`resolve_scan_window`, moved to `analysis/partition_axis.rs` /
+  `analysis/source_bounds.rs`) and `model_properties` (Surface + §Semantics "Event-time monotonicity
+  trace" hadn't caught up to the shipped, tested `Offset::Integer` variant, commits
+  `98393e25`/`cc75fe58`). Both fixed inline this phase (spec text + `model_properties.md`
+  `last_reviewed` bump to 2026-09-04); neither needed a new phase row or a `## Blocked` entry — the
+  `model_properties` finding was initially mis-dispositioned by its validating sub-agent as behaviour
+  drift needing a phase row, corrected here since the code already implements and tests the gap, so
+  it's the spec lagging, not a functional hole. Four reports land at
+  `docs/validations/2026-09-04-<slug>-closure.md`; `check-validations.sh` (new gate for this phase)
+  went red-then-green. `check-inventory.sh`/`check-classification.sh` unchanged and still green.
+  Timeless-oracle sweep across all four specs: zero `Phase [A-Z0-9]+` hits. Row 5 stands as written —
+  criteria 1-3 were already satisfied by phases 1-3, criterion 4 is now fully satisfied.
 
 ## Blocked
 
