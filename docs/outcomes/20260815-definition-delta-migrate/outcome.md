@@ -341,7 +341,8 @@ open — not that the excluded bullets themselves are gone.
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
-| 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
+| 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | planned |
+| 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
@@ -1229,6 +1230,18 @@ open — not that the excluded bullets themselves are gone.
   `resolved_grain()`, so a partition-shaped model that writes no `grain:` is wrongly refused
   for declaring `safety_overrides:`. Row 29 is rewritten to cover both directions; no rows
   added or removed.
+
+- **2026-09-03, phase 30 planned — a second author of model-table `ALTER TABLE` DDL exists
+  outside the scanned crates.** Planning-time audit for the structural-leg widening found
+  `crates/smelt-state/src/ddl_duckdb.rs` constructing `ALTER TABLE … ADD COLUMN` /
+  `DROP COLUMN` text for *model* tables (consumed by `smelt-runtime`'s `schema_evolution`
+  `MigrationAction::AlterTable` path), duplicating `backbuild::emit`'s
+  `emit_alter_add_column`/`emit_alter_drop_column`. That is the two-authors bug class item 12
+  names, not the ledger-bookkeeping exclusion the spec carves out for `smelt-state`, so it
+  serves success criterion 9 and is not deferred out: added row 30b. Phase 30 keeps the
+  structural scan's crate list unchanged (`smelt-backend*`, `smelt-runtime`, `smelt-logical`)
+  and widens only its *shape* list to the backbuild families; 30b owns the crate-list widening
+  plus the unification, so a large refactor cannot silently expand phase 30.
 
 ## Blocked
 
