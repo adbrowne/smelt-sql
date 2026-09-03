@@ -1,7 +1,7 @@
 # Outcome: Wire the definition-delta synthesis layer (plan-and-approve migration)
 
 **Created:** 2026-08-15
-**Status:** active
+**Status:** done
 **Source:** `docs/research/20260811-delta-signatures-and-definition-deltas.md` §6 step 2
 **Spec anchors:** `docs/specs/definition_deltas.md`, `docs/specs/incremental_models.md`,
 `docs/specs/incremental_shapes.md`
@@ -300,6 +300,13 @@ open — not that the excluded bullets themselves are gone.
   structurally for every technique by the scan; per-technique executed-vs-emitted fixtures are
   breadth, not a success criterion, and each needs its own staged workspace.
 
+- **Full contract-lattice probe listing in `smelt explain`** (phase 34 summary): the
+  `frozen_horizon` and `deferral` probes are dispatched at runtime but not enumerated by
+  `probe_plan_for_model`, so `smelt explain` lists only the `retain_departed`,
+  `key_recurrence` and `referential_integrity` entries. No success criterion asks for
+  explain-side probe-plan completeness — criteria 11 and 12 ask for scheduling and refusal,
+  both shipped — so this is explain-surface breadth for a future outcome, not a gap in this one.
+
 ## Phases
 
 | # | Phase | Status |
@@ -355,6 +362,24 @@ open — not that the excluded bullets themselves are gone.
 | 34 | Persist the `retain_departed` probe outcome on the run manifest: thread the snapshot-reconcile path's pre-write probe through `smelt-runtime`'s `ProbeRecord`/`ModelRunRecord.probes` ledger the `frozen_horizon`/`deferral` probes already use, so the declared lattice point is explain/run-report visible rather than only fail-loud inline (phase 32b summary follow-up) | done |
 
 ## Decision log
+
+- **2026-09-03, outcome close-out — all 20 success criteria met; Status → done.** Every phase row
+  (1–34, including the 32/33 rows that were briefly `blocked` on a missing plan file and then
+  planned and shipped) is `done`. Evidence: criteria 1–3 — `smelt migrate` and `smelt rebuild` are
+  live CLI verbs (`crates/smelt-cli/src/main.rs:46,68`, dispatching `commands::rebuild` /
+  `commands::migrate`), with the approval store, hash-mismatch refusal, `--json` and CI exit code
+  from phase 3. Criteria 4–10 — phases 5–11 summaries; criteria 11–17 — phases 12–27g; criterion 18
+  — phases 28a–28c; criterion 19 — phase 29; criteria 8 and 20 — phases 10 and 31, whose
+  `/smelt:validate` reports are committed at `phases/31-validate-incremental_models.md` and
+  `phases/31-validate-incremental_shapes.md`, and a repo-wide `rg 'smelt backbuild|
+  MaintenanceSkeletonColumnAdded'` over `docs/specs/` and `docs-site/docs/` returns no matches.
+  Criterion 9 — `bash .claude/scripts/verify-phase.sh` re-run at the close-out commit `ae0870b3`
+  (clean tree): fmt, clippy over both CI feature sets, full workspace `cargo test`, and
+  `example_diagnostics` all PASS; phase 34 additionally recorded `statement_parity` (33),
+  `maintenance_conformance` (74), `contract_lattice_spec` (13) and `departed_key_reconcile` (5)
+  green. One residue is recorded under §Out of scope rather than carried: the `frozen_horizon` /
+  `deferral` probes are dispatched but not listed by `probe_plan_for_model`, which no success
+  criterion requires.
 
 - **2026-09-03, phase 34 implement — landed.** Shipped as planned: `ProbeRecord.observed`,
   the `probe_sink` out-parameter threaded through `execute_snapshot_reconcile` into the
