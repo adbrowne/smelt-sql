@@ -60,7 +60,7 @@ divergence entry removed).
 |---|-------|--------|
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
-| 3 | Resolve any residual or drifted bullets, including the `keyed-grain-residue` blocked-phase residue: reopen the owning outcome, or fix the stale spec wording directly if trivial | pending |
+| 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | planned |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
 
@@ -104,6 +104,19 @@ divergence entry removed).
   claims closure, so success criterion 6 doesn't fire — no owning-outcome reopen is needed. Full
   detail in `phases/02-summary.md` and `baseline-inventory.md` §Classification summary. Row 3 is
   lighter-scoped than anticipated (a wording spot-check on the 16 `drifted` rows, not a reopen).
+
+- 2026-09-04 — Phase 3 planned. Light reshape, no new rows. (a) Row 3's wording is updated: phase 2
+  found **zero `residue`** and confirmed the `keyed-grain-residue` blocked bullet (`IS-18`) never
+  claimed closure, so there is no owning-outcome reopen to do — the row's real content is the
+  `drifted` wording spot-check. (b) Row 3 now explicitly absorbs success criterion 3's
+  out-of-scope spot-check (every bullet `20260815-definition-delta-migrate` §"Out of scope" names:
+  still present, still `(Open Question)`-tagged where claimed, behaviour still missing), which was
+  previously implicit across rows 2-3 and which phase 2 did not cover — phase 2 classified the 80
+  *baseline* bullets, while the out-of-scope list also names §Future Extensions material that is
+  not a baseline Known-Divergence row. (c) Standing rule fixed for this phase: a stale bullet is
+  edited inline only when the fix is wording; a stale bullet needing implementation gets a new
+  phase row, and one needing a product decision gets a `## Blocked` entry — the audit never
+  invents a decision the program declined to make.
 
 ## Blocked
 
