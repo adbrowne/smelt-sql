@@ -338,7 +338,7 @@ open — not that the excluded bullets themselves are gone.
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | done |
 | 27g | Runtime dispatch for the 27d selection: thread the matching `write:` pin into the live keyed-fold write path (`cumulative.rs`), execute the staged-candidate group where pinned, extend `statement_parity`, and narrow the `incremental_models.md` Known Divergences bullet | done |
 | 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
-| 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | pending |
+| 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | planned |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | pending |
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing; make `safety_overrides:` on a key-addressed model a hard frontmatter error | pending |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
@@ -1179,6 +1179,14 @@ open — not that the excluded bullets themselves are gone.
   `smelt-logical/src/maintenance/derive.rs` has only `AppendOnly`/`MutableSnapshot` variants, so
   no `UpstreamMutation` cell can be derived for a feed today). Nothing left the outcome; success
   criteria 18 and 20 are still covered in full by the three rows.
+
+- **2026-09-03, phase 28b planned — the merged-group rule is violated, not merely
+  unchecked.** Planning-time audit of `derive_mutation`
+  (`crates/smelt-logical/src/maintenance/derive.rs`) found the `(Corner, Technique)` choice
+  keys on `membership_sensitive` alone, per source: a group value-sensitive to two mutable
+  inputs gets two `ColumnScopedMerge` cells, exactly what `incremental_models.md` §"The plan
+  matrix" forbids. 28b is therefore a code-change phase (guard + fixture pin + bullet
+  removal), not a docs-only confirmation. No rows added or removed.
 
 ## Blocked
 
