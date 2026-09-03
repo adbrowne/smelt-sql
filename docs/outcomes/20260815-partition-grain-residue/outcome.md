@@ -69,7 +69,7 @@ fixture.
 |---|-------|--------|
 | 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
-| 3 | CTE-only `event_time_column` detection in the outer-visibility check | planned |
+| 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
 | 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
@@ -131,6 +131,15 @@ fixture.
   recorded under §"Out of scope" rather than given a phase row. Phase 3 keeps
   its audited scope: the outer-visibility check's Case 2 matches only a bare
   parenthesized subquery in `FROM`, so the `WITH … FROM <cte>` form escapes.
+
+- 2026-09-04 — Phase 3 implemented (`phases/03-summary.md`). Landed Case 3 in
+  `check_event_time_injectable` (`crates/smelt-logical/src/rules/rule_diagnostics.rs`):
+  a `FROM` naming a CTE that doesn't project `event_time_column` is rejected, resolved
+  through a chain of CTEs with conservative fallback for wildcards, set-operation bodies,
+  `WITH RECURSIVE`, and joined outer FROMs. Spec and diagnostics catalogue updated; probe
+  inverted. Swept `examples/` — two batched models with CTE-shaped outer FROMs
+  (`silver/sessions.sql`, `silver/sessions_chained.sql`) both already project the column;
+  no example changes needed. No phase reshape.
 
 ## Blocked
 

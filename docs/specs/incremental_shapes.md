@@ -346,7 +346,7 @@ chooser").
 |---|---|
 | `TimeseriesRequiredForPartitionGrain` | `grain: partition` asserted with no `timeseries:` block (rule owned by `models.md` §"Constraint violations"). |
 | `PartitionGrainNotSafe` | The batch-safety classifier rejects the model's SQL (§"Safety checks (per-cell admission for recompute-a-region)"). |
-| `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation or subquery hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
+| `EventTimeColumnNotVisibleAtOuterSelect` | The outer output-clamp cannot bind: a set operation, subquery, or CTE hides `event_time_column` at the outermost SELECT (§"Event-time outer-visibility"). |
 | `PartitionGrainForbidsMetrics` | A partition-grain model's body consumes `smelt.metric()` — the composition of metric expansion with time-filter injection is deliberately unspecified, so the combination refuses ahead of execution rather than composing unpredictably (§"Functions inside partition-grain bodies"). |
 
 **Key-grain codes.**
@@ -527,11 +527,15 @@ wholesale (discouraged).
 #### Event-time outer-visibility
 
 The outer clamp needs `event_time_column` **accessible** at the outermost SELECT. A plain
-`UNION`/`INTERSECT`/`EXCEPT`, a `UNION ALL` with unprovable branches, or a subquery FROM not
-projecting it, is rejected (`EventTimeColumnNotVisibleAtOuterSelect`) before execution. A
-`UNION ALL` is **exempt** when every branch traces `Traceable` back to a real source's own
-partition column; a `StaticSeed` branch is named and rejected, a `NotTraceable` branch keeps
-the whole-model clamp.
+`UNION`/`INTERSECT`/`EXCEPT`, a `UNION ALL` with unprovable branches, a subquery FROM not
+projecting it, or a `FROM` naming a CTE whose body does not project it, is rejected
+(`EventTimeColumnNotVisibleAtOuterSelect`) before execution. A `UNION ALL` is **exempt** when
+every branch traces `Traceable` back to a real source's own partition column; a `StaticSeed`
+branch is named and rejected, a `NotTraceable` branch keeps the whole-model clamp. The CTE case
+is resolved through a chain of CTEs (a CTE's own single-table `FROM` naming another CTE), and
+left accepted (conservative, no diagnostic) when the referenced CTE's body projects a wildcard,
+the `WITH` is recursive, or the outer `FROM` has more than one table expression (a join) — the
+column may come from the other side.
 
 #### Observing the per-source clamp
 
@@ -1158,9 +1162,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 - **Non-deterministic row-set-membership or grouping is out of scope** — always rejected;
   admitting it needs a frozen-per-window-membership design
   (`docs/research/20260703-model-updates.md` §9.1a).
-- **CTE-only `event_time_column` references are not yet detected**: a CTE alias that fails to
-  project it escapes the outer-visibility check and fails at execution. Tracked:
-  `docs/plans/20260616-smelt-feedback-fixes.md`.
 - **Schema evolution on the partition grain is largely a definition delta now** — an output
   schema change is specified by `definition_deltas.md` (and unwired there, per its §Known
   Divergences); the residual open question here is a `partition_column` rename, a

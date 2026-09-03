@@ -30,12 +30,10 @@ fn ts_config(event_time_column: &str, partition_column: &str) -> TimeseriesConfi
 }
 
 /// Residue: "CTE-only `event_time_column` references are not yet detected" —
-/// `docs/specs/incremental_shapes.md` §"The partition grain" Known
-/// Divergences. Tracked: `docs/plans/20260616-smelt-feedback-fixes.md`.
-/// `check_event_time_injectable`'s Case 2 only handles a bare parenthesized
-/// subquery in the FROM clause (`from_text.starts_with('(')`) — a `WITH ...
-/// AS (...)` CTE alias referenced from FROM never starts with `(`, so this
-/// case silently returns `None` and the model is accepted. Inverts in phase 3.
+/// landed in phase 3 (`docs/outcomes/20260815-partition-grain-residue/phases/03-summary.md`).
+/// `check_event_time_injectable` now has a Case 3 (`check_cte_from_injectable`)
+/// that resolves a `FROM` naming a CTE, through a chain of CTEs, and rejects
+/// when the referenced CTE's projection doesn't include `event_time_column`.
 #[test]
 fn probe_cte_only_event_time_column() {
     let sql = "WITH recent AS (SELECT user_id, amount FROM smelt.orders) \
@@ -63,17 +61,15 @@ fn probe_cte_only_event_time_column() {
 
     // `recent` never projects `event_ts`, so injecting a WHERE filter on the
     // outer SELECT (which only sees `user_id`/`total`) cannot work — the spec
-    // requires `EventTimeColumnNotVisibleAtOuterSelect` here. TODAY the CTE
-    // form escapes the bare-subquery-only check and is accepted.
+    // requires `EventTimeColumnNotVisibleAtOuterSelect` here, and phase 3
+    // landed the CTE case (Case 3) that catches it.
     let caught = diags
         .iter()
         .any(|d| d.code == RuleDiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect);
     assert!(
-        !caught,
-        "CTE-only event_time_column non-visibility is already caught \
-         (EventTimeColumnNotVisibleAtOuterSelect fired) — this residue is LANDED; \
-         invert this probe and update docs/specs/incremental_shapes.md's \
-         Known Divergences entry"
+        caught,
+        "CTE-only event_time_column non-visibility must be caught \
+         (EventTimeColumnNotVisibleAtOuterSelect must fire); got: {diags:?}"
     );
 }
 
