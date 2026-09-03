@@ -359,6 +359,7 @@ pub(crate) fn diagnostic_code_str(code: DbCode) -> &'static str {
         DbCode::KeyedOnceWriteUnproven => "keyed-once-write-unproven",
         DbCode::KeyedStateColumnCollision => "keyed-state-column-collision",
         DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
+        DbCode::KeyedForbidsSafetyOverrides => "keyed-forbids-safety-overrides",
         DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
         DbCode::MaterializedViewForbidsPartitionGrain => "materialized-view-forbids-batched",
         DbCode::PartitionGrainNotSafe => "batched-not-safe",

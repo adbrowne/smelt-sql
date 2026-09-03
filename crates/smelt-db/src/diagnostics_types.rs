@@ -760,6 +760,11 @@ pub enum DiagnosticCode {
     /// partition column by default; the rule reads it from the driving
     /// source. Anchored at offset 0. Error severity.
     KeyedForbidsTimeseries,
+    /// A key-addressed model (`grain: key`, resolved) declares
+    /// `safety_overrides:` (top-level or the folded `batched.safety_overrides`
+    /// sub-block). A keyed model has no partition-shaped output for a safety
+    /// override to apply to. Anchored at offset 0. Error severity.
+    KeyedForbidsSafetyOverrides,
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `timeseries:` block. Like `keyed`, the engine-maintained output
     /// has no partition column. Anchored at offset 0. Error severity.

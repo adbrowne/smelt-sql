@@ -173,15 +173,14 @@ fn refresh_keyed_with_timeseries_reaches_plan_derivation() {
 }
 
 /// `refresh: incremental` + `grain: key` with an internally-folded `batched`
-/// block → `PartitionGrainRequiresRefreshIncremental`. The literal `batched:` sub-block
-/// itself is refused at parse time (before a `ModelMetadata` even exists),
-/// so this constructs the internal representation directly to exercise
-/// `validate_timeseries`'s pure check — the dedicated `KeyedForbidsPartitionGrain`
-/// check was removed as unreachable (`is_keyed()` implies
-/// `!is_partition_grain()`, a strict subset of what
-/// `PartitionGrainRequiresRefreshIncremental` already checks).
+/// block → the dedicated `KeyedForbidsSafetyOverrides` error, not the
+/// misdirecting `PartitionGrainRequiresRefreshIncremental` (which tells a
+/// keyed author to add `grain: partition`, the opposite of the rule). The
+/// literal `batched:` sub-block itself is refused at parse time (before a
+/// `ModelMetadata` even exists), so this constructs the internal
+/// representation directly to exercise `validate_timeseries`'s pure check.
 #[test]
-fn refresh_keyed_forbids_incremental() {
+fn keyed_safety_overrides_is_keyed_error() {
     use smelt_core::config::{PartitionGrainConfig, PartitionGrainSafetyOverrides};
     use smelt_core::metadata::MetadataError;
 
@@ -199,9 +198,76 @@ fn refresh_keyed_forbids_incremental() {
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
         .expect_err("refresh: incremental + grain: key + batched: must error");
     assert!(
-        matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
-        "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
+        matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+        "Expected KeyedForbidsSafetyOverrides, got: {}",
         err
+    );
+}
+
+/// The same check, but the `grain: key` shape is *derived* (top-level
+/// `unique_key:` declared, no written `grain:`) rather than explicitly
+/// asserted — `resolved_grain()` must still catch it.
+#[test]
+fn keyed_safety_overrides_without_declared_grain_is_keyed_error() {
+    use smelt_core::config::{PartitionGrainConfig, PartitionGrainSafetyOverrides};
+    use smelt_core::metadata::MetadataError;
+
+    let metadata = ModelMetadata {
+        materialization: Some(Materialization::Table),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: None,
+        unique_key: Some(vec!["device_id".to_string()]),
+        batched: Some(PartitionGrainConfig {
+            unique_key: vec![],
+            nondeterministic_columns_retired: (),
+            safety_overrides: PartitionGrainSafetyOverrides::default(),
+        }),
+        ..Default::default()
+    };
+    let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+        .expect_err("derived grain: key + batched: must error");
+    assert!(
+        matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+        "Expected KeyedForbidsSafetyOverrides, got: {}",
+        err
+    );
+}
+
+/// A model whose effective shape is partition-grain *by derivation*
+/// (`timeseries:` + `refresh: incremental`, no written `grain:`) admits
+/// `safety_overrides:` — `models.md` allows `safety_overrides` on any
+/// partition-shaped output, and the check must not over-refuse based on the
+/// literal (absent) `grain:` field.
+#[test]
+fn safety_overrides_on_derived_partition_shape_is_admitted() {
+    use smelt_core::config::{
+        Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides, TimeseriesConfig,
+    };
+
+    let metadata = ModelMetadata {
+        materialization: Some(Materialization::Table),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: None,
+        timeseries: Some(TimeseriesConfig {
+            partition_column: "dt".to_string(),
+            event_time_column: "dt".to_string(),
+            granularity: Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        }),
+        batched: Some(PartitionGrainConfig {
+            unique_key: vec![],
+            nondeterministic_columns_retired: (),
+            safety_overrides: PartitionGrainSafetyOverrides {
+                allow_having: true,
+                ..Default::default()
+            },
+        }),
+        ..Default::default()
+    };
+    assert!(
+        validate_timeseries(&metadata, "SELECT dt FROM foo").is_ok(),
+        "safety_overrides: on a derived partition-grain shape must be admitted, not refused"
     );
 }
 

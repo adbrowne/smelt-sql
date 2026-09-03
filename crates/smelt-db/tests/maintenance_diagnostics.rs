@@ -573,6 +573,61 @@ SELECT user_id, SUM(amount) as total_amount FROM smelt.sources.payments GROUP BY
     );
 }
 
+/// A key-addressed model (`grain: key`) declaring top-level
+/// `safety_overrides:` gets the dedicated `KeyedForbidsSafetyOverrides`
+/// diagnostic (CLI + LSP parity via `file_diagnostics()`), not the
+/// misdirecting `PartitionGrainRequiresRefreshIncremental`.
+#[test]
+fn keyed_safety_overrides_is_dedicated_error() {
+    let payments_source = r#"
+description: Payments, append-only.
+mutation_profile: append_only
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [user_id]
+safety_overrides:
+  allow_having: true
+---
+SELECT user_id, amount FROM smelt.sources.payments
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/payments.yml", payments_source),
+            ("models/lifetime_value.sql", model),
+        ],
+        "lifetime_value",
+    );
+
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::KeyedForbidsSafetyOverrides))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one KeyedForbidsSafetyOverrides, got {diags:?}"
+    );
+    assert_eq!(
+        refusals[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "keyed safety_overrides must be an Error"
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| !d.message.contains("PartitionGrainRequiresRefreshIncremental")),
+        "must not also raise the misdirecting PartitionGrainRequiresRefreshIncremental, got {diags:?}"
+    );
+}
+
 /// `maintenance.cells[].columns` naming members of two different derived
 /// column groups is an error — it would silently re-partition the plan.
 #[test]

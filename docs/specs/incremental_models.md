@@ -524,6 +524,9 @@ smelt run     [selectors]                                                       
 - For a **window-forward keyed** model, both flags are required and address the **driving
   source's** `partition_column`/`granularity` — never a column of the keyed output, even when
   an admitted output `timeseries:` block exists (run flags always address the source's clock).
+  A run with neither flag, or only one, **refuses** rather than falling back to a whole-source
+  rebuild; `--full-refresh` is the only intentional escape to drop and recreate the target from
+  the whole-source SELECT (`incremental_shapes.md` §"The key grain").
 - For a **snapshot-reconcile** keyed model (no clocked source), the flags are a **hard error** —
   *"model has no clocked driving source; run without event-time flags"*. Each run is a whole
   reconciliation.

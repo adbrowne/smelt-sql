@@ -126,6 +126,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::PlausibleContractOnSkeletonColumn { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
         MetadataError::PartitionGrainRequiresRefreshIncremental => None,
+        MetadataError::KeyedForbidsSafetyOverrides => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsPartitionGrain => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
@@ -2360,6 +2361,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::PartitionGrainRequiresRefreshIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }
+                smelt_core::metadata::MetadataError::KeyedForbidsSafetyOverrides => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::KeyedForbidsSafetyOverrides,
+                )),
                 smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
                     ts_err.to_string(),
                     DiagnosticCode::MaterializedViewForbidsTimeseries,

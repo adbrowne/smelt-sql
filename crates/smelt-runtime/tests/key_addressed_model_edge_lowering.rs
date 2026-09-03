@@ -479,7 +479,15 @@ mod chain {
             end: None,
             batch_size_days: None,
             per_partition: false,
-            full_refresh: false,
+            // `agg` (this file's clocked, `grain: key` upstream) always runs
+            // unwindowed via this helper — a window-forward keyed run with
+            // no window now refuses unless `--full-refresh` is set
+            // (`docs/specs/incremental_shapes.md` §"The key grain"). Harmless
+            // for every other model this helper selects: `full_refresh` is
+            // only consulted by that one windowless-keyed-run branch and the
+            // definition-delta gate (unexercised by this file), never by the
+            // key-addressed model-edge dispatch this file's tests pin.
+            full_refresh: true,
             dry_run: false,
             enforce_safety: false,
             allow_column_removal: false,

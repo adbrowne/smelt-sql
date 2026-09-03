@@ -340,12 +340,24 @@ open — not that the excluded bullets themselves are gone.
 | 28a | Record the already-taken decisions in their owning specs (out-of-band-edit non-goal cross-reference, `on_column_add` supersession) and close the docs-site CLI-surface audit with a standing coverage gate | done |
 | 28b | Pin the merged-group region-recompute rule: a column group whose sensitivity spans two or more mutation-sensitive inputs takes region recompute — audited, checked, fixture-pinned; bullet removed | done |
 | 28c | `change_feed` sources get an `UpstreamMutation` cell like every other mutation-sensitive posture (plan-layer `MutationProfile` gains the kind); the Known Divergences bullet narrows to the still-open full-input-re-derivation residue | done |
-| 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | planned |
+| 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | pending |
 | 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | pending |
 
 ## Decision log
 
+- **2026-09-03, phase 29 — windowless window-forward keyed runs refuse; `safety_overrides:`
+  on a keyed model gets its own diagnostic.** `execute.rs`'s windowless keyed dispatch now
+  `bail!`s (mirroring the pre-existing snapshot-reconcile arm) unless `request.full_refresh` is
+  set. `validate_timeseries` splits its `batched.is_some()` check: a resolved `grain: key` shape
+  (via `resolved_grain()`, not the literal field, so a derived-partition model isn't
+  over-refused) gets the new `KeyedForbidsSafetyOverrides`; kept `refresh: incremental` as an
+  explicit precondition alongside the derived-grain check — dropping it (as a literal reading of
+  the plan's phrasing would) silently admitted a non-incremental model's folded
+  `safety_overrides:`, breaking two pre-existing tests. `smelt build` had no `--full-refresh`
+  flag at all, so 12 of `example_web_analytics.rs`'s own fixture calls needed it added
+  end-to-end (CLI flag → `ExecuteRequest`) before they could pass one. See
+  `phases/29-summary.md`.
 - **2026-09-03, phase 28c — `change_feed` sources get an `UpstreamMutation` cell, clamped to
   full-input re-derivation.** Added `MutationProfile::ChangeFeed` to the plan layer with a
   single-owner `is_mutable()` predicate; `derive_triggers` derives the cell unconditionally from

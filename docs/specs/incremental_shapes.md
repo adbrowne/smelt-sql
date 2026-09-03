@@ -202,9 +202,10 @@ Rules:
 - One profile covers the running-aggregate, latest-value, and milestone patterns; what
   distinguishes them is the **column family** of each projection, derived from the SQL, never
   declared.
-- No shape-specific config block exists, and `safety_overrides` is a hard error once identity
-  makes the output key-addressed: every keyed rejection guards the equivalence invariant itself,
-  and there is nothing safe to waive (§"Key-grain design").
+- No shape-specific config block exists, and `safety_overrides` is a hard error
+  (`KeyedForbidsSafetyOverrides`) once identity makes the output key-addressed: every keyed
+  rejection guards the equivalence invariant itself, and there is nothing safe to waive
+  (§"Key-grain design").
 - By default the output carries no partition column and downstream consumers read it in full,
   like any lookup. A `timeseries:` block on the model is admitted **iff key temporal locality
   is established** (§"Key temporal locality (the time-partitioned output)"), refused otherwise
@@ -354,6 +355,7 @@ chooser").
 |---|---|
 | `KeyedRequiresGroupBy` | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
 | `KeyedForbidsTimeseries` | The model declares `timeseries:` but key temporal locality cannot be established — no route applies; names the three routes and the nearest missing fact (§"Key temporal locality (the time-partitioned output)"). |
+| `KeyedForbidsSafetyOverrides` | A key-addressed model (`grain: key`, declared or resolved) declares `safety_overrides:` — every keyed rejection guards the equivalence invariant, and there is nothing safe to waive; names the two escapes (remodel as partition-shaped, or `refresh: materialized_view`). |
 | `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
 | `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
@@ -1184,12 +1186,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
 
 ### The key grain
 
-- **A window-forward keyed run with no event-time window silently full-refreshes instead of
-  refusing** — the CLI surface (`incremental_models.md` §"CLI") requires both
-  `--event-time-start` and `--event-time-end`; the runtime's no-window arm instead drops and
-  recreates the target from the whole-source SELECT (including when only one flag is supplied).
-  The end state matches the full-refresh oracle, so nothing is silently wrong, but no test
-  asserts the refusal, and user docs describe the fallback rather than the required-flags rule.
 - **The once-write classifier has no nullability route around the fallback case** — the only
   route to decomposed `(value, written)` state is the FD-backed proof, since the NOT-NULL
   derivation proves not-null only for a partition/driving-clock-derived column; the key-derived
@@ -1206,9 +1202,6 @@ and §References → Plans. Family-wide gaps (plan, graph layer, contract lattic
   consult. Decision record: `docs/research/20260816-open-questions-triage.md`.
 - **`KeyedRetractableContribution` has no implementation (Open Question)** — the code is
   specified but no classifier, diagnostic variant, or test produces it.
-- **`safety_overrides:` on a key-addressed model is not a hard error** — §"Key-grain
-  declaration (`grain: key`)" makes it one, but frontmatter validation only checks the
-  double-declaration case, so the block parses on a keyed model and is ignored.
 - **The reconciliation ledger's fold is transactional on DuckDB only (Open Question)** — the
   default `Backend::fold_ledger_delta` is best-effort check-then-act across separate
   statements; only the DuckDB backend overrides it with a real transaction.

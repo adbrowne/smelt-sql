@@ -3004,6 +3004,12 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
             .expect("seed payments");
     }
 
+    // `agg` is a clocked, `grain: key` window-forward model always run
+    // unwindowed here — that now refuses without `--full-refresh`
+    // (`docs/specs/incremental_shapes.md` §"The key grain"). Harmless for
+    // `downstream`: `full_refresh` is only consulted by that one
+    // windowless-keyed-run branch, never by the key-addressed model-edge
+    // dispatch this test pins.
     let multi_select = |models: &[&str]| ExecuteRequest {
         target: "dev".to_string(),
         select: models.iter().map(|s| s.to_string()).collect(),
@@ -3012,7 +3018,7 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
         end: None,
         batch_size_days: None,
         per_partition: false,
-        full_refresh: false,
+        full_refresh: true,
         dry_run: false,
         enforce_safety: false,
         allow_column_removal: false,

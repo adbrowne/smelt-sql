@@ -438,6 +438,7 @@ The flags below have surprised users in practice; the table records what each on
 | `--exclude` / `-e` | repeatable | Same selector grammar and repetition rule as `--select`. |
 | `--dry-run` | **not on `smelt build`** | Use `smelt run --dry-run` for parse-and-validate-without-executing. There is no project-wide compile-only flag on `build` today. |
 | `--event-time-start` / `--event-time-end` | implemented | ISO-8601 (`2026-03-20` or `2026-03-20T00:00:00Z`). End is exclusive. Both required together for incremental execution. |
+| `--full-refresh` | implemented | Without it, `smelt build` on a window-forward keyed model with no event-time window **refuses** rather than silently full-refreshing. Pass `--full-refresh` for a from-scratch build of such a model. |
 | `--allow-downgrade` | implemented | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL. |
 
 **Usage:**
@@ -461,6 +462,7 @@ smelt build [OPTIONS]
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
 | `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
 | `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
+| `--full-refresh` | | bool | `false` | Drop and recreate every selected model's target from scratch instead of maintaining it incrementally. Required to build a window-forward keyed model (`grain: key` over a clocked source) with no `--event-time-start`/`--event-time-end` window. |
 | `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 
 **Examples:**

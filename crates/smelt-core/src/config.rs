@@ -2172,8 +2172,8 @@ models:
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: incremental + grain: key + batched: must error");
         assert!(
-            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
-            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
+            matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+            "Expected KeyedForbidsSafetyOverrides, got: {}",
             err
         );
     }

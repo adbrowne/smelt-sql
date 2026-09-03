@@ -393,6 +393,14 @@ struct BuildArgs {
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
 
+    /// Drop and recreate every selected model's target from scratch instead
+    /// of maintaining it incrementally. Required to build a window-forward
+    /// keyed model (`grain: key` over a clocked source) with no
+    /// `--event-time-start`/`--event-time-end` window — see `smelt run
+    /// --full-refresh`.
+    #[arg(long = "full-refresh")]
+    full_refresh: bool,
+
     /// Backward resolution: given the target model (the positional
     /// argument) and this period, resolve the per-ancestor required
     /// upstream slices and the ancestor-first/target-last build order

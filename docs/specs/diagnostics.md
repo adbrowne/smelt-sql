@@ -157,14 +157,18 @@ unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, 
 - `KeyedForbidsPartitionGrain` — the literal `batched:` sub-block it named is refused universally, for
   every grain, at frontmatter parse time (`YamlParseError`, not a dedicated code) — a `grain: key`
   model can no longer declare the sub-block at all, so the dedicated keyed check is gone rather
-  than reachable. `PartitionGrainRequiresRefreshIncremental` still catches the one surviving way a `grain: key`
-  model can carry an internally-folded `batched` block (via the top-level `safety_overrides:` fold),
-  a strict subset of what that check already covers.
+  than reachable. The one surviving way a `grain: key` model can carry an internally-folded
+  `batched` block (via the top-level `safety_overrides:` fold) is caught by the dedicated
+  `KeyedForbidsSafetyOverrides` below, not by `PartitionGrainRequiresRefreshIncremental` — routed
+  through the model's *resolved* grain (declared or derived) so a keyed shape is never mistaken
+  for the generic partition-grain refusal, whose fix-it (add `grain: partition`) would be the
+  opposite of the keyed rule.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
 | `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_shapes.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsSafetyOverrides` | Error | A key-addressed model (`grain: key`, declared or resolved) declares `safety_overrides:` (top-level, or the folded `batched.safety_overrides` sub-block) — a keyed model has no partition-shaped output for a safety override to apply to. Names the key-grain rule and the two escapes: remodel the output as partition-shaped, or use `refresh: materialized_view`. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY(value, ordering)` as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |

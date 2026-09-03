@@ -559,6 +559,16 @@ pub enum MetadataError {
     #[error("PartitionGrainRequiresRefreshIncremental: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
     PartitionGrainRequiresRefreshIncremental,
 
+    /// A key-addressed model (`resolved_grain() == Some(Grain::Key)`) declares
+    /// `safety_overrides:` (top-level, or the folded `batched.safety_overrides`
+    /// sub-block). Every keyed rejection guards the equivalence invariant — a
+    /// keyed model has no partition-shaped output for a safety override to
+    /// widen or narrow. The escape is to remodel the output as
+    /// partition-shaped (not `grain: partition`, which only asserts an
+    /// already-derived label) or move to `refresh: materialized_view`.
+    #[error("KeyedForbidsSafetyOverrides: key-addressed models (grain: key) cannot declare `safety_overrides:` — a keyed model has no partition-shaped output for a safety override to apply to; remodel the output as partition-shaped or use refresh: materialized_view")]
+    KeyedForbidsSafetyOverrides,
+
     /// A model declares both the top-level `safety_overrides:` key and a
     /// non-default `batched.safety_overrides` sub-block. The two spellings
     /// are the same fact (`docs/specs/models.md` §"The Relation Contract");
@@ -1083,10 +1093,29 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
+    // Rule: batched: block on a key-addressed effective shape →
+    // KeyedForbidsSafetyOverrides (a dedicated, correctly-named refusal — the
+    // generic PartitionGrainRequiresRefreshIncremental message below tells
+    // the author to add `grain: partition`, the opposite of the keyed rule).
+    // Routed through `resolved_grain()`, not the declared `grain:` field
+    // alone, so a `timeseries:` + `refresh: incremental` model with no
+    // written `grain:` (an effective partition shape) isn't mistaken for
+    // keyed here. Both arms still require `refresh: incremental` explicitly
+    // (not just an incremental-shaped set of facts) — a model with no
+    // `refresh:` key at all is a plain table build, and `batched:` on it is
+    // still the generic refusal regardless of what `resolved_grain()` would
+    // derive if it WERE incremental.
+    //
     // Rule: batched: block without refresh: incremental + grain: partition →
     // PartitionGrainRequiresRefreshIncremental
-    if metadata.batched.is_some() && !metadata.is_partition_grain() {
-        return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
+    if metadata.batched.is_some() {
+        let is_incremental = metadata.refresh == Some(RefreshStrategy::Incremental);
+        if is_incremental && metadata.resolved_grain() == Some(crate::config::Grain::Key) {
+            return Err(MetadataError::KeyedForbidsSafetyOverrides);
+        }
+        if !is_incremental || metadata.resolved_grain() != Some(crate::config::Grain::Partition) {
+            return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
+        }
     }
 
     // Rule: refresh: incremental + grain: partition without timeseries: →
@@ -3327,8 +3356,8 @@ GROUP BY device_id, user_id"#;
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
-            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
+            matches!(err, MetadataError::KeyedForbidsSafetyOverrides),
+            "Expected KeyedForbidsSafetyOverrides, got: {}",
             err
         );
     }

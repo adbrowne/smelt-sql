@@ -2422,10 +2422,32 @@ pub async fn execute_project(
                     )
                     .await
                 }
+                _ if !request.full_refresh => {
+                    // No run window, window-forward run shape, no
+                    // `--full-refresh`: refuse rather than silently
+                    // drop+recreating from a whole-source SELECT
+                    // (`docs/specs/incremental_shapes.md` §"The key grain" —
+                    // a window-forward keyed run requires both
+                    // `--event-time-start`/`--event-time-end`; the
+                    // `--full-refresh` escape below is the only intentional
+                    // rebuild path). Mirrors the snapshot-reconcile arm
+                    // above's plain-`bail!` shape.
+                    anyhow::bail!(
+                        "Model '{}' derives the window-forward run shape (a clocked driving \
+                         source, `docs/specs/incremental_models.md` §\"The two run shapes\") \
+                         and was run with no event-time window — both \
+                         --event-time-start/--event-time-end are required, or pass \
+                         --full-refresh to intentionally rebuild the whole target from a \
+                         whole-source SELECT (`docs/specs/incremental_shapes.md` §\"The key \
+                         grain\").",
+                        plan.name
+                    );
+                }
                 _ => {
-                    // No run window, window-forward run shape: single-shot
-                    // full refresh of the keyed SELECT. Matches CLI's
-                    // behaviour for `smelt build` / `smelt run` without an
+                    // No run window, window-forward run shape,
+                    // `--full-refresh`: single-shot full refresh of the
+                    // keyed SELECT. Matches CLI's behaviour for
+                    // `smelt build` / `smelt run --full-refresh` without an
                     // event-time window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
                     let compiled = compiler.compile_with_sql_and_ephemerals(
