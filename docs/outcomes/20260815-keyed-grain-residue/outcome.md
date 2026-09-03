@@ -73,7 +73,7 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
-| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | pending |
+| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | planned |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
@@ -195,6 +195,15 @@ six success criteria — criterion 1 is already met end-to-end without it.
   `gate_composed.rs:343` was the root cause of all 5 reported errors; no further rot was found.
   Added a per-PR "Gated conformance twin compile check" step to the `Lint` job in
   `.github/workflows/test.yml`. No new limitations discovered.
+
+- 2026-09-04 — Phase 7 planned. No reshape: phase 6's summary reports no new limitations and rows
+  7-8 still map onto the residue named in phase 3's blocked entry plus close-out. Phase 7's design
+  was fixed to a defaulted `RunReporter::state_structure_unavailable` event carried on the
+  `RetryPolicy` the driver already receives (reporter, run id and model name are all in scope), so
+  no call site of `run_windowed_keyed_maintenance` gains a parameter — deliberately avoiding the
+  arg-drift that caused phase 6's rot — with the buffered `ReporterEvent` twin added so a
+  `--jobs > 1` run does not lose the fact. Scope is explicitly the *visibility* of the skip only:
+  the skip itself stays a skip, because deciding otherwise is phase 3's blocked product call.
 
 ## Blocked
 
