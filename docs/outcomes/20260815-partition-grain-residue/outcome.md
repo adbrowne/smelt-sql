@@ -71,7 +71,8 @@ fixture.
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | done |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | done |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | done |
-| 5 | Monotone-integer `partition_column` end-to-end (backfill chunking, scan-filter injection, explain clamp) | pending |
+| 5a | Partition-axis domain: typed run window + backfill chunking over a monotone-integer axis | planned |
+| 5b | Integer-axis emission end-to-end: scan-filter/DELETE literals, explain clamp, first-run/backfill/steady-state proof | pending |
 | 6 | Per-source clamp observability: run-relative scan window in `explain --json`; editor hover | pending |
 | 7 | `partition_column` rename: refusal diagnostic + fixture | pending |
 | 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
@@ -162,6 +163,37 @@ fixture.
   (array-literal and loader-driven lambda) extract and apply the override;
   `discovery::model_file_from_emitted_def` needed no changes since it already clones
   `EmittedModelDef`'s config fields verbatim. No phase reshape.
+
+- 2026-09-04 — Phase 5 **split** into 5a (axis domain: typed run window,
+  validation, backfill chunking) and 5b (emission: scan-filter/DELETE literal
+  rendering, explain clamp, end-to-end first-run/backfill/steady-state proof).
+  Reason: staging the probe by hand against the built binary showed the residue
+  is two distinct changes stacked — the run window is `chrono::NaiveDate` in
+  `windowing.rs`'s `IncrementalBatch` *and* the partition literal is hard-quoted
+  (`format!("'{}'", …)`) at four `Region` construction sites in `execute.rs`, so
+  a monotone-integer model dies at `DELETE … WHERE batch_id >= '2026-01-01'`
+  (`Could not convert string '2026-01-01' to INT32`). Retyping the axis alone
+  touches `windowing.rs`, ~32 format sites in `execute.rs` and four `smelt-cli`
+  callers; folding the emission change and the e2e oracle into the same phase
+  would make one commit that cannot be reviewed against a single red test.
+  Nothing is deferred out — 5b carries every remaining part of success
+  criterion 5. Later rows keep their numbers (the loop's row parser accepts the
+  `5a`/`5b` form), so `audit.md`'s residue→phase mapping now reads residue #11 →
+  phases 5a+5b.
+- 2026-09-04 — Phase 5a planned. One design call the outcome text leaves open,
+  made in the plan rather than escalated: *what a run window means on an integer
+  partition axis*. `timeseries.md` rule 4 admits an integer `partition_column`
+  and `monotonicity.rs` already derives `Offset::Integer` for it, but nothing
+  says what a partition or a chunk is there. Chosen: a **unit-step integer
+  grid** — one partition is one integer value, the run window's bounds are given
+  as bare integers in the axis's own domain, `--batch-size N` counts N units, and
+  `granularity` keeps its declared-propagation-grain role (grain alignment, graph
+  edges) without being the chunk step. Rejected: (a) treating the integer as an
+  epoch encoding of a calendar window, which needs an encoding smelt is never
+  told; (b) probing the target for the batch-id range covering a date window,
+  which makes chunk shape depend on live data. Day-typed widening inputs
+  (`data_latency`, seconds-domain lookback/skew) have no conversion into the unit
+  grid and are refused fail-closed rather than coerced.
 
 ## Blocked
 
