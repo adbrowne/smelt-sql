@@ -1,7 +1,7 @@
 # Outcome: Close the key grain's implementation-only residues
 
 **Created:** 2026-08-15
-**Status:** active
+**Status:** blocked
 **Source:** `docs/specs/incremental_shapes.md` §"The key grain" §Known Divergences;
 `docs/outcomes/20260815-definition-delta-migrate/outcome.md` §"Out of scope"
 **Spec anchors:** `docs/specs/incremental_shapes.md`, `docs/specs/incremental_models.md`
@@ -74,10 +74,17 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
 | 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | done |
 | 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | done |
-| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | planned |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | done |
 
 ## Decision log
 
+- 2026-09-04 — Phase 8 (validate + close out) done: `/smelt:validate incremental_shapes` found
+  no drift attributable to phases 1/2/4/5/7 (spec §References gained the code/test entries those
+  phases introduced; §Known Divergences already reflected each phase's landed state; no
+  timeless-oracle leakage). All standing gates green. Every phase row is now `done` except row 3
+  (`blocked`), which is pending the human decision recorded in §Blocked's 2026-09-03 entry —
+  outcome Status flipped `active` → `blocked` since no further row is workable without that
+  decision. Criterion 3 stays the one open success criterion.
 - 2026-09-03 — Outcome activated. Phase 1 planned with no reshape: no prior phase summary exists
   in this outcome, and the six phase rows still match the success criteria one-for-one. Phase 1's
   derivation seam was fixed to the key-grain `NewData` handler's repair-refusal arm in

@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-09-03
+last_reviewed: 2026-09-04
 owners: [andrew]
 ---
 
@@ -1323,13 +1323,22 @@ via its own spec diff. Deferral decisions recorded 2026-08-16:
 
 - **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy`);
   `crates/smelt-logical/src/rules/cumulative.rs` (the built classifier seed — combiner lookup,
-  GROUP-BY key derivation, driving-source resolution);
-  `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
+  GROUP-BY key derivation, driving-source resolution — and `execution_postures`, the derived
+  re-run-tolerance/order-independence/reprocessing-refusal verdicts);
+  `crates/smelt-logical/src/maintenance/derive.rs` (the `KeyedRetractableContribution` classifier
+  seam); `crates/smelt-runtime/src/maintenance_driver.rs` (the windowed-keyed-maintenance driver,
   `WindowedKeyedRule`); `crates/smelt-runtime/src/cumulative.rs` (per-window merge execution);
-  `crates/smelt-backend/src/lib.rs` (`merge_into`), impls in
-  `crates/smelt-backend-duckdb`/`-spark`.
+  `crates/smelt-backend/src/lib.rs` (`merge_into`, `Backend::execute_write_with_bookkeeping` —
+  the transactional-write seam), impls in `crates/smelt-backend-duckdb` (the transactional
+  override) `/-spark`; `crates/smelt-runtime/src/reporter.rs`
+  (`RunReporter::state_structure_unavailable` — the fail-loud report when a non-DuckDB backend
+  skips the idempotent-grade ledger record).
 - **Tests**: the cumulative classifier unit tests (`smelt-logical/src/rules/cumulative.rs`);
-  the keyed end-state-equivalence harness; `smelt-backend-duckdb` `merge_into` tests.
+  `crates/smelt-logical/tests/execution_postures.rs`; the keyed end-state-equivalence harness;
+  `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`; `smelt-backend-duckdb` `merge_into`
+  tests; `arb_once_write_null_schedule` (`crates/smelt-maintenance-testkit/src/recipe.rs`) —
+  the once-write NULL-payload generator consumed by `smelt-cli`'s
+  `maintenance_conformance` gate.
 - **User docs**: `docs-site/docs/reference/cumulative-aggregate.md` (the key-grain reference
   page — column families, the once-write proof, the two run shapes, the diagnostic codes);
   `docs-site/docs/guide/materializations.md` (author-facing walkthrough);
