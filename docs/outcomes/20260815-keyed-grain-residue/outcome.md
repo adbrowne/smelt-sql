@@ -72,7 +72,9 @@ six success criteria — criterion 1 is already met end-to-end without it.
 | 3 | Transactional ledger fold on every shipped backend | blocked |
 | 4 | Derive and print execution postures (order-independence) in `smelt explain` | done |
 | 5 | Generative conformance pool: nullable payload, once-write NULL direction covered | done |
-| 6 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
+| 6 | Un-rot the gated conformance twin: `gate_composed.rs` compiles under `spark`/`bigquery`, guarded per-PR | planned |
+| 7 | Make the non-DuckDB `Grade::Idempotent` ledger skip a recorded, visible fact (fail-loud) | pending |
+| 8 | Validate + close out: `/smelt:validate incremental_shapes` clean, standing gates green | pending |
 
 ## Decision log
 
@@ -119,7 +121,22 @@ six success criteria — criterion 1 is already met end-to-end without it.
   `state.md` §"The degradation contract" instead — is a real, unowned feature (availability
   resolution does not exist at all; `state.md` §Known Divergences says so). Either way the choice
   is a product call this outcome cannot make. Rows 4-6 are unaffected and stay workable; criterion
-  3 will be unmet at row 6 unless this is resolved first. Full entry under "## Blocked".
+  3 will be unmet at row 6 unless this is resolved first. Full entry under "- 2026-09-04 — Phase 6 planned, with a reshape adding two rows before close-out. (a) Phase 5's
+  summary reported that `cargo check -p smelt-cli --tests --features smelt-cli/spark` (and the
+  BigQuery twin) fail to compile on a pre-existing stale call in
+  `smelt-maintenance-testkit/src/families/gate_composed.rs` — the whole `families/` module is
+  `#![cfg(any(feature = "spark", feature = "bigquery"))]`, so no default-feature build ever
+  compiles it and the call site rotted silently when `run_windowed_keyed_maintenance` gained its
+  `write_pin` parameter. That is squarely criterion 6 ("all standing gates green"): a gate that
+  cannot compile is not green, and no later phase of this outcome can honestly verify itself under
+  those features. It becomes row 6, and its scope includes a per-PR compile guard so the same rot
+  cannot recur silently. (b) Phase 3's blocked entry names a "minimum fix regardless of option" —
+  the silent `tracing::warn` skip phase 2 left in the `Grade::Idempotent` arm on non-DuckDB
+  backends — which is residue this outcome itself created and conflicts with CLAUDE.md
+  §"Fail-loud discipline"; it needs no part of phase 3's deferred product decision, so it becomes
+  row 7 rather than being deferred out. Close-out moves to row 8. Nothing left the outcome.
+
+## Blocked".
 
 - 2026-09-03 — Phase 4 planned. No reshape: phase 2's summary surfaced no new work, phase 3's
   blocked entry already records its own decision, and rows 4-6 still map one-for-one onto criteria
