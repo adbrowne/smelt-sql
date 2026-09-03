@@ -10,6 +10,13 @@
 # fail a reworded-but-still-present row or falsely pass a moved-to-Future-
 # Extensions row); phase 3 owns the judgement call on whether a `drifted` row's
 # *current* wording is itself stale.
+#
+# Every `drifted` row must also carry a phase-3 Verdict in the table's trailing
+# column: `accurate` (reworded but still describes a real, still-open gap),
+# `relocated` (moved to §Future Extensions, still honestly undecided-future),
+# or `stale-fixed <sha-or-"this commit">` (the gap it describes turned out to be
+# closed already — the spec text just never caught up). Non-`drifted` rows get
+# `-`. A `drifted` row with an empty or unrecognised Verdict fails.
 set -euo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -39,14 +46,16 @@ while IFS= read -r row; do
   # protect an escaped "\|" (a literal pipe inside a table cell, e.g. IM-18's
   # `on_column_add: backfill \| leave_null \| recompute`) from the column split
   row="${row//\\|/$'\x01'}"
-  IFS='|' read -r _ id _subsection bullet oq disposition _ <<<"$row"
+  IFS='|' read -r _ id _subsection bullet oq disposition verdict _ <<<"$row"
   id="${id//$'\x01'/|}"
   bullet="${bullet//$'\x01'/|}"
   disposition="${disposition//$'\x01'/|}"
+  verdict="${verdict//$'\x01'/|}"
   id="$(trim "$id")"
   [[ "$id" =~ ^(DD|IM|IS|MP)-[0-9]+$ ]] || continue
   bullet="$(trim "$bullet")"
   disposition="$(trim "$disposition")"
+  verdict="$(trim "$verdict")"
   prefix="${id%%-*}"
   spec="${prefix_spec[$prefix]}"
 
@@ -95,6 +104,28 @@ while IFS= read -r row; do
       offenders+=("$id")
       fail=1
     fi
+  fi
+
+  if [ "$first_word" = "drifted" ]; then
+    if [ -z "$verdict" ]; then
+      echo "FAIL: $id is 'drifted' but has no phase-3 Verdict" >&2
+      offenders+=("$id")
+      fail=1
+    else
+      verdict_first="${verdict%% *}"
+      case "$verdict_first" in
+        accurate|relocated|stale-fixed) ;;
+        *)
+          echo "FAIL: $id Verdict '$verdict' does not start with accurate|relocated|stale-fixed" >&2
+          offenders+=("$id")
+          fail=1
+          ;;
+      esac
+    fi
+  elif [ "$verdict" != "-" ]; then
+    echo "FAIL: $id is not 'drifted' but Verdict is '$verdict' (expected '-')" >&2
+    offenders+=("$id")
+    fail=1
   fi
 done < <(grep -E '^\| (DD|IM|IS|MP)-[0-9]+ \|' "$INVENTORY_MD")
 

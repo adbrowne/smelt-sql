@@ -60,7 +60,7 @@ divergence entry removed).
 |---|-------|--------|
 | 1 | Reconstruct the 2026-08-15 baseline bullet inventory (Known Divergences + Open Questions) across all four specs from git history | done |
 | 2 | Cross-check every baseline bullet against the current repo state and each owning outcome's decision log; classify closed / still-open-and-accurate / drifted | done |
-| 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | planned |
+| 3 | Resolve residual/drifted bullets and spot-check the `definition-delta-migrate` §Out-of-scope bullets: fix stale spec wording directly if trivial, otherwise open a row or a Blocked entry | done |
 | 4 | Run all four `/smelt:validate` invocations; fix any drift | pending |
 | 5 | Write `closure-report.md`; final standing-gate run | pending |
 
@@ -117,6 +117,23 @@ divergence entry removed).
   edited inline only when the fix is wording; a stale bullet needing implementation gets a new
   phase row, and one needing a product decision gets a `## Blocked` entry — the audit never
   invents a decision the program declined to make.
+
+- 2026-09-04 — Phase 3 done. All 16 `drifted` rows given a phase-3 Verdict: 11 `accurate`
+  (reworded but still describe a real, still-open gap), 5 `relocated` (moved to `§Future
+  Extensions`, still honestly framed as undecided-future). Zero `stale-fixed` — no spec text
+  needed editing, so this phase produced no spec diff. `check-classification.sh` extended to
+  enforce the Verdict column (confirmed red on all 16 rows before filling it in, green after).
+  The `20260815-definition-delta-migrate` §"Out of scope" sweep (success criterion 3) added a new
+  `baseline-inventory.md` §"Out-of-scope spot-check" table, one row per named item: every item's
+  spec/section still exists and is still honestly framed, with one exception that is **not** a
+  spec-text divergence — the out-of-scope prose's own claim that `docs/plans/20260704-model-
+  updates.md`'s D1–D3 fate is "unclear individually" is stale for the D3 leg
+  (`refresh: materialized_view` has since shipped as fully-specified surface,
+  `docs/specs/materialized_view.md`); D1/D2 (`latest_value`/`versioned`) remain genuinely absent
+  and unclear. No spec bullet claims D3 undecided, so nothing to fix under the spec-only-if-
+  trivial rule, and no product decision is needed (D3 is already decided and shipped) — recorded
+  as a closure-report footnote per the standing rule, not a new row or a `## Blocked` entry. The
+  `IS-24`/`IS-18` mislabel cross-check (task 7) came back clean in both owning outcomes' files.
 
 ## Blocked
 
