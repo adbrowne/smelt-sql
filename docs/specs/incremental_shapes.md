@@ -1,7 +1,7 @@
 ---
 feature: incremental_shapes
 status: experimental
-last_reviewed: 2026-08-16
+last_reviewed: 2026-09-03
 owners: [andrew]
 ---
 

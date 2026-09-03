@@ -348,9 +348,23 @@ open — not that the excluded bullets themselves are gone.
 | 29 | Close two key-grain frontmatter/CLI validation gaps: refuse a window-forward keyed run started with an incomplete event-time window instead of silently full-refreshing (`--full-refresh` stays the rebuild escape); give `safety_overrides:` on a key-addressed model its own hard frontmatter error instead of the misdirecting `PartitionGrainRequiresRefreshIncremental`, routed through the *resolved* grain so a derived partition shape stops being over-refused | done |
 | 30 | Extend `statement_parity`'s byte-identical structural leg to the backbuild emitter family; remove the correspondingly narrowed `architecture.md` Known Divergences bullet | done |
 | 30b | Schema-evolution DDL second author: `smelt-state`'s `ddl_duckdb.rs` builds model-table `ALTER TABLE … ADD/DROP COLUMN` text beside `backbuild::emit`'s `emit_alter_add_column`/`emit_alter_drop_column`; route it through the single-owner emitters (or record a justified per-dialect exception) and widen the structural scan to cover it | done |
-| 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | planned |
+| 31 | Validate + close out (extended): `/smelt:validate incremental_models` and `/smelt:validate incremental_shapes` clean for every bullet phases 11–29 close, alongside the existing `definition_deltas` validate in phase 10 | done |
+| 32 | Posture-derived key departure (`retain_departed`): declaration parsing, oracle transform, probe emitter, and a `ContractRetainDepartedInvalid`-shaped diagnostic for the already-decided default-point behaviour (decision record `docs/research/20260816-open-questions-triage.md`); found orphaned by phase 31's audit (maps to no live outcome, out-of-scope entry, or Future Extensions item) | planned |
+| 33 | Decide (or explicitly defer to Out of scope) the `Override-ladder reach (Open Question)` bullet — whether the first-build-vs-steady-state rule should reach the keyed-fold suppression consumer; found orphaned by phase 31's audit (the only remaining `(Open Question)` tag in `incremental_models.md` with no owning outcome) | planned |
 
 ## Decision log
+
+- **2026-09-03, phase 31 — divergence-closure audit clean; two orphaned bullets found and
+  queued rather than fixed on the spot.** `/smelt:validate incremental_models` and
+  `/smelt:validate incremental_shapes` confirm every Known Divergences bullet criteria 10–19
+  name is either removed or correctly narrowed to its stated residue — no wording drift.
+  `incremental_shapes.md`'s `last_reviewed` was stale (phase 29 edited the file without
+  bumping the date) — corrected to 2026-09-03. Two pre-existing bullets
+  (posture-derived key departure / `retain_departed`, and `Override-ladder reach (Open
+  Question)`) map to no live sibling outcome, Out-of-scope entry, or Future Extensions item;
+  rather than silently leave them or delete them, added as phase rows 32/33 per the plan's
+  own instruction (task 5) — the first is a decided-but-unimplemented item, the second still
+  needs a product decision.
 
 - **2026-09-03, phase 30b — schema-evolution DDL declared a separate single-owner family,
   scan widened to `smelt-state`.** `smelt-state`'s `schema_tracking.rs` safe-path loop and the
