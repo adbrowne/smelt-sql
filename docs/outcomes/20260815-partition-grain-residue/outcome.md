@@ -62,7 +62,7 @@ fixture.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | planned |
+| 1 | Audit the four cited pre-outcome tracking plans against current repo state; confirm what's already landed vs. still open | done |
 | 2 | Function-registry-threaded classification: lookback gate + window-function batch-safety read through `smelt.define` bodies | pending |
 | 3 | CTE-only `event_time_column` detection in the outer-visibility check | pending |
 | 4 | Per-`ModelDef` overrides for generator-emitted models | pending |
@@ -78,6 +78,21 @@ fixture.
   2-7 start from a red test rather than re-investigating a stale plan file. No phase reshape
   made — this is the first phase, there is no prior summary, and reshaping on guesswork rather
   than the audit's findings is exactly what phase 1 exists to prevent.
+
+- 2026-09-04 — Phase 1 audit complete (`audit.md`). All seven phase-mapped
+  residues (phases 2–7, two residues folded into phase 2) confirmed still
+  OPEN or only partially landed by a pinned probe — none closes early. Five
+  other partition-grain Known Divergences bullets (per-column `data_latency`,
+  non-deterministic row-set-membership, `PartitionGrainForbidsMetrics`,
+  sub-`g_part` suggestion, `NOW()`/`CURRENT_*` pinning) cite no
+  `docs/plans/*` tracker predating `docs/outcomes/` — decision records or
+  by-design exclusions only — so none is folded into this outcome's phases;
+  they stay unowned outside this outcome's scope. Correction to the spec
+  itself: bullet #3 (per-source clamp observability) claims "specified ahead
+  of a tracking plan," but it is tracked, by
+  `docs/plans/20260704-model-updates-l4-batched.md` Phase BL8 (`pending`) —
+  phase 8's close-out should fix this stale claim alongside the divergence
+  removal.
 
 ## Blocked
 
