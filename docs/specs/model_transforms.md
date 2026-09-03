@@ -47,7 +47,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
 | Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | **built** (column-scoped and keyed-fold) |
-| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | *partial* (keyed identity only) |
+| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | keyed identity: full; whole-row identity: region-grained suppression |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
 | Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
@@ -220,6 +220,19 @@ relation; derive the changed/new/departed row sets against stored state by diff 
 identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-or-departed rows;
 `INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
 with the write physically restricted to the rows whose effect is not the identity.
+
+**The whole-row realisation is region-grained, not row-grained.** A keyless region (no declared
+`unique_key`, no proven grain key — `RowIdentity::WholeRow`) has no row address a multiset
+difference could delete with multiplicity in portable SQL, so suppression licenses the whole
+region as one unit rather than individual rows: a two-way `EXCEPT ALL` diff between stored state
+and the staged candidate is materialised once into a 1-row-max sentinel relation, computed before
+either write statement runs (never an `EXISTS` re-evaluated after the `DELETE` has already
+mutated the target — that would be order-dependent), and the region's existing unconditional
+`DELETE`+`INSERT` is guarded on the sentinel being non-empty: diff empty ⇒ neither statement
+touches a row; diff non-empty ⇒ byte-identical to today's unconditional region write. The same
+fixed-`S` bit-equality obligation applies, at this coarser suppression grain. No observed delta
+(T5) is recorded on this path — the observed-delta table is keyed by the row identity's key
+columns, and a keyless write has none.
 
 **The region DELETE+INSERT family's own conditional realisation** takes this same shape,
 scoped by the output region's own slice predicate rather than an affected-key set: the update
@@ -480,18 +493,17 @@ by `docs/plans/20260704-model-updates.md` (design:
   `emit::emit_diff_patch`) is wired only for a model-edge-sourced creation cell
   (`smelt_runtime::maintenance_driver::DeltaRestrictionFacts`); an external-source-only region
   cell still rewrites its whole window unconditionally.
-- **The staged-candidate conditional DELETE+INSERT is built for the keyed-identity realisation
-  only; the whole-row `EXCEPT ALL` realisation remains unbuilt.** `smelt_logical::maintenance::
-  emit::emit_staged_candidate_conditional` emits the merge-less keyed-shaped write — stage the
-  candidate region into a temp relation, `DELETE` the rows a declared/proven key identifies as
-  changed, `INSERT` the changed-or-new rows read back from the staged relation, `DROP` the temp
-  relation — as one transaction, so a mid-group failure leaves both the target and the temp-
-  relation namespace untouched. `maintenance::choice::resolve_keyed_write_mechanism` chooses
-  between the keyed `MERGE` and this mechanism from a backend-capability flag alone (never a
-  silent substitution on a `MERGE`-capable backend); a `write:` pin over this choice, the
-  whole-row (`EXCEPT ALL`-both-ways) realisation for a keyless region, and wiring this choice
-  into the live `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) all
-  remain open, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **The staged-candidate conditional DELETE+INSERT's keyed-identity realisation has no `write:`
+  pin, and is not yet wired into the live `refresh: keyed` per-partition execution loop.**
+  `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` emits the merge-less
+  keyed-shaped write — stage the candidate region into a temp relation, `DELETE` the rows a
+  declared/proven key identifies as changed, `INSERT` the changed-or-new rows read back from the
+  staged relation, `DROP` the temp relation — as one transaction, so a mid-group failure leaves
+  both the target and the temp-relation namespace untouched. `maintenance::choice::
+  resolve_keyed_write_mechanism` chooses between the keyed `MERGE` and this mechanism from a
+  backend-capability flag alone (never a silent substitution on a `MERGE`-capable backend); a
+  `write:` pin over this choice, and wiring it into `smelt-runtime::cumulative`, remain open,
+  tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Delta-restricted enrichment join is built for a maintained-model edge's own driving-source
   recompute.** `maintenance::derive::append_model_edge_cells` derives the skeleton-source-closure
   verdict (P1, `model_properties.md`) shared by every model edge of a downstream model;

@@ -2131,6 +2131,218 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
     );
 }
 
+/// The keyless (whole-row) realisation (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`): a `grain:
+/// partition` output with no `unique_key` and no `GROUP BY` — `RowIdentity::
+/// WholeRow` — joined to a `mutation_profile: mutable_snapshot` dimension
+/// with no declared `unique_key`/`referential_integrity` of its own (so the
+/// join is never closure-pruned, keeping the group genuinely membership-
+/// sensitive) must dispatch `MembershipRecomputeWrite::StagedKeyless`, whose
+/// executed statements are byte-identical to a direct
+/// `emit_staged_candidate_conditional_keyless` call over the batch's own
+/// inputs.
+#[tokio::test]
+async fn staged_candidate_keyless_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(project_dir.join("models/sources")).expect("mkdir models/sources");
+    std::fs::write(
+        project_dir.join("smelt.yml"),
+        "name: keyless_membership_parity\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+         default_materialization: table\ntarget: dev\n",
+    )
+    .expect("write smelt.yml");
+    std::fs::write(
+        project_dir.join("models/sources/facts.yml"),
+        "description: facts\ncolumns:\n- name: fact_id\n  type: INTEGER\n\
+         - name: dim_id\n  type: INTEGER\n- name: event_date\n  type: DATE\n\
+         - name: amount\n  type: INTEGER\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: event_date\n  event_time_column: event_date\n  \
+         granularity: day\n",
+    )
+    .expect("write facts source yml");
+    std::fs::write(
+        project_dir.join("models/sources/dim.yml"),
+        "description: dim\ncolumns:\n- name: dim_id\n  type: INTEGER\n\
+         - name: tag\n  type: VARCHAR\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    )
+    .expect("write dim source yml");
+    write_model(
+        &project_dir,
+        "events_by_dim",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: event_date\n  event_time_column: event_date\n  \
+         granularity: day\nmaintenance:\n  scan_bounds:\n    per_source:\n      \
+         dim:\n        allow_full_scan: true\n---\n\
+         SELECT f.fact_id AS fact_id, f.event_date AS event_date, f.amount AS amount, d.tag AS \
+         tag\nFROM smelt.sources.facts f\nJOIN smelt.sources.dim d ON f.dim_id = d.dim_id\n",
+    );
+
+    let db_path = tmp.path().join("run.duckdb");
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_facts (fact_id INTEGER, dim_id INTEGER, event_date \
+                 DATE, amount INTEGER)",
+            )
+            .await
+            .expect("create facts source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_facts VALUES \
+                 (1, 1, DATE '2025-01-10', 10), (2, 2, DATE '2025-01-10', 20)",
+            )
+            .await
+            .expect("seed facts");
+        backend
+            .execute_sql("CREATE TABLE main.sources_dim (dim_id INTEGER, tag VARCHAR)")
+            .await
+            .expect("create dim source table");
+        backend
+            .execute_sql("INSERT INTO main.sources_dim VALUES (1, 'a'), (2, 'b')")
+            .await
+            .expect("seed dim");
+    }
+
+    // Run 1: creation — never the membership-recompute path.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        execute_project(
+            "keyless-membership-parity-run-1".to_string(),
+            select_request("dev", "events_by_dim", "2025-01-10", "2025-01-11"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &RecordingBackendFactory {
+                db_path: db_path.clone(),
+                backend: Arc::new(Mutex::new(None)),
+            },
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Mutate the dimension in place — the `{tag}` cell becomes live.
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("UPDATE main.sources_dim SET tag = 'z' WHERE dim_id = 1")
+            .await
+            .expect("mutate dimension");
+    }
+
+    // Run 2: the dimension mutation dispatches the staged-candidate keyless
+    // membership recompute.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "keyless-membership-parity-run-2".to_string(),
+        select_request("dev", "events_by_dim", "2025-01-11", "2025-01-12"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("second run (keyless membership recompute) must succeed");
+
+    let record = outcome
+        .models
+        .get("events_by_dim")
+        .expect("events_by_dim ran");
+    assert_eq!(
+        record.strategy, "delete_insert_suppressed",
+        "the dimension mutation must dispatch the staged-candidate membership-recompute \
+         technique"
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let staged_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| {
+            g.statements
+                .first()
+                .is_some_and(|s| s.sql.starts_with("CREATE TEMP TABLE"))
+        })
+        .collect();
+    assert_eq!(
+        staged_groups.len(),
+        1,
+        "exactly one staged-candidate group must have executed: {:?}",
+        groups
+    );
+    let group = staged_groups[0];
+    assert!(
+        group.transactional,
+        "the staged-candidate keyless group is transactional"
+    );
+    assert_eq!(group.statements.len(), 7);
+
+    // Recover the caller-composed `candidate_select` from the recorded
+    // INSERT statement (statement index 1).
+    let staged_relation = "__smelt_staged_events_by_dim";
+    let sentinel_relation = "__smelt_sentinel_events_by_dim";
+    let insert_sql = &group.statements[1].sql;
+    let candidate_prefix = format!("INSERT INTO {staged_relation} ");
+    assert!(
+        insert_sql.starts_with(&candidate_prefix),
+        "unexpected staged-candidate INSERT statement: {insert_sql}"
+    );
+    let candidate_select = &insert_sql[candidate_prefix.len()..];
+
+    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
+        "main.events_by_dim",
+        staged_relation,
+        sentinel_relation,
+        None,
+        candidate_select,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed staged-candidate keyless group must be byte-identical to a direct emitter \
+         call over the same inputs"
+    );
+
+    // Result-equivalence: the staged-candidate recompute actually executed
+    // must leave the target multiset-equal to a full refresh of the model.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT fact_id, event_date, amount, tag FROM main.events_by_dim",
+            "SELECT f.fact_id, f.event_date, f.amount, d.tag FROM main.sources_facts f JOIN \
+             main.sources_dim d ON f.dim_id = d.dim_id"
+        )
+        .await,
+        "the staged-candidate keyless recompute actually executed must reproduce a full refresh"
+    );
+}
+
 /// The repair family (`docs/specs/incremental_models.md` §"The repair
 /// family"): a keyed `MAX` fold over a **clocked, mutable** source refuses
 /// the faithful-fold source-posture obligation, so the derived plan admits

@@ -2097,10 +2097,9 @@ definition-delta gaps (including the unwired synthesis layer and the verb rename
   retention point).
 - **Conditional-maintenance gaps**: the region DELETE+INSERT family's conditional variant is
   wired only for a model-edge-sourced creation cell, not an external-source-only region cell;
-  the whole-row (keyless) staged-candidate realisation does not exist; no `write:` pin selects
-  between keyed MERGE and staged-candidate; delta-restriction admission doesn't yet consume an
-  external `mutable_snapshot` source's fingerprint-sidecar delta; non-DuckDB targets keep the
-  widened-scan recompute. Refs:
+  no `write:` pin selects between keyed MERGE and staged-candidate; delta-restriction admission
+  doesn't yet consume an external `mutable_snapshot` source's fingerprint-sidecar delta;
+  non-DuckDB targets keep the widened-scan recompute. Refs:
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`,
   `docs/outcomes/20260815-definition-delta-migrate/phases/27b-plan.md`.
 

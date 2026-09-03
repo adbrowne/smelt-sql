@@ -9,13 +9,15 @@
 //! row-admission read — so the model's `UpstreamMutation(users)` `{user_name}`
 //! cell (and its sibling `{event_id, event_type, user_id}` cell for the
 //! SAME trigger) is now membership-sensitive (`Technique::DeleteInsert`),
-//! never `ColumnScopedMerge`. This model is `grain: partition`, and no live
-//! runtime DISPATCH exists for a `grain: partition` `DeleteInsert`
-//! membership cell (`resolve_live_membership_recompute_cell`'s own doc
-//! comment: left to the existing unconditional region `DELETE`+`INSERT`
-//! batch loop) — so an ADMISSIBLE `technique_overrides` entry never
-//! observably steers the write path; it still resolves to the same honest
-//! default (`"deleteinsert"`).
+//! never `ColumnScopedMerge`. This model is `grain: partition` with no
+//! `unique_key` — `RowIdentity::WholeRow` — and since `docs/outcomes/
+//! 20260815-definition-delta-migrate/phases/27c-plan.md` a live runtime
+//! DISPATCH exists for exactly this shape: the keyless (whole-row) staged-
+//! candidate conditional write (`MembershipRecomputeWrite::StagedKeyless`),
+//! reported as `"delete_insert_suppressed"` — an ADMISSIBLE
+//! `technique_overrides` entry (or no override at all) now resolves to this
+//! live, change-suppressed write rather than the plain unconditional
+//! `"deleteinsert"` batch loop.
 //!
 //! **That does not mean overrides are unconsulted.** `resolve_live_column_
 //! scoped_cell`'s pin-consulting loop (called unconditionally by the
@@ -209,6 +211,14 @@ fn scratch_project(project: &LinkCProject, scratch_name: &str) -> (LinkCProject,
 /// at all — the honest test proves `recompute` still works exactly as
 /// before, and `rederive_columns` now fails exactly the way an unadmitted
 /// pin should.
+///
+/// **Post-27c note:** for this `RowIdentity::WholeRow` cell, `DeleteInsert`
+/// IS the family's own "recompute" option (`resolve_live_membership_
+/// recompute_cell`'s own doc comment) — `technique: recompute` resolves to
+/// `ChosenTechnique::Admitted(Technique::DeleteInsert)`, the SAME arm the
+/// unpinned default resolves to, which now dispatches the live keyless
+/// staged-candidate conditional write (`"delete_insert_suppressed"`) rather
+/// than the plain unconditional batch loop.
 #[tokio::test]
 async fn request_override_forces_each_admissible_technique() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -244,11 +254,10 @@ async fn request_override_forces_each_admissible_technique() {
             .get("daily_events_enriched")
             .expect("model ran")
             .strategy,
-        "deleteinsert",
-        "the `recompute` override resolves to the SAME plain region-recompute path this shape \
-         already defaults to (no live ColumnScopedMerge dispatch exists to differ from) — the \
-         point of this half of the test is that the override is CONSULTED and ADMITTED, not \
-         that it changes the write path"
+        "delete_insert_suppressed",
+        "the `recompute` override resolves to the SAME live keyless staged-candidate write path \
+         this shape already dispatches by default — the point of this half of the test is that \
+         the override is CONSULTED and ADMITTED, not that it changes the write path"
     );
     let conn = duckdb::Connection::open(&db_path).expect("reconnect");
     let recompute_count: i64 = conn
@@ -373,9 +382,9 @@ async fn empty_overrides_change_nothing() {
             .get("daily_events_enriched")
             .expect("model ran")
             .strategy,
-        "deleteinsert",
-        "with no override at all, the cell's own honest default (the plain region-recompute \
-         batch loop — no live dispatch exists for this membership-sensitive, grain: partition \
-         cell) must still resolve, unperturbed by this seam"
+        "delete_insert_suppressed",
+        "with no override at all, the cell's own honest default (the live keyless \
+         staged-candidate write for this membership-sensitive, grain: partition, \
+         RowIdentity::WholeRow cell) must still resolve, unperturbed by this seam"
     );
 }

@@ -859,6 +859,109 @@ pub fn emit_staged_candidate_conditional_recompute(
     }
 }
 
+/// The staged-candidate conditional `DELETE`+`INSERT`, **keyless (whole-row)**
+/// variant (`docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`):
+/// the [`RowIdentity::WholeRow`] realisation [`emit_staged_candidate_conditional`]'s
+/// own doc comment names as unbuilt. Without a proven row identity there is no
+/// row address a multiset difference could delete with multiplicity in
+/// portable SQL, so suppression here is **region-grained, not row-grained**:
+/// a two-way `EXCEPT ALL` diff between stored state (optionally restricted by
+/// `region_predicate`) and the staged candidate is materialised once, before
+/// either write statement runs, into a 1-row-max sentinel relation; the
+/// region's own unconditional `DELETE`+`INSERT` is then guarded on that
+/// sentinel being non-empty. Diff empty ⇒ neither write statement touches a
+/// row; diff non-empty ⇒ byte-identical to the unconditional region rewrite
+/// (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and the
+/// staged-candidate conditional DELETE+INSERT").
+///
+/// The sentinel is a `CREATE TEMP TABLE ... AS SELECT ...`, not an `EXISTS`
+/// re-evaluated after the `DELETE` — evaluating the diff after the target has
+/// already been mutated is order-dependent reasoning; a materialised sentinel
+/// computed up front is not.
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 2. `INSERT INTO <staged_relation> <candidate_select>`
+/// 3. `CREATE TEMP TABLE <sentinel_relation> AS SELECT 1 FROM ((stored EXCEPT
+///    ALL staged) UNION ALL (staged EXCEPT ALL stored)) LIMIT 1` — the stored
+///    side carries `region_predicate` when given, so the diff is scoped to
+///    exactly the same region the candidate covers.
+/// 4. `DELETE FROM <table> WHERE [<region_predicate> AND] EXISTS (SELECT 1
+///    FROM <sentinel_relation>)` — the whole region, guarded.
+/// 5. `INSERT INTO <table> SELECT * FROM <staged_relation> WHERE EXISTS
+///    (SELECT 1 FROM <sentinel_relation>)` — the whole staged candidate,
+///    guarded by the same sentinel.
+/// 6. `DROP TABLE <staged_relation>`
+/// 7. `DROP TABLE <sentinel_relation>`
+///
+/// One transaction, same contract as every other staged-candidate emitter in
+/// this module.
+///
+/// **No observed delta is recorded on this path.** The observed-delta table
+/// (T5) is keyed by the row identity's key columns; a keyless write has none
+/// to record — callers must not synthesize a fake key to force a recording.
+///
+/// # Panics
+/// Panics if `candidate_select` is empty — a vacuous candidate has no sound
+/// diff shape to emit.
+pub fn emit_staged_candidate_conditional_keyless(
+    table: &str,
+    staged_relation: &str,
+    sentinel_relation: &str,
+    region_predicate: Option<&str>,
+    candidate_select: &str,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !candidate_select.trim().is_empty(),
+        "emit_staged_candidate_conditional_keyless requires a non-empty candidate select for \
+         {table}"
+    );
+
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+
+    let stored_side = match region_predicate {
+        Some(pred) => format!("SELECT * FROM {table} WHERE {pred}"),
+        None => format!("SELECT * FROM {table}"),
+    };
+    let sentinel = format!(
+        "CREATE TEMP TABLE {sentinel_relation} AS SELECT 1 AS __smelt_diff FROM (({stored_side} \
+         EXCEPT ALL SELECT * FROM {staged_relation}) UNION ALL (SELECT * FROM {staged_relation} \
+         EXCEPT ALL {stored_side})) AS __smelt_diff_rows LIMIT 1"
+    );
+
+    let delete = match region_predicate {
+        Some(pred) => format!(
+            "DELETE FROM {table} WHERE {pred} AND EXISTS (SELECT 1 FROM {sentinel_relation})"
+        ),
+        None => {
+            format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {sentinel_relation})")
+        }
+    };
+    let insert = format!(
+        "INSERT INTO {table} SELECT * FROM {staged_relation} WHERE EXISTS (SELECT 1 FROM \
+         {sentinel_relation})"
+    );
+    let drop_staged = format!("DROP TABLE {staged_relation}");
+    let drop_sentinel = format!("DROP TABLE {sentinel_relation}");
+
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(sentinel),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop_staged),
+            MaintenanceStatement::new(drop_sentinel),
+        ],
+        transactional: true,
+    }
+}
+
 /// The repair family's per-group recompute (`docs/specs/incremental_models.md`
 /// §"The repair family"): a targeted `DELETE`+`INSERT` restricted to the
 /// admitted [`super::repair::AdmittedRepair`]'s affected-key relation —
@@ -3634,6 +3737,102 @@ mod staged_candidate_conditional_tests {
             &["user_id".to_string()],
             "SELECT user_id, tier FROM source_delta",
             &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_candidate_keyless_tests {
+    use super::*;
+
+    #[test]
+    fn keyless_group_stages_diffs_and_guards_both_write_legs() {
+        let group = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "SELECT event_id, event_date, payload FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 7);
+        assert_eq!(
+            group.statements[0].sql,
+            "CREATE TEMP TABLE __smelt_staged_events_region AS SELECT * FROM (SELECT event_id, \
+             event_date, payload FROM source_delta) AS __smelt_staged_shape LIMIT 0"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO __smelt_staged_events_region SELECT event_id, event_date, payload FROM \
+             source_delta"
+        );
+        assert!(group.statements[2]
+            .sql
+            .starts_with("CREATE TEMP TABLE __smelt_sentinel_events_region AS"));
+        assert!(group.statements[2].sql.contains("EXCEPT ALL"));
+        // Both directions of the whole-row diff appear.
+        assert_eq!(group.statements[2].sql.matches("EXCEPT ALL").count(), 2);
+        assert_eq!(
+            group.statements[3].sql,
+            "DELETE FROM main.events_region WHERE EXISTS (SELECT 1 FROM \
+             __smelt_sentinel_events_region)"
+        );
+        assert_eq!(
+            group.statements[4].sql,
+            "INSERT INTO main.events_region SELECT * FROM __smelt_staged_events_region WHERE \
+             EXISTS (SELECT 1 FROM __smelt_sentinel_events_region)"
+        );
+        assert_eq!(
+            group.statements[5].sql,
+            "DROP TABLE __smelt_staged_events_region"
+        );
+        assert_eq!(
+            group.statements[6].sql,
+            "DROP TABLE __smelt_sentinel_events_region"
+        );
+    }
+
+    #[test]
+    fn keyless_region_predicate_bounds_both_the_diff_and_the_delete() {
+        let with_region = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            Some("main.events_region.event_date >= '2026-08-01'"),
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(with_region.statements[2]
+            .sql
+            .contains("main.events_region.event_date >= '2026-08-01'"));
+        assert!(with_region.statements[3]
+            .sql
+            .contains("main.events_region.event_date >= '2026-08-01'"));
+
+        let without_region = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(!without_region.statements[2].sql.contains("event_date >= "));
+        assert!(!without_region.statements[3].sql.contains("event_date >= "));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty candidate select")]
+    fn keyless_emitter_needs_no_key_but_refuses_an_empty_candidate_select() {
+        emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            "__smelt_staged_events_region",
+            "__smelt_sentinel_events_region",
+            None,
+            "   ",
             MaintenanceDialect::DuckDb,
         );
     }

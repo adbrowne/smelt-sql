@@ -597,6 +597,75 @@ pub fn resolve_write_suppression(
     }
 }
 
+/// Resolve whether a **keyless** (`RowIdentity::WholeRow`) region's
+/// staged-candidate write may be suppressed (`docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`) — the whole-row
+/// counterpart of [`resolve_write_suppression`], which refuses outright
+/// whenever the row identity is `WholeRow`. Unlike the keyed proof, which
+/// only needs a cell's own mutation-sensitive column group to be comparable
+/// (the diff join addresses rows by key, so only the compared group's values
+/// matter), a keyless diff is a whole-row `EXCEPT ALL` — every selected
+/// column participates in row equality, so `output_columns` here is the
+/// model's full payload column set, not one cell's own group.
+///
+/// Fail-closed, mirroring [`resolve_write_suppression`]'s own posture:
+/// - A proven `RowIdentity::Key` never resolves here — that is the keyed
+///   mechanism's proof (`resolve_write_suppression`), never this one's.
+/// - An empty `output_columns` has nothing to compare and refuses.
+/// - A column absent from `comparability` is treated exactly like an
+///   explicit `Incomparable` verdict — absence of a proof is never trusted
+///   as a pass.
+pub fn resolve_keyless_staged_suppression(
+    output_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+) -> WriteSuppression {
+    if !matches!(row_identity.identity, RowIdentity::WholeRow) {
+        return WriteSuppression::Unconditional {
+            why: "a proven row identity (P2 verdict is Key) routes through the keyed \
+                  staged-candidate mechanism, never the keyless whole-row one"
+                .to_string(),
+        };
+    }
+
+    if output_columns.is_empty() {
+        return WriteSuppression::Unconditional {
+            why: "the model has no payload output columns to compare".to_string(),
+        };
+    }
+
+    let incomparable: Vec<String> = output_columns
+        .iter()
+        .filter(|col| {
+            let verdict = comparability
+                .iter()
+                .find(|c| c.output.eq_ignore_ascii_case(col));
+            match verdict {
+                Some(c) => c.comparability == Comparability::Incomparable,
+                // Fail-closed: no proof at all for this column is never
+                // trusted as a pass.
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
+
+    if incomparable.is_empty() {
+        WriteSuppression::Suppressed {
+            compared_columns: output_columns.to_vec(),
+        }
+    } else {
+        WriteSuppression::Unconditional {
+            why: format!(
+                "column(s) {} are not proven comparable across runs (P3) — the keyless \
+                 conditional write refuses fail-closed and falls back to the unconditional \
+                 region rewrite",
+                incomparable.join(", ")
+            ),
+        }
+    }
+}
+
 /// Why a suppressible cell's [`WriteSuppression`] verdict is or isn't
 /// **preferred** once admitted — the conditional-variant dimension the
 /// override ladder ranks alongside family choice
@@ -1308,6 +1377,90 @@ mod write_suppression_tests {
                 assert!(why.contains("row identity") || why.contains("WholeRow"));
             }
             other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod keyless_write_suppression_tests {
+    use super::*;
+    use crate::maintenance::RowIdentity;
+
+    fn whole_row_identity() -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        }
+    }
+
+    fn key_identity(cols: &[&str]) -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(cols.iter().map(|s| s.to_string()).collect()),
+            proven_mismatch: None,
+        }
+    }
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    fn incomparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Incomparable,
+        }
+    }
+
+    #[test]
+    fn whole_row_identity_admits_keyless_staged_suppression_when_every_column_is_comparable() {
+        let columns = vec!["event_id".to_string(), "payload".to_string()];
+        let comparability = vec![comparable("event_id"), comparable("payload")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &whole_row_identity());
+        assert_eq!(
+            resolved,
+            WriteSuppression::Suppressed {
+                compared_columns: columns
+            }
+        );
+    }
+
+    #[test]
+    fn whole_row_identity_with_an_incomparable_column_refuses_keyless_staged_suppression() {
+        let columns = vec!["event_id".to_string(), "notes".to_string()];
+        let comparability = vec![comparable("event_id"), incomparable("notes")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &whole_row_identity());
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(
+                    why.contains("notes"),
+                    "refusal reason must name the incomparable column; got: {why}"
+                );
+            }
+            other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn key_identity_never_resolves_the_keyless_mechanism() {
+        let columns = vec!["event_id".to_string()];
+        let comparability = vec![comparable("event_id")];
+
+        let resolved =
+            resolve_keyless_staged_suppression(&columns, &comparability, &key_identity(&["id"]));
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(why.contains("keyed"), "got: {why}");
+            }
+            other => {
+                panic!("expected Unconditional refusal (falls through to keyed), got {other:?}")
+            }
         }
     }
 }

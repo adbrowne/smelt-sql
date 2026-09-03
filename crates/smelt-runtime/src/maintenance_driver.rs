@@ -1394,10 +1394,16 @@ pub fn resolve_live_in_place_update_cell(
 }
 
 /// Find the first `explicitly_mutable` source whose `Trigger::
-/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` over a
-/// proven `RowIdentity::Key` — the membership-sensitive counterpart of
-/// [`resolve_live_column_scoped_cell`] above, added for the **keyed run
-/// loop only** (`docs/plans/20260808-membership-sensitivity.md` Phase 2).
+/// UpstreamMutation` cell resolves live to `Technique::DeleteInsert` — the
+/// membership-sensitive counterpart of [`resolve_live_column_scoped_cell`]
+/// above, added for the keyed run loop (`docs/plans/
+/// 20260808-membership-sensitivity.md` Phase 2) and extended to the keyless
+/// (`RowIdentity::WholeRow`) shape by `docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md` — this function's
+/// caller in `execute.rs`'s non-keyed batch loop consumes only the keyless
+/// arm (`MembershipRecomputeWrite::StagedKeyless`); the keyed
+/// (`StagedRecompute`/`DiffPatch`) arms stay the keyed-run-loop's own
+/// concern, called from `execute.rs`'s `plan_is_keyed` branch.
 ///
 /// Per `incremental_models.md` §"The plan matrix": "A membership-sensitive
 /// group … must be repaired by a technique that can create and delete rows:
@@ -1407,18 +1413,17 @@ pub fn resolve_live_in_place_update_cell(
 /// now assigns exactly such a cell `Technique::DeleteInsert` +
 /// `Corner::RecomputeRegion` for a membership-sensitive column group.
 ///
-/// A `Technique::DeleteInsert` cell is deliberately **not** surfaced here
-/// unless the cell's own [`RowIdentity`] proved a real `Key(_)` — a `grain:
-/// partition` output's `WholeRow` identity has no key
-/// `smelt_logical::maintenance::emit::emit_staged_candidate_conditional` can
-/// join stored rows to candidate rows on (that emitter panics on an empty
-/// key), and the whole-row `EXCEPT ALL`-both-ways realisation for a keyless
-/// region remains unbuilt (`docs/specs/model_transforms.md` §Known
-/// Divergences). A `grain: partition` model's `DeleteInsert` membership cell
-/// is left to the existing unconditional region `DELETE`+`INSERT` batch loop
-/// (`execute.rs`'s plain incremental path, unchanged by this phase) — the
-/// always-correct, always-available fallback the plan matrix names for
-/// exactly this shape.
+/// A `Technique::DeleteInsert` cell with `RowIdentity::Key(key)` where `key`
+/// is empty is skipped (a degenerate proof this resolver has never had a
+/// lowering for) — every other `Key(_)`/`WholeRow` cell is surfaced, with
+/// the row-identity shape deciding which `MembershipRecomputeWrite` arm the
+/// caller receives: `Key(_)` resolves through the same keyed proof this
+/// function always ran (`resolve_cell_write_suppression`/`emit_staged_
+/// candidate_conditional_recompute`); `WholeRow` resolves through
+/// `smelt_logical::maintenance::choice::resolve_keyless_staged_suppression`
+/// over the model's full payload column set and
+/// `smelt_logical::maintenance::emit::
+/// emit_staged_candidate_conditional_keyless`.
 ///
 /// This function only ever surfaces a cell when [`resolve_write_variant`]
 /// resolves `WriteSuppression::Suppressed` — `emit_staged_candidate_
@@ -1456,6 +1461,13 @@ pub enum MembershipRecomputeWrite {
     /// [`emit_diff_patch`]'s diff-then-patch pattern, admitted via
     /// [`smelt_logical::maintenance::diff_patch::admit_diff_patch`].
     DiffPatch { compared_columns: Vec<String> },
+    /// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless`]'s
+    /// region-grained whole-row conditional `DELETE`+`INSERT`
+    /// (`docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`)
+    /// — the `RowIdentity::WholeRow` realisation, reached only when
+    /// [`smelt_logical::maintenance::choice::resolve_keyless_staged_suppression`]
+    /// admits over the model's full payload column set.
+    StagedKeyless { compared_columns: Vec<String> },
 }
 
 /// A live membership-recompute cell as
@@ -1551,12 +1563,18 @@ pub fn resolve_live_membership_recompute_cell(
             if cell.technique != Technique::DeleteInsert {
                 continue;
             }
-            let RowIdentity::Key(key) = &cell.row_identity.identity else {
-                continue;
+            // A proven `RowIdentity::Key` (non-empty) routes through the
+            // keyed staged-candidate/diff_patch legs below; `RowIdentity::
+            // WholeRow` routes through the keyless leg (`docs/outcomes/
+            // 20260815-definition-delta-migrate/phases/27c-plan.md`) instead
+            // of being skipped outright — a `Key(vec![])` is a degenerate
+            // proof this resolver has never had a lowering for and stays
+            // skipped.
+            let key: Option<&Vec<String>> = match &cell.row_identity.identity {
+                RowIdentity::Key(key) if !key.is_empty() => Some(key),
+                RowIdentity::Key(_) => continue,
+                RowIdentity::WholeRow => None,
             };
-            if key.is_empty() {
-                continue;
-            }
             let write_pin = smelt_db::queries::maintenance::matching_write_pin(
                 cell,
                 &result.column_groups,
@@ -1601,7 +1619,7 @@ pub fn resolve_live_membership_recompute_cell(
                 .map(|v| v.comparability)
                 .unwrap_or_default();
             match chosen {
-                ChosenTechnique::Admitted(Technique::DeleteInsert) => {
+                ChosenTechnique::Admitted(Technique::DeleteInsert) if key.is_some() => {
                     // A `technique: suppress` pin whose P2/P3 proof refused
                     // propagates as a real run error (`incremental_models.md`
                     // §"Per-cell write addressing" → "User pins") — never a
@@ -1625,6 +1643,39 @@ pub fn resolve_live_membership_recompute_cell(
                         cell.clone(),
                         group_columns.clone(),
                         MembershipRecomputeWrite::StagedRecompute { compared_columns },
+                    )));
+                }
+                ChosenTechnique::Admitted(Technique::DeleteInsert) => {
+                    // `key.is_none()` here — a `RowIdentity::WholeRow` cell
+                    // (`docs/outcomes/20260815-definition-delta-migrate/
+                    // phases/27c-plan.md`). `resolve_write_suppression`
+                    // (the keyed proof `resolve_cell_write_suppression`
+                    // calls) refuses solely because the identity is
+                    // `WholeRow`, before it ever inspects column
+                    // comparability — so this arm never calls it, and
+                    // instead runs the keyless proof directly over the
+                    // model's full payload column set (every selected
+                    // column participates in a whole-row diff, not just this
+                    // cell's own mutation-sensitive group).
+                    let output_columns: Vec<String> = result
+                        .column_groups
+                        .iter()
+                        .flat_map(|g| g.columns.clone())
+                        .collect();
+                    let suppression =
+                        smelt_logical::maintenance::choice::resolve_keyless_staged_suppression(
+                            &output_columns,
+                            &comparability,
+                            &cell.row_identity,
+                        );
+                    let WriteSuppression::Suppressed { compared_columns } = suppression else {
+                        continue;
+                    };
+                    return Ok(Some((
+                        source.clone(),
+                        cell.clone(),
+                        group_columns.clone(),
+                        MembershipRecomputeWrite::StagedKeyless { compared_columns },
                     )));
                 }
                 ChosenTechnique::DiffPatch {
@@ -1759,6 +1810,51 @@ pub async fn execute_staged_membership_recompute(
     .map_err(|e| {
         anyhow::anyhow!("staged-candidate membership recompute failed for '{full_table}': {e}")
     })?;
+    let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
+    Ok(ExecutionResult {
+        model_name: table.to_string(),
+        duration: start.elapsed(),
+        row_count,
+        preview: None,
+    })
+}
+
+/// Execute a live, membership-sensitive `Technique::DeleteInsert` cell whose
+/// row identity is `RowIdentity::WholeRow` (`resolve_live_membership_
+/// recompute_cell`'s keyless arm, `docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`) via
+/// [`smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless`] —
+/// the region-grained whole-row conditional `DELETE`+`INSERT`. Mirrors
+/// [`execute_staged_membership_recompute`] minus the observed-delta leg: a
+/// keyless write has no key columns the observed-delta table (T5) could
+/// record against, so this executor never calls
+/// `execute_conditional_write_and_record_observed_delta`, only the plain
+/// `execute_statement_group`.
+pub async fn execute_staged_keyless_recompute(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    candidate_select: &str,
+    retry: &crate::execute::RetryPolicy<'_>,
+) -> Result<ExecutionResult> {
+    let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let staged_relation = format!("__smelt_staged_{table}");
+    let sentinel_relation = format!("__smelt_sentinel_{table}");
+    let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
+        &full_table,
+        &staged_relation,
+        &sentinel_relation,
+        None,
+        candidate_select,
+        dialect,
+    );
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("staged-candidate keyless recompute failed for '{full_table}': {e}")
+        })?;
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),

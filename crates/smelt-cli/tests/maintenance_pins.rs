@@ -16,11 +16,15 @@
 //! its sibling `{event_id, event_type, user_id}` cell for the SAME
 //! trigger — membership sensitivity is row-scoped, not per-column) is now
 //! membership-sensitive (`Technique::DeleteInsert`), never
-//! `Technique::ColumnScopedMerge`. This model is `grain: partition`: there
-//! is no live runtime DISPATCH for a `grain: partition` `DeleteInsert`
-//! membership cell (`resolve_live_membership_recompute_cell`'s own doc
-//! comment — that fact is still true and unchanged by this note), so
-//! neither pin below ever steers a run onto a different write path.
+//! `Technique::ColumnScopedMerge`. This model is `grain: partition` with no
+//! `unique_key` — `RowIdentity::WholeRow`. Since `docs/outcomes/
+//! 20260815-definition-delta-migrate/phases/27c-plan.md` a live runtime
+//! DISPATCH exists for exactly this shape (the keyless staged-candidate
+//! conditional write, reported as `"delete_insert_suppressed"`), so a
+//! `technique`/`prefer` naming a family this cell's resolvable set
+//! (`{recompute, DeleteInsert}`) actually admits now IS observable — the
+//! notes on individual tests below describe which pins do and don't steer
+//! it.
 //!
 //! **What this note corrects (Phase 3 reviewer fix, same date):** a hard
 //! `cells[].technique:` pin is still validated even though it never steers
@@ -295,10 +299,12 @@ async fn inadmissible_pin_fails_loud() {
 /// admissible technique". Since `fold` is not a member of this cell's
 /// resolvable set at all, the preference has no admissible target to steer
 /// toward and the cell keeps resolving to its own live default
-/// (`"deleteinsert"` — `Technique::DeleteInsert`, this shape's honest
-/// membership-sensitive default post-Phase-1, never `"column_scoped_merge"`,
-/// which is unreachable for this shape) — the run succeeds, unlike the hard
-/// pin above.
+/// (`"delete_insert_suppressed"` — the live keyless staged-candidate
+/// conditional write over `Technique::DeleteInsert`, this shape's honest
+/// membership-sensitive default since `docs/outcomes/
+/// 20260815-definition-delta-migrate/phases/27c-plan.md`, never
+/// `"column_scoped_merge"`, which is unreachable for this shape) — the run
+/// succeeds, unlike the hard pin above.
 #[tokio::test]
 async fn prefer_is_soft_and_never_refuses() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
@@ -330,7 +336,7 @@ async fn prefer_is_soft_and_never_refuses() {
         .get("daily_events_enriched")
         .expect("model ran");
     assert_eq!(
-        record.strategy, "deleteinsert",
+        record.strategy, "delete_insert_suppressed",
         "an unresolvable soft preference must not perturb the cell's own live default \
          technique — got strategy {:?}",
         record.strategy
@@ -346,7 +352,8 @@ async fn prefer_is_soft_and_never_refuses() {
         .expect("read maintained user_name");
     assert_eq!(
         maintained_name, "Alicia",
-        "the column-scoped MERGE must still pick up the mutated dimension value"
+        "the keyless staged-candidate conditional write must still pick up the mutated \
+         dimension value"
     );
 }
 

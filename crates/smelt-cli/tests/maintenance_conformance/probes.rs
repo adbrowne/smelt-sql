@@ -145,7 +145,8 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
     }
 
     // The catch-up run: same window, so the whole-region recompute resyncs
-    // it (no column-scoped dispatch exists for this shape anymore).
+    // it — never the column-scoped MERGE family, which this membership-
+    // sensitive shape can never admit.
     let outcome = project
         .run_quiet("probe-catchup", request)
         .await
@@ -156,8 +157,9 @@ async fn dimension_mutation_recomputes_the_whole_touched_region() {
         .expect("model ran on catch-up");
     assert_ne!(
         record.strategy, "column_scoped_merge",
-        "no live dispatch exists for this cell's technique — the catch-up run must fall \
-         through to the plain region-recompute batch loop"
+        "this cell's resolvable set never contains ColumnScopedMerge — the catch-up run must \
+         resolve through the region-recompute family (unconditional or the keyless \
+         staged-candidate conditional write), never column-scoped MERGE"
     );
 
     let after = read_maintained_rows(&project, &recipe);

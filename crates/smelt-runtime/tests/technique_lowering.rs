@@ -1849,15 +1849,14 @@ mod column_scoped_merge_e2e {
     /// `Technique::DeleteInsert`, never `ColumnScopedMerge`
     /// (`real_fixture_examples_timeseries_admits_membership_recompute_cell`
     /// above proves the derivation). This is a `grain: partition` output
-    /// with `WholeRow` row identity (no declared `unique_key`) — Phase 2's
-    /// new staged-candidate recompute dispatch requires a proven
-    /// `RowIdentity::Key` (`maintenance_driver::
-    /// resolve_live_membership_recompute_cell`'s own doc comment), so this
-    /// shape is deliberately left to the EXISTING, always-correct,
-    /// unconditional region `DELETE`+`INSERT` batch loop
-    /// (`execute.rs`'s plain incremental path) — unchanged by Phase 2, and
-    /// already reported as `RunOutcome.models["daily_events_enriched"]
-    /// .strategy == "deleteinsert"` for every batch, mutation or not.
+    /// with `WholeRow` row identity (no declared `unique_key`) — since
+    /// `docs/outcomes/20260815-definition-delta-migrate/phases/27c-plan.md`
+    /// this shape dispatches the keyless (whole-row) staged-candidate
+    /// conditional write (`maintenance_driver::execute_staged_keyless_
+    /// recompute`), reported as `RunOutcome.models["daily_events_enriched"]
+    /// .strategy == "delete_insert_suppressed"` on any run where the
+    /// dimension mutation is live (never on the creation run, which has no
+    /// prior state to diff against).
     #[tokio::test]
     async fn membership_recompute_dispatches_through_execute_project() {
         let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1977,10 +1976,11 @@ mod column_scoped_merge_e2e {
             .get("daily_events_enriched")
             .expect("daily_events_enriched ran");
         assert_eq!(
-            record.strategy, "deleteinsert",
-            "a membership-sensitive dimension mutation dispatches the regular incremental run \
-             through the SAME region DELETE+INSERT technique every batch already uses — never \
-             column-scoped MERGE, which cannot repair which rows exist"
+            record.strategy, "delete_insert_suppressed",
+            "a membership-sensitive dimension mutation over a WholeRow-identity cell dispatches \
+             the keyless staged-candidate conditional write — never column-scoped MERGE, which \
+             cannot repair which rows exist, and never the plain unconditional DELETE+INSERT \
+             now that a live dispatch exists for this shape"
         );
 
         let conn = duckdb::Connection::open(&db_path).expect("reconnect");

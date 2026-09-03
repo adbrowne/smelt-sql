@@ -2708,13 +2708,16 @@ pub async fn execute_project(
                         Some(crate::mutation_probe::MutationVerdict::NoOp)
                     );
                     if mutation_should_dispatch {
-                    let smelt_logical::maintenance::RowIdentity::Key(key) =
-                        &cell.row_identity.identity
-                    else {
-                        unreachable!(
-                            "resolve_live_membership_recompute_cell only ever returns a cell \
-                             with a proven RowIdentity::Key"
-                        );
+                    // `resolve_live_membership_recompute_cell` returns a
+                    // `RowIdentity::Key` cell for the keyed staged-recompute/
+                    // diff_patch legs below, or a `RowIdentity::WholeRow`
+                    // cell for the keyless leg (`docs/outcomes/
+                    // 20260815-definition-delta-migrate/phases/27c-plan.md`)
+                    // — never a bare `Key(vec![])`, the resolver's own
+                    // degenerate-proof skip.
+                    let key: Option<&Vec<String>> = match &cell.row_identity.identity {
+                        smelt_logical::maintenance::RowIdentity::Key(key) => Some(key),
+                        smelt_logical::maintenance::RowIdentity::WholeRow => None,
                     };
                     // The model's own FULL, unwindowed recompute — same
                     // `clean_sql_for_merge` source text `column_scoped_cell`'s
@@ -2751,6 +2754,10 @@ pub async fn execute_project(
                         crate::maintenance_driver::MembershipRecomputeWrite::StagedRecompute {
                             compared_columns,
                         } => {
+                            let key = key.expect(
+                                "resolve_live_membership_recompute_cell only ever returns \
+                                 StagedRecompute for a proven RowIdentity::Key cell",
+                            );
                             crate::maintenance_driver::execute_staged_membership_recompute(
                                 backend,
                                 schema,
@@ -2768,6 +2775,10 @@ pub async fn execute_project(
                         crate::maintenance_driver::MembershipRecomputeWrite::DiffPatch {
                             compared_columns,
                         } => {
+                            let key = key.expect(
+                                "resolve_live_membership_recompute_cell only ever returns \
+                                 DiffPatch for a proven RowIdentity::Key cell",
+                            );
                             // The candidate select IS the model's full
                             // admitted state — nothing is excluded from the
                             // comparison, so the slice predicate that scopes
@@ -2787,6 +2798,27 @@ pub async fn execute_project(
                                 &smelt_logical::maintenance::diff_patch::DeleteLeg::Complete,
                                 &retry_policy,
                                 None,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                            .row_count
+                        }
+                        crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                            compared_columns: _,
+                        } => {
+                            // No key at all — this is the `RowIdentity::
+                            // WholeRow` region-grained realisation
+                            // (`docs/outcomes/20260815-definition-delta-migrate/
+                            // phases/27c-plan.md`); `compared_columns` is the
+                            // model's full payload column set, already
+                            // implicit in `candidate_select`'s own shape, so
+                            // the executor needs nothing further from it.
+                            crate::maintenance_driver::execute_staged_keyless_recompute(
+                                backend,
+                                schema,
+                                &db_table_name,
+                                &compiled.sql,
+                                &retry_policy,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -3068,6 +3100,47 @@ pub async fn execute_project(
                     None => None,
                 };
 
+                // The keyless (`RowIdentity::WholeRow`) counterpart of
+                // `column_scoped_cell` above (`docs/outcomes/
+                // 20260815-definition-delta-migrate/phases/27c-plan.md`): a
+                // `grain: partition` output has no `unique_key`, so a
+                // membership-sensitive `UpstreamMutation` cell can never
+                // resolve `Technique::ColumnScopedMerge` (that family needs a
+                // proven row identity too) — before this phase it fell
+                // through to the ordinary unconditional widened-scan
+                // DELETE+INSERT every run. `resolve_live_membership_
+                // recompute_cell` derives both the keyed (`StagedRecompute`/
+                // `DiffPatch`, the keyed run loop's own concern) and keyless
+                // (`StagedKeyless`) arms from the SAME plan; only the keyless
+                // arm is consumed here — a `RowIdentity::Key` result stays
+                // out of scope for this (non-keyed) branch, unchanged from
+                // before this phase.
+                let membership_recompute_keyless_cell = match plan.model_file.metadata.as_deref()
+                {
+                    Some(metadata) => {
+                        crate::maintenance_driver::resolve_live_membership_recompute_cell(
+                            &sql_for_bounds,
+                            &plan.model_file.db_name_owned(),
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &request.technique_overrides,
+                        )?
+                        .filter(|(_, cell, _, write)| {
+                            matches!(
+                                cell.row_identity.identity,
+                                smelt_logical::maintenance::RowIdentity::WholeRow
+                            ) && matches!(
+                                write,
+                                crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                                    ..
+                                }
+                            )
+                        })
+                    }
+                    None => None,
+                };
+
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries
                         .iter()
@@ -3297,6 +3370,94 @@ pub async fn execute_project(
                         },
                     );
                     break 'run_dispatch_or_batches;
+                }
+
+                // The keyless membership-recompute dispatch
+                // (`membership_recompute_keyless_cell` above): a live
+                // `RowIdentity::WholeRow` `UpstreamMutation` cell replaces
+                // the whole run — never dispatched on the creation run
+                // (`table_exists_before_run`), and never when the mutated
+                // source's own fingerprint shows no real change since the
+                // last recorded baseline (mirrors `column_scoped_cell`'s own
+                // `mutation_gate` posture above).
+                if let Some((source, _cell, _group_columns, write)) =
+                    membership_recompute_keyless_cell.as_ref()
+                {
+                    if table_exists_before_run {
+                        let mutation_gate = resolve_upstream_mutation_gate(
+                            backend,
+                            &plan.name,
+                            source_infos,
+                            source,
+                            model_target,
+                            schema,
+                            file_store,
+                            state_io_lock,
+                        )
+                        .await?;
+                        let mutation_should_dispatch = !matches!(
+                            mutation_gate.as_ref().map(|(v, _)| v),
+                            Some(crate::mutation_probe::MutationVerdict::NoOp)
+                        );
+                        if mutation_should_dispatch {
+                            let crate::maintenance_driver::MembershipRecomputeWrite::StagedKeyless {
+                                compared_columns: _,
+                            } = write
+                            else {
+                                unreachable!(
+                                    "membership_recompute_keyless_cell is filtered to \
+                                     StagedKeyless only"
+                                );
+                            };
+                            let compiler = compilers.get(model_target);
+                            let resolver = &ephemeral_resolvers[model_target];
+                            let compiled = compiler.compile_with_sql_and_ephemerals(
+                                &plan.model_file,
+                                schema,
+                                &sql_for_bounds,
+                                resolver,
+                            )?;
+                            let retry_policy =
+                                RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                            let result =
+                                crate::maintenance_driver::execute_staged_keyless_recompute(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &compiled.sql,
+                                    &retry_policy,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?;
+                            total_rows = result.row_count;
+                            record_upstream_mutation_baseline(
+                                mutation_gate,
+                                source,
+                                file_store,
+                                state_io_lock,
+                            )
+                            .await;
+                            manifest_entries.insert(
+                                plan.name.clone(),
+                                ModelRunRecord {
+                                    strategy: "delete_insert_suppressed".to_string(),
+                                    time_range: None,
+                                    partitions_updated: vec![],
+                                    row_count: total_rows,
+                                    duration_ms: model_start.elapsed().as_millis() as u64,
+                                    batch_safety: None,
+                                    outcome: smelt_state::RunOutcomeKind::Success,
+                                    definition_hash: compute_model_hash(&plan.sql),
+                                    error: None,
+                                    retry_count: sink.retry_count(),
+                                    probes: Vec::new(),
+                                    subsumed: None,
+                                    deferred_cells: Vec::new(),
+                                },
+                            );
+                            break 'run_dispatch_or_batches;
+                        }
+                    }
                 }
 
                 // First-run bootstrap for a self-referential model

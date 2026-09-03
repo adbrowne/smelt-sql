@@ -332,7 +332,7 @@ open — not that the excluded bullets themselves are gone.
 | 26d | Finer-than-partition column-group dirt: dirt scoped to a column group stops coarsening to whole-partition where the finer grain is derivable | done |
 | 27a | `smelt explain --show-sql` renders the write form a live run would execute: the change-suppressed matched arm for a `Suppressed` cell (column-scoped `MERGE` and keyed fold), resolved through the same `choice::resolve_write_suppression`/`resolve_write_variant` the driver uses, never the unconditional arm | done |
 | 27b | Region DELETE+INSERT conditional variant: the recompute family's staged, change-suppressed route and its admission (`emit_staged_candidate_conditional_recompute` exists — establish what is actually unwired and close it) | done |
-| 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | planned |
+| 27c | Keyless (whole-row `EXCEPT ALL`) staged-candidate realisation for a region with no declared/proven key | done |
 | 27d | `write:` pin selecting between the keyed `MERGE` and the staged-candidate mechanism: the pure selection layer (`resolve_keyed_write_mechanism` consults the pin, fail-loud) plus the folded staged-candidate select the merge-less keyed-fold realisation needs | planned |
 | 27e | Delta-restriction admission consumes an external `mutable_snapshot` source's fingerprint-sidecar delta | planned |
 | 27f | `window_independence`'s `Ordered` verdict must require `before > 0` for a same-partition self-read, matching the graph layer's refusal | planned |
